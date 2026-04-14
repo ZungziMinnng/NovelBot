@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon } from 'lucide-react'
+import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower } from 'lucide-react'
 import { settingsApi } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 
 export default function Settings() {
   const navigate = useNavigate()
-  const { theme, toggleTheme } = useSettingsStore()
+  const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
   const [apiKey, setApiKey] = useState('')
   const [maskedKey, setMaskedKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('https://aihubmix.com/v1')
@@ -230,6 +230,34 @@ export default function Settings() {
               <p className="text-xs text-muted-foreground mt-1">负责世界观扩写</p>
             </div>
           </div>
+        </section>
+
+        <section>
+          <h2 className="font-semibold text-base mb-1">生成显示模式</h2>
+          <p className="text-xs text-muted-foreground mb-4">
+            关闭流式显示后，生成过程中不逐字渲染内容，完成后一次性展示。适合 API 连接不稳定的情况。
+          </p>
+          <button
+            onClick={toggleStreamingMode}
+            className={`flex items-center gap-3 w-full p-4 rounded-lg border transition-colors text-left ${
+              streamingMode
+                ? 'border-primary/50 bg-primary/5 dark:bg-primary/10'
+                : 'border-border hover:border-muted-foreground/50'
+            }`}
+          >
+            <div className={`p-2 rounded-md ${streamingMode ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
+              {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium">{streamingMode ? '流式显示已开启' : '流式显示已关闭'}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {streamingMode ? '逐字渲染生成内容，实时看到 Token 输出' : '生成完成后一次性显示全文'}
+              </p>
+            </div>
+            <div className={`w-10 h-6 rounded-full transition-colors relative ${streamingMode ? 'bg-primary' : 'bg-muted-foreground/30'}`}>
+              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${streamingMode ? 'translate-x-5' : 'translate-x-1'}`} />
+            </div>
+          </button>
         </section>
 
         <div className="flex items-center gap-3">

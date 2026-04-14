@@ -1,13 +1,13 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Users, List, Zap, Check, Edit3,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
-  Settings2, Sun, Moon, AlertTriangle
+  Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, type Novel, type Chapter,
+  novelsApi, chaptersApi, type Chapter,
   streamChapterGeneration,
 } from '@/api/client'
 import type { SSEMessage, AgentDoneData, TotalUsageData } from '@/api/client'
@@ -16,6 +16,7 @@ import ContextPanel from '@/components/ContextPanel/ContextPanel'
 import NovelSettingsDrawer from '@/components/NovelSettingsDrawer/NovelSettingsDrawer'
 import AgentLog, { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
 import { useSettingsStore } from '@/store/settingsStore'
+import { useGenerationStore } from '@/store/generationStore'
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>()
@@ -23,29 +24,20 @@ export default function Editor() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
+  const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
+  const genStore = useGenerationStore()
 
   const [selectedChapterNum, setSelectedChapterNum] = useState<number>(
     Number(searchParams.get('chapter')) || 1
   )
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [agentStage, setAgentStage] = useState('')
-  const [streamingText, setStreamingText] = useState('')
   const [instruction, setInstruction] = useState('')
   const [targetWords, setTargetWords] = useState(800)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [showContext, setShowContext] = useState(true)
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false)
-
-  // Agent log state (Feature 5)
-  const [agentLogEntries, setAgentLogEntries] = useState<AgentLogEntry[]>([])
-  const [totalInputTokens, setTotalInputTokens] = useState(0)
-  const [totalOutputTokens, setTotalOutputTokens] = useState(0)
   const [showTokens, setShowTokens] = useState(true)
   const [logCollapsed, setLogCollapsed] = useState(false)
-
-  const abortRef = useRef<AbortController | null>(null)
   const contentEndRef = useRef<HTMLDivElement>(null)
 
   const { data: novel } = useQuery({
@@ -58,35 +50,47 @@ export default function Editor() {
     queryFn: () => chaptersApi.list(novelId),
   })
 
+  // Is the global generation currently targeting this novel + chapter?
+  const isCurrentlyGenerating =
+    genStore.isGenerating &&
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum
+
   const currentChapter = chapters.find((c: Chapter) => c.number === selectedChapterNum) || null
 
   useEffect(() => {
     if (currentChapter) {
       setEditContent(currentChapter.content)
-      setStreamingText('')
     }
   }, [currentChapter?.id])
 
+  // Scroll to bottom during streaming
   useEffect(() => {
-    contentEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [streamingText])
+    if (isCurrentlyGenerating && streamingMode) {
+      contentEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [genStore.streamingText, isCurrentlyGenerating, streamingMode])
+
+  // Sync selectedChapterNum when coming back via GenerationIndicator link
+  useEffect(() => {
+    const chapterFromUrl = Number(searchParams.get('chapter'))
+    if (chapterFromUrl && chapterFromUrl !== selectedChapterNum) {
+      setSelectedChapterNum(chapterFromUrl)
+    }
+  }, [searchParams])
 
   const handleGenerate = useCallback(() => {
-    if (isGenerating || !novel) return
-    setIsGenerating(true)
-    setStreamingText('')
-    setAgentStage('building_context')
+    const gs = useGenerationStore.getState()
+    if (gs.isGenerating || !novel) return
+
+    gs.startGeneration(novelId, novel.title, selectedChapterNum)
     setIsEditing(false)
-    setAgentLogEntries([])
-    setTotalInputTokens(0)
-    setTotalOutputTokens(0)
     setLogCollapsed(false)
 
-    let accumulatedText = ''
-    const runningEntries: Map<string, AgentLogEntry> = new Map()
     let entryCounter = 0
+    const runningEntryIds: Map<string, string> = new Map() // agent name → entryId
 
-    abortRef.current = streamChapterGeneration(
+    const ctrl = streamChapterGeneration(
       {
         novel_id: novelId,
         chapter_number: selectedChapterNum,
@@ -95,11 +99,11 @@ export default function Editor() {
         target_words: targetWords,
       },
       (msg: SSEMessage) => {
+        const s = useGenerationStore.getState()
         if (msg.event === 'stage') {
-          setAgentStage(msg.data as string)
+          s.setAgentStage(msg.data as string)
         } else if (msg.event === 'token') {
-          accumulatedText += msg.data as string
-          setStreamingText(accumulatedText)
+          s.appendToken(msg.data as string)
         } else if (msg.event === 'agent_start') {
           const d = msg.data as { agent: string; label: string }
           const entryId = `${d.agent}-${entryCounter++}`
@@ -111,38 +115,37 @@ export default function Editor() {
             inputTokens: 0,
             outputTokens: 0,
           }
-          runningEntries.set(d.agent, entry)
-          setAgentLogEntries(prev => [...prev, entry])
+          runningEntryIds.set(d.agent, entryId)
+          s.addLogEntry(entry)
         } else if (msg.event === 'agent_done') {
           const d = msg.data as AgentDoneData
-          const existing = runningEntries.get(d.agent)
-          if (existing) {
-            const updated: AgentLogEntry = {
-              ...existing,
+          const entryId = runningEntryIds.get(d.agent)
+          if (entryId) {
+            s.updateLogEntry(entryId, {
               status: 'done',
               inputTokens: d.input_tokens,
               outputTokens: d.output_tokens,
               passed: d.passed,
-            }
-            runningEntries.set(d.agent, updated)
-            setAgentLogEntries(prev => prev.map(e => e.id === existing.id ? updated : e))
+            })
           }
         } else if (msg.event === 'total_usage') {
           const d = msg.data as TotalUsageData
-          setTotalInputTokens(d.input_tokens)
-          setTotalOutputTokens(d.output_tokens)
+          s.setTotalTokens(d.input_tokens, d.output_tokens)
         } else if (msg.event === 'done') {
-          setAgentStage('done')
-          refetchChapters()
+          s.setAgentStage('done')
+          // Invalidate queries so data refreshes regardless of which page the user is on
+          qc.invalidateQueries({ queryKey: ['chapters', novelId] })
           qc.invalidateQueries({ queryKey: ['characters', novelId] })
         } else if (msg.event === 'error') {
-          setAgentStage('error')
+          s.setAgentStage('error')
           console.error('Generation error:', msg.data)
         }
       },
-      () => setIsGenerating(false)
+      () => useGenerationStore.getState().finishGeneration()
     )
-  }, [isGenerating, novel, novelId, selectedChapterNum, instruction, targetWords, refetchChapters, qc])
+
+    useGenerationStore.getState().setAbortController(ctrl)
+  }, [novel, novelId, selectedChapterNum, instruction, targetWords, qc])
 
   const handleConfirm = async () => {
     if (!currentChapter) return
@@ -158,11 +161,20 @@ export default function Editor() {
     setIsEditing(false)
   }
 
+  const streamingText = isCurrentlyGenerating ? genStore.streamingText : ''
+  const agentStage = isCurrentlyGenerating ? genStore.agentStage : ''
+  const agentLogEntries = isCurrentlyGenerating ? genStore.agentLogEntries : []
+  const totalInputTokens = isCurrentlyGenerating ? genStore.totalInputTokens : 0
+  const totalOutputTokens = isCurrentlyGenerating ? genStore.totalOutputTokens : 0
+
+  // What text to display in the editor area
   const displayText = isEditing
     ? editContent
-    : (streamingText || currentChapter?.content || '')
+    : streamingMode && isCurrentlyGenerating
+      ? (streamingText || currentChapter?.content || '')
+      : (currentChapter?.content || '')
 
-  const isStreaming = isGenerating && streamingText.length > 0
+  const isStreaming = isCurrentlyGenerating && streamingMode && streamingText.length > 0
 
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
@@ -192,6 +204,13 @@ export default function Editor() {
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
           >
             <Settings2 className="w-3.5 h-3.5" /> 设置
+          </button>
+          <button
+            onClick={toggleStreamingMode}
+            className={`p-1.5 rounded-md hover:bg-muted transition-colors ${streamingMode ? 'text-primary' : 'text-muted-foreground'}`}
+            title={streamingMode ? '流式显示已开启（点击关闭）' : '流式显示已关闭（点击开启）'}
+          >
+            {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
           </button>
           <button
             onClick={toggleTheme}
@@ -226,7 +245,12 @@ export default function Editor() {
               >
                 <div className="flex items-center justify-between">
                   <span className="truncate">第{c.number}章</span>
-                  {c.status === 'confirmed' && <Check className="w-3 h-3 shrink-0 opacity-70" />}
+                  {/* Pulse dot when this chapter is generating */}
+                  {genStore.isGenerating && genStore.novelId === novelId && genStore.chapterNum === c.number
+                    ? <span className="w-2 h-2 rounded-full bg-primary animate-pulse shrink-0" />
+                    : c.status === 'confirmed'
+                      ? <Check className="w-3 h-3 shrink-0 opacity-70" />
+                      : null}
                 </div>
                 {c.title && c.title !== `第${c.number}章` && (
                   <p className={`text-xs truncate mt-0.5 ${c.number === selectedChapterNum ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
@@ -235,7 +259,6 @@ export default function Editor() {
                 )}
               </button>
             ))}
-            {/* Next chapter button */}
             <button
               onClick={() => setSelectedChapterNum(
                 chapters.length > 0 ? Math.max(...chapters.map((c: Chapter) => c.number)) + 1 : 1
@@ -268,7 +291,7 @@ export default function Editor() {
             ) : null}
 
             <div className="flex items-center gap-2 ml-auto">
-              {currentChapter?.content && !isGenerating && (
+              {currentChapter?.content && !isCurrentlyGenerating && (
                 <>
                   {!isEditing ? (
                     <button onClick={() => { setIsEditing(true); setEditContent(currentChapter.content) }}
@@ -301,11 +324,17 @@ export default function Editor() {
                 className="w-full h-full p-8 text-base leading-loose resize-none bg-background focus:outline-none novel-content font-serif"
                 placeholder="在此输入内容..."
               />
+            ) : isCurrentlyGenerating && !streamingMode ? (
+              <div className="p-8 flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+                <Loader2 className="w-8 h-8 animate-spin" />
+                <p className="text-sm">AI 正在创作中，完成后自动显示...</p>
+                <p className="text-xs opacity-60">切换页面不会中断生成</p>
+              </div>
             ) : (
               <div className={`p-8 novel-content text-base leading-loose whitespace-pre-wrap ${isStreaming ? 'streaming-cursor' : ''}`}>
                 {displayText || (
                   <span className="text-muted-foreground/50">
-                    {isGenerating ? '' : '点击下方「生成章节」开始创作...'}
+                    {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
                   </span>
                 )}
                 <div ref={contentEndRef} />
@@ -326,7 +355,7 @@ export default function Editor() {
 
           {/* Generation Controls */}
           <div className="border-t px-4 py-3 shrink-0 space-y-2">
-            <AgentStatus stage={agentStage} visible={isGenerating} />
+            <AgentStatus stage={agentStage} visible={isCurrentlyGenerating} />
             <div className="flex items-center gap-2">
               <input
                 value={instruction}
@@ -346,12 +375,14 @@ export default function Editor() {
               </select>
               <button
                 onClick={handleGenerate}
-                disabled={isGenerating}
+                disabled={genStore.isGenerating}
                 className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity shrink-0"
               >
-                {isGenerating
+                {isCurrentlyGenerating
                   ? <><Loader2 className="w-4 h-4 animate-spin" /> 生成中</>
-                  : <><Zap className="w-4 h-4" /> 生成章节</>
+                  : genStore.isGenerating
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
+                    : <><Zap className="w-4 h-4" /> 生成章节</>
                 }
               </button>
             </div>

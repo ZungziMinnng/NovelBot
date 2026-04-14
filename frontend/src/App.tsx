@@ -5,6 +5,7 @@ import Editor from '@/pages/Editor/Editor'
 import Characters from '@/pages/Characters/Characters'
 import Outline from '@/pages/Outline/Outline'
 import Settings from '@/pages/Settings/Settings'
+import GenerationIndicator from '@/components/GenerationIndicator/GenerationIndicator'
 import { useSettingsStore } from '@/store/settingsStore'
 
 export default function App() {
@@ -29,6 +30,8 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {/* Floating generation indicator shown on all pages except the active editor */}
+      <GenerationIndicator />
     </BrowserRouter>
   )
 }
