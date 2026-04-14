@@ -1,0 +1,212 @@
+"""
+Orchestrator: LangGraph 风格的状态机，协调所有 Agent。
+以 AsyncIterator 形式输出 SSE 事件，支持流式渲染。
+"""
+import json
+from typing import AsyncIterator, TypedDict
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.models.novel import Novel
+from app.models.chapter import Chapter
+from app.services.context_builder import build_generation_context
+from app.services import summarizer
+from app.agents import writer, critic
+from app.config import settings
+
+
+class NovelState(TypedDict):
+    novel_id: int
+    chapter_number: int
+    volume: int
+    instruction: str
+    target_words: int
+    context: dict
+    generated_text: str
+    critic_issues: str
+    revision_count: int
+    passed: bool
+    total_input_tokens: int
+    total_output_tokens: int
+
+
+def _sse(event: str, data: str) -> str:
+    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+def _sse_json(event: str, data: dict) -> str:
+    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+async def run_chapter_generation(
+    session: AsyncSession,
+    novel: Novel,
+    chapter_number: int,
+    volume: int = 1,
+    instruction: str = "",
+    target_words: int = 800,
+) -> AsyncIterator[str]:
+    """
+    章节生成主流程，yield SSE 格式字符串。
+
+    SSE 事件类型：
+      stage        → 当前阶段（building_context / writing / reviewing / revising / done / error）
+      token        → Writer 流式 token
+      agent_start  → {"agent": str, "label": str}
+      agent_done   → {"agent": str, "label": str, "input_tokens": int, "output_tokens": int, "passed": bool}
+      total_usage  → {"input_tokens": int, "output_tokens": int}
+      done         → 生成完成，data 为最终章节 ID
+      error        → 错误信息
+    """
+    state: NovelState = {
+        "novel_id": novel.id,
+        "chapter_number": chapter_number,
+        "volume": volume,
+        "instruction": instruction,
+        "target_words": target_words,
+        "context": {},
+        "generated_text": "",
+        "critic_issues": "",
+        "revision_count": 0,
+        "passed": False,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+    }
+
+    writer_system_prompt = getattr(novel, "writer_system_prompt", "") or ""
+
+    try:
+        # ── Node 1: Build Context ──────────────────────────────────────────
+        yield _sse("stage", "building_context")
+        state["context"] = await build_generation_context(
+            session=session,
+            novel=novel,
+            chapter_number=chapter_number,
+            volume=volume,
+            scene_hint=instruction,
+        )
+
+        # ── Node 2: Write (with optional revision loop) ────────────────────
+        max_retries = settings.max_critic_retries
+        while state["revision_count"] <= max_retries:
+            revision = state["revision_count"]
+            if revision == 0:
+                stage_label = "writing"
+                agent_label = "生成章节"
+            else:
+                stage_label = f"revising_{revision}"
+                agent_label = f"修改（第{revision}次）"
+
+            yield _sse("stage", stage_label)
+            yield _sse_json("agent_start", {"agent": "writer", "label": agent_label})
+
+            full_text = ""
+            writer_in_tok = 0
+            writer_out_tok = 0
+            async for item in writer.stream_chapter(
+                ctx=state["context"],
+                instruction=state["instruction"],
+                target_words=state["target_words"],
+                writer_model=novel.writer_model,
+                issues_feedback=state["critic_issues"],
+                writer_system_prompt=writer_system_prompt,
+            ):
+                if isinstance(item, tuple):
+                    writer_in_tok, writer_out_tok = item
+                else:
+                    full_text += item
+                    yield _sse("token", item)
+
+            state["generated_text"] = full_text
+            state["total_input_tokens"] += writer_in_tok
+            state["total_output_tokens"] += writer_out_tok
+            yield _sse_json("agent_done", {
+                "agent": "writer",
+                "label": agent_label,
+                "input_tokens": writer_in_tok,
+                "output_tokens": writer_out_tok,
+                "passed": True,
+            })
+
+            # ── Node 3: Critic ─────────────────────────────────────────────
+            yield _sse("stage", "reviewing")
+            yield _sse_json("agent_start", {"agent": "critic", "label": "质量审查"})
+            passed, issues, critic_in_tok, critic_out_tok = await critic.review_chapter(
+                generated_text=state["generated_text"],
+                ctx=state["context"],
+                fast_model=novel.fast_model,
+            )
+            state["passed"] = passed
+            state["critic_issues"] = issues
+            state["total_input_tokens"] += critic_in_tok
+            state["total_output_tokens"] += critic_out_tok
+            yield _sse_json("agent_done", {
+                "agent": "critic",
+                "label": "质量审查",
+                "input_tokens": critic_in_tok,
+                "output_tokens": critic_out_tok,
+                "passed": passed,
+            })
+
+            if passed:
+                break
+            state["revision_count"] += 1
+
+        # ── Node 4: Save Chapter ───────────────────────────────────────────
+        yield _sse("stage", "saving")
+        chapter = await _save_chapter(session, state, novel)
+
+        # ── Node 5: Update Memory (background-like, still awaited) ────────
+        yield _sse("stage", "updating_memory")
+        await summarizer.summarize_chapter(session, chapter, novel)
+        await summarizer.update_character_states(session, chapter, novel)
+        await session.commit()
+
+        # ── Emit total usage ───────────────────────────────────────────────
+        yield _sse_json("total_usage", {
+            "input_tokens": state["total_input_tokens"],
+            "output_tokens": state["total_output_tokens"],
+        })
+
+        yield _sse("done", str(chapter.id))
+
+    except Exception as e:
+        await session.rollback()
+        yield _sse("error", str(e))
+
+
+async def _save_chapter(
+    session: AsyncSession,
+    state: NovelState,
+    novel: Novel,
+) -> Chapter:
+    """保存或更新章节到数据库"""
+    result = await session.execute(
+        select(Chapter).where(
+            Chapter.novel_id == state["novel_id"],
+            Chapter.number == state["chapter_number"],
+            Chapter.volume == state["volume"],
+        )
+    )
+    chapter = result.scalar_one_or_none()
+
+    if chapter:
+        chapter.content = state["generated_text"]
+        chapter.status = "draft"
+        chapter.word_count = len(state["generated_text"])
+    else:
+        chapter = Chapter(
+            novel_id=state["novel_id"],
+            volume=state["volume"],
+            number=state["chapter_number"],
+            title=f"第{state['chapter_number']}章",
+            content=state["generated_text"],
+            status="draft",
+            word_count=len(state["generated_text"]),
+        )
+        session.add(chapter)
+
+    await session.flush()
+    return chapter
