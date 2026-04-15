@@ -27,6 +27,12 @@ class GenerateWorldRequest(BaseModel):
     raw_rules: str = ""
 
 
+class PlotSuggestionsRequest(BaseModel):
+    novel_id: int
+    chapter_number: int
+    volume: int = 1
+
+
 # SSE 事件结构
 class SSEEvent(BaseModel):
     event: str  # stage / token / done / error

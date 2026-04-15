@@ -42,6 +42,10 @@ class SettingsUpdate(BaseModel):
     agent_outline_model: str = ""
     agent_character_model: str = ""
     agent_orchestrator_model: str = ""
+    gemini_base_url: str = ""
+    anthropic_base_url: str = ""
+    https_proxy: str = ""
+    http_proxy: str = ""
 
 
 class SettingsOut(BaseModel):
@@ -57,6 +61,10 @@ class SettingsOut(BaseModel):
     agent_outline_model: str
     agent_character_model: str
     agent_orchestrator_model: str
+    gemini_base_url: str
+    anthropic_base_url: str
+    https_proxy: str
+    http_proxy: str
 
 
 @router.get("/", response_model=SettingsOut)
@@ -74,6 +82,10 @@ async def get_settings():
         agent_outline_model=settings.agent_outline_model,
         agent_character_model=settings.agent_character_model,
         agent_orchestrator_model=settings.agent_orchestrator_model,
+        gemini_base_url=settings.gemini_base_url,
+        anthropic_base_url=settings.anthropic_base_url,
+        https_proxy=settings.https_proxy,
+        http_proxy=settings.http_proxy,
     )
 
 
@@ -105,23 +117,36 @@ async def update_settings(data: SettingsUpdate):
     _write_env("AGENT_CHARACTER_MODEL", data.agent_character_model)
     settings.agent_orchestrator_model = data.agent_orchestrator_model
     _write_env("AGENT_ORCHESTRATOR_MODEL", data.agent_orchestrator_model)
+    # 原生 SDK 端点（允许保存空字符串以清除）
+    settings.gemini_base_url = data.gemini_base_url
+    _write_env("GEMINI_BASE_URL", data.gemini_base_url)
+    settings.anthropic_base_url = data.anthropic_base_url
+    _write_env("ANTHROPIC_BASE_URL", data.anthropic_base_url)
+    # 代理设置（允许保存空字符串以清除代理）
+    settings.https_proxy = data.https_proxy
+    _write_env("HTTPS_PROXY", data.https_proxy)
+    settings.http_proxy = data.http_proxy
+    _write_env("HTTP_PROXY", data.http_proxy)
     return {"ok": True}
 
 
+class TestRequest(BaseModel):
+    model: str = ""
+
+
 @router.post("/test")
-async def test_connection():
-    """测试 AiHubMix 连接"""
-    from openai import AsyncOpenAI
+async def test_connection(data: TestRequest = TestRequest()):
+    """测试连接：支持指定模型，自动按 api_format 路由到对应 SDK"""
+    from app.services import llm_client
+    model = data.model or settings.default_fast_model
+    api_format = llm_client.get_model_api_format(model)
     try:
-        client = AsyncOpenAI(
-            api_key=settings.aihubmix_api_key,
-            base_url=settings.aihubmix_base_url,
-        )
-        resp = await client.chat.completions.create(
-            model=settings.default_fast_model,
+        response = await llm_client.dispatch_chat_complete(
             messages=[{"role": "user", "content": "回复数字1"}],
+            model=model,
+            api_format=api_format,
             max_tokens=5,
         )
-        return {"ok": True, "response": resp.choices[0].message.content}
+        return {"ok": True, "response": response, "model": model, "api_format": api_format}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "model": model, "api_format": api_format}

@@ -42,11 +42,11 @@ async def generate_chapter_outlines(
         chapter_count=chapter_count,
     )
 
-    client, model = llm_client.get_agent_client("outline", novel.fast_model)
-    raw = await llm_client.chat_complete(
+    model, api_format = llm_client.get_agent_client("outline", novel.fast_model)
+    raw = await llm_client.dispatch_chat_complete(
         messages=[{"role": "user", "content": prompt}],
         model=model,
-        client=client,
+        api_format=api_format,
         temperature=0.7,
         max_tokens=4096,
     )

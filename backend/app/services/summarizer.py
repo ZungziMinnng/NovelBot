@@ -47,12 +47,12 @@ async def summarize_chapter(
     if not chapter.content.strip():
         return ""
 
-    client, model = llm_client.get_agent_client("memory", novel.fast_model)
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
     prompt = CHAPTER_SUMMARY_PROMPT.format(content=chapter.content[:3000])
-    summary = await llm_client.chat_complete(
+    summary = await llm_client.dispatch_chat_complete(
         messages=[{"role": "user", "content": prompt}],
         model=model,
-        client=client,
+        api_format=api_format,
         temperature=0.3,
         max_tokens=200,
     )
@@ -117,16 +117,16 @@ async def update_character_states(
         ensure_ascii=False,
         indent=2,
     )
-    client, model = llm_client.get_agent_client("memory", novel.fast_model)
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
     prompt = CHARACTER_UPDATE_PROMPT.format(
         character_states=states_text,
         content=chapter.content[:3000],
     )
     try:
-        raw = await llm_client.chat_complete(
+        raw = await llm_client.dispatch_chat_complete(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            client=client,
+            api_format=api_format,
             temperature=0.2,
             max_tokens=800,
         )

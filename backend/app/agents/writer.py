@@ -12,6 +12,8 @@ async def stream_chapter(
     writer_model: str = "",
     issues_feedback: str = "",
     writer_system_prompt: str = "",
+    temperature: float = 0.85,
+    max_tokens: int = 4096,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """
     流式生成章节内容。
@@ -24,9 +26,9 @@ async def stream_chapter(
         writing_style=ctx.get("writing_style", ""),
         target_words=target_words,
     )
-    system_content = base_system
-    if writer_system_prompt:
-        system_content = f"{base_system}\n\n{writer_system_prompt}"
+    custom = writer_system_prompt.strip()
+    # 有自定义提示词时完整替换，不填才使用默认模板
+    system_content = custom if custom else base_system
 
     user_content = format_context_for_writer(ctx, instruction, target_words)
 
@@ -42,15 +44,19 @@ async def stream_chapter(
         })
         messages.append({
             "role": "user",
-            "content": f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n请重新输出完整章节正文。"
+            "content": (
+                f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n"
+                f"⚠️ 以下用户原始要求必须严格遵守（尤其是角色姓名不得更改）：\n{instruction}\n\n"
+                "请重新输出完整章节正文。"
+            )
         })
 
-    client, model = llm_client.get_agent_client("writer", writer_model)
-    async for item in llm_client.chat_stream_with_usage(
+    model, api_format = llm_client.get_agent_client("writer", writer_model)
+    async for item in llm_client.dispatch_chat_stream_with_usage(
         messages=messages,
         model=model,
-        client=client,
-        temperature=0.85,
-        max_tokens=4096,
+        api_format=api_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
     ):
         yield item

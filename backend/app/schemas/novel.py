@@ -24,6 +24,9 @@ class NovelUpdate(BaseModel):
     writer_model: Optional[str] = None
     fast_model: Optional[str] = None
     writer_system_prompt: Optional[str] = None
+    enable_critic: Optional[bool] = None
+    writer_temperature: Optional[float] = None
+    writer_max_tokens: Optional[int] = None
 
 
 class NovelOut(BaseModel):
@@ -40,6 +43,9 @@ class NovelOut(BaseModel):
     writer_model: str
     fast_model: str
     writer_system_prompt: str
+    enable_critic: bool
+    writer_temperature: float
+    writer_max_tokens: int
     created_at: datetime
     updated_at: datetime
 

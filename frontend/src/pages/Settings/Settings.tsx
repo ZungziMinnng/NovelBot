@@ -1,12 +1,45 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower } from 'lucide-react'
-import { settingsApi } from '@/api/client'
+import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower, Plus, Pencil, Trash2, X } from 'lucide-react'
+import { settingsApi, modelLibraryApi, PROVIDERS, type ModelEntry } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
+
+// ── ModelSelect sub-component ─────────────────────────────────────────────
+
+function ModelSelect({
+  value,
+  onChange,
+  placeholder,
+  models,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  models: ModelEntry[]
+}) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+    >
+      <option value="">{placeholder}</option>
+      {models.map(m => (
+        <option key={m.id} value={m.model_id}>
+          [{m.provider}] {m.display_name || m.model_id}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+// ── Main Settings page ────────────────────────────────────────────────────
 
 export default function Settings() {
   const navigate = useNavigate()
   const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
+
+  // ── API & model settings state ──────────────────────────────────────────
   const [apiKey, setApiKey] = useState('')
   const [maskedKey, setMaskedKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('https://aihubmix.com/v1')
@@ -18,9 +51,24 @@ export default function Settings() {
   const [agentOutlineModel, setAgentOutlineModel] = useState('')
   const [agentCharacterModel, setAgentCharacterModel] = useState('')
   const [agentOrchestratorModel, setAgentOrchestratorModel] = useState('')
+  const [geminiBaseUrl, setGeminiBaseUrl] = useState('')
+  const [anthropicBaseUrl, setAnthropicBaseUrl] = useState('')
+  const [httpsProxy, setHttpsProxy] = useState('')
+  const [httpProxy, setHttpProxy] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [testModel, setTestModel] = useState('')
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  // ── Model library state ─────────────────────────────────────────────────
+  const [models, setModels] = useState<ModelEntry[]>([])
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [formDisplayName, setFormDisplayName] = useState('')
+  const [formModelId, setFormModelId] = useState('')
+  const [formProvider, setFormProvider] = useState(PROVIDERS[0].label)
+  const [formApiFormat, setFormApiFormat] = useState(PROVIDERS[0].api_format)
+  const [modelSaving, setModelSaving] = useState(false)
 
   useEffect(() => {
     settingsApi.get().then((s: {
@@ -34,6 +82,10 @@ export default function Settings() {
       agent_outline_model: string
       agent_character_model: string
       agent_orchestrator_model: string
+      gemini_base_url: string
+      anthropic_base_url: string
+      https_proxy: string
+      http_proxy: string
     }) => {
       setMaskedKey(s.aihubmix_api_key_masked || '')
       setBaseUrl(s.aihubmix_base_url)
@@ -45,8 +97,17 @@ export default function Settings() {
       setAgentOutlineModel(s.agent_outline_model || '')
       setAgentCharacterModel(s.agent_character_model || '')
       setAgentOrchestratorModel(s.agent_orchestrator_model || '')
+      setGeminiBaseUrl(s.gemini_base_url || '')
+      setAnthropicBaseUrl(s.anthropic_base_url || '')
+      setHttpsProxy(s.https_proxy || '')
+      setHttpProxy(s.http_proxy || '')
     })
+    loadModels()
   }, [])
+
+  const loadModels = () => {
+    modelLibraryApi.list().then(setModels)
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -63,10 +124,14 @@ export default function Settings() {
         agent_outline_model: agentOutlineModel,
         agent_character_model: agentCharacterModel,
         agent_orchestrator_model: agentOrchestratorModel,
+        gemini_base_url: geminiBaseUrl,
+        anthropic_base_url: anthropicBaseUrl,
+        https_proxy: httpsProxy,
+        http_proxy: httpProxy,
       })
       setTesting(true)
-      const r = await settingsApi.test()
-      setTestResult({ ok: r.ok, msg: r.ok ? `连接成功，模型响应：${r.response}` : r.error })
+      const r = await settingsApi.test(testModel || undefined)
+      setTestResult({ ok: r.ok, msg: r.ok ? `连接成功 [${r.api_format}] ${r.model}：${r.response}` : `[${r.api_format}] ${r.model}：${r.error}` })
       const s = await settingsApi.get()
       setMaskedKey(s.aihubmix_api_key_masked || '')
       setApiKey('')
@@ -80,11 +145,75 @@ export default function Settings() {
     setTesting(true)
     setTestResult(null)
     try {
-      const r = await settingsApi.test()
-      setTestResult({ ok: r.ok, msg: r.ok ? `连接成功，模型响应：${r.response}` : r.error })
+      const r = await settingsApi.test(testModel || undefined)
+      setTestResult({ ok: r.ok, msg: r.ok ? `连接成功 [${r.api_format}] ${r.model}：${r.response}` : `[${r.api_format}] ${r.model}：${r.error}` })
     } finally {
       setTesting(false)
     }
+  }
+
+  // ── Model library handlers ──────────────────────────────────────────────
+
+  const resetForm = () => {
+    setFormDisplayName('')
+    setFormModelId('')
+    setFormProvider(PROVIDERS[0].label)
+    setFormApiFormat(PROVIDERS[0].api_format)
+    setEditingId(null)
+    setShowAddForm(false)
+  }
+
+  const handleProviderChange = (label: string) => {
+    setFormProvider(label)
+    const p = PROVIDERS.find(p => p.label === label)
+    if (p) setFormApiFormat(p.api_format)
+  }
+
+  const startEdit = (m: ModelEntry) => {
+    setEditingId(m.id)
+    setFormDisplayName(m.display_name)
+    setFormModelId(m.model_id)
+    setFormProvider(m.provider)
+    setFormApiFormat(m.api_format)
+    setShowAddForm(true)
+  }
+
+  const handleModelSubmit = async () => {
+    if (!formModelId.trim()) return
+    setModelSaving(true)
+    try {
+      if (editingId !== null) {
+        await modelLibraryApi.update(editingId, {
+          display_name: formDisplayName,
+          model_id: formModelId,
+          provider: formProvider,
+          api_format: formApiFormat,
+        })
+      } else {
+        await modelLibraryApi.create({
+          display_name: formDisplayName,
+          model_id: formModelId,
+          provider: formProvider,
+          api_format: formApiFormat,
+        })
+      }
+      loadModels()
+      resetForm()
+    } finally {
+      setModelSaving(false)
+    }
+  }
+
+  const handleModelDelete = async (id: number) => {
+    if (!confirm('确认删除此模型？')) return
+    await modelLibraryApi.delete(id)
+    loadModels()
+  }
+
+  const providerBadgeColor = (apiFormat: string) => {
+    if (apiFormat === 'gemini') return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+    if (apiFormat === 'anthropic') return 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'
+    return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
   }
 
   return (
@@ -104,6 +233,8 @@ export default function Settings() {
       </header>
 
       <main className="max-w-2xl mx-auto px-6 py-10 space-y-8">
+
+        {/* ── 1. API 配置 ─────────────────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-4">API 配置</h2>
           <div className="space-y-4">
@@ -134,6 +265,138 @@ export default function Settings() {
           </div>
         </section>
 
+        {/* ── 2. 模型库 ───────────────────────────────────────────────── */}
+        <section>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="font-semibold text-base">模型库</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                管理可选模型，下方下拉框将从此列表中读取。
+              </p>
+            </div>
+            {!showAddForm && (
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="flex items-center gap-1.5 text-sm border rounded-lg px-3 py-1.5 hover:bg-muted transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                添加模型
+              </button>
+            )}
+          </div>
+
+          {/* Add / Edit form */}
+          {showAddForm && (
+            <div className="border rounded-lg p-4 mb-4 bg-muted/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{editingId ? '编辑模型' : '添加新模型'}</span>
+                <button onClick={resetForm} className="p-1 rounded hover:bg-muted">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">显示名称</label>
+                  <input
+                    value={formDisplayName}
+                    onChange={e => setFormDisplayName(e.target.value)}
+                    placeholder="例：Gemini 2.0 Flash"
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">模型 ID *</label>
+                  <input
+                    value={formModelId}
+                    onChange={e => setFormModelId(e.target.value)}
+                    placeholder="例：gemini-2.0-flash"
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">提供商</label>
+                  <select
+                    value={formProvider}
+                    onChange={e => handleProviderChange(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    {PROVIDERS.map(p => (
+                      <option key={p.label} value={p.label}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">API 格式（自动填充）</label>
+                  <input
+                    value={formApiFormat}
+                    readOnly
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-muted text-muted-foreground cursor-not-allowed"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button onClick={resetForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+                  取消
+                </button>
+                <button
+                  onClick={handleModelSubmit}
+                  disabled={!formModelId.trim() || modelSaving}
+                  className="text-sm px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {modelSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {editingId ? '保存修改' : '添加'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Model list */}
+          {models.length === 0 ? (
+            <div className="text-sm text-muted-foreground text-center py-6 border rounded-lg border-dashed">
+              暂无模型，点击「添加模型」开始配置
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {models.map(m => (
+                <div key={m.id} className="flex items-center gap-3 border rounded-lg px-4 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium truncate">{m.display_name || m.model_id}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${providerBadgeColor(m.api_format)}`}>
+                        {m.api_format}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="text-xs text-muted-foreground font-mono">{m.model_id}</span>
+                      <span className="text-xs text-muted-foreground">·</span>
+                      <span className="text-xs text-muted-foreground">{m.provider}</span>
+                    </div>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <button
+                      onClick={() => startEdit(m)}
+                      className="p-1.5 rounded hover:bg-muted transition-colors"
+                      title="编辑"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleModelDelete(m.id)}
+                      className="p-1.5 rounded hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950 transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* ── 3. 默认模型配置 ─────────────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-1">默认模型配置</h2>
           <p className="text-xs text-muted-foreground mb-4">
@@ -142,27 +405,28 @@ export default function Settings() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-sm font-medium mb-1 block">创作模型（Writer）</label>
-              <input
+              <ModelSelect
                 value={writerModel}
-                onChange={e => setWriterModel(e.target.value)}
-                placeholder="例：gemini-2.0-flash"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                onChange={setWriterModel}
+                placeholder="留空使用全局默认"
+                models={models}
               />
               <p className="text-xs text-muted-foreground mt-1">生成章节正文，建议高质量模型</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">快速模型（Fast）</label>
-              <input
+              <ModelSelect
                 value={fastModel}
-                onChange={e => setFastModel(e.target.value)}
-                placeholder="例：gpt-4o-mini"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                onChange={setFastModel}
+                placeholder="留空使用全局默认"
+                models={models}
               />
               <p className="text-xs text-muted-foreground mt-1">摘要/审查/规划，建议经济模型</p>
             </div>
           </div>
         </section>
 
+        {/* ── 4. Agent 独立模型配置 ───────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-1">Agent 独立模型配置</h2>
           <p className="text-xs text-muted-foreground mb-4">
@@ -171,67 +435,38 @@ export default function Settings() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-sm font-medium mb-1 block">Writer Agent</label>
-              <input
-                value={agentWriterModel}
-                onChange={e => setAgentWriterModel(e.target.value)}
-                placeholder="留空使用默认 Writer 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentWriterModel} onChange={setAgentWriterModel} placeholder="留空使用默认 Writer 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责生成章节正文</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Critic Agent</label>
-              <input
-                value={agentCriticModel}
-                onChange={e => setAgentCriticModel(e.target.value)}
-                placeholder="留空使用默认 Fast 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentCriticModel} onChange={setAgentCriticModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责审查章节质量</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Memory Agent</label>
-              <input
-                value={agentMemoryModel}
-                onChange={e => setAgentMemoryModel(e.target.value)}
-                placeholder="留空使用默认 Fast 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentMemoryModel} onChange={setAgentMemoryModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责摘要和记忆更新</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Outline Agent</label>
-              <input
-                value={agentOutlineModel}
-                onChange={e => setAgentOutlineModel(e.target.value)}
-                placeholder="留空使用默认 Fast 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentOutlineModel} onChange={setAgentOutlineModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责生成章节大纲</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Character Agent</label>
-              <input
-                value={agentCharacterModel}
-                onChange={e => setAgentCharacterModel(e.target.value)}
-                placeholder="留空使用默认 Fast 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentCharacterModel} onChange={setAgentCharacterModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责生成角色卡</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Orchestrator / World Agent</label>
-              <input
-                value={agentOrchestratorModel}
-                onChange={e => setAgentOrchestratorModel(e.target.value)}
-                placeholder="留空使用默认 Fast 模型"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <ModelSelect value={agentOrchestratorModel} onChange={setAgentOrchestratorModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责世界观扩写</p>
             </div>
           </div>
         </section>
 
+        {/* ── 5. 生成显示模式 ─────────────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-1">生成显示模式</h2>
           <p className="text-xs text-muted-foreground mb-4">
@@ -260,11 +495,78 @@ export default function Settings() {
           </button>
         </section>
 
-        <div className="flex items-center gap-3">
+        {/* ── 6. 网络代理 + 原生端点 ──────────────────────────────────── */}
+        <section>
+          <h2 className="font-semibold text-base mb-1">网络代理</h2>
+          <p className="text-xs text-muted-foreground mb-4">
+            开启 VPN 时，若无法连接 API，请在此填写本地代理地址。留空则自动读取系统环境变量。
+          </p>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-sm font-medium mb-1 block">HTTPS 代理</label>
+              <input
+                value={httpsProxy}
+                onChange={e => setHttpsProxy(e.target.value)}
+                placeholder="例：http://127.0.0.1:7890"
+                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              />
+              <p className="text-xs text-muted-foreground mt-1">用于 HTTPS 请求（AiHubMix API）</p>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">HTTP 代理</label>
+              <input
+                value={httpProxy}
+                onChange={e => setHttpProxy(e.target.value)}
+                placeholder="例：http://127.0.0.1:7890"
+                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              />
+              <p className="text-xs text-muted-foreground mt-1">通常与 HTTPS 代理相同</p>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">Gemini 原生端点</label>
+              <input
+                value={geminiBaseUrl}
+                onChange={e => setGeminiBaseUrl(e.target.value)}
+                placeholder="https://aihubmix.com/gemini"
+                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              />
+              <p className="text-xs text-muted-foreground mt-1">默认 AiHubMix 代理端点，留空则直连 Google</p>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">Claude 原生端点</label>
+              <input
+                value={anthropicBaseUrl}
+                onChange={e => setAnthropicBaseUrl(e.target.value)}
+                placeholder="留空使用 SDK 默认（直连 Anthropic）"
+                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              />
+              <p className="text-xs text-muted-foreground mt-1">Anthropic 原生格式端点，填写 AIHubMix 端点时走代理</p>
+            </div>
+          </div>
+        </section>
+
+        {/* ── 操作按钮 ─────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground shrink-0">测试模型：</span>
+            <select
+              value={testModel}
+              onChange={e => setTestModel(e.target.value)}
+              disabled={testing || saving}
+              className="border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+              <option value="">默认（{fastModel || 'fast model'}）</option>
+              {models.map(m => (
+                <option key={m.id} value={m.model_id}>
+                  [{m.provider}] {m.display_name || m.model_id}
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             onClick={handleTest}
             disabled={testing || saving}
-            className="flex items-center gap-2 border px-4 py-2 rounded-lg text-sm hover:bg-muted disabled:opacity-50 transition-colors"
+            className="flex items-center gap-2 border px-4 py-2 rounded-lg text-sm hover:bg-muted disabled:opacity-50 transition-colors shrink-0"
           >
             {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
             测试连接

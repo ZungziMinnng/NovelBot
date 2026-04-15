@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     agent_character_model: str = ""    # Character Agent → 默认使用 default_fast_model
     agent_orchestrator_model: str = "" # Orchestrator/World → 默认使用 default_fast_model
 
+    # 原生 SDK 端点（留空则直连 Google/Anthropic 官方，填写 AiHubMix 端点则走代理）
+    gemini_base_url: str = "https://aihubmix.com/gemini"
+    anthropic_base_url: str = ""
+
+    # 网络代理（开启 VPN 时填写，例：http://127.0.0.1:7890）
+    https_proxy: str = ""
+    http_proxy: str = ""
+
     # 数据路径
     data_dir: str = "./data"
     database_url: str = "sqlite+aiosqlite:///./data/novelbot.db"

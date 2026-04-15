@@ -8,6 +8,7 @@ interface GenerationState {
   chapterNum: number
   agentStage: string
   streamingText: string
+  originalDraft: string   // 首次 Critic 失败前的初稿（有重写时才有值）
   agentLogEntries: AgentLogEntry[]
   totalInputTokens: number
   totalOutputTokens: number
@@ -17,19 +18,22 @@ interface GenerationState {
   setAbortController: (ctrl: AbortController) => void
   setAgentStage: (stage: string) => void
   appendToken: (token: string) => void
+  setOriginalDraft: (text: string) => void
   addLogEntry: (entry: AgentLogEntry) => void
   updateLogEntry: (id: string, updates: Partial<AgentLogEntry>) => void
   setTotalTokens: (input: number, output: number) => void
   finishGeneration: () => void
+  abortGeneration: () => void
 }
 
-export const useGenerationStore = create<GenerationState>()((set) => ({
+export const useGenerationStore = create<GenerationState>()((set, get) => ({
   isGenerating: false,
   novelId: null,
   novelTitle: '',
   chapterNum: 1,
   agentStage: '',
   streamingText: '',
+  originalDraft: '',
   agentLogEntries: [],
   totalInputTokens: 0,
   totalOutputTokens: 0,
@@ -43,6 +47,7 @@ export const useGenerationStore = create<GenerationState>()((set) => ({
       chapterNum,
       agentStage: 'building_context',
       streamingText: '',
+      originalDraft: '',
       agentLogEntries: [],
       totalInputTokens: 0,
       totalOutputTokens: 0,
@@ -54,6 +59,8 @@ export const useGenerationStore = create<GenerationState>()((set) => ({
   setAgentStage: (stage) => set({ agentStage: stage }),
 
   appendToken: (token) => set((s) => ({ streamingText: s.streamingText + token })),
+
+  setOriginalDraft: (text) => set({ originalDraft: text }),
 
   addLogEntry: (entry) => set((s) => ({ agentLogEntries: [...s.agentLogEntries, entry] })),
 
@@ -67,4 +74,9 @@ export const useGenerationStore = create<GenerationState>()((set) => ({
 
   finishGeneration: () =>
     set({ isGenerating: false, agentStage: 'done', abortController: null }),
+
+  abortGeneration: () => {
+    get().abortController?.abort()
+    set({ isGenerating: false, novelId: null, chapterNum: 1 })
+  },
 }))

@@ -112,6 +112,8 @@ async def run_chapter_generation(
                 writer_model=novel.writer_model,
                 issues_feedback=state["critic_issues"],
                 writer_system_prompt=writer_system_prompt,
+                temperature=getattr(novel, "writer_temperature", 0.85),
+                max_tokens=getattr(novel, "writer_max_tokens", 4096),
             ):
                 if isinstance(item, tuple):
                     writer_in_tok, writer_out_tok = item
@@ -130,29 +132,36 @@ async def run_chapter_generation(
                 "passed": True,
             })
 
-            # ── Node 3: Critic ─────────────────────────────────────────────
-            yield _sse("stage", "reviewing")
-            yield _sse_json("agent_start", {"agent": "critic", "label": "质量审查"})
-            passed, issues, critic_in_tok, critic_out_tok = await critic.review_chapter(
-                generated_text=state["generated_text"],
-                ctx=state["context"],
-                fast_model=novel.fast_model,
-            )
-            state["passed"] = passed
-            state["critic_issues"] = issues
-            state["total_input_tokens"] += critic_in_tok
-            state["total_output_tokens"] += critic_out_tok
-            yield _sse_json("agent_done", {
-                "agent": "critic",
-                "label": "质量审查",
-                "input_tokens": critic_in_tok,
-                "output_tokens": critic_out_tok,
-                "passed": passed,
-            })
+            # ── Node 3: Critic (可选) ──────────────────────────────────────
+            if getattr(novel, "enable_critic", True):
+                yield _sse("stage", "reviewing")
+                yield _sse_json("agent_start", {"agent": "critic", "label": "质量审查"})
+                passed, issues, critic_in_tok, critic_out_tok = await critic.review_chapter(
+                    generated_text=state["generated_text"],
+                    ctx=state["context"],
+                    fast_model=novel.fast_model,
+                )
+                state["passed"] = passed
+                state["critic_issues"] = issues
+                state["total_input_tokens"] += critic_in_tok
+                state["total_output_tokens"] += critic_out_tok
+                yield _sse_json("agent_done", {
+                    "agent": "critic",
+                    "label": "质量审查",
+                    "input_tokens": critic_in_tok,
+                    "output_tokens": critic_out_tok,
+                    "passed": passed,
+                })
 
-            if passed:
+                if passed:
+                    break
+                # 首次 Critic 失败时，先发出初稿内容，让前端展示对比视图
+                if state["revision_count"] == 0:
+                    yield _sse_json("original_draft", {"text": state["generated_text"]})
+                state["revision_count"] += 1
+            else:
+                # Critic 已关闭，直接使用 Writer 生成结果
                 break
-            state["revision_count"] += 1
 
         # ── Node 4: Save Chapter ───────────────────────────────────────────
         yield _sse("stage", "saving")

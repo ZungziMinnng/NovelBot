@@ -31,11 +31,11 @@ async def review_chapter(
         chapter_content=generated_text[:3000],
     )
 
-    client, model = llm_client.get_agent_client("critic", fast_model)
-    result, in_tok, out_tok = await llm_client.chat_complete_with_usage(
+    model, api_format = llm_client.get_agent_client("critic", fast_model)
+    result, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
         messages=[{"role": "user", "content": prompt}],
         model=model,
-        client=client,
+        api_format=api_format,
         temperature=0.2,
         max_tokens=400,
     )

@@ -18,11 +18,11 @@ async def expand_world_setting(
         genre=novel.genre,
     )
 
-    client, model = llm_client.get_agent_client("world", novel.fast_model)
-    result = await llm_client.chat_complete(
+    model, api_format = llm_client.get_agent_client("world", novel.fast_model)
+    result = await llm_client.dispatch_chat_complete(
         messages=[{"role": "user", "content": prompt}],
         model=model,
-        client=client,
+        api_format=api_format,
         temperature=0.7,
         max_tokens=800,
     )

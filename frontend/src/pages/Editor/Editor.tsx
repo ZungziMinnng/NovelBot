@@ -4,17 +4,21 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Users, List, Zap, Check, Edit3,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
-  Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower,
+  Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, Square, MessageSquare,
+  Terminal, Sparkles,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, type Chapter,
+  novelsApi, chaptersApi, generationApi, type Chapter,
   streamChapterGeneration,
 } from '@/api/client'
-import type { SSEMessage, AgentDoneData, TotalUsageData } from '@/api/client'
+import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData } from '@/api/client'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
+import DiffView from '@/components/DiffView/DiffView'
 import ContextPanel from '@/components/ContextPanel/ContextPanel'
 import NovelSettingsDrawer from '@/components/NovelSettingsDrawer/NovelSettingsDrawer'
 import AgentLog, { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
+import ChatPanel from '@/components/ChatPanel/ChatPanel'
+import DevPanel from '@/components/DevPanel/DevPanel'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useGenerationStore } from '@/store/generationStore'
 
@@ -30,14 +34,19 @@ export default function Editor() {
   const [selectedChapterNum, setSelectedChapterNum] = useState<number>(
     Number(searchParams.get('chapter')) || 1
   )
+  const [editorMode, setEditorMode] = useState<'generate' | 'chat'>('generate')
   const [instruction, setInstruction] = useState('')
   const [targetWords, setTargetWords] = useState(800)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [showContext, setShowContext] = useState(true)
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false)
+  const [showDiff, setShowDiff] = useState(false)
   const [showTokens, setShowTokens] = useState(true)
   const [logCollapsed, setLogCollapsed] = useState(false)
+  const [showDevPanel, setShowDevPanel] = useState(false)
+  const [plotSuggestions, setPlotSuggestions] = useState<string[]>([])
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
   const contentEndRef = useRef<HTMLDivElement>(null)
 
   const { data: novel } = useQuery({
@@ -79,6 +88,24 @@ export default function Editor() {
     }
   }, [searchParams])
 
+  // Clear suggestions when chapter changes
+  useEffect(() => {
+    setPlotSuggestions([])
+  }, [selectedChapterNum])
+
+  const handleFetchSuggestions = useCallback(async () => {
+    setIsLoadingSuggestions(true)
+    setPlotSuggestions([])
+    try {
+      const suggestions = await generationApi.plotSuggestions(novelId, selectedChapterNum)
+      setPlotSuggestions(suggestions)
+    } catch (e) {
+      console.error('Failed to fetch suggestions:', e)
+    } finally {
+      setIsLoadingSuggestions(false)
+    }
+  }, [novelId, selectedChapterNum])
+
   const handleGenerate = useCallback(() => {
     const gs = useGenerationStore.getState()
     if (gs.isGenerating || !novel) return
@@ -86,6 +113,8 @@ export default function Editor() {
     gs.startGeneration(novelId, novel.title, selectedChapterNum)
     setIsEditing(false)
     setLogCollapsed(false)
+    setShowDiff(false)
+    setPlotSuggestions([])
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map() // agent name → entryId
@@ -136,16 +165,32 @@ export default function Editor() {
           // Invalidate queries so data refreshes regardless of which page the user is on
           qc.invalidateQueries({ queryKey: ['chapters', novelId] })
           qc.invalidateQueries({ queryKey: ['characters', novelId] })
+        } else if (msg.event === 'original_draft') {
+          const d = msg.data as OriginalDraftData
+          s.setOriginalDraft(d.text)
+          setShowDiff(true)
         } else if (msg.event === 'error') {
           s.setAgentStage('error')
           console.error('Generation error:', msg.data)
         }
       },
-      () => useGenerationStore.getState().finishGeneration()
+      () => {
+        useGenerationStore.getState().finishGeneration()
+        setLogCollapsed(true)
+      }
     )
 
     useGenerationStore.getState().setAbortController(ctrl)
   }, [novel, novelId, selectedChapterNum, instruction, targetWords, qc])
+
+  const handleAbortOrGenerate = useCallback(() => {
+    const gs = useGenerationStore.getState()
+    if (gs.isGenerating && gs.novelId === novelId && gs.chapterNum === selectedChapterNum) {
+      gs.abortGeneration()
+      return
+    }
+    handleGenerate()
+  }, [novelId, selectedChapterNum, handleGenerate])
 
   const handleConfirm = async () => {
     if (!currentChapter) return
@@ -163,16 +208,37 @@ export default function Editor() {
 
   const streamingText = isCurrentlyGenerating ? genStore.streamingText : ''
   const agentStage = isCurrentlyGenerating ? genStore.agentStage : ''
-  const agentLogEntries = isCurrentlyGenerating ? genStore.agentLogEntries : []
-  const totalInputTokens = isCurrentlyGenerating ? genStore.totalInputTokens : 0
-  const totalOutputTokens = isCurrentlyGenerating ? genStore.totalOutputTokens : 0
+
+  // Show agent log & tokens for current generation OR after it finishes (same novel/chapter)
+  const hasGenDataHere =
+    genStore.agentLogEntries.length > 0 &&
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum
+  const agentLogEntries = hasGenDataHere ? genStore.agentLogEntries : []
+  const totalInputTokens = hasGenDataHere ? genStore.totalInputTokens : 0
+  const totalOutputTokens = hasGenDataHere ? genStore.totalOutputTokens : 0
+
+  // True after generation completes successfully for this chapter
+  const justFinishedHere =
+    !genStore.isGenerating &&
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum &&
+    genStore.agentStage === 'done'
+
+  // Fallback: after generation finishes, React Query refetch is async.
+  // Use streamingText from store as a bridge until the new chapter data arrives.
+  const recentlyFinishedHere =
+    !genStore.isGenerating &&
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum &&
+    genStore.streamingText.length > 0
 
   // What text to display in the editor area
   const displayText = isEditing
     ? editContent
     : streamingMode && isCurrentlyGenerating
       ? (streamingText || currentChapter?.content || '')
-      : (currentChapter?.content || '')
+      : (currentChapter?.content || (recentlyFinishedHere ? genStore.streamingText : ''))
 
   const isStreaming = isCurrentlyGenerating && streamingMode && streamingText.length > 0
 
@@ -204,6 +270,13 @@ export default function Editor() {
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
           >
             <Settings2 className="w-3.5 h-3.5" /> 设置
+          </button>
+          <button
+            onClick={() => setShowDevPanel(v => !v)}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDevPanel ? 'text-primary bg-primary/10' : ''}`}
+            title="开发者视图"
+          >
+            <Terminal className="w-3.5 h-3.5" /> Dev
           </button>
           <button
             onClick={toggleStreamingMode}
@@ -315,9 +388,47 @@ export default function Editor() {
             </div>
           </div>
 
+          {/* Mode Tabs */}
+          <div className="border-b px-4 flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setEditorMode('generate')}
+              className={`flex items-center gap-1.5 text-xs px-3 py-2 border-b-2 transition-colors ${
+                editorMode === 'generate'
+                  ? 'border-primary text-primary font-medium'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5" /> 生成
+            </button>
+            <button
+              onClick={() => setEditorMode('chat')}
+              className={`flex items-center gap-1.5 text-xs px-3 py-2 border-b-2 transition-colors ${
+                editorMode === 'chat'
+                  ? 'border-primary text-primary font-medium'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <MessageSquare className="w-3.5 h-3.5" /> 对话
+            </button>
+          </div>
+
+          {/* Chat Mode */}
+          {editorMode === 'chat' && novel && (
+            <div className="flex-1 overflow-hidden">
+              <ChatPanel novelId={novelId} novel={novel} />
+            </div>
+          )}
+
+          {editorMode === 'generate' && <>
           {/* Content Area */}
-          <div className="flex-1 overflow-y-auto">
-            {isEditing ? (
+          <div className={`flex-1 ${showDiff && !isCurrentlyGenerating && genStore.originalDraft ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+            {showDiff && !isCurrentlyGenerating && genStore.originalDraft ? (
+              <DiffView
+                originalText={genStore.originalDraft}
+                revisedText={currentChapter?.content || genStore.streamingText}
+                onClose={() => setShowDiff(false)}
+              />
+            ) : isEditing ? (
               <textarea
                 value={editContent}
                 onChange={e => setEditContent(e.target.value)}
@@ -356,6 +467,51 @@ export default function Editor() {
           {/* Generation Controls */}
           <div className="border-t px-4 py-3 shrink-0 space-y-2">
             <AgentStatus stage={agentStage} visible={isCurrentlyGenerating} />
+
+            {/* Plot Suggestions */}
+            {justFinishedHere && plotSuggestions.length === 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleFetchSuggestions}
+                  disabled={isLoadingSuggestions}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+                >
+                  {isLoadingSuggestions
+                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 生成建议中...</>
+                    : <><Sparkles className="w-3.5 h-3.5" /> 获取下章剧情建议</>
+                  }
+                </button>
+              </div>
+            )}
+            {plotSuggestions.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" /> 下章剧情建议（点击填入指令）
+                  </span>
+                  <button
+                    onClick={() => setPlotSuggestions([])}
+                    className="text-xs text-muted-foreground hover:text-foreground px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="flex flex-col gap-1">
+                  {plotSuggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setInstruction(s)}
+                      className={`text-left text-xs px-3 py-1.5 rounded-lg border transition-colors hover:bg-muted ${
+                        instruction === s ? 'border-primary bg-primary/5 text-primary' : 'border-border'
+                      }`}
+                    >
+                      <span className="text-muted-foreground mr-1.5">{i + 1}.</span>{s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center gap-2">
               <input
                 value={instruction}
@@ -374,12 +530,16 @@ export default function Editor() {
                 <option value={2000}>2000字</option>
               </select>
               <button
-                onClick={handleGenerate}
-                disabled={genStore.isGenerating}
-                className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity shrink-0"
+                onClick={handleAbortOrGenerate}
+                disabled={genStore.isGenerating && !isCurrentlyGenerating}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
+                  isCurrentlyGenerating
+                    ? 'bg-destructive text-destructive-foreground hover:opacity-90'
+                    : 'bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50'
+                }`}
               >
                 {isCurrentlyGenerating
-                  ? <><Loader2 className="w-4 h-4 animate-spin" /> 生成中</>
+                  ? <><Square className="w-4 h-4" /> 终止</>
                   : genStore.isGenerating
                     ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
                     : <><Zap className="w-4 h-4" /> 生成章节</>
@@ -387,6 +547,7 @@ export default function Editor() {
               </button>
             </div>
           </div>
+          </>}
         </div>
 
         {/* Context Panel */}
@@ -408,6 +569,11 @@ export default function Editor() {
           novel={novel}
           onClose={() => setShowSettingsDrawer(false)}
         />
+      )}
+
+      {/* Developer View Panel */}
+      {showDevPanel && (
+        <DevPanel onClose={() => setShowDevPanel(false)} />
       )}
     </div>
   )

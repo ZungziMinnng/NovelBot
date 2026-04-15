@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, DateTime, JSON
+from sqlalchemy import String, Text, Integer, Float, Boolean, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -28,6 +28,11 @@ class Novel(Base):
 
     # 自定义 Writer 系统提示词（追加到模板之后）
     writer_system_prompt: Mapped[str] = mapped_column(Text, default="")
+
+    # 生成参数（覆盖硬编码默认值）
+    enable_critic: Mapped[bool] = mapped_column(Boolean, default=True)
+    writer_temperature: Mapped[float] = mapped_column(Float, default=0.85)
+    writer_max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
