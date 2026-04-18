@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Send, Loader2, Bot, User } from 'lucide-react'
 import { streamChat, modelLibraryApi, type ChatMessage, type ChatSSEMessage, type ModelEntry } from '@/api/client'
 import type { Novel } from '@/api/client'
@@ -19,18 +20,16 @@ export default function ChatPanel({ novelId, novel }: Props) {
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [selectedModel, setSelectedModel] = useState(novel.writer_model || '')
-  const [modelLibrary, setModelLibrary] = useState<ModelEntry[]>([])
+  const { data: modelLibrary = [] } = useQuery({
+    queryKey: ['model-library'],
+    queryFn: modelLibraryApi.list,
+  })
   const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // Abort on unmount
   useEffect(() => {
     return () => { abortRef.current?.abort() }
-  }, [])
-
-  // Load model library
-  useEffect(() => {
-    modelLibraryApi.list().then(setModelLibrary)
   }, [])
 
   // Scroll to bottom when messages update

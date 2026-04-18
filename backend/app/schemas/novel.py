@@ -27,6 +27,11 @@ class NovelUpdate(BaseModel):
     enable_critic: Optional[bool] = None
     writer_temperature: Optional[float] = None
     writer_max_tokens: Optional[int] = None
+    rolling_summary_count: Optional[int] = None
+    rag_top_k: Optional[int] = None
+    chat_context_rounds: Optional[int] = None
+    enable_thinking: Optional[bool] = None
+    thinking_level: Optional[str] = None  # "off" | "low" | "medium" | "high"
 
 
 class NovelOut(BaseModel):
@@ -46,6 +51,11 @@ class NovelOut(BaseModel):
     enable_critic: bool
     writer_temperature: float
     writer_max_tokens: int
+    rolling_summary_count: int
+    rag_top_k: int
+    chat_context_rounds: int
+    enable_thinking: bool
+    thinking_level: str
     created_at: datetime
     updated_at: datetime
 
@@ -79,3 +89,7 @@ class WizardStep4(BaseModel):
 
 class WizardFinalize(BaseModel):
     novel_id: int
+
+
+class WorldOptimizeRequest(BaseModel):
+    core_setting: str

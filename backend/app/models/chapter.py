@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 from sqlalchemy import String, Text, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -15,6 +16,8 @@ class Chapter(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     # 章节摘要（确认后 AI 自动生成）
     summary: Mapped[str] = mapped_column(Text, default="")
+    # 生成时的用户指令（构思备忘）
+    instruction: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
     # draft = 草稿, confirmed = 已确认（触发记忆更新）
     status: Mapped[str] = mapped_column(String(20), default="draft")
     word_count: Mapped[int] = mapped_column(Integer, default=0)

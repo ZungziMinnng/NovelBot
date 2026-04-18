@@ -26,6 +26,7 @@ const EVENT_COLOR: Record<string, string> = {
   agent_done:     'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300',
   total_usage:    'bg-teal-100 text-teal-700 dark:bg-teal-900 dark:text-teal-300',
   original_draft: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300',
+  llm_request:    'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
 }
 
 function ExpandableJson({ data }: { data: unknown }) {

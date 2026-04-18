@@ -14,6 +14,7 @@ class ChapterCreate(BaseModel):
 class ChapterUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
+    summary: Optional[str] = None
     status: Optional[str] = None
 
 
@@ -25,6 +26,7 @@ class ChapterOut(BaseModel):
     title: str
     content: str
     summary: str
+    instruction: Optional[str] = None
     status: str
     word_count: int
     created_at: datetime

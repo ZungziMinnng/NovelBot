@@ -34,6 +34,13 @@ class Novel(Base):
     writer_temperature: Mapped[float] = mapped_column(Float, default=0.85)
     writer_max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
 
+    # 上下文配置（覆盖硬编码默认值）
+    rolling_summary_count: Mapped[int] = mapped_column(Integer, default=5)
+    rag_top_k: Mapped[int] = mapped_column(Integer, default=3)
+    chat_context_rounds: Mapped[int] = mapped_column(Integer, default=20)  # 0 = 无限
+    enable_thinking: Mapped[bool] = mapped_column(Boolean, default=True)
+    thinking_level: Mapped[str] = mapped_column(String(20), default="medium")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

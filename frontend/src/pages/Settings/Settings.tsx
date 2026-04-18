@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower, Plus, Pencil, Trash2, X } from 'lucide-react'
 import { settingsApi, modelLibraryApi, PROVIDERS, type ModelEntry } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
@@ -37,6 +38,7 @@ function ModelSelect({
 
 export default function Settings() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
 
   // ── API & model settings state ──────────────────────────────────────────
@@ -61,7 +63,10 @@ export default function Settings() {
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
   // ── Model library state ─────────────────────────────────────────────────
-  const [models, setModels] = useState<ModelEntry[]>([])
+  const { data: models = [] } = useQuery({
+    queryKey: ['model-library'],
+    queryFn: modelLibraryApi.list,
+  })
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [formDisplayName, setFormDisplayName] = useState('')
@@ -102,12 +107,7 @@ export default function Settings() {
       setHttpsProxy(s.https_proxy || '')
       setHttpProxy(s.http_proxy || '')
     })
-    loadModels()
   }, [])
-
-  const loadModels = () => {
-    modelLibraryApi.list().then(setModels)
-  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -197,7 +197,7 @@ export default function Settings() {
           api_format: formApiFormat,
         })
       }
-      loadModels()
+      qc.invalidateQueries({ queryKey: ['model-library'] })
       resetForm()
     } finally {
       setModelSaving(false)

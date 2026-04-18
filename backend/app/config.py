@@ -1,4 +1,5 @@
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
 
@@ -26,8 +27,9 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
 
     # 网络代理（开启 VPN 时填写，例：http://127.0.0.1:7890）
-    https_proxy: str = ""
-    http_proxy: str = ""
+    # 使用 NOVELBOT_ 前缀，避免与操作系统标准环境变量 HTTPS_PROXY/HTTP_PROXY 冲突
+    https_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTPS_PROXY")
+    http_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTP_PROXY")
 
     # 数据路径
     data_dir: str = "./data"
@@ -39,9 +41,10 @@ class Settings(BaseSettings):
     debug: bool = True
     max_critic_retries: int = 1  # 1 = Writer 最多执行两次（初次 + 1 次修改）
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
     def ensure_data_dir(self):
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)

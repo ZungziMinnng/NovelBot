@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db, AsyncSessionLocal
 from app.api.routes import novels, chapters, characters, generation, app_settings, chat
-from app.api.routes import model_library
+from app.api.routes import model_library, admin, writer_presets
 
 
 @asynccontextmanager
@@ -39,6 +39,8 @@ app.include_router(generation.router,    prefix="/api/generation",  tags=["gener
 app.include_router(app_settings.router,  prefix="/api/settings",    tags=["settings"])
 app.include_router(chat.router,          prefix="/api/chat",        tags=["chat"])
 app.include_router(model_library.router, prefix="/api/models",      tags=["models"])
+app.include_router(admin.router,         prefix="/api/admin",       tags=["admin"])
+app.include_router(writer_presets.router, prefix="/api/writer-presets", tags=["writer-presets"])
 
 
 @app.get("/api/health")

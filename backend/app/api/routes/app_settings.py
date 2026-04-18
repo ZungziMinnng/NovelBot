@@ -124,9 +124,9 @@ async def update_settings(data: SettingsUpdate):
     _write_env("ANTHROPIC_BASE_URL", data.anthropic_base_url)
     # 代理设置（允许保存空字符串以清除代理）
     settings.https_proxy = data.https_proxy
-    _write_env("HTTPS_PROXY", data.https_proxy)
+    _write_env("NOVELBOT_HTTPS_PROXY", data.https_proxy)
     settings.http_proxy = data.http_proxy
-    _write_env("HTTP_PROXY", data.http_proxy)
+    _write_env("NOVELBOT_HTTP_PROXY", data.http_proxy)
     return {"ok": True}
 
 

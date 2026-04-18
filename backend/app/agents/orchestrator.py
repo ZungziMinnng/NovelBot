@@ -2,10 +2,12 @@
 Orchestrator: LangGraph 风格的状态机，协调所有 Agent。
 以 AsyncIterator 形式输出 SSE 事件，支持流式渲染。
 """
+import asyncio
 import json
 from typing import AsyncIterator, TypedDict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
+from app.models.memory import Memory
 
 from app.models.novel import Novel
 from app.models.chapter import Chapter
@@ -78,6 +80,19 @@ async def run_chapter_generation(
     writer_system_prompt = getattr(novel, "writer_system_prompt", "") or ""
 
     try:
+        # ── 预清理：删除当前章节的旧摘要 ─────────────────────────────────
+        # 确保生成全程 DB 里没有该章节的陈旧记忆数据，
+        # 也避免生成失败时遗留脏数据影响后续章节的滚动摘要窗口。
+        await session.execute(
+            sql_delete(Memory).where(
+                Memory.novel_id == novel.id,
+                Memory.chapter_number == chapter_number,
+                Memory.volume == volume,
+                Memory.memory_type == "chapter_summary",
+            )
+        )
+        await session.commit()
+
         # ── Node 1: Build Context ──────────────────────────────────────────
         yield _sse("stage", "building_context")
         state["context"] = await build_generation_context(
@@ -105,6 +120,7 @@ async def run_chapter_generation(
             full_text = ""
             writer_in_tok = 0
             writer_out_tok = 0
+            writer_truncated = False
             async for item in writer.stream_chapter(
                 ctx=state["context"],
                 instruction=state["instruction"],
@@ -114,9 +130,18 @@ async def run_chapter_generation(
                 writer_system_prompt=writer_system_prompt,
                 temperature=getattr(novel, "writer_temperature", 0.85),
                 max_tokens=getattr(novel, "writer_max_tokens", 4096),
+                thinking_level=getattr(novel, "thinking_level", "medium"),
             ):
-                if isinstance(item, tuple):
-                    writer_in_tok, writer_out_tok = item
+                if isinstance(item, dict):
+                    # 元信息（如重试 warning、LLM payload）
+                    if "warning" in item:
+                        yield _sse("warning", item["warning"])
+                    elif "llm_payload" in item:
+                        yield _sse_json("llm_request", item["llm_payload"])
+                elif isinstance(item, tuple):
+                    finish_reason, writer_in_tok, writer_out_tok = item
+                    if finish_reason == "length":
+                        writer_truncated = True
                 else:
                     full_text += item
                     yield _sse("token", item)
@@ -164,14 +189,49 @@ async def run_chapter_generation(
                 break
 
         # ── Node 4: Save Chapter ───────────────────────────────────────────
+        if not state["generated_text"].strip():
+            raise ValueError("Writer 未生成任何内容，已中止保存。请检查模型配置或 API Key 是否正确。")
+        if writer_truncated:
+            yield _sse("warning", f"内容已达 Token 上限（{getattr(novel, 'writer_max_tokens', 4096)} tokens）被截断，建议在小说设置中增大「最大输出 Token」")
         yield _sse("stage", "saving")
         chapter = await _save_chapter(session, state, novel)
 
-        # ── Node 5: Update Memory (background-like, still awaited) ────────
+        # ── Node 5: Update Memory ─────────────────────────────────────────
         yield _sse("stage", "updating_memory")
-        await summarizer.summarize_chapter(session, chapter, novel)
-        await summarizer.update_character_states(session, chapter, novel)
+        yield _sse_json("agent_start", {"agent": "memory", "label": "更新记忆"})
+        summary_coro = summarizer.summarize_chapter(session, chapter, novel)
+        char_coro = summarizer.update_character_states(
+            session, chapter, novel, instruction=state["instruction"]
+        )
+        (_, sum_in, sum_out), (char_ok, char_warning, char_in, char_out) = (
+            await asyncio.gather(summary_coro, char_coro)
+        )
+        mem_in = sum_in + char_in
+        mem_out = sum_out + char_out
+        state["total_input_tokens"] += mem_in
+        state["total_output_tokens"] += mem_out
+        yield _sse_json("agent_done", {
+            "agent": "memory",
+            "label": "更新记忆",
+            "input_tokens": mem_in,
+            "output_tokens": mem_out,
+            "passed": char_ok,
+        })
         await session.commit()
+        if char_warning:
+            yield _sse("warning", char_warning)
+
+        # ── Node 6: Discover New Characters ──────────────────────────────
+        from app.agents import character_agent
+        existing_names = [c["name"] for c in state["context"].get("characters", [])]
+        try:
+            candidates = await character_agent.discover_new_characters(
+                novel, state["generated_text"], existing_names
+            )
+            if candidates:
+                yield _sse_json("new_characters", {"candidates": candidates})
+        except Exception:
+            pass
 
         # ── Emit total usage ───────────────────────────────────────────────
         yield _sse_json("total_usage", {
@@ -203,6 +263,7 @@ async def _save_chapter(
 
     if chapter:
         chapter.content = state["generated_text"]
+        chapter.instruction = state.get("instruction") or None
         chapter.status = "draft"
         chapter.word_count = len(state["generated_text"])
     else:
@@ -212,6 +273,7 @@ async def _save_chapter(
             number=state["chapter_number"],
             title=f"第{state['chapter_number']}章",
             content=state["generated_text"],
+            instruction=state.get("instruction") or None,
             status="draft",
             word_count=len(state["generated_text"]),
         )

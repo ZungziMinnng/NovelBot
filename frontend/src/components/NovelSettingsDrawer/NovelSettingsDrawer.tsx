@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
-import { X, Save, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
-import { novelsApi, modelLibraryApi, type Novel, type ModelEntry } from '@/api/client'
-import { useQueryClient } from '@tanstack/react-query'
+import toast from 'react-hot-toast'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen } from 'lucide-react'
+import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
+import { useQueryClient, useQuery } from '@tanstack/react-query'
 
 interface Props {
   novel: Novel
@@ -41,7 +42,10 @@ function ModelSelect({
 
 export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   const qc = useQueryClient()
-  const [modelLibrary, setModelLibrary] = useState<ModelEntry[]>([])
+  const { data: modelLibrary = [] } = useQuery({
+    queryKey: ['model-library'],
+    queryFn: modelLibraryApi.list,
+  })
   const [title, setTitle] = useState(novel.title)
   const [genre, setGenre] = useState(novel.genre)
   const [writingStyle, setWritingStyle] = useState(novel.writing_style)
@@ -53,9 +57,16 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   const [enableCritic, setEnableCritic] = useState(novel.enable_critic ?? true)
   const [writerTemperature, setWriterTemperature] = useState(novel.writer_temperature ?? 0.85)
   const [writerMaxTokens, setWriterMaxTokens] = useState(novel.writer_max_tokens ?? 4096)
+  const [rollingSummaryCount, setRollingSummaryCount] = useState(novel.rolling_summary_count ?? 5)
+  const [ragTopK, setRagTopK] = useState(novel.rag_top_k ?? 3)
+  const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
+  const [thinkingLevel, setThinkingLevel] = useState(novel.thinking_level || 'medium')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
   const [showPromptPreview, setShowPromptPreview] = useState(false)
+  const [bookSummary, setBookSummary] = useState(novel.book_summary || '')
+  const [generatingBookSummary, setGeneratingBookSummary] = useState(false)
 
   useEffect(() => {
     setTitle(novel.title)
@@ -69,11 +80,42 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
     setEnableCritic(novel.enable_critic ?? true)
     setWriterTemperature(novel.writer_temperature ?? 0.85)
     setWriterMaxTokens(novel.writer_max_tokens ?? 4096)
+    setRollingSummaryCount(novel.rolling_summary_count ?? 5)
+    setRagTopK(novel.rag_top_k ?? 3)
+    setChatContextRounds(novel.chat_context_rounds ?? 20)
+    setThinkingLevel(novel.thinking_level || 'medium')
+    setBookSummary(novel.book_summary || '')
   }, [novel.id])
 
-  useEffect(() => {
-    modelLibraryApi.list().then(setModelLibrary)
-  }, [])
+  const { data: writerPresets = [] } = useQuery({
+    queryKey: ['writer-presets'],
+    queryFn: writerPresetsApi.list,
+  })
+
+  const handleGenerateBookSummary = async () => {
+    setGeneratingBookSummary(true)
+    try {
+      const result = await novelsApi.refreshBookSummary(novel.id)
+      setBookSummary(result.book_summary)
+      qc.invalidateQueries({ queryKey: ['novel', novel.id] })
+    } catch {
+      toast.error('生成全书概要失败')
+    } finally {
+      setGeneratingBookSummary(false)
+    }
+  }
+
+  const handleOptimizeWorld = async () => {
+    setOptimizing(true)
+    try {
+      const result = await novelsApi.optimizeWorld(novel.id, coreSetting)
+      setCoreSetting(result.core_setting)
+    } catch {
+      toast.error('优化世界观失败')
+    } finally {
+      setOptimizing(false)
+    }
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -85,16 +127,23 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
         writing_style: writingStyle,
         target_length: targetLength,
         core_setting: coreSetting,
+        book_summary: bookSummary,
         writer_system_prompt: writerSystemPrompt,
         writer_model: writerModel,
         fast_model: fastModel,
         enable_critic: enableCritic,
         writer_temperature: writerTemperature,
         writer_max_tokens: writerMaxTokens,
+        rolling_summary_count: rollingSummaryCount,
+        rag_top_k: ragTopK,
+        chat_context_rounds: chatContextRounds,
+        thinking_level: thinkingLevel,
       })
       qc.invalidateQueries({ queryKey: ['novel', novel.id] })
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
+    } catch {
+      toast.error('保存设置失败')
     } finally {
       setSaving(false)
     }
@@ -141,7 +190,21 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                       {g}
                     </button>
                   ))}
+                  <button
+                    onClick={() => { if (GENRES.includes(genre)) setGenre('') }}
+                    className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${!GENRES.includes(genre) ? 'bg-primary text-primary-foreground border-primary' : 'hover:border-primary'}`}
+                  >
+                    自定义
+                  </button>
                 </div>
+                {!GENRES.includes(genre) && (
+                  <input
+                    value={genre}
+                    onChange={e => setGenre(e.target.value)}
+                    placeholder="输入自定义类型..."
+                    className="mt-1.5 w-full border rounded-lg px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                )}
               </div>
               <div>
                 <label className="text-sm font-medium mb-2 block">写作风格</label>
@@ -155,7 +218,21 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                       {s}
                     </button>
                   ))}
+                  <button
+                    onClick={() => { if (STYLES.includes(writingStyle)) setWritingStyle('') }}
+                    className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${!STYLES.includes(writingStyle) ? 'bg-primary text-primary-foreground border-primary' : 'hover:border-primary'}`}
+                  >
+                    自定义
+                  </button>
                 </div>
+                {!STYLES.includes(writingStyle) && (
+                  <input
+                    value={writingStyle}
+                    onChange={e => setWritingStyle(e.target.value)}
+                    placeholder="输入自定义风格..."
+                    className="mt-1.5 w-full border rounded-lg px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                )}
               </div>
               <div>
                 <label className="text-sm font-medium mb-2 block">目标长度</label>
@@ -180,14 +257,71 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
             <textarea
               value={coreSetting}
               onChange={e => setCoreSetting(e.target.value)}
+              disabled={optimizing}
               placeholder="世界观、规则、时代背景..."
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-none h-28 focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
+            />
+            <button
+              onClick={handleOptimizeWorld}
+              disabled={optimizing || !coreSetting.trim()}
+              className={`mt-1.5 flex items-center gap-1.5 text-xs transition-opacity ${
+                optimizing
+                  ? 'text-muted-foreground cursor-not-allowed'
+                  : !coreSetting.trim()
+                  ? 'text-primary opacity-40 cursor-not-allowed'
+                  : 'text-primary hover:opacity-75'
+              }`}
+            >
+              {optimizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+              {optimizing ? '正在优化...' : 'AI 优化世界观'}
+            </button>
+          </div>
+
+          {/* Book Summary */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">全书概要（长程记忆）</label>
+              <button
+                onClick={handleGenerateBookSummary}
+                disabled={generatingBookSummary}
+                className={`flex items-center gap-1.5 text-xs transition-opacity ${
+                  generatingBookSummary
+                    ? 'text-muted-foreground cursor-not-allowed'
+                    : 'text-primary hover:opacity-75'
+                }`}
+              >
+                {generatingBookSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookOpen className="w-3.5 h-3.5" />}
+                {generatingBookSummary ? '生成中...' : '重新整理'}
+              </button>
+            </div>
+            <textarea
+              value={bookSummary}
+              onChange={e => setBookSummary(e.target.value)}
+              placeholder="写了一定章节后，点击「重新整理」让 AI 从所有章节摘要生成全书概要，之后生成新章节时会自动携带此概要作为长程记忆..."
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-none h-28 focus:outline-none focus:ring-1 focus:ring-ring"
             />
+            <p className="text-xs text-muted-foreground mt-1">覆盖 rolling_summary（5章）无法触及的早期剧情，保存时同步入库。</p>
           </div>
 
           {/* Custom Writer prompt */}
           <div>
             <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">自定义 Writer 提示词</label>
+            {writerPresets.length > 0 && (
+              <select
+                defaultValue=""
+                onChange={e => {
+                  const preset = writerPresets.find(p => p.id === Number(e.target.value))
+                  if (preset) setWriterSystemPrompt(preset.prompt)
+                  e.target.value = ''
+                }}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring mb-2"
+              >
+                <option value="">从预设填充...</option>
+                {writerPresets.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            )}
             <textarea
               value={writerSystemPrompt}
               onChange={e => setWriterSystemPrompt(e.target.value)}
@@ -267,6 +401,24 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                 </button>
               </div>
 
+              {/* Thinking level */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Thinking 深度思考</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">控制 Gemini 思考强度，关闭可减少空响应</p>
+                </div>
+                <select
+                  value={thinkingLevel}
+                  onChange={e => setThinkingLevel(e.target.value)}
+                  className="text-sm border rounded-lg px-2 py-1.5 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="off">关闭</option>
+                  <option value="low">低</option>
+                  <option value="medium">中（默认）</option>
+                  <option value="high">高</option>
+                </select>
+              </div>
+
               {/* Temperature slider */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -301,6 +453,63 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                   <option value={8192}>8192（约 6000 字）</option>
                   <option value={16384}>16384（约 12000 字）</option>
                 </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Generation context */}
+          <div>
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">生成上下文</label>
+            <div className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-sm font-medium">滚动摘要章数</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={rollingSummaryCount}
+                    onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                    className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-sm font-medium">RAG 检索条数</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={ragTopK}
+                    onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                    className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Chat context */}
+          <div>
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">对话上下文</label>
+            <div className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-sm font-medium">对话历史轮数</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={chatContextRounds}
+                    onChange={e => setChatContextRounds(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                    className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">与 AI 助手对话时携带的最近消息轮数，0 表示不限制</p>
               </div>
             </div>
           </div>

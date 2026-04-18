@@ -29,6 +29,25 @@ async def expand_world_setting(
     return result.strip()
 
 
+async def optimize_world_setting(novel: Novel, core_setting: str) -> str:
+    """用 fast 模型优化世界观设定，core_setting 为当前文本（可能未保存到 DB）"""
+    prompt = render(
+        "world_optimizer.jinja2",
+        core_setting=core_setting,
+        premise=novel.premise,
+        genre=novel.genre,
+    )
+    model, api_format = llm_client.get_agent_client("world", novel.fast_model)
+    result = await llm_client.dispatch_chat_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_format=api_format,
+        temperature=0.7,
+        max_tokens=1000,
+    )
+    return result.strip()
+
+
 async def embed_world_setting(novel_id: int, core_setting: str) -> None:
     """将世界观写入向量库"""
     vector_store.store_text(

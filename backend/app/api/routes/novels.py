@@ -5,8 +5,9 @@ from openai import AuthenticationError as OpenAIAuthError
 from app.database import get_db
 from app.models.novel import Novel
 from app.models.memory import Outline
-from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4
+from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
 from app.agents import world_agent, outline_agent, character_agent
+from app.services import summarizer
 from app.models.character import Character
 from app.services import vector_store
 
@@ -60,6 +61,43 @@ async def delete_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
 
 
 # ── 向导接口 ──────────────────────────────────────────────────────────────
+
+@router.post("/{novel_id}/optimize-world")
+async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, db: AsyncSession = Depends(get_db)):
+    """使用 fast 模型优化世界观设定（使用前端传入的当前文本，而非 DB 中的旧值）"""
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    if not data.core_setting.strip():
+        raise HTTPException(status_code=400, detail="当前世界观设定为空，无法优化")
+    try:
+        core_setting = await world_agent.optimize_world_setting(novel, data.core_setting)
+    except OpenAIAuthError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"API Key 或模型名无效，请前往「设置」页面检查配置。原始错误：{e}"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
+    novel.core_setting = core_setting
+    await world_agent.embed_world_setting(novel.id, core_setting)
+    await db.commit()
+    return {"core_setting": core_setting}
+
+
+@router.post("/{novel_id}/book-summary")
+async def refresh_book_summary(novel_id: int, db: AsyncSession = Depends(get_db)):
+    """从所有已确认章节的摘要重新生成全书概要，存入 novel.book_summary"""
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    try:
+        book_summary = await summarizer.generate_book_summary(db, novel)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成全书概要失败：{e}")
+    await db.commit()
+    return {"book_summary": book_summary}
+
 
 @router.post("/wizard/world")
 async def wizard_expand_world(data: WizardStep2, db: AsyncSession = Depends(get_db)):

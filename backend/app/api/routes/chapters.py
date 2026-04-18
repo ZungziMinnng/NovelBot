@@ -5,7 +5,7 @@ from app.database import get_db
 from app.models.chapter import Chapter
 from app.models.novel import Novel
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
-from app.services import summarizer
+from app.services import summarizer, vector_store
 
 router = APIRouter()
 
@@ -62,15 +62,17 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
     novel = await db.get(Novel, chapter.novel_id)
     chapter.status = "confirmed"
 
-    summary = await summarizer.summarize_chapter(db, chapter, novel)
-    await summarizer.update_character_states(db, chapter, novel)
+    summary, _, _ = await summarizer.summarize_chapter(db, chapter, novel)
+    char_ok, char_warning, _, _ = await summarizer.update_character_states(
+        db, chapter, novel, instruction=chapter.instruction or ""
+    )
 
     # 更新小说当前进度
     novel.current_chapter = max(novel.current_chapter, chapter.number)
     novel.current_volume = chapter.volume
 
     await db.commit()
-    return {"summary": summary, "status": "confirmed"}
+    return {"summary": summary, "status": "confirmed", "char_warning": char_warning or None}
 
 
 @router.delete("/{chapter_id}")
@@ -78,6 +80,10 @@ async def delete_chapter(chapter_id: int, db: AsyncSession = Depends(get_db)):
     chapter = await db.get(Chapter, chapter_id)
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
+    # 清理 ChromaDB 中的 summary + content chunk 向量
+    doc_ids = [f"chapter_{chapter_id}_summary"]
+    doc_ids.extend(f"chapter_{chapter_id}_chunk_{i}" for i in range(50))
+    await vector_store.adelete_docs(chapter.novel_id, doc_ids)
     await db.delete(chapter)
     await db.commit()
     return {"ok": True}

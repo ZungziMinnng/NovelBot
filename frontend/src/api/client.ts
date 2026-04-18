@@ -60,6 +60,11 @@ export interface Novel {
   enable_critic: boolean
   writer_temperature: number
   writer_max_tokens: number
+  rolling_summary_count: number
+  rag_top_k: number
+  chat_context_rounds: number
+  enable_thinking: boolean
+  thinking_level: string
   created_at: string
   updated_at: string
 }
@@ -72,6 +77,7 @@ export interface Chapter {
   title: string
   content: string
   summary: string
+  instruction?: string
   status: string
   word_count: number
   created_at: string
@@ -97,6 +103,28 @@ export interface Outline {
   content: string
 }
 
+export interface Memory {
+  id: number
+  novel_id: number
+  chapter_id: number | null
+  memory_type: string
+  content: string
+  volume: number
+  chapter_number: number
+  created_at: string
+}
+
+export interface OutlineEntry {
+  id: number
+  novel_id: number
+  level: string
+  volume: number
+  chapter_number: number
+  title: string
+  content: string
+  updated_at: string
+}
+
 export interface ModelEntry {
   id: number
   display_name: string
@@ -104,6 +132,14 @@ export interface ModelEntry {
   provider: string
   api_format: string
   created_at: string
+}
+
+export interface WriterPreset {
+  id: number
+  name: string
+  prompt: string
+  created_at: string
+  updated_at: string
 }
 
 export const PROVIDERS = [
@@ -121,6 +157,10 @@ export const novelsApi = {
   create: (data: Partial<Novel>) => api.post<Novel>('/novels/', data).then(r => r.data),
   update: (id: number, data: Partial<Novel>) => api.patch<Novel>(`/novels/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/novels/${id}`).then(r => r.data),
+  optimizeWorld: (novelId: number, coreSetting: string) =>
+    api.post<{ core_setting: string }>(`/novels/${novelId}/optimize-world`, { core_setting: coreSetting }).then(r => r.data),
+  refreshBookSummary: (novelId: number) =>
+    api.post<{ book_summary: string }>(`/novels/${novelId}/book-summary`).then(r => r.data),
   wizardWorld: (novelId: number, rawSetting: string, rawRules: string) =>
     api.post('/novels/wizard/world', { novel_id: novelId, raw_world_setting: rawSetting, raw_world_rules: rawRules }).then(r => r.data),
   wizardCharacters: (novelId: number, characters: object[]) =>
@@ -150,6 +190,16 @@ export const charactersApi = {
   delete: (id: number) => api.delete(`/characters/${id}`).then(r => r.data),
 }
 
+// ── Admin APIs ────────────────────────────────────────────────────────────
+
+export const adminApi = {
+  listMemories: (novelId: number) => api.get<Memory[]>(`/admin/novel/${novelId}/memories`).then(r => r.data),
+  updateMemory: (id: number, data: { content: string }) => api.patch<Memory>(`/admin/memories/${id}`, data).then(r => r.data),
+  deleteMemory: (id: number) => api.delete(`/admin/memories/${id}`).then(r => r.data),
+  listOutlines: (novelId: number) => api.get<OutlineEntry[]>(`/admin/novel/${novelId}/outlines`).then(r => r.data),
+  updateOutline: (id: number, data: { title?: string; content?: string }) => api.patch<OutlineEntry>(`/admin/outlines/${id}`, data).then(r => r.data),
+}
+
 // ── Settings APIs ──────────────────────────────────────────────────────────
 
 export const settingsApi = {
@@ -165,6 +215,15 @@ export const modelLibraryApi = {
   create: (data: Omit<ModelEntry, 'id' | 'created_at'>) => api.post<ModelEntry>('/models/', data).then(r => r.data),
   update: (id: number, data: Partial<Omit<ModelEntry, 'id' | 'created_at'>>) => api.patch<ModelEntry>(`/models/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/models/${id}`).then(r => r.data),
+}
+
+// ── Writer Preset APIs ─────────────────────────────────────────────────────
+
+export const writerPresetsApi = {
+  list: () => api.get<WriterPreset[]>('/writer-presets/').then(r => r.data),
+  create: (data: { name: string; prompt?: string }) => api.post<WriterPreset>('/writer-presets/', data).then(r => r.data),
+  update: (id: number, data: { name?: string; prompt?: string }) => api.patch<WriterPreset>(`/writer-presets/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/writer-presets/${id}`).then(r => r.data),
 }
 
 // ── Generation APIs ─────────────────────────────────────────────────────────
@@ -202,15 +261,22 @@ export interface OriginalDraftData {
   text: string
 }
 
+export interface NewCharactersData {
+  candidates: Array<{ name: string; role: string; description: string }>
+}
+
 export type SSEMessage =
   | { event: 'stage'; data: string }
   | { event: 'token'; data: string }
   | { event: 'done'; data: string }
   | { event: 'error'; data: string }
+  | { event: 'warning'; data: string }
   | { event: 'agent_start'; data: AgentStartData }
   | { event: 'agent_done'; data: AgentDoneData }
   | { event: 'total_usage'; data: TotalUsageData }
   | { event: 'original_draft'; data: OriginalDraftData }
+  | { event: 'new_characters'; data: NewCharactersData }
+  | { event: 'llm_request'; data: Record<string, unknown> }
 
 // ── SSE Chat ───────────────────────────────────────────────────────────────
 

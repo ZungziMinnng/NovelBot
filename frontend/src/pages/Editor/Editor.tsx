@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import toast from 'react-hot-toast'
 import {
-  ArrowLeft, Users, List, Zap, Check, Edit3,
+  ArrowLeft, Users, List, Zap, Check, Edit3, Trash2, Plus,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, Square, MessageSquare,
-  Terminal, Sparkles,
+  Terminal, Sparkles, Database,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, generationApi, type Chapter,
+  novelsApi, chaptersApi, charactersApi, generationApi, type Chapter,
   streamChapterGeneration,
 } from '@/api/client'
-import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData } from '@/api/client'
+import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData } from '@/api/client'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 import DiffView from '@/components/DiffView/DiffView'
 import ContextPanel from '@/components/ContextPanel/ContextPanel'
@@ -47,6 +48,11 @@ export default function Editor() {
   const [showDevPanel, setShowDevPanel] = useState(false)
   const [plotSuggestions, setPlotSuggestions] = useState<string[]>([])
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
+  const [newCharCandidates, setNewCharCandidates] = useState<Array<{ name: string; role: string; description: string }>>([])
+  const [addingChars, setAddingChars] = useState(false)
+  const [isConfirming, setIsConfirming] = useState(false)
+  const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('novel_font_size') || 16))
+  const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
   const contentEndRef = useRef<HTMLDivElement>(null)
 
   const { data: novel } = useQuery({
@@ -115,6 +121,7 @@ export default function Editor() {
     setLogCollapsed(false)
     setShowDiff(false)
     setPlotSuggestions([])
+    setNewCharCandidates([])
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map() // agent name → entryId
@@ -169,9 +176,14 @@ export default function Editor() {
           const d = msg.data as OriginalDraftData
           s.setOriginalDraft(d.text)
           setShowDiff(true)
+        } else if (msg.event === 'new_characters') {
+          const d = msg.data as NewCharactersData
+          if (d.candidates?.length) setNewCharCandidates(d.candidates)
+        } else if (msg.event === 'warning') {
+          s.setWarning(String(msg.data))
+          toast(String(msg.data), { icon: '⚠️' })
         } else if (msg.event === 'error') {
-          s.setAgentStage('error')
-          console.error('Generation error:', msg.data)
+          s.setError(String(msg.data))
         }
       },
       () => {
@@ -193,17 +205,62 @@ export default function Editor() {
   }, [novelId, selectedChapterNum, handleGenerate])
 
   const handleConfirm = async () => {
+    if (!currentChapter || isConfirming) return
+    setIsConfirming(true)
+    try {
+      await chaptersApi.confirm(currentChapter.id)
+      refetchChapters()
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      toast.success('章节已确认，摘要和角色状态已更新')
+    } catch {
+      toast.error('确认章节失败')
+    } finally {
+      setIsConfirming(false)
+    }
+  }
+
+  const handleDelete = async () => {
     if (!currentChapter) return
-    await chaptersApi.confirm(currentChapter.id)
-    refetchChapters()
-    qc.invalidateQueries({ queryKey: ['characters', novelId] })
+    if (!window.confirm(`确认删除第 ${currentChapter.number} 章？此操作不可撤销。`)) return
+    try {
+      await chaptersApi.delete(currentChapter.id)
+      const remaining = chapters.filter((c: Chapter) => c.id !== currentChapter.id)
+      if (remaining.length > 0) {
+        const prev = [...remaining].reverse().find((c: Chapter) => c.number < currentChapter.number)
+        const next = remaining.find((c: Chapter) => c.number > currentChapter.number)
+        setSelectedChapterNum((prev || next)!.number)
+      } else {
+        setSelectedChapterNum(1)
+      }
+      refetchChapters()
+    } catch {
+      toast.error('删除章节失败')
+    }
   }
 
   const handleSaveEdit = async () => {
     if (!currentChapter) return
-    await chaptersApi.update(currentChapter.id, { content: editContent, title: currentChapter.title })
-    refetchChapters()
-    setIsEditing(false)
+    try {
+      await chaptersApi.update(currentChapter.id, { content: editContent, title: currentChapter.title })
+      refetchChapters()
+      setIsEditing(false)
+    } catch {
+      toast.error('保存章节失败')
+    }
+  }
+
+  const handleAddNewChars = async () => {
+    if (!newCharCandidates.length || addingChars) return
+    setAddingChars(true)
+    try {
+      for (const c of newCharCandidates) {
+        await charactersApi.create({ ...c, novel_id: novelId })
+      }
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      setNewCharCandidates([])
+    } finally {
+      setAddingChars(false)
+    }
   }
 
   const streamingText = isCurrentlyGenerating ? genStore.streamingText : ''
@@ -217,6 +274,18 @@ export default function Editor() {
   const agentLogEntries = hasGenDataHere ? genStore.agentLogEntries : []
   const totalInputTokens = hasGenDataHere ? genStore.totalInputTokens : 0
   const totalOutputTokens = hasGenDataHere ? genStore.totalOutputTokens : 0
+
+  const errorMessage = (
+    !genStore.isGenerating &&
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum &&
+    genStore.agentStage === 'error'
+  ) ? genStore.errorMessage : ''
+
+  const warningMessage = (
+    genStore.novelId === novelId &&
+    genStore.chapterNum === selectedChapterNum
+  ) ? genStore.warningMessage : ''
 
   // True after generation completes successfully for this chapter
   const justFinishedHere =
@@ -264,6 +333,10 @@ export default function Editor() {
           <button onClick={() => navigate(`/novel/${novelId}/outline`)}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
             <List className="w-3.5 h-3.5" /> 大纲
+          </button>
+          <button onClick={() => navigate(`/novel/${novelId}/data`)}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            <Database className="w-3.5 h-3.5" /> 数据
           </button>
           <button
             onClick={() => setShowSettingsDrawer(true)}
@@ -363,7 +436,40 @@ export default function Editor() {
               <span className="text-xs text-muted-foreground">{currentChapter.word_count}字</span>
             ) : null}
 
-            <div className="flex items-center gap-2 ml-auto">
+            <div className="flex items-center gap-1.5 ml-auto">
+              <select
+                value={fontSize}
+                onChange={e => { const v = Number(e.target.value); setFontSize(v); localStorage.setItem('novel_font_size', String(v)) }}
+                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                title="字体大小"
+              >
+                <option value={14}>14px</option>
+                <option value={16}>16px</option>
+                <option value={18}>18px</option>
+                <option value={20}>20px</option>
+              </select>
+              <select
+                value={lineHeight}
+                onChange={e => { const v = Number(e.target.value); setLineHeight(v); localStorage.setItem('novel_line_height', String(v)) }}
+                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                title="行间距"
+              >
+                <option value={1.5}>1.5×</option>
+                <option value={1.8}>1.8×</option>
+                <option value={2.0}>2.0×</option>
+                <option value={2.5}>2.5×</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              {currentChapter && !isCurrentlyGenerating && (
+                <button
+                  onClick={handleDelete}
+                  className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md text-destructive hover:bg-destructive/10 transition-colors"
+                  title="删除本章"
+                >
+                  <Trash2 className="w-3 h-3" /> 删除
+                </button>
+              )}
               {currentChapter?.content && !isCurrentlyGenerating && (
                 <>
                   {!isEditing ? (
@@ -379,14 +485,17 @@ export default function Editor() {
                   )}
                   {currentChapter.status !== 'confirmed' && (
                     <button onClick={handleConfirm}
-                      className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors">
-                      <Check className="w-3 h-3" /> 确认章节
+                      disabled={isConfirming}
+                      className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                      {isConfirming ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      {isConfirming ? '确认中...' : '确认章节'}
                     </button>
                   )}
                 </>
               )}
             </div>
           </div>
+
 
           {/* Mode Tabs */}
           <div className="border-b px-4 flex items-center gap-1 shrink-0">
@@ -428,11 +537,29 @@ export default function Editor() {
                 revisedText={currentChapter?.content || genStore.streamingText}
                 onClose={() => setShowDiff(false)}
               />
+            ) : warningMessage && !isCurrentlyGenerating ? (
+              <div className="flex flex-col h-full overflow-y-auto">
+                <div className="mx-8 mt-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded-lg px-4 py-2.5 flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+                  <span className="shrink-0 mt-0.5">⚠</span>
+                  <span>{warningMessage}</span>
+                </div>
+                <div className={`p-8 novel-content whitespace-pre-wrap`} style={{ fontSize: `${fontSize}px`, lineHeight }}>
+                  {displayText}
+                </div>
+              </div>
+            ) : errorMessage ? (
+              <div className="p-8 flex flex-col items-center justify-center h-full gap-3">
+                <div className="max-w-lg w-full bg-destructive/10 border border-destructive/30 rounded-lg p-4">
+                  <p className="text-sm font-medium text-destructive mb-1">生成失败</p>
+                  <p className="text-xs text-destructive/80 whitespace-pre-wrap break-words">{errorMessage}</p>
+                </div>
+              </div>
             ) : isEditing ? (
               <textarea
                 value={editContent}
                 onChange={e => setEditContent(e.target.value)}
-                className="w-full h-full p-8 text-base leading-loose resize-none bg-background focus:outline-none novel-content font-serif"
+                className="w-full h-full p-8 resize-none bg-background focus:outline-none novel-content font-serif"
+                style={{ fontSize: `${fontSize}px`, lineHeight }}
                 placeholder="在此输入内容..."
               />
             ) : isCurrentlyGenerating && !streamingMode ? (
@@ -442,13 +569,27 @@ export default function Editor() {
                 <p className="text-xs opacity-60">切换页面不会中断生成</p>
               </div>
             ) : (
-              <div className={`p-8 novel-content text-base leading-loose whitespace-pre-wrap ${isStreaming ? 'streaming-cursor' : ''}`}>
-                {displayText || (
-                  <span className="text-muted-foreground/50">
-                    {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
-                  </span>
+              <div className="h-full flex flex-col overflow-y-auto">
+                {currentChapter?.instruction && (
+                  <div className="px-8 pt-6 pb-1 shrink-0">
+                    <details>
+                      <summary className="text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors">
+                        📝 本章构思
+                      </summary>
+                      <p className="mt-2 text-sm text-muted-foreground border-l-2 border-muted pl-3 whitespace-pre-wrap">
+                        {currentChapter.instruction}
+                      </p>
+                    </details>
+                  </div>
                 )}
-                <div ref={contentEndRef} />
+                <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight }}>
+                  {displayText || (
+                    <span className="text-muted-foreground/50">
+                      {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
+                    </span>
+                  )}
+                  <div ref={contentEndRef} />
+                </div>
               </div>
             )}
           </div>
@@ -512,39 +653,75 @@ export default function Editor() {
               </div>
             )}
 
-            <div className="flex items-center gap-2">
-              <input
+            {newCharCandidates.length > 0 && (
+              <div className="space-y-1.5 border rounded-lg p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Users className="w-3 h-3" /> 发现新角色（本章首次出现）
+                  </span>
+                  <button
+                    onClick={() => setNewCharCandidates([])}
+                    className="text-xs text-muted-foreground hover:text-foreground px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {newCharCandidates.map((c, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs bg-muted px-2.5 py-1.5 rounded-md">
+                      <span className="font-medium">{c.name}</span>
+                      <span className="text-muted-foreground">·{c.role}</span>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={handleAddNewChars}
+                  disabled={addingChars}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {addingChars ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                  一键添加到角色表
+                </button>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2">
+              <textarea
                 value={instruction}
                 onChange={e => setInstruction(e.target.value)}
                 placeholder="生成指令（可选）：重点描写心理活动..."
-                className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                rows={3}
+                className="w-full text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[38px]"
               />
-              <select
-                value={targetWords}
-                onChange={e => setTargetWords(Number(e.target.value))}
-                className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none"
-              >
-                <option value={500}>500字</option>
-                <option value={800}>800字</option>
-                <option value={1200}>1200字</option>
-                <option value={2000}>2000字</option>
-              </select>
-              <button
-                onClick={handleAbortOrGenerate}
-                disabled={genStore.isGenerating && !isCurrentlyGenerating}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
-                  isCurrentlyGenerating
-                    ? 'bg-destructive text-destructive-foreground hover:opacity-90'
-                    : 'bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50'
-                }`}
-              >
-                {isCurrentlyGenerating
-                  ? <><Square className="w-4 h-4" /> 终止</>
-                  : genStore.isGenerating
-                    ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
-                    : <><Zap className="w-4 h-4" /> 生成章节</>
-                }
-              </button>
+              <div className="flex items-center gap-2">
+                <select
+                  value={targetWords}
+                  onChange={e => setTargetWords(Number(e.target.value))}
+                  className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none"
+                >
+                  <option value={500}>500字</option>
+                  <option value={800}>800字</option>
+                  <option value={1200}>1200字</option>
+                  <option value={2000}>2000字</option>
+                </select>
+                <div className="flex-1" />
+                <button
+                  onClick={handleAbortOrGenerate}
+                  disabled={genStore.isGenerating && !isCurrentlyGenerating}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
+                    isCurrentlyGenerating
+                      ? 'bg-destructive text-destructive-foreground hover:opacity-90'
+                      : 'bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50'
+                  }`}
+                >
+                  {isCurrentlyGenerating
+                    ? <><Square className="w-4 h-4" /> 终止</>
+                    : genStore.isGenerating
+                      ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
+                      : <><Zap className="w-4 h-4" /> 生成章节</>
+                  }
+                </button>
+              </div>
             </div>
           </div>
           </>}

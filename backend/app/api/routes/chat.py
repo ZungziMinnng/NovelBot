@@ -63,9 +63,17 @@ async def chat_stream(
     )
     system_prompt = _build_chat_system_prompt(ctx)
 
+    # 应用消息轮次限制（1轮 = user+assistant 各1条 = 2条消息）
+    chat_rounds = novel.chat_context_rounds
+    if chat_rounds and chat_rounds > 0:
+        max_messages = chat_rounds * 2
+        trimmed = req.messages[-max_messages:]
+    else:
+        trimmed = req.messages
+
     # 组装 messages（prepend system message）
     messages = [{"role": "system", "content": system_prompt}]
-    for m in req.messages:
+    for m in trimmed:
         messages.append({"role": m.role, "content": m.content})
 
     # 解析模型

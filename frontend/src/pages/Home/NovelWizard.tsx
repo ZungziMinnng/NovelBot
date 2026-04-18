@@ -25,53 +25,41 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
 
   const [rawSetting, setRawSetting] = useState('')
   const [rawRules, setRawRules] = useState('')
-  const [worldPreview, setWorldPreview] = useState('')
 
   const [characters, setCharacters] = useState([
     { name: '', role: '主角', age: '', description: '' }
   ])
 
+  const ensureNovel = async (): Promise<number> => {
+    if (novelId) return novelId
+    const novel = await novelsApi.create({
+      title: title || `《${premise.slice(0, 10) || '新建小说'}》`,
+      premise: premise || '',
+      genre,
+      target_length: LENGTH_VALUES[length],
+      writing_style: style,
+    })
+    setNovelId(novel.id)
+    return novel.id
+  }
+
   const handleStep1 = async () => {
-    if (!premise.trim()) return
     setLoading(true)
     try {
-      const novel = await novelsApi.create({
-        title: title || `《${premise.slice(0, 10)}...》`,
-        premise,
-        genre,
-        target_length: LENGTH_VALUES[length],
-        writing_style: style,
-      })
-      setNovelId(novel.id)
+      await ensureNovel()
       setStep(2)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleSkip = async () => {
-    if (!premise.trim()) return
-    setLoading(true)
-    try {
-      const novel = await novelsApi.create({
-        title: title || `《${premise.slice(0, 10)}...》`,
-        premise,
-        genre,
-        target_length: LENGTH_VALUES[length],
-        writing_style: style,
-      })
-      onComplete(novel.id)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const handleStep2 = async () => {
-    if (!rawSetting.trim() || !novelId) return
     setLoading(true)
     try {
-      const result = await novelsApi.wizardWorld(novelId, rawSetting, rawRules)
-      setWorldPreview(result.core_setting)
+      const id = await ensureNovel()
+      if (rawSetting.trim()) {
+        await novelsApi.update(id, { core_setting: rawSetting })
+      }
       setStep(3)
     } finally {
       setLoading(false)
@@ -79,12 +67,15 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
   }
 
   const handleStep3 = async () => {
-    if (!novelId) return
     const validChars = characters.filter(c => c.name.trim())
-    if (validChars.length === 0) return
+    if (validChars.length === 0) {
+      setStep(4)
+      return
+    }
     setLoading(true)
     try {
-      await novelsApi.wizardCharacters(novelId, validChars)
+      const id = await ensureNovel()
+      await novelsApi.wizardCharacters(id, validChars)
       setStep(4)
     } finally {
       setLoading(false)
@@ -92,11 +83,21 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
   }
 
   const handleStep4 = async () => {
-    if (!novelId) return
     setLoading(true)
     try {
-      await novelsApi.wizardOutline(novelId)
-      onComplete(novelId)
+      const id = await ensureNovel()
+      await novelsApi.wizardOutline(id)
+      onComplete(id)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSkip = async () => {
+    setLoading(true)
+    try {
+      const id = await ensureNovel()
+      onComplete(id)
     } finally {
       setLoading(false)
     }
@@ -107,6 +108,7 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
 
   const updateChar = (i: number, k: string, v: string) =>
     setCharacters(characters.map((c, idx) => idx === i ? { ...c, [k]: v } : c))
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-card rounded-2xl w-full max-w-2xl shadow-2xl">
@@ -115,7 +117,11 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
             <h2 className="font-bold text-lg">新建小说</h2>
             <div className="flex items-center gap-1 mt-1">
               {[1,2,3,4].map(s => (
-                <div key={s} className={`h-1 w-8 rounded-full transition-colors ${s <= step ? 'bg-primary' : 'bg-border'}`} />
+                <button
+                  key={s}
+                  onClick={() => setStep(s)}
+                  className={`h-1 w-8 rounded-full transition-colors ${s <= step ? 'bg-primary' : 'bg-border'}`}
+                />
               ))}
               <span className="text-xs text-muted-foreground ml-2">{step}/4</span>
             </div>
@@ -155,7 +161,19 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
                       {g}
                     </button>
                   ))}
+                  <button onClick={() => { if (GENRES.includes(genre)) setGenre('') }}
+                    className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${!GENRES.includes(genre) ? 'bg-primary text-primary-foreground border-primary' : 'hover:border-primary'}`}>
+                    自定义
+                  </button>
                 </div>
+                {!GENRES.includes(genre) && (
+                  <input
+                    value={genre}
+                    onChange={e => setGenre(e.target.value)}
+                    placeholder="输入自定义类型..."
+                    className="mt-2 w-full border rounded-lg p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -178,7 +196,19 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
                         <span className="text-sm">{s}</span>
                       </label>
                     ))}
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" checked={!STYLES.includes(style)} onChange={() => { if (STYLES.includes(style)) setStyle('') }} />
+                      <span className="text-sm">自定义</span>
+                    </label>
                   </div>
+                  {!STYLES.includes(style) && (
+                    <input
+                      value={style}
+                      onChange={e => setStyle(e.target.value)}
+                      placeholder="输入自定义风格..."
+                      className="mt-2 w-full border rounded-lg p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  )}
                 </div>
               </div>
             </div>
@@ -186,9 +216,9 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
 
           {step === 2 && (
             <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">描述你的世界观，AI 将为你扩写完整设定文档。</p>
+              <p className="text-sm text-muted-foreground">描述你的世界观，作为后续创作的背景设定。</p>
               <div>
-                <label className="text-sm font-medium mb-1 block">时代背景 *</label>
+                <label className="text-sm font-medium mb-1 block">时代背景</label>
                 <textarea
                   value={rawSetting}
                   onChange={e => setRawSetting(e.target.value)}
@@ -205,14 +235,9 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
                   className="w-full border rounded-lg p-3 text-sm resize-none h-16 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                 />
               </div>
-              {worldPreview && (
-                <div className="bg-muted rounded-lg p-4 text-sm text-muted-foreground">
-                  <p className="font-medium text-foreground mb-1">AI 扩写预览：</p>
-                  {worldPreview}
-                </div>
-              )}
             </div>
           )}
+
           {step === 3 && (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground">添加主要角色，AI 将自动生成完整角色卡。</p>
@@ -275,15 +300,13 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
             {step === 1 ? '取消' : '上一步'}
           </button>
           <div className="flex items-center gap-2">
-            {step === 1 && (
-              <button
-                onClick={handleSkip}
-                disabled={loading || !premise.trim()}
-                className="text-sm text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors px-3 py-2"
-              >
-                跳过，快速创建
-              </button>
-            )}
+            <button
+              onClick={handleSkip}
+              disabled={loading}
+              className="text-sm text-muted-foreground hover:text-foreground disabled:opacity-40 transition-colors px-3 py-2"
+            >
+              跳过，快速创建
+            </button>
             <button
               onClick={() => {
                 if (step === 1) handleStep1()
