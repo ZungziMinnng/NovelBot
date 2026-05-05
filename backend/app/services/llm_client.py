@@ -1,13 +1,18 @@
+import logging
 import httpx
 from openai import AsyncOpenAI
 from typing import AsyncIterator, Union
 from app.config import settings
 
-# ─── 单例客户端（避免每次调用新建 httpx 连接）─────────────────────────────
+# ─── 客户端字典缓存（按供应商凭据缓存，支持多个同格式供应商）──────────────
+_openai_clients: dict[tuple, AsyncOpenAI] = {}
+_gemini_clients: dict[tuple, object] = {}
+_anthropic_clients: dict[tuple, object] = {}
+
+# ─── 向后兼容：全局单例（供未关联 provider 的旧模型使用）─────────────────────
 _cached_client: AsyncOpenAI | None = None
 _cached_client_key: tuple = ("", "", "", "")
 
-# ─── Gemini / Anthropic 单例客户端 ──────────────────────────────────────────
 _cached_gemini_client = None
 _cached_gemini_key: tuple = ("", "", "", "")
 
@@ -17,23 +22,70 @@ _cached_anthropic_key: tuple = ("", "", "", "")
 # ─── 模型格式缓存（model_id → api_format）─────────────────────────────────
 _model_formats: dict[str, str] = {}
 
+# ─── 供应商缓存 ─────────────────────────────────────────────────────────────
+_providers_cache: dict[int, dict] = {}       # provider_id → {name, api_key, base_url, api_format}
+_model_provider_map: dict[str, int] = {}     # model_id → provider_id
+
+
+def _build_httpx_client() -> httpx.AsyncClient:
+    """构建带代理设置的 httpx 客户端"""
+    mounts: dict = {}
+    if settings.https_proxy:
+        mounts["https://"] = httpx.AsyncHTTPTransport(proxy=settings.https_proxy)
+    if settings.http_proxy:
+        mounts["http://"] = httpx.AsyncHTTPTransport(proxy=settings.http_proxy)
+    return httpx.AsyncClient(mounts=mounts or None, trust_env=False)
+
+
+def _get_openai_client_for(api_key: str, base_url: str) -> AsyncOpenAI:
+    """按 (api_key, base_url) 获取或创建缓存的 AsyncOpenAI 客户端。"""
+    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+    if cache_key not in _openai_clients:
+        _openai_clients[cache_key] = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=_build_httpx_client(),
+        )
+    return _openai_clients[cache_key]
+
+
+def _get_gemini_client_for(api_key: str, base_url: str):
+    """按 (api_key, base_url) 获取或创建缓存的 genai.Client。"""
+    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+    if cache_key not in _gemini_clients:
+        from google import genai
+        client_kwargs: dict = {"api_key": api_key}
+        if base_url:
+            client_kwargs["http_options"] = {"base_url": base_url}
+        _gemini_clients[cache_key] = genai.Client(**client_kwargs)
+    return _gemini_clients[cache_key]
+
+
+def _get_anthropic_client_for(api_key: str, base_url: str):
+    """按 (api_key, base_url) 获取或创建缓存的 AsyncAnthropic 客户端。"""
+    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+    if cache_key not in _anthropic_clients:
+        import anthropic
+        kwargs = {
+            "api_key": api_key or "placeholder",
+            "http_client": _build_httpx_client(),
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        _anthropic_clients[cache_key] = anthropic.AsyncAnthropic(**kwargs)
+    return _anthropic_clients[cache_key]
+
 
 def _make_client() -> AsyncOpenAI:
-    """返回全局复用的 AsyncOpenAI 客户端，当 API Key / Base URL / 代理变化时自动重建。"""
+    """返回全局复用的 AsyncOpenAI 客户端（向后兼容，未配置 provider 时使用）。"""
     global _cached_client, _cached_client_key
-    key = (settings.aihubmix_api_key, settings.aihubmix_base_url,
+    key = (settings.openai_api_key, settings.openai_base_url,
            settings.https_proxy, settings.http_proxy)
     if _cached_client is None or _cached_client_key != key:
-        mounts: dict = {}
-        if settings.https_proxy:
-            mounts["https://"] = httpx.AsyncHTTPTransport(proxy=settings.https_proxy)
-        if settings.http_proxy:
-            mounts["http://"] = httpx.AsyncHTTPTransport(proxy=settings.http_proxy)
-        http_client = httpx.AsyncClient(mounts=mounts or None, trust_env=False)
         _cached_client = AsyncOpenAI(
-            api_key=settings.aihubmix_api_key,
-            base_url=settings.aihubmix_base_url,
-            http_client=http_client,
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            http_client=_build_httpx_client(),
         )
         _cached_client_key = key
     return _cached_client
@@ -45,8 +97,34 @@ async def refresh_model_formats(session) -> None:
     from app.models.model_library import ModelEntry
     result = await session.execute(select(ModelEntry))
     _model_formats.clear()
+    _model_provider_map.clear()
     for m in result.scalars():
         _model_formats[m.model_id] = m.api_format
+        if m.provider_id:
+            _model_provider_map[m.model_id] = m.provider_id
+
+
+async def refresh_provider_cache(session) -> None:
+    """从数据库重建 provider_id → 供应商凭据 内存映射"""
+    from sqlalchemy import select
+    from app.models.api_provider import ApiProvider
+    result = await session.execute(select(ApiProvider))
+    _providers_cache.clear()
+    for p in result.scalars():
+        _providers_cache[p.id] = {
+            "name": p.name,
+            "api_key": p.api_key,
+            "base_url": p.base_url,
+            "api_format": p.api_format,
+        }
+
+
+def _get_provider_config(model: str) -> dict | None:
+    """查找模型对应的供应商配置。未找到则返回 None（回退到全局 settings）。"""
+    provider_id = _model_provider_map.get(model)
+    if provider_id and provider_id in _providers_cache:
+        return _providers_cache[provider_id]
+    return None
 
 
 def get_model_api_format(model_id: str) -> str:
@@ -138,6 +216,26 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list]:
 
 # ─── 统一分发函数 ──────────────────────────────────────────────────────────
 
+def _resolve_client(model: str, api_format: str):
+    """根据模型的供应商配置获取对应客户端。回退到全局 settings 单例。"""
+    provider = _get_provider_config(model)
+    if provider:
+        fmt = provider["api_format"]
+        if fmt == "gemini":
+            return "gemini", _get_gemini_client_for(provider["api_key"], provider["base_url"])
+        elif fmt == "anthropic":
+            return "anthropic", _get_anthropic_client_for(provider["api_key"], provider["base_url"])
+        else:
+            return "openai", _get_openai_client_for(provider["api_key"], provider["base_url"])
+    # 回退到全局 settings
+    if api_format == "gemini":
+        return "gemini", _make_gemini_client()
+    elif api_format == "anthropic":
+        return "anthropic", _make_anthropic_client()
+    else:
+        return "openai", _make_client()
+
+
 async def dispatch_chat_complete(
     messages: list[dict],
     model: str,
@@ -146,12 +244,12 @@ async def dispatch_chat_complete(
     max_tokens: int = 4096,
 ) -> str:
     """根据 api_format 分发非流式调用，返回文本内容"""
-    if api_format == "gemini":
-        return await _gemini_complete(messages, model, temperature, max_tokens)
-    elif api_format == "anthropic":
-        return await _anthropic_complete(messages, model, temperature, max_tokens)
+    fmt, client = _resolve_client(model, api_format)
+    if fmt == "gemini":
+        return await _gemini_complete(messages, model, temperature, max_tokens, client)
+    elif fmt == "anthropic":
+        return await _anthropic_complete(messages, model, temperature, max_tokens, client)
     else:
-        client = _make_client()
         return await chat_complete(messages, model, client, temperature, max_tokens)
 
 
@@ -163,12 +261,12 @@ async def dispatch_chat_complete_with_usage(
     max_tokens: int = 4096,
 ) -> tuple[str, int, int]:
     """根据 api_format 分发非流式调用，返回 (content, input_tokens, output_tokens)"""
-    if api_format == "gemini":
-        return await _gemini_complete_with_usage(messages, model, temperature, max_tokens)
-    elif api_format == "anthropic":
-        return await _anthropic_complete_with_usage(messages, model, temperature, max_tokens)
+    fmt, client = _resolve_client(model, api_format)
+    if fmt == "gemini":
+        return await _gemini_complete_with_usage(messages, model, temperature, max_tokens, client)
+    elif fmt == "anthropic":
+        return await _anthropic_complete_with_usage(messages, model, temperature, max_tokens, client)
     else:
-        client = _make_client()
         return await chat_complete_with_usage(messages, model, client, temperature, max_tokens)
 
 
@@ -182,15 +280,15 @@ async def dispatch_chat_stream_with_usage(
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """根据 api_format 分发流式调用，yield str token 最后 yield (in_tok, out_tok)。
     可能 yield dict 表示元信息（如 {"warning": "..."} 重试提醒）。"""
-    if api_format == "gemini":
-        async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level):
+    fmt, client = _resolve_client(model, api_format)
+    if fmt == "gemini":
+        async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
             yield item
-    elif api_format == "anthropic":
-        async for item in _anthropic_stream_with_usage(messages, model, temperature, max_tokens):
+    elif fmt == "anthropic":
+        async for item in _anthropic_stream_with_usage(messages, model, temperature, max_tokens, client):
             yield item
     else:
-        client = _make_client()
-        async for item in chat_stream_with_usage(messages, model, client, temperature, max_tokens):
+        async for item in chat_stream_with_usage(messages, model, client, temperature, max_tokens, thinking_level):
             yield item
 
 
@@ -214,6 +312,11 @@ def _is_gemini_flash(model_id: str) -> bool:
     return "-flash" in model_id.lower()
 
 
+def _is_deepseek_model(model_id: str) -> bool:
+    """DeepSeek 模型，需要通过 extra_body 启用 thinking"""
+    return "deepseek" in model_id.lower()
+
+
 # 参考 Cherry Studio THINKING_TOKEN_MAP (config/models/reasoning.ts:775-779)
 _GEMINI_2X_THINKING_LIMITS: dict[str, tuple[int, int]] = {
     "flash_lite": (512, 24576),
@@ -232,109 +335,114 @@ def _get_2x_thinking_limits(model_id: str) -> tuple[int, int]:
     return _GEMINI_2X_THINKING_LIMITS["pro"]
 
 
-def _resolve_gemini_thinking(model_id: str, thinking_level: str = "medium") -> dict:
-    """根据模型版本和 thinking_level 返回 thinkingConfig dict（REST API 格式）。
+def _resolve_gemini_thinking(model_id: str, thinking_level: str = "medium"):
+    """根据模型版本和 thinking_level 返回 types.ThinkingConfig。
 
     thinking_level: "off" | "low" | "medium" | "high"
     """
+    from google.genai import types as genai_types
+
     if thinking_level == "off":
         if _is_gemini_3x(model_id):
-            lowest = "MINIMAL" if _is_gemini_flash(model_id) else "LOW"
-            return {"thinkingLevel": lowest}
+            lowest = genai_types.ThinkingLevel.MINIMAL if _is_gemini_flash(model_id) else genai_types.ThinkingLevel.LOW
+            return genai_types.ThinkingConfig(thinking_level=lowest)
         min_budget, _ = _get_2x_thinking_limits(model_id)
-        return {"thinkingBudget": min_budget}
+        return genai_types.ThinkingConfig(thinking_budget=min_budget)
 
     if _is_gemini_3x(model_id):
-        level_map = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}
-        level = level_map.get(thinking_level, "MEDIUM")
-        if _is_gemini_pro(model_id) and level == "MEDIUM" and "3.0" in model_id:
-            level = "LOW"
-        return {"thinkingLevel": level}
+        level_map = {
+            "low": genai_types.ThinkingLevel.LOW,
+            "medium": genai_types.ThinkingLevel.MEDIUM,
+            "high": genai_types.ThinkingLevel.HIGH,
+        }
+        level = level_map.get(thinking_level, genai_types.ThinkingLevel.MEDIUM)
+        if _is_gemini_pro(model_id) and level == genai_types.ThinkingLevel.MEDIUM and "3.0" in model_id:
+            level = genai_types.ThinkingLevel.LOW
+        return genai_types.ThinkingConfig(thinking_level=level)
 
     # Gemini 2.x → thinkingBudget
     min_budget, max_budget = _get_2x_thinking_limits(model_id)
     ratio_map = {"low": 0.2, "medium": 0.5, "high": 0.85}
     ratio = ratio_map.get(thinking_level, 0.5)
     budget = int((max_budget - min_budget) * ratio + min_budget)
-    return {"thinkingBudget": budget}
+    return genai_types.ThinkingConfig(thinking_budget=budget)
 
 
-def _estimate_thinking_overhead(model_id: str, thinking_level: str = "medium") -> int:
-    """估算 thinking 消耗的 token 数，用于上调 max_output_tokens。"""
-    if _is_gemini_3x(model_id):
-        overhead_map = {"low": 1024, "medium": 4096, "high": 8192}
-        return overhead_map.get(thinking_level, 4096)
-    min_budget, max_budget = _get_2x_thinking_limits(model_id)
-    ratio_map = {"low": 0.2, "medium": 0.5, "high": 0.85}
-    ratio = ratio_map.get(thinking_level, 0.5)
-    return int((max_budget - min_budget) * ratio + min_budget)
-
-
-def _make_gemini_client() -> httpx.AsyncClient:
-    """返回复用的 httpx.AsyncClient（用于 Gemini REST 调用）。"""
+def _make_gemini_client():
+    """返回复用的 genai.Client，按 AiHubMix 推荐：api_key 通过 header 传递，非 URL 参数。"""
     global _cached_gemini_client, _cached_gemini_key
-    key = (settings.aihubmix_api_key, settings.gemini_base_url,
+    key = (settings.gemini_api_key, settings.gemini_base_url,
            settings.https_proxy, settings.http_proxy)
     if _cached_gemini_client is not None and _cached_gemini_key == key:
         return _cached_gemini_client
+
+    from google import genai
+
+    client_kwargs: dict = {"api_key": settings.gemini_api_key}
+    if settings.gemini_base_url:
+        client_kwargs["http_options"] = {"base_url": settings.gemini_base_url}
     proxy = settings.https_proxy or settings.http_proxy or None
-    _cached_gemini_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=30.0),
-        proxy=proxy,
-    )
+    if proxy:
+        client_kwargs["http_options"] = {
+            **(client_kwargs.get("http_options", {})),
+            "headers": {},  # placeholder; proxy 由底层 httpx 环境变量处理
+        }
+
+    _cached_gemini_client = genai.Client(**client_kwargs)
     _cached_gemini_key = key
     return _cached_gemini_client
 
 
-async def _gemini_request(
+def _parse_gemini_response(response) -> tuple[str, int, int, str]:
+    """解析 genai SDK 响应 → (text, input_tokens, output_tokens, finish_reason_str)"""
+    text = ""
+    finish_reason = ""
+    if response.candidates:
+        candidate = response.candidates[0]
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
+                # 跳过 thinking 部分，只取正文
+                if part.text and not getattr(part, "thought", False):
+                    text += part.text
+        if candidate.finish_reason:
+            finish_reason = str(candidate.finish_reason.name) if hasattr(candidate.finish_reason, "name") else str(candidate.finish_reason)
+
+    in_tok = 0
+    out_tok = 0
+    if response.usage_metadata:
+        in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+        out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+    return text, in_tok, out_tok, finish_reason
+
+
+async def _gemini_call(
     model: str,
     contents: list,
     system_instruction: str = "",
     temperature: float = 0.7,
     max_output_tokens: int | None = None,
-    thinking_config: dict | None = None,
-) -> dict:
-    """发送 Gemini REST 请求，返回完整 response JSON。
-    payload 格式匹配 Cherry Studio：不传 safetySettings，依赖默认 Off。"""
-    client = _make_gemini_client()
-    base_url = settings.gemini_base_url.rstrip("/")
-    url = f"{base_url}/v1beta/models/{model}:generateContent"
+    thinking_config=None,
+    client=None,
+):
+    """使用 genai SDK 发送非流式 Gemini 请求，返回 SDK response 对象。"""
+    from google.genai import types as genai_types
 
-    generation_config: dict = {"temperature": temperature}
+    if client is None:
+        client = _make_gemini_client()
+
+    config_kwargs: dict = {"temperature": temperature}
     if max_output_tokens is not None:
-        generation_config["maxOutputTokens"] = max_output_tokens
-    if thinking_config:
-        generation_config["thinkingConfig"] = thinking_config
-
-    body: dict = {"contents": contents, "generationConfig": generation_config}
+        config_kwargs["max_output_tokens"] = max_output_tokens
+    if thinking_config is not None:
+        config_kwargs["thinking_config"] = thinking_config
     if system_instruction:
-        body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        config_kwargs["system_instruction"] = system_instruction
 
-    params = {"key": settings.aihubmix_api_key}
-    resp = await client.post(url, json=body, params=params)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Gemini API 错误 ({resp.status_code}): {resp.text}")
-    return resp.json()
-
-
-def _parse_gemini_response(data: dict) -> tuple[str, int, int, str]:
-    """解析 Gemini REST 响应 → (text, in_tok, out_tok, finish_reason)"""
-    text = ""
-    candidates = data.get("candidates", [])
-    finish_reason = ""
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        for part in parts:
-            # 跳过 thinking 部分（thought=True），只取正文
-            if "text" in part and not part.get("thought"):
-                val = part["text"]
-                text += val if isinstance(val, str) else str(val)
-        finish_reason = candidates[0].get("finishReason", "")
-
-    usage = data.get("usageMetadata", {})
-    in_tok = usage.get("promptTokenCount", 0)
-    out_tok = usage.get("candidatesTokenCount", 0)
-    return text, in_tok, out_tok, finish_reason
+    return await client.aio.models.generate_content(
+        model=model,
+        contents=contents,
+        config=genai_types.GenerateContentConfig(**config_kwargs),
+    )
 
 
 async def _gemini_complete(
@@ -342,17 +450,19 @@ async def _gemini_complete(
     model: str,
     temperature: float,
     max_tokens: int,
+    client=None,
 ) -> str:
     system_instruction, contents = _to_gemini_contents(messages)
-    data = await _gemini_request(
+    response = await _gemini_call(
         model=model,
         contents=contents,
         system_instruction=system_instruction,
         temperature=temperature,
         max_output_tokens=max_tokens,
         thinking_config=_resolve_gemini_thinking(model, thinking_level="off"),
+        client=client,
     )
-    text, _, _, _ = _parse_gemini_response(data)
+    text, _, _, _ = _parse_gemini_response(response)
     return text
 
 
@@ -361,17 +471,24 @@ async def _gemini_complete_with_usage(
     model: str,
     temperature: float,
     max_tokens: int,
+    client=None,
 ) -> tuple[str, int, int]:
     system_instruction, contents = _to_gemini_contents(messages)
-    data = await _gemini_request(
+    response = await _gemini_call(
         model=model,
         contents=contents,
         system_instruction=system_instruction,
         temperature=temperature,
         max_output_tokens=max_tokens,
         thinking_config=_resolve_gemini_thinking(model, thinking_level="off"),
+        client=client,
     )
-    text, in_tok, out_tok, _ = _parse_gemini_response(data)
+    text, in_tok, out_tok, finish_reason = _parse_gemini_response(response)
+    if finish_reason and finish_reason not in ("STOP", "FINISH_REASON_UNSPECIFIED"):
+        logging.getLogger(__name__).warning(
+            "Gemini 非流式调用异常结束: finish_reason=%s, model=%s, out_tok=%d",
+            finish_reason, model, out_tok,
+        )
     return text, in_tok, out_tok
 
 
@@ -381,11 +498,11 @@ async def _gemini_stream_with_usage(
     temperature: float,
     max_tokens: int,
     thinking_level: str = "medium",
+    client=None,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
-    """Gemini 生成（非流式 REST 调用 + 模拟流式输出）。
+    """Gemini 生成（genai SDK 非流式调用 + 模拟流式输出）。
 
-    匹配 Cherry Studio 的 payload 格式：不传 safetySettings、thinkingConfig 放在
-    generationConfig 内部。获取完整响应后按 chunk 逐段 yield，模拟流式效果。
+    先通过 SDK 获取完整响应，检查空响应/安全拦截后按 chunk 逐段 yield。
     """
     import asyncio
     import logging
@@ -394,16 +511,17 @@ async def _gemini_stream_with_usage(
 
     thinking_config = _resolve_gemini_thinking(model, thinking_level=thinking_level)
 
-    # Writer 场景不传 maxOutputTokens，让模型自由决定输出长度（匹配 Cherry Studio）
-    data = await _gemini_request(
+    # Writer 场景不传 max_output_tokens，让模型自由决定输出长度
+    response = await _gemini_call(
         model=model,
         contents=contents,
         system_instruction=system_instruction,
         temperature=temperature,
         max_output_tokens=None,
         thinking_config=thinking_config,
+        client=client,
     )
-    text, in_tok, out_tok, finish_reason_str = _parse_gemini_response(data)
+    text, in_tok, out_tok, finish_reason_str = _parse_gemini_response(response)
 
     finish_reason: str | None = None
     if "MAX_TOKENS" in finish_reason_str:
@@ -411,14 +529,12 @@ async def _gemini_stream_with_usage(
 
     # ── 空响应时记录原始响应用于诊断 ──
     if not text:
-        # 检查 promptFeedback（prompt 级别被拦截时无 candidates）
-        prompt_feedback = data.get("promptFeedback", {})
-        block_reason = prompt_feedback.get("blockReason", "")
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(prompt_feedback, "block_reason", "") if prompt_feedback else ""
         logger.warning(
             "Gemini 空响应诊断: model=%s, finish_reason=%s, block_reason=%s, "
-            "has_candidates=%s, prompt_feedback=%s, raw_keys=%s",
-            model, finish_reason_str, block_reason,
-            bool(data.get("candidates")), prompt_feedback, list(data.keys()),
+            "has_candidates=%s",
+            model, finish_reason_str, block_reason, bool(response.candidates),
         )
         if block_reason:
             raise RuntimeError(
@@ -434,15 +550,16 @@ async def _gemini_stream_with_usage(
             model, finish_reason_str, in_tok,
         )
         yield {"warning": "Gemini 首次生成无输出，正在关闭 Thinking 并降低温度重试..."}
-        data = await _gemini_request(
+        response = await _gemini_call(
             model=model,
             contents=contents,
             system_instruction=system_instruction,
             temperature=max(temperature - 0.2, 0.1),
             max_output_tokens=max_tokens,
             thinking_config=_resolve_gemini_thinking(model, thinking_level="off"),
+            client=client,
         )
-        text, in_tok, out_tok, finish_reason_str = _parse_gemini_response(data)
+        text, in_tok, out_tok, finish_reason_str = _parse_gemini_response(response)
         finish_reason = None
         if "MAX_TOKENS" in finish_reason_str:
             finish_reason = "length"
@@ -475,7 +592,7 @@ async def _gemini_stream_with_usage(
 def _make_anthropic_client():
     """返回全局复用的 Anthropic 客户端，当配置变化时自动重建。"""
     global _cached_anthropic_client, _cached_anthropic_key
-    key = (settings.aihubmix_api_key, settings.anthropic_base_url,
+    key = (settings.anthropic_api_key, settings.anthropic_base_url,
            settings.https_proxy, settings.http_proxy)
     if _cached_anthropic_client is not None and _cached_anthropic_key == key:
         return _cached_anthropic_client
@@ -488,7 +605,7 @@ def _make_anthropic_client():
         mounts["http://"] = httpx.AsyncHTTPTransport(proxy=settings.http_proxy)
     http_client = httpx.AsyncClient(mounts=mounts or None, trust_env=False)
     kwargs = {
-        "api_key": settings.aihubmix_api_key or "placeholder",
+        "api_key": settings.anthropic_api_key or "placeholder",
         "http_client": http_client,
     }
     if settings.anthropic_base_url:
@@ -503,9 +620,11 @@ async def _anthropic_complete(
     model: str,
     temperature: float,
     max_tokens: int,
+    client=None,
 ) -> str:
     system_prompt, filtered = _to_anthropic_messages(messages)
-    client = _make_anthropic_client()
+    if client is None:
+        client = _make_anthropic_client()
     kwargs = {
         "model": model,
         "messages": filtered,
@@ -523,9 +642,11 @@ async def _anthropic_complete_with_usage(
     model: str,
     temperature: float,
     max_tokens: int,
+    client=None,
 ) -> tuple[str, int, int]:
     system_prompt, filtered = _to_anthropic_messages(messages)
-    client = _make_anthropic_client()
+    if client is None:
+        client = _make_anthropic_client()
     kwargs = {
         "model": model,
         "messages": filtered,
@@ -546,9 +667,11 @@ async def _anthropic_stream_with_usage(
     model: str,
     temperature: float,
     max_tokens: int,
+    client=None,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     system_prompt, filtered = _to_anthropic_messages(messages)
-    client = _make_anthropic_client()
+    if client is None:
+        client = _make_anthropic_client()
     kwargs = {
         "model": model,
         "messages": filtered,
@@ -583,12 +706,16 @@ async def chat_complete(
     max_tokens: int = 4096,
 ) -> str:
     """非流式调用"""
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    # DeepSeek V4 默认开启 thinking，非流式结构化任务需显式关闭
+    if _is_deepseek_model(model):
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    response = await client.chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""
 
 
@@ -600,13 +727,22 @@ async def chat_complete_with_usage(
     max_tokens: int = 4096,
 ) -> tuple[str, int, int]:
     """非流式调用，返回 (content, input_tokens, output_tokens)"""
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    content = response.choices[0].message.content or ""
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if _is_deepseek_model(model):
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    response = await client.chat.completions.create(**kwargs)
+    choice = response.choices[0]
+    content = choice.message.content or ""
+    if choice.finish_reason and choice.finish_reason != "stop":
+        logging.getLogger(__name__).warning(
+            "OpenAI 非流式调用异常结束: finish_reason=%s, model=%s",
+            choice.finish_reason, model,
+        )
     usage = response.usage
     in_tok = usage.prompt_tokens if usage else 0
     out_tok = usage.completion_tokens if usage else 0
@@ -619,15 +755,25 @@ async def chat_stream(
     client: AsyncOpenAI,
     temperature: float = 0.85,
     max_tokens: int = 4096,
+    thinking_level: str = "off",
 ) -> AsyncIterator[str]:
     """流式调用，逐 token yield"""
-    stream = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-    )
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    if _is_deepseek_model(model):
+        if thinking_level != "off":
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": thinking_level,
+            }
+        else:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    stream = await client.chat.completions.create(**kwargs)
     async for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
@@ -640,20 +786,30 @@ async def chat_stream_with_usage(
     client: AsyncOpenAI,
     temperature: float = 0.85,
     max_tokens: int = 4096,
+    thinking_level: str = "off",
 ) -> AsyncIterator[Union[str, tuple]]:
     """
     流式调用，逐 token yield str。
     最后 yield (finish_reason, input_tokens, output_tokens)。
     finish_reason == "length" 表示内容被 token 上限截断。
     """
-    stream = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if _is_deepseek_model(model):
+        if thinking_level != "off":
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": thinking_level,
+            }
+        else:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    stream = await client.chat.completions.create(**kwargs)
     in_tok = 0
     out_tok = 0
     finish_reason: str | None = None

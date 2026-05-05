@@ -8,10 +8,10 @@ async def review_chapter(
     generated_text: str,
     ctx: dict,
     fast_model: str = "",
-) -> tuple[bool, str, int, int]:
+) -> tuple[bool, str, int, int, str]:
     """
     审查章节内容。
-    返回 (passed, issues_text, input_tokens, output_tokens)
+    返回 (passed, issues_text, input_tokens, output_tokens, model)
     passed=True 表示通过，issues_text 为空
     """
     chars = ctx.get("characters", [])
@@ -42,5 +42,5 @@ async def review_chapter(
     result = result.strip()
 
     if result.upper().startswith("PASS"):
-        return True, "", in_tok, out_tok
-    return False, result, in_tok, out_tok
+        return True, "", in_tok, out_tok, model
+    return False, result, in_tok, out_tok, model

@@ -19,6 +19,7 @@ env/
 # ── Backend runtime data (do NOT commit) ────────────────────────────────────
 backend/data/
 backend/.env
+tmp_*
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/

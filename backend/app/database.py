@@ -13,7 +13,7 @@ engine = create_async_engine(
 def _set_sqlite_pragmas(dbapi_conn, _):
     cur = dbapi_conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
-    cur.execute("PRAGMA busy_timeout=5000")
+    cur.execute("PRAGMA busy_timeout=30000")
     cur.close()
 
 AsyncSessionLocal = async_sessionmaker(
@@ -58,6 +58,14 @@ async def _run_migrations() -> None:
         "ALTER TABLE novels ADD COLUMN chat_context_rounds INTEGER DEFAULT 20",
         "ALTER TABLE novels ADD COLUMN enable_thinking INTEGER DEFAULT 1",
         "ALTER TABLE novels ADD COLUMN thinking_level TEXT DEFAULT 'medium'",
+        # 世界实体索引
+        "CREATE INDEX IF NOT EXISTS idx_world_entities_novel ON world_entities(novel_id)",
+        "CREATE INDEX IF NOT EXISTS idx_world_entities_novel_type ON world_entities(novel_id, type)",
+        # 地点索引
+        "CREATE INDEX IF NOT EXISTS idx_locations_novel ON locations(novel_id)",
+        "CREATE INDEX IF NOT EXISTS idx_locations_novel_type ON locations(novel_id, type)",
+        # 供应商关联
+        "ALTER TABLE model_library ADD COLUMN provider_id INTEGER DEFAULT NULL",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -68,7 +76,7 @@ async def _run_migrations() -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_migrations()

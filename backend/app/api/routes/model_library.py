@@ -3,9 +3,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models.model_library import ModelEntry
+from app.models.api_provider import ApiProvider
 from app.schemas.model_library import ModelEntryCreate, ModelEntryUpdate, ModelEntryOut
 
 router = APIRouter()
+
+
+async def _fill_from_provider(entry: ModelEntry, provider_id: int | None, db: AsyncSession):
+    """如果提供了 provider_id，从供应商记录填充 provider 和 api_format 反规范化字段。"""
+    if provider_id is None:
+        return
+    provider = await db.get(ApiProvider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"供应商 ID {provider_id} 不存在")
+    entry.provider_id = provider_id
+    entry.provider = provider.name
+    entry.api_format = provider.api_format
 
 
 @router.get("/", response_model=list[ModelEntryOut])
@@ -22,10 +35,10 @@ async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db
         provider=data.provider,
         api_format=data.api_format,
     )
+    await _fill_from_provider(entry, data.provider_id, db)
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    # Refresh in-memory format cache
     from app.services import llm_client
     await llm_client.refresh_model_formats(db)
     return entry
@@ -40,13 +53,15 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
         entry.display_name = data.display_name
     if data.model_id is not None:
         entry.model_id = data.model_id
-    if data.provider is not None:
-        entry.provider = data.provider
-    if data.api_format is not None:
-        entry.api_format = data.api_format
+    if data.provider_id is not None:
+        await _fill_from_provider(entry, data.provider_id, db)
+    else:
+        if data.provider is not None:
+            entry.provider = data.provider
+        if data.api_format is not None:
+            entry.api_format = data.api_format
     await db.commit()
     await db.refresh(entry)
-    # Refresh in-memory format cache
     from app.services import llm_client
     await llm_client.refresh_model_formats(db)
     return entry
@@ -59,7 +74,6 @@ async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="模型不存在")
     await db.delete(entry)
     await db.commit()
-    # Refresh in-memory format cache
     from app.services import llm_client
     await llm_client.refresh_model_formats(db)
     return {"ok": True}

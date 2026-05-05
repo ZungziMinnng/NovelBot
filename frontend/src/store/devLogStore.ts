@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type DevLogType = 'request' | 'response' | 'sse'
+export type DevLogType = 'request' | 'response' | 'sse' | 'llm_call'
 
 export interface DevLogEntry {
   id: string
@@ -15,6 +15,14 @@ export interface DevLogEntry {
   // SSE fields
   event?: string
   eventData?: unknown
+  // LLM Call fields
+  agent?: string
+  model?: string
+  llmStatus?: 'ok' | 'truncated' | 'error'
+  inputTokens?: number
+  outputTokens?: number
+  durationMs?: number
+  payload?: Record<string, unknown>
 }
 
 interface DevLogState {

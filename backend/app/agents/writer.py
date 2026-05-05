@@ -34,54 +34,124 @@ async def stream_chapter(
     context_block, chars_block, task_instruction = format_context_for_writer(ctx, instruction, target_words)
     recent_text = ctx.get("recent_text", "")
 
-    # ── 组装 messages（分层规避 Gemini 安全过滤，同时避免生成截断）──────
-    # 问题背景：
-    #   - AIHUBMIX 代理不透传 safety_settings，无法直接关闭安全过滤
-    #   - Gemini 不会重审 assistant(model) 角色的内容
-    #   - 但若 assistant 消息末尾是故事正文，Gemini 会将其视为"自己刚写的内容"，
-    #     只生成极短的续写（实测约 167 字）就停止
+    # 先解析模型和格式，后续按 api_format 决定消息结构
+    model, api_format = llm_client.get_agent_client("writer", writer_model)
+
+    # ── 组装 messages ──────────────────────────────────────────────────
     #
-    # 分层策略：
-    #   user      → context_block（世界观/大纲/摘要/RAG，内容干净，不触发安全过滤）
-    #   assistant → chars_block + recent_text（角色描述含显式外貌、上章内容，放 model 角色绕过过滤）
-    #   user      → 写作任务（干净）
+    # 核心差异：用户写作指令（instruction）在不同 API 格式中的放置策略
     #
-    # 效果：Gemini 在最后一条 user 消息收到"写第N章"指令时，
-    #       assistant 消息结尾是结构化角色数据而非故事正文，
-    #       会生成完整的目标字数而非简短续写。
+    # Gemini 路径：
+    #   指令 → assistant(model) 角色，绕过输入侧 PROHIBITED_CONTENT 过滤
+    #   结构：user(背景) → assistant(角色+指令+上章) → user(任务)
+    #
+    # OpenAI / DeepSeek 路径：
+    #   指令 → 最后一条 user 消息，确保模型将其视为必须遵循的指令
+    #   assistant 角色 = "AI 之前说过的话"，模型不会把其中内容当指令执行
+    #   结构：user(背景+角色+上章) → assistant(确认) → user(指令+任务)
+
     messages: list[dict] = [
         {"role": "system", "content": system_content},
-        {"role": "user",   "content": context_block or "请根据角色设定和写作任务创作小说章节。"},
     ]
-    # 角色描述 + 上章结尾 → assistant 消息（绕过安全过滤）
-    assistant_parts = []
-    if chars_block:
-        assistant_parts.append(chars_block)
-    if recent_text:
-        assistant_parts.append(f"=== 上章结尾 ===\n{recent_text}")
-    if assistant_parts:
-        messages.append({"role": "assistant", "content": "\n\n".join(assistant_parts)})
-    messages.append({"role": "user", "content": task_instruction})
+
+    if api_format == "gemini":
+        # ── Gemini 消息结构 ──
+        messages.append({"role": "user", "content": context_block or "请根据角色设定和写作任务创作小说章节。"})
+        assistant_parts = []
+        if chars_block:
+            assistant_parts.append(chars_block)
+        if instruction:
+            assistant_parts.append(f"=== 写作方向备忘（严格遵守）===\n{instruction}")
+        if recent_text:
+            assistant_parts.append(f"=== 上章结尾 ===\n{recent_text}")
+        if assistant_parts:
+            messages.append({"role": "assistant", "content": "\n\n".join(assistant_parts)})
+        task_with_ref = task_instruction
+        if instruction:
+            task_with_ref += "\n请严格按照「写作方向备忘」中的要求创作。"
+        messages.append({"role": "user", "content": task_with_ref})
+    else:
+        # ── OpenAI / DeepSeek / Anthropic 消息结构 ──
+        # 第一条 user：所有参考资料（世界观、角色、上章内容）
+        ref_parts = []
+        if context_block:
+            ref_parts.append(context_block)
+        if chars_block:
+            ref_parts.append(chars_block)
+        if recent_text:
+            ref_parts.append(f"=== 上章结尾 ===\n{recent_text}")
+        messages.append({"role": "user", "content": "\n\n".join(ref_parts) or "请根据角色设定和写作任务创作小说章节。"})
+        # assistant 确认收到参考资料
+        messages.append({"role": "assistant", "content": "已了解上述背景资料、角色设定和近期剧情，准备按要求创作。"})
+        # 最后一条 user：写作指令 + 任务（模型最重视的位置）
+        directive_parts = []
+        if instruction:
+            directive_parts.append(f"=== 写作方向（严格遵守）===\n{instruction}")
+        directive_parts.append(task_instruction)
+        messages.append({"role": "user", "content": "\n\n".join(directive_parts)})
 
     if issues_feedback:
-        # 将用户原始指令放入 assistant(model) 角色，避免 Gemini PROHIBITED_CONTENT 过滤
-        messages.append({
-            "role": "assistant",
-            "content": (
-                f"[上一版本内容]\n\n"
-                f"=== 写作方向备忘（严格遵守）===\n{instruction}"
-            ) if instruction else "[上一版本内容]"
-        })
-        messages.append({
-            "role": "user",
-            "content": (
-                f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n"
-                "⚠️ 请严格按照「写作方向备忘」中的要求创作（尤其是角色姓名不得更改）。\n\n"
+        if api_format == "gemini":
+            # Gemini: 指令放 assistant 角色绕过过滤
+            messages.append({
+                "role": "assistant",
+                "content": (
+                    f"[上一版本内容]\n\n"
+                    f"=== 写作方向备忘（严格遵守）===\n{instruction}"
+                ) if instruction else "[上一版本内容]"
+            })
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n"
+                    "⚠️ 请严格按照「写作方向备忘」中的要求创作（尤其是角色姓名不得更改）。\n\n"
+                    "请重新输出完整章节正文。"
+                )
+            })
+        else:
+            # OpenAI / DeepSeek: assistant 表示上一版草稿，user 给出修改指令+写作方向
+            messages.append({"role": "assistant", "content": "[上一版本内容]"})
+            revision_parts = [f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}"]
+            if instruction:
+                revision_parts.append(f"=== 写作方向（严格遵守）===\n{instruction}")
+            revision_parts.append(
+                "⚠️ 请严格按照上述写作方向要求创作（尤其是角色姓名不得更改）。\n\n"
                 "请重新输出完整章节正文。"
             )
-        })
+            messages.append({"role": "user", "content": "\n\n".join(revision_parts)})
 
-    model, api_format = llm_client.get_agent_client("writer", writer_model)
+    # ── DeepSeek：system prompt 降级到 user message ──
+    # DeepSeek V4 默认开启 thinking 会忽略 system message；
+    # 即使显式关闭 thinking，DeepSeek 对 system prompt 的遵从度也较低。
+    # 统一将 system 内容合并到最后一条 user message 以确保字数/风格约束生效。
+    if llm_client._is_deepseek_model(model):
+        system_text = ""
+        new_messages = []
+        for m in messages:
+            if m["role"] == "system":
+                system_text = m["content"]
+            else:
+                new_messages.append(m)
+        if system_text and new_messages:
+            # 找到最后一条 user message，将 system 内容前置
+            for i in range(len(new_messages) - 1, -1, -1):
+                if new_messages[i]["role"] == "user":
+                    new_messages[i]["content"] = (
+                        f"=== 写作要求（严格遵守）===\n{system_text}\n\n"
+                        + new_messages[i]["content"]
+                    )
+                    break
+        messages = new_messages
+
+    # ── DeepSeek：根据目标字数动态限制 max_tokens ──
+    # DeepSeek 不遵守提示词中的字数要求，会填满整个 token 预算。
+    # 用 target_words 计算硬上限，让 max_tokens 与目标字数对齐。
+    # 中文约 1.5 token/字，取 2.0 留出余量；thinking 模式额外预留 token。
+    if llm_client._is_deepseek_model(model):
+        content_tokens = int(target_words * 2.0)
+        thinking_buffer = 1500 if thinking_level != "off" else 0
+        words_cap = content_tokens + thinking_buffer
+        max_tokens = min(max_tokens, words_cap)
 
     # ── Dev: 将实际 LLM 请求 payload 发给前端 DevPanel ──
     def _truncate_messages(msgs: list[dict], max_len: int = 500) -> list[dict]:

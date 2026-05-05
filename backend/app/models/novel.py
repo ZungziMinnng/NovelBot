@@ -58,3 +58,9 @@ class Novel(Base):
     outlines: Mapped[list["Outline"]] = relationship(  # noqa: F821
         "Outline", back_populates="novel", cascade="all, delete-orphan"
     )
+    world_entities: Mapped[list["WorldEntity"]] = relationship(  # noqa: F821
+        "WorldEntity", back_populates="novel", cascade="all, delete-orphan"
+    )
+    locations: Mapped[list["Location"]] = relationship(  # noqa: F821
+        "Location", back_populates="novel", cascade="all, delete-orphan"
+    )

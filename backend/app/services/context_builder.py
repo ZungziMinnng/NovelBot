@@ -4,7 +4,8 @@ from sqlalchemy import select
 from app.models.novel import Novel
 from app.models.chapter import Chapter
 from app.models.character import Character
-from app.models.memory import Outline
+from app.models.world_entity import WorldEntity
+from app.models.memory import Memory, Outline
 from app.services import vector_store, summarizer
 
 
@@ -21,8 +22,29 @@ async def build_generation_context(
     """
     ctx = {}
 
-    # 1. 核心设定（世界观，始终携带）
-    ctx["core_setting"] = novel.core_setting[:1000] if novel.core_setting else ""
+    # 1. 核心设定（世界观，RAG 按需检索相关段落）
+    world_query = scene_hint or ""
+    if not world_query:
+        # 后续会填充 chapter_outline，这里先查大纲作为 query
+        outline_result_tmp = await session.execute(
+            select(Outline).where(
+                Outline.novel_id == novel.id,
+                Outline.level == "chapter",
+                Outline.volume == volume,
+                Outline.chapter_number == chapter_number,
+            )
+        )
+        outline_tmp = outline_result_tmp.scalar_one_or_none()
+        world_query = outline_tmp.content if outline_tmp else f"第{chapter_number}章"
+
+    world_chunks = await vector_store.asearch_similar(
+        novel.id, world_query, top_k=3,
+        where={"type": {"$eq": "world_setting"}},
+    )
+    if world_chunks:
+        ctx["core_setting"] = "\n\n".join(world_chunks)
+    else:
+        ctx["core_setting"] = novel.core_setting[:500] if novel.core_setting else ""
 
     # 2. 角色状态卡（结构化，节约 token）
     result = await session.execute(
@@ -38,6 +60,22 @@ async def build_generation_context(
             "state": c.current_state,
         }
         for c in characters
+    ]
+
+    # 2b. 世界实体（道具/系统）
+    entity_result = await session.execute(
+        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
+    )
+    entities = entity_result.scalars().all()
+    ctx["world_entities"] = [
+        {
+            "name": e.name,
+            "type": e.type,
+            "description": e.description,
+            "properties": e.properties or {},
+            "state": e.current_state,
+        }
+        for e in entities
     ]
 
     # 3. 大纲：当前章节目标
@@ -59,27 +97,44 @@ async def build_generation_context(
     )
     ctx["rolling_summary"] = rolling_text
 
-    # 5. RAG 检索相关历史场景（排除当前章节 + rolling_summary 已覆盖的章节，避免冗余）
+    # 4b. 最近的弧摘要（中间粒度：~15章，提供本卷/本弧的中程定位）
+    arc_result = await session.execute(
+        select(Memory)
+        .where(
+            Memory.novel_id == novel.id,
+            Memory.memory_type == "arc_summary",
+            Memory.chapter_number < chapter_number,
+        )
+        .order_by(Memory.chapter_number.desc())
+        .limit(1)
+    )
+    arc_memory = arc_result.scalar_one_or_none()
+    ctx["arc_summary"] = arc_memory.content if arc_memory else ""
+
+    # 5. RAG 检索相关历史场景
+    #    - 只检索近 20 章，避免拉回早已解决的远古伏笔
+    #    - 排除当前章节 + rolling_summary 已覆盖的章节，避免冗余
     rag_top_k = novel.rag_top_k if novel.rag_top_k is not None else 3
     if rag_top_k > 0:
         query = scene_hint or ctx["chapter_outline"] or f"第{chapter_number}章"
-        excluded_chapters = list({chapter_number} | set(rolling_chapter_nums))
+        excluded_chapters = {chapter_number} | set(rolling_chapter_nums)
+        rag_chapter_filter: list = [
+            {"chapter_number": {"$gte": max(1, chapter_number - 20)}},
+            {"type": {"$eq": "chapter_summary"}},
+        ]
         if len(excluded_chapters) == 1:
-            chapter_filter = {"chapter_number": {"$ne": excluded_chapters[0]}}
+            rag_chapter_filter.append({"chapter_number": {"$ne": next(iter(excluded_chapters))}})
         else:
-            chapter_filter = {"chapter_number": {"$nin": excluded_chapters}}
+            rag_chapter_filter.append({"chapter_number": {"$nin": list(excluded_chapters)}})
         retrieved = await vector_store.asearch_similar(
             novel.id, query, top_k=rag_top_k,
-            where={"$and": [chapter_filter, {"type": {"$eq": "chapter_summary"}}]},
+            where={"$and": rag_chapter_filter},
         )
         ctx["rag_context"] = "\n\n".join(retrieved)
     else:
         ctx["rag_context"] = ""
 
-    # 6. 即时上下文：上一章末尾原文（场景级衔接）
-    #    优先使用末尾原文，因为 rolling_summary 已经包含了编辑视角的章节摘要，
-    #    recent_text 的职责是提供场景级细节（人物在哪、在做什么、对话停在哪），
-    #    让 Writer 能自然衔接上一章的结尾场景。
+    # 6. 即时上下文：上一章全文（场景级衔接）
     #    原文通过 assistant role 传递（writer.py），Gemini 不会重审 assistant 消息，安全无虞。
     #    仅当原文内容为空时回退到摘要。
     prev_result = await session.execute(
@@ -91,9 +146,9 @@ async def build_generation_context(
     )
     prev_chapter = prev_result.scalar_one_or_none()
     if prev_chapter:
-        prev_content = prev_chapter.content or ""
+        prev_content = summarizer.strip_plot_suggestions(prev_chapter.content or "")
         prev_summary = prev_chapter.summary or ""
-        ctx["recent_text"] = prev_content[-500:].strip() or prev_summary.strip()
+        ctx["recent_text"] = prev_content.strip() or prev_summary.strip()
     else:
         ctx["recent_text"] = ""
 
@@ -115,16 +170,17 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
     将 context dict 格式化为 Writer Agent 的 Prompt 输入。
 
     返回 (context_block, chars_block, task_instruction)：
-      context_block    — 世界观 + 全书概要 + 大纲 + 近期摘要 + RAG（不含角色描述、不含 recent_text）
-      chars_block      — 角色状态（含角色描述，可能含敏感外貌描写）
-      task_instruction — 写作任务指令段
+      context_block    — 世界观 + 全书概要 + 大纲 + 近期摘要 + RAG
+      chars_block      — 角色状态 + 世界实体（不含用户写作指令）
+      task_instruction — 结构性写作任务（字数、章节号等）
 
-    chars_block 与 recent_text 由 writer.py 合并为一条 assistant 消息插入，
-    使其以 Gemini "model" 角色传递，避免触发输入侧安全过滤。
+    用户写作指令（instruction）不嵌入任何返回值，
+    由 writer.py 根据 api_format 决定放置位置：
+      Gemini  → assistant(model) 角色，绕过输入侧安全过滤
+      OpenAI  → 最后一条 user 消息，确保模型将其视为必须遵循的指令
     """
-    # 角色描述单独提取，后续放入 assistant(model) 消息避免 Gemini 输入过滤
     _SHEET_LABELS = {
-        "personality": "性格", "motivation": "动机", "skills": "技能",
+        "personality": "性格", "skills": "技能",
         "appearance": "外貌", "speech_style": "说话风格",
     }
     chars_text = ""
@@ -144,17 +200,33 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
             else:
                 chars_text += f"  {label}：{val}\n"
         if state:
-            chars_text += f"  当前状态：{json.dumps(state, ensure_ascii=False)}\n"
+            filtered_state = {k: v for k, v in state.items() if k != "known_secrets"}
+            if filtered_state:
+                chars_text += f"  当前状态：{json.dumps(filtered_state, ensure_ascii=False)}\n"
     chars_block = f"=== 角色状态 ===\n{chars_text.strip()}" if chars_text.strip() else ""
 
-    # 用户写作指令拼入 chars_block（将以 assistant/model 角色传递），
-    # 避免露骨创作指令出现在 user 消息中触发 Gemini PROHIBITED_CONTENT 过滤。
-    if instruction:
-        instruction_section = f"=== 写作方向备忘（严格遵守）===\n{instruction}"
-        if chars_block:
-            chars_block = f"{chars_block}\n\n{instruction_section}"
-        else:
-            chars_block = instruction_section
+    # 世界实体（道具/系统）
+    _TYPE_LABELS = {"item": "道具", "system": "系统"}
+    entities_text = ""
+    for e in ctx.get("world_entities", []):
+        type_label = _TYPE_LABELS.get(e["type"], e["type"])
+        props = e.get("properties", {})
+        state = e.get("state", {})
+        entities_text += f"【{e['name']}·{type_label}】{e['description']}\n"
+        for key, val in props.items():
+            if not val:
+                continue
+            if isinstance(val, list):
+                entities_text += f"  {key}：{'、'.join(str(v) for v in val)}\n"
+            elif isinstance(val, dict):
+                entities_text += f"  {key}：{json.dumps(val, ensure_ascii=False)}\n"
+            else:
+                entities_text += f"  {key}：{val}\n"
+        if state:
+            entities_text += f"  当前状态：{json.dumps(state, ensure_ascii=False)}\n"
+    if entities_text.strip():
+        entities_block = f"=== 世界实体 ===\n{entities_text.strip()}"
+        chars_block = f"{chars_block}\n\n{entities_block}" if chars_block else entities_block
 
     # context_block 只含纯净内容（世界观、大纲、摘要、RAG），不含角色描述
     parts = []
@@ -162,6 +234,8 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         parts.append(f"=== 世界观设定 ===\n{ctx['core_setting']}")
     if ctx.get("book_summary"):
         parts.append(f"=== 全书概要 ===\n{ctx['book_summary']}")
+    if ctx.get("arc_summary"):
+        parts.append(f"=== 近期故事弧概要 ===\n{ctx['arc_summary']}")
     if ctx.get("chapter_outline"):
         parts.append(f"=== 本章大纲 ===\n{ctx['chapter_outline']}")
     if ctx.get("rolling_summary"):
@@ -180,16 +254,14 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
             "保持人物位置、对话语境、情节节奏的连贯性，不要重复已写过的内容。"
         )
 
-    # 用户原始指令已移入 chars_block（model 角色），此处只保留干净的结构性任务描述
-    instruction_ref = "\n请严格按照「写作方向备忘」中的要求创作。" if instruction else ""
+    # 结构性任务描述（不含用户写作指令——由 writer.py 根据 api_format 决定指令放置位置）
     task_instruction = (
         f"=== 写作任务 ===\n"
         f"请为《{ctx.get('novel_title', '')}》写第{volume}卷"
         f"第{chapter_number}章，"
         f"风格：{ctx.get('writing_style', '')}，"
-        f"目标字数约 {target_words} 字。"
-        f"{continuity_hint}"
-        f"{instruction_ref}\n"
+        f"目标字数 {target_words} 字（不得低于 {int(target_words * 0.9)} 字，不得超过 {int(target_words * 1.15)} 字）。"
+        f"{continuity_hint}\n"
         f"直接输出正文内容，不要输出章节标题或任何前缀。"
     )
 

@@ -6,90 +6,105 @@ interface Props {
   onClose: () => void
 }
 
-type Tab = 'http' | 'sse'
-
-const METHOD_COLOR: Record<string, string> = {
-  GET:    'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
-  POST:   'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
-  PATCH:  'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300',
-  DELETE: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
+const AGENT_COLOR: Record<string, string> = {
+  writer:        'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+  critic:        'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300',
+  summarizer:    'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
+  char_update:   'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300',
+  entity_update: 'bg-teal-100 text-teal-700 dark:bg-teal-900 dark:text-teal-300',
 }
 
-const STATUS_COLOR = (s: number) =>
-  s >= 500 ? 'text-red-500' : s >= 400 ? 'text-orange-500' : s >= 200 ? 'text-green-600' : 'text-muted-foreground'
-
-const EVENT_COLOR: Record<string, string> = {
-  stage:          'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
-  done:           'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
-  error:          'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
-  agent_start:    'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300',
-  agent_done:     'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300',
-  total_usage:    'bg-teal-100 text-teal-700 dark:bg-teal-900 dark:text-teal-300',
-  original_draft: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300',
-  llm_request:    'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+const AGENT_LABEL: Record<string, string> = {
+  writer:        'Writer',
+  critic:        'Critic',
+  summarizer:    'Summary',
+  char_update:   'CharUpd',
+  entity_update: 'EntUpd',
 }
 
-function ExpandableJson({ data }: { data: unknown }) {
+function statusIcon(s?: string) {
+  switch (s) {
+    case 'ok':        return <span className="text-green-600 font-semibold">&#10003;</span>
+    case 'truncated': return <span className="text-yellow-500 font-semibold">&#9888;</span>
+    case 'error':     return <span className="text-red-500 font-semibold">&#10007;</span>
+    default:          return null
+  }
+}
+
+function fmtTokens(n?: number): string {
+  if (n == null) return '-'
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+function fmtDuration(ms?: number): string {
+  if (ms == null) return '-'
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+function LlmCallRow({ entry }: { entry: DevLogEntry }) {
   const [open, setOpen] = useState(false)
-  if (data === undefined || data === null) return null
-  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-  const preview = typeof data === 'string' ? data.slice(0, 60) : JSON.stringify(data).slice(0, 60)
+  const agent = entry.agent || ''
+  const hasPayload = !!entry.payload
+  const d = new Date(entry.ts)
+  const ts = d.toLocaleTimeString('zh-CN', { hour12: false })
+
   return (
-    <div className="mt-1">
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+    <div className="border-b">
+      <div
+        className={`px-3 py-2 text-xs flex items-center gap-2 ${hasPayload ? 'cursor-pointer hover:bg-muted/40' : ''}`}
+        onClick={hasPayload ? () => setOpen(v => !v) : undefined}
       >
-        {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-        {open ? '收起' : `${preview}${preview.length < text.length ? '…' : ''}`}
-      </button>
-      {open && (
-        <pre className="mt-1 text-[10px] bg-muted rounded p-2 overflow-x-auto max-h-48 whitespace-pre-wrap break-all leading-relaxed">
-          {text}
-        </pre>
+        <span className="text-muted-foreground/50 shrink-0 font-mono text-[10px]">{ts}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 min-w-[52px] text-center ${AGENT_COLOR[agent] || 'bg-muted text-muted-foreground'}`}>
+          {AGENT_LABEL[agent] || agent}
+        </span>
+        <span className="font-mono text-[11px] truncate text-muted-foreground max-w-[120px]">{entry.model || '-'}</span>
+        <span className="shrink-0">{statusIcon(entry.llmStatus)}</span>
+        <span className="font-mono text-[11px] shrink-0">{fmtTokens(entry.inputTokens)}<span className="text-muted-foreground/50 mx-0.5">&rarr;</span>{fmtTokens(entry.outputTokens)}</span>
+        <span className="font-mono text-[11px] text-muted-foreground shrink-0 ml-auto">{fmtDuration(entry.durationMs)}</span>
+        {hasPayload && (
+          <span className="shrink-0 text-muted-foreground">
+            {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </span>
+        )}
+      </div>
+      {open && entry.payload && (
+        <div className="px-3 pb-2">
+          <PayloadView payload={entry.payload} />
+        </div>
       )}
     </div>
   )
 }
 
-function HttpEntry({ entry }: { entry: DevLogEntry }) {
-  const isReq = entry.type === 'request'
-  const method = entry.method || ''
-  const shortUrl = entry.url?.replace('/api', '') || ''
-  const ts = new Date(entry.ts).toLocaleTimeString('zh-CN', { hour12: false, fractionalSecondDigits: 2 })
+function PayloadView({ payload }: { payload: Record<string, unknown> }) {
+  const messages = payload.messages as Array<{ role: string; content: string }> | undefined
+  const params = { ...payload }
+  delete params.messages
 
   return (
-    <div className={`px-3 py-2 border-b text-xs ${isReq ? '' : 'bg-muted/30'}`}>
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-muted-foreground/50 shrink-0 font-mono text-[10px]">{ts}</span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${METHOD_COLOR[method] || 'bg-muted text-muted-foreground'}`}>
-          {method}
-        </span>
-        {!isReq && entry.status !== undefined && (
-          <span className={`font-mono font-semibold shrink-0 ${STATUS_COLOR(entry.status)}`}>
-            {entry.status}
-          </span>
-        )}
-        <span className="font-mono truncate text-foreground">{shortUrl}</span>
-      </div>
-      {isReq && entry.reqBody !== undefined && <ExpandableJson data={entry.reqBody} />}
-      {!isReq && entry.resData !== undefined && <ExpandableJson data={entry.resData} />}
-    </div>
-  )
-}
-
-function SseEntry({ entry }: { entry: DevLogEntry }) {
-  const event = entry.event || ''
-  const ts = new Date(entry.ts).toLocaleTimeString('zh-CN', { hour12: false, fractionalSecondDigits: 2 })
-  return (
-    <div className="px-3 py-2 border-b text-xs">
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-muted-foreground/50 shrink-0 font-mono text-[10px]">{ts}</span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${EVENT_COLOR[event] || 'bg-muted text-muted-foreground'}`}>
-          {event}
-        </span>
-      </div>
-      {entry.eventData !== undefined && <ExpandableJson data={entry.eventData} />}
+    <div className="space-y-2">
+      {Object.keys(params).length > 0 && (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+          {Object.entries(params).map(([k, v]) => (
+            <span key={k}><span className="font-medium text-foreground/70">{k}:</span> {String(v)}</span>
+          ))}
+        </div>
+      )}
+      {messages && (
+        <div className="space-y-1">
+          {messages.map((m, i) => (
+            <div key={i} className="text-[10px]">
+              <span className={`font-medium ${m.role === 'system' ? 'text-purple-500' : m.role === 'assistant' ? 'text-green-600' : 'text-blue-600'}`}>
+                [{m.role}]
+              </span>
+              <pre className="mt-0.5 bg-muted rounded p-1.5 overflow-x-auto max-h-32 whitespace-pre-wrap break-all leading-relaxed text-[10px]">
+                {m.content}
+              </pre>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -97,69 +112,38 @@ function SseEntry({ entry }: { entry: DevLogEntry }) {
 export default function DevPanel({ onClose }: Props) {
   const entries = useDevLogStore(s => s.entries)
   const clear = useDevLogStore(s => s.clear)
-  const [tab, setTab] = useState<Tab>('http')
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  const httpEntries = entries.filter(e => e.type === 'request' || e.type === 'response')
-  const sseEntries = entries.filter(e => e.type === 'sse')
+  const llmCalls = entries.filter(e => e.type === 'llm_call')
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [entries.length])
+  }, [llmCalls.length])
 
   return (
     <>
-      {/* Backdrop */}
       <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
 
-      {/* Drawer */}
-      <div className="fixed inset-y-0 right-0 w-[440px] bg-background border-l shadow-xl z-50 flex flex-col">
-        {/* Header */}
+      <div className="fixed inset-y-0 right-0 w-[480px] bg-background border-l shadow-xl z-50 flex flex-col">
         <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0">
-          <span className="text-sm font-semibold">开发者视图</span>
-          <span className="text-xs text-muted-foreground ml-1">({entries.length} 条记录)</span>
+          <span className="text-sm font-semibold">LLM Calls</span>
+          <span className="text-xs text-muted-foreground ml-1">({llmCalls.length})</span>
           <button
             onClick={clear}
             className="ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-muted transition-colors text-muted-foreground"
           >
-            <Trash2 className="w-3.5 h-3.5" /> 清空
+            <Trash2 className="w-3.5 h-3.5" />
           </button>
           <button onClick={onClose} className="p-1.5 rounded hover:bg-muted transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b shrink-0">
-          {([['http', `HTTP (${httpEntries.length})`], ['sse', `流式事件 (${sseEntries.length})`]] as [Tab, string][]).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={`px-4 py-2 text-xs border-b-2 transition-colors ${
-                tab === key
-                  ? 'border-primary text-primary font-medium'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {/* Content */}
         <div className="flex-1 overflow-y-auto">
-          {tab === 'http' ? (
-            httpEntries.length === 0 ? (
-              <p className="text-xs text-muted-foreground text-center mt-8">暂无 HTTP 记录</p>
-            ) : (
-              httpEntries.map(e => <HttpEntry key={e.id} entry={e} />)
-            )
+          {llmCalls.length === 0 ? (
+            <p className="text-xs text-muted-foreground text-center mt-8">暂无 LLM 调用记录</p>
           ) : (
-            sseEntries.length === 0 ? (
-              <p className="text-xs text-muted-foreground text-center mt-8">暂无流式事件记录</p>
-            ) : (
-              sseEntries.map(e => <SseEntry key={e.id} entry={e} />)
-            )
+            llmCalls.map(e => <LlmCallRow key={e.id} entry={e} />)
           )}
           <div ref={bottomRef} />
         </div>

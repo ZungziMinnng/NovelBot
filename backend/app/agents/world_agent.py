@@ -49,10 +49,26 @@ async def optimize_world_setting(novel: Novel, core_setting: str) -> str:
 
 
 async def embed_world_setting(novel_id: int, core_setting: str) -> None:
-    """将世界观写入向量库"""
-    vector_store.store_text(
-        novel_id=novel_id,
-        doc_id=f"world_setting_{novel_id}",
-        text=core_setting,
-        metadata={"type": "world_setting"},
-    )
+    """将世界观分块写入向量库，支持按需 RAG 检索"""
+    # 清理旧向量（旧的单条 + 分块）
+    old_ids = [f"world_setting_{novel_id}"]
+    old_ids.extend(f"world_setting_{novel_id}_chunk_{i}" for i in range(50))
+    await vector_store.adelete_docs(novel_id, old_ids)
+
+    if not core_setting.strip():
+        return
+
+    # 按双换行分段，合并过短的段落
+    raw_chunks = [p.strip() for p in core_setting.split("\n\n") if p.strip()]
+    chunks: list[str] = []
+    for chunk in raw_chunks:
+        if chunks and len(chunks[-1]) < 30:
+            chunks[-1] += "\n\n" + chunk
+        else:
+            chunks.append(chunk)
+
+    items = [
+        (f"world_setting_{novel_id}_chunk_{i}", text, {"type": "world_setting", "chunk_index": i})
+        for i, text in enumerate(chunks)
+    ]
+    await vector_store.astore_texts_batch(novel_id, items)

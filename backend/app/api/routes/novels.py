@@ -7,7 +7,7 @@ from app.models.novel import Novel
 from app.models.memory import Outline
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
 from app.agents import world_agent, outline_agent, character_agent
-from app.services import summarizer
+from app.services import summarizer, context_builder
 from app.models.character import Character
 from app.services import vector_store
 
@@ -42,10 +42,19 @@ async def update_novel(novel_id: int, data: NovelUpdate, db: AsyncSession = Depe
     novel = await db.get(Novel, novel_id)
     if not novel:
         raise HTTPException(status_code=404, detail="小说不存在")
-    for k, v in data.model_dump(exclude_none=True).items():
+    updates = data.model_dump(exclude_none=True)
+    core_setting_changed = "core_setting" in updates and updates["core_setting"] != novel.core_setting
+    for k, v in updates.items():
         setattr(novel, k, v)
-    await db.commit()
-    await db.refresh(novel)
+    try:
+        await db.commit()
+        await db.refresh(novel)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("update_novel commit failed")
+        raise HTTPException(status_code=500, detail=f"保存失败: {e}")
+    if core_setting_changed:
+        await world_agent.embed_world_setting(novel.id, novel.core_setting)
     return novel
 
 
@@ -153,7 +162,6 @@ async def wizard_generate_characters(data: WizardStep3, db: AsyncSession = Depen
             raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
         char.full_sheet = sheet
         char.current_state = character_agent.init_character_state(char)
-        await character_agent.embed_character(novel.id, char)
         created.append({"id": char.id, "name": char.name, "sheet": sheet})
 
     await db.commit()
@@ -191,4 +199,56 @@ async def wizard_generate_outline(data: WizardStep4, db: AsyncSession = Depends(
             {"chapter_number": o.chapter_number, "title": o.title, "content": o.content}
             for o in outlines
         ]
+    }
+
+
+@router.get("/{novel_id}/context-preview")
+async def get_context_preview(
+    novel_id: int,
+    chapter_number: int | None = None,
+    instruction: str = "",
+    target_words: int = 800,
+    db: AsyncSession = Depends(get_db),
+):
+    """预览 Writer 在生成指定章节时收到的完整上下文（JSON 结构化）。"""
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    if chapter_number is None:
+        chapter_number = (novel.current_chapter or 0) + 1
+    if chapter_number < 1:
+        chapter_number = 1
+
+    ctx = await context_builder.build_generation_context(
+        session=db,
+        novel=novel,
+        chapter_number=chapter_number,
+        volume=novel.current_volume or 1,
+        scene_hint=instruction,
+    )
+    context_block, chars_block, task_instruction = context_builder.format_context_for_writer(
+        ctx, instruction=instruction, target_words=target_words,
+    )
+
+    return {
+        "chapter_number": chapter_number,
+        "context": {
+            "core_setting": ctx.get("core_setting", ""),
+            "book_summary": ctx.get("book_summary", ""),
+            "arc_summary": ctx.get("arc_summary", ""),
+            "chapter_outline": ctx.get("chapter_outline", ""),
+            "rolling_summary": ctx.get("rolling_summary", ""),
+            "rag_context": ctx.get("rag_context", ""),
+            "recent_text": ctx.get("recent_text", ""),
+            "characters_count": len(ctx.get("characters", [])),
+            "entities_count": len(ctx.get("world_entities", [])),
+        },
+        "writer_messages": [
+            {"role": "system", "content": f"（系统提示由 writer.jinja2 渲染，genre={ctx.get('genre')}, writing_style={ctx.get('writing_style')}）"},
+            {"role": "user", "content": context_block or "（无上下文区块）"},
+            {"role": "assistant", "content": chars_block or "（无角色/实体数据）"},
+            {"role": "user", "content": task_instruction},
+        ],
+        "writer_model": novel.writer_model or "（使用全局默认 Writer 模型）",
     }

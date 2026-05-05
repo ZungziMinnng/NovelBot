@@ -1,45 +1,9 @@
 import axios from 'axios'
-import { useDevLogStore } from '@/store/devLogStore'
 
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
 })
-
-// ── Dev log interceptors ────────────────────────────────────────────────────
-
-api.interceptors.request.use((config) => {
-  useDevLogStore.getState().addEntry({
-    type: 'request',
-    method: config.method?.toUpperCase(),
-    url: (config.baseURL || '') + (config.url || ''),
-    reqBody: config.data ? JSON.parse(JSON.stringify(config.data)) : undefined,
-  })
-  return config
-})
-
-api.interceptors.response.use(
-  (response) => {
-    useDevLogStore.getState().addEntry({
-      type: 'response',
-      method: response.config.method?.toUpperCase(),
-      url: (response.config.baseURL || '') + (response.config.url || ''),
-      status: response.status,
-      resData: response.data,
-    })
-    return response
-  },
-  (error) => {
-    useDevLogStore.getState().addEntry({
-      type: 'response',
-      method: error.config?.method?.toUpperCase(),
-      url: (error.config?.baseURL || '') + (error.config?.url || ''),
-      status: error.response?.status ?? 0,
-      resData: error.response?.data ?? String(error),
-    })
-    return Promise.reject(error)
-  },
-)
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +61,31 @@ export interface Character {
   updated_at: string
 }
 
+export interface WorldEntity {
+  id: number
+  novel_id: number
+  type: 'item' | 'system'
+  name: string
+  description: string
+  properties: Record<string, unknown>
+  current_state: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface Location {
+  id: number
+  novel_id: number
+  name: string
+  type: string  // continent/region/city/building/landmark/other
+  description: string
+  parent_id: number | null
+  properties: Record<string, unknown>
+  current_state: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
 export interface Outline {
   chapter_number: number
   title: string
@@ -131,6 +120,17 @@ export interface ModelEntry {
   model_id: string
   provider: string
   api_format: string
+  provider_id: number | null
+  created_at: string
+}
+
+export interface ApiProvider {
+  id: number
+  name: string
+  base_url: string
+  api_key_set: boolean
+  api_key_masked: string
+  api_format: string
   created_at: string
 }
 
@@ -142,11 +142,12 @@ export interface WriterPreset {
   updated_at: string
 }
 
-export const PROVIDERS = [
-  { label: 'OpenAI', api_format: 'openai' },
-  { label: 'Google / Gemini', api_format: 'gemini' },
-  { label: 'Anthropic / Claude', api_format: 'anthropic' },
-  { label: '其他（OpenAI 兼容）', api_format: 'openai' },
+export const PROVIDER_PRESETS = [
+  { name: 'OpenAI',        base_url: 'https://api.openai.com/v1',                api_format: 'openai' },
+  { name: 'DeepSeek',      base_url: 'https://api.deepseek.com',                 api_format: 'openai' },
+  { name: 'AiHubMix',      base_url: 'https://aihubmix.com/v1',                  api_format: 'openai' },
+  { name: 'Google Gemini',  base_url: 'https://generativelanguage.googleapis.com', api_format: 'gemini' },
+  { name: 'Anthropic',     base_url: 'https://api.anthropic.com',                api_format: 'anthropic' },
 ] as const
 
 // ── Novel APIs ─────────────────────────────────────────────────────────────
@@ -167,6 +168,32 @@ export const novelsApi = {
     api.post('/novels/wizard/characters', { novel_id: novelId, characters }).then(r => r.data),
   wizardOutline: (novelId: number) =>
     api.post('/novels/wizard/outline', { novel_id: novelId }).then(r => r.data),
+  contextPreview: (novelId: number, chapterNumber?: number, instruction?: string, targetWords?: number) =>
+    api.get<ContextPreview>(`/novels/${novelId}/context-preview`, {
+      params: { chapter_number: chapterNumber, instruction, target_words: targetWords },
+    }).then(r => r.data),
+}
+
+export interface WriterMessage {
+  role: string
+  content: string
+}
+
+export interface ContextPreview {
+  chapter_number: number
+  context: {
+    core_setting: string
+    book_summary: string
+    arc_summary: string
+    chapter_outline: string
+    rolling_summary: string
+    rag_context: string
+    recent_text: string
+    characters_count: number
+    entities_count: number
+  }
+  writer_messages: WriterMessage[]
+  writer_model: string
 }
 
 // ── Chapter APIs ───────────────────────────────────────────────────────────
@@ -176,7 +203,7 @@ export const chaptersApi = {
   get: (id: number) => api.get<Chapter>(`/chapters/${id}`).then(r => r.data),
   create: (data: Partial<Chapter>) => api.post<Chapter>('/chapters/', data).then(r => r.data),
   update: (id: number, data: Partial<Chapter>) => api.patch<Chapter>(`/chapters/${id}`, data).then(r => r.data),
-  confirm: (chapterId: number) => api.post('/chapters/confirm', { chapter_id: chapterId }).then(r => r.data),
+  confirm: (chapterId: number) => api.post('/chapters/confirm', { chapter_id: chapterId }, { timeout: 120000 }).then(r => r.data),
   delete: (id: number) => api.delete(`/chapters/${id}`).then(r => r.data),
 }
 
@@ -188,6 +215,28 @@ export const charactersApi = {
   create: (data: Partial<Character>) => api.post<Character>('/characters/', data).then(r => r.data),
   update: (id: number, data: Partial<Character>) => api.patch<Character>(`/characters/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/characters/${id}`).then(r => r.data),
+}
+
+// ── World Entity APIs ─────────────────────────────────────────────────────
+
+export const worldEntitiesApi = {
+  list: (novelId: number, type?: string) =>
+    api.get<WorldEntity[]>(`/world-entities/novel/${novelId}`, { params: type ? { type } : {} }).then(r => r.data),
+  get: (id: number) => api.get<WorldEntity>(`/world-entities/${id}`).then(r => r.data),
+  create: (data: Partial<WorldEntity>) => api.post<WorldEntity>('/world-entities/', data).then(r => r.data),
+  update: (id: number, data: Partial<WorldEntity>) => api.patch<WorldEntity>(`/world-entities/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/world-entities/${id}`).then(r => r.data),
+}
+
+// ── Location APIs ────────────────────────────────────────────────────────────
+
+export const locationsApi = {
+  list: (novelId: number, type?: string) =>
+    api.get<Location[]>(`/locations/novel/${novelId}`, { params: type ? { type } : {} }).then(r => r.data),
+  get: (id: number) => api.get<Location>(`/locations/${id}`).then(r => r.data),
+  create: (data: Partial<Location>) => api.post<Location>('/locations/', data).then(r => r.data),
+  update: (id: number, data: Partial<Location>) => api.patch<Location>(`/locations/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/locations/${id}`).then(r => r.data),
 }
 
 // ── Admin APIs ────────────────────────────────────────────────────────────
@@ -208,12 +257,25 @@ export const settingsApi = {
   test: (model?: string) => api.post('/settings/test', { model: model ?? '' }).then(r => r.data),
 }
 
+// ── Provider APIs ────────────────────────────────────────────────────────────
+
+export const providersApi = {
+  list: () => api.get<ApiProvider[]>('/providers/').then(r => r.data),
+  create: (data: { name: string; base_url: string; api_key: string; api_format: string }) =>
+    api.post<ApiProvider>('/providers/', data).then(r => r.data),
+  update: (id: number, data: { name?: string; base_url?: string; api_key?: string; api_format?: string }) =>
+    api.patch<ApiProvider>(`/providers/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/providers/${id}`).then(r => r.data),
+}
+
 // ── Model Library APIs ──────────────────────────────────────────────────────
 
 export const modelLibraryApi = {
   list: () => api.get<ModelEntry[]>('/models/').then(r => r.data),
-  create: (data: Omit<ModelEntry, 'id' | 'created_at'>) => api.post<ModelEntry>('/models/', data).then(r => r.data),
-  update: (id: number, data: Partial<Omit<ModelEntry, 'id' | 'created_at'>>) => api.patch<ModelEntry>(`/models/${id}`, data).then(r => r.data),
+  create: (data: { display_name: string; model_id: string; provider_id: number; provider?: string; api_format?: string }) =>
+    api.post<ModelEntry>('/models/', data).then(r => r.data),
+  update: (id: number, data: { display_name?: string; model_id?: string; provider_id?: number }) =>
+    api.patch<ModelEntry>(`/models/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/models/${id}`).then(r => r.data),
 }
 
@@ -265,6 +327,24 @@ export interface NewCharactersData {
   candidates: Array<{ name: string; role: string; description: string }>
 }
 
+export interface NewEntitiesData {
+  candidates: Array<{ name: string; type: string; description: string }>
+}
+
+export interface PlotSuggestionsData {
+  suggestions: string[]
+}
+
+export interface LlmCallData {
+  agent: string
+  model: string
+  status: 'ok' | 'truncated' | 'error'
+  input_tokens: number
+  output_tokens: number
+  duration_ms: number
+  payload?: Record<string, unknown>
+}
+
 export type SSEMessage =
   | { event: 'stage'; data: string }
   | { event: 'token'; data: string }
@@ -276,7 +356,10 @@ export type SSEMessage =
   | { event: 'total_usage'; data: TotalUsageData }
   | { event: 'original_draft'; data: OriginalDraftData }
   | { event: 'new_characters'; data: NewCharactersData }
+  | { event: 'new_entities'; data: NewEntitiesData }
+  | { event: 'plot_suggestions'; data: PlotSuggestionsData }
   | { event: 'llm_request'; data: Record<string, unknown> }
+  | { event: 'llm_call'; data: LlmCallData }
 
 // ── SSE Chat ───────────────────────────────────────────────────────────────
 
@@ -295,14 +378,15 @@ export function streamChat(
     novel_id: number
     messages: ChatMessage[]
     model?: string
+    system_prompt?: string
+    temperature?: number
+    max_tokens?: number
+    context_rounds?: number
   },
   onMessage: (msg: ChatSSEMessage) => void,
   onClose: () => void,
 ): AbortController {
   const controller = new AbortController()
-  const devLog = useDevLogStore.getState()
-
-  devLog.addEntry({ type: 'request', method: 'POST', url: '/api/chat/stream', reqBody: payload })
 
   fetch('/api/chat/stream', {
     method: 'POST',
@@ -310,7 +394,6 @@ export function streamChat(
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
-    devLog.addEntry({ type: 'response', method: 'POST', url: '/api/chat/stream', status: response.status })
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -328,9 +411,6 @@ export function streamChat(
           try {
             const msg = JSON.parse(line.slice(6)) as ChatSSEMessage
             onMessage(msg)
-            if (msg.event !== 'token') {
-              devLog.addEntry({ type: 'sse', event: msg.event, eventData: msg.data })
-            }
           } catch {}
         }
       }
@@ -339,7 +419,6 @@ export function streamChat(
   }).catch((err) => {
     if (err.name !== 'AbortError') {
       onMessage({ event: 'error', data: String(err) })
-      devLog.addEntry({ type: 'sse', event: 'error', eventData: String(err) })
     }
     onClose()
   })
@@ -361,9 +440,6 @@ export function streamChapterGeneration(
   onClose: () => void,
 ): AbortController {
   const controller = new AbortController()
-  const devLog = useDevLogStore.getState()
-
-  devLog.addEntry({ type: 'request', method: 'POST', url: '/api/generation/chapter', reqBody: payload })
 
   fetch('/api/generation/chapter', {
     method: 'POST',
@@ -371,7 +447,6 @@ export function streamChapterGeneration(
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
-    devLog.addEntry({ type: 'response', method: 'POST', url: '/api/generation/chapter', status: response.status })
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -389,9 +464,6 @@ export function streamChapterGeneration(
           try {
             const msg = JSON.parse(line.slice(6)) as SSEMessage
             onMessage(msg)
-            if (msg.event !== 'token') {
-              devLog.addEntry({ type: 'sse', event: msg.event, eventData: msg.data })
-            }
           } catch {}
         }
       }
@@ -400,7 +472,6 @@ export function streamChapterGeneration(
   }).catch((err) => {
     if (err.name !== 'AbortError') {
       onMessage({ event: 'error', data: String(err) })
-      devLog.addEntry({ type: 'sse', event: 'error', eventData: String(err) })
     }
     onClose()
   })

@@ -32,8 +32,6 @@ def _mask_key(key: str) -> str:
 
 
 class SettingsUpdate(BaseModel):
-    aihubmix_api_key: str = ""
-    aihubmix_base_url: str = ""
     default_writer_model: str = ""
     default_fast_model: str = ""
     agent_writer_model: str = ""
@@ -42,16 +40,11 @@ class SettingsUpdate(BaseModel):
     agent_outline_model: str = ""
     agent_character_model: str = ""
     agent_orchestrator_model: str = ""
-    gemini_base_url: str = ""
-    anthropic_base_url: str = ""
     https_proxy: str = ""
     http_proxy: str = ""
 
 
 class SettingsOut(BaseModel):
-    aihubmix_api_key_set: bool
-    aihubmix_api_key_masked: str
-    aihubmix_base_url: str
     default_writer_model: str
     default_fast_model: str
     max_critic_retries: int
@@ -61,8 +54,6 @@ class SettingsOut(BaseModel):
     agent_outline_model: str
     agent_character_model: str
     agent_orchestrator_model: str
-    gemini_base_url: str
-    anthropic_base_url: str
     https_proxy: str
     http_proxy: str
 
@@ -70,9 +61,6 @@ class SettingsOut(BaseModel):
 @router.get("/", response_model=SettingsOut)
 async def get_settings():
     return SettingsOut(
-        aihubmix_api_key_set=bool(settings.aihubmix_api_key),
-        aihubmix_api_key_masked=_mask_key(settings.aihubmix_api_key) if settings.aihubmix_api_key else "",
-        aihubmix_base_url=settings.aihubmix_base_url,
         default_writer_model=settings.default_writer_model,
         default_fast_model=settings.default_fast_model,
         max_critic_retries=settings.max_critic_retries,
@@ -82,8 +70,6 @@ async def get_settings():
         agent_outline_model=settings.agent_outline_model,
         agent_character_model=settings.agent_character_model,
         agent_orchestrator_model=settings.agent_orchestrator_model,
-        gemini_base_url=settings.gemini_base_url,
-        anthropic_base_url=settings.anthropic_base_url,
         https_proxy=settings.https_proxy,
         http_proxy=settings.http_proxy,
     )
@@ -92,12 +78,7 @@ async def get_settings():
 @router.patch("/")
 async def update_settings(data: SettingsUpdate):
     """更新配置，同步写入 .env 文件并更新内存"""
-    if data.aihubmix_api_key:
-        settings.aihubmix_api_key = data.aihubmix_api_key
-        _write_env("AIHUBMIX_API_KEY", data.aihubmix_api_key)
-    if data.aihubmix_base_url:
-        settings.aihubmix_base_url = data.aihubmix_base_url
-        _write_env("AIHUBMIX_BASE_URL", data.aihubmix_base_url)
+    # 模型配置
     if data.default_writer_model:
         settings.default_writer_model = data.default_writer_model
         _write_env("DEFAULT_WRITER_MODEL", data.default_writer_model)
@@ -117,11 +98,6 @@ async def update_settings(data: SettingsUpdate):
     _write_env("AGENT_CHARACTER_MODEL", data.agent_character_model)
     settings.agent_orchestrator_model = data.agent_orchestrator_model
     _write_env("AGENT_ORCHESTRATOR_MODEL", data.agent_orchestrator_model)
-    # 原生 SDK 端点（允许保存空字符串以清除）
-    settings.gemini_base_url = data.gemini_base_url
-    _write_env("GEMINI_BASE_URL", data.gemini_base_url)
-    settings.anthropic_base_url = data.anthropic_base_url
-    _write_env("ANTHROPIC_BASE_URL", data.anthropic_base_url)
     # 代理设置（允许保存空字符串以清除代理）
     settings.https_proxy = data.https_proxy
     _write_env("NOVELBOT_HTTPS_PROXY", data.https_proxy)

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower, Plus, Pencil, Trash2, X } from 'lucide-react'
-import { settingsApi, modelLibraryApi, PROVIDERS, type ModelEntry } from '@/api/client'
+import { settingsApi, modelLibraryApi, providersApi, PROVIDER_PRESETS, type ModelEntry, type ApiProvider } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 
 // ── ModelSelect sub-component ─────────────────────────────────────────────
@@ -41,10 +41,7 @@ export default function Settings() {
   const qc = useQueryClient()
   const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
 
-  // ── API & model settings state ──────────────────────────────────────────
-  const [apiKey, setApiKey] = useState('')
-  const [maskedKey, setMaskedKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState('https://aihubmix.com/v1')
+  // ── Settings state (model assignments + proxy) ─────────────────────────
   const [writerModel, setWriterModel] = useState('')
   const [fastModel, setFastModel] = useState('')
   const [agentWriterModel, setAgentWriterModel] = useState('')
@@ -53,14 +50,25 @@ export default function Settings() {
   const [agentOutlineModel, setAgentOutlineModel] = useState('')
   const [agentCharacterModel, setAgentCharacterModel] = useState('')
   const [agentOrchestratorModel, setAgentOrchestratorModel] = useState('')
-  const [geminiBaseUrl, setGeminiBaseUrl] = useState('')
-  const [anthropicBaseUrl, setAnthropicBaseUrl] = useState('')
   const [httpsProxy, setHttpsProxy] = useState('')
   const [httpProxy, setHttpProxy] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testModel, setTestModel] = useState('')
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  // ── Provider state ──────────────────────────────────────────────────────
+  const { data: providers = [], refetch: refetchProviders } = useQuery({
+    queryKey: ['providers'],
+    queryFn: providersApi.list,
+  })
+  const [showProviderForm, setShowProviderForm] = useState(false)
+  const [editingProviderId, setEditingProviderId] = useState<number | null>(null)
+  const [providerName, setProviderName] = useState('')
+  const [providerBaseUrl, setProviderBaseUrl] = useState('')
+  const [providerApiKey, setProviderApiKey] = useState('')
+  const [providerApiFormat, setProviderApiFormat] = useState('openai')
+  const [providerSaving, setProviderSaving] = useState(false)
 
   // ── Model library state ─────────────────────────────────────────────────
   const { data: models = [] } = useQuery({
@@ -71,14 +79,12 @@ export default function Settings() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [formDisplayName, setFormDisplayName] = useState('')
   const [formModelId, setFormModelId] = useState('')
-  const [formProvider, setFormProvider] = useState(PROVIDERS[0].label)
-  const [formApiFormat, setFormApiFormat] = useState(PROVIDERS[0].api_format)
+  const [formProviderId, setFormProviderId] = useState<number | null>(null)
   const [modelSaving, setModelSaving] = useState(false)
 
   useEffect(() => {
+    let cancelled = false
     settingsApi.get().then((s: {
-      aihubmix_api_key_masked: string
-      aihubmix_base_url: string
       default_writer_model: string
       default_fast_model: string
       agent_writer_model: string
@@ -87,13 +93,10 @@ export default function Settings() {
       agent_outline_model: string
       agent_character_model: string
       agent_orchestrator_model: string
-      gemini_base_url: string
-      anthropic_base_url: string
       https_proxy: string
       http_proxy: string
     }) => {
-      setMaskedKey(s.aihubmix_api_key_masked || '')
-      setBaseUrl(s.aihubmix_base_url)
+      if (cancelled) return
       setWriterModel(s.default_writer_model)
       setFastModel(s.default_fast_model)
       setAgentWriterModel(s.agent_writer_model || '')
@@ -102,11 +105,10 @@ export default function Settings() {
       setAgentOutlineModel(s.agent_outline_model || '')
       setAgentCharacterModel(s.agent_character_model || '')
       setAgentOrchestratorModel(s.agent_orchestrator_model || '')
-      setGeminiBaseUrl(s.gemini_base_url || '')
-      setAnthropicBaseUrl(s.anthropic_base_url || '')
       setHttpsProxy(s.https_proxy || '')
       setHttpProxy(s.http_proxy || '')
-    })
+    }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   const handleSave = async () => {
@@ -114,8 +116,6 @@ export default function Settings() {
     setTestResult(null)
     try {
       await settingsApi.update({
-        aihubmix_api_key: apiKey || undefined,
-        aihubmix_base_url: baseUrl,
         default_writer_model: writerModel,
         default_fast_model: fastModel,
         agent_writer_model: agentWriterModel,
@@ -124,17 +124,12 @@ export default function Settings() {
         agent_outline_model: agentOutlineModel,
         agent_character_model: agentCharacterModel,
         agent_orchestrator_model: agentOrchestratorModel,
-        gemini_base_url: geminiBaseUrl,
-        anthropic_base_url: anthropicBaseUrl,
         https_proxy: httpsProxy,
         http_proxy: httpProxy,
       })
       setTesting(true)
       const r = await settingsApi.test(testModel || undefined)
       setTestResult({ ok: r.ok, msg: r.ok ? `连接成功 [${r.api_format}] ${r.model}：${r.response}` : `[${r.api_format}] ${r.model}：${r.error}` })
-      const s = await settingsApi.get()
-      setMaskedKey(s.aihubmix_api_key_masked || '')
-      setApiKey('')
     } finally {
       setSaving(false)
       setTesting(false)
@@ -152,49 +147,111 @@ export default function Settings() {
     }
   }
 
+  // ── Provider handlers ──────────────────────────────────────────────────
+
+  const resetProviderForm = () => {
+    setProviderName('')
+    setProviderBaseUrl('')
+    setProviderApiKey('')
+    setProviderApiFormat('openai')
+    setEditingProviderId(null)
+    setShowProviderForm(false)
+  }
+
+  const handlePresetClick = (preset: typeof PROVIDER_PRESETS[number]) => {
+    // Check if this preset is already added
+    const exists = providers.find(p => p.name === preset.name)
+    if (exists) {
+      // Start editing the existing one
+      startEditProvider(exists)
+      return
+    }
+    setProviderName(preset.name)
+    setProviderBaseUrl(preset.base_url)
+    setProviderApiFormat(preset.api_format)
+    setProviderApiKey('')
+    setEditingProviderId(null)
+    setShowProviderForm(true)
+  }
+
+  const startEditProvider = (p: ApiProvider) => {
+    setEditingProviderId(p.id)
+    setProviderName(p.name)
+    setProviderBaseUrl(p.base_url)
+    setProviderApiFormat(p.api_format)
+    setProviderApiKey('')
+    setShowProviderForm(true)
+  }
+
+  const handleProviderSubmit = async () => {
+    if (!providerName.trim()) return
+    setProviderSaving(true)
+    try {
+      if (editingProviderId !== null) {
+        await providersApi.update(editingProviderId, {
+          name: providerName,
+          base_url: providerBaseUrl,
+          api_key: providerApiKey || undefined,
+          api_format: providerApiFormat,
+        })
+      } else {
+        await providersApi.create({
+          name: providerName,
+          base_url: providerBaseUrl,
+          api_key: providerApiKey,
+          api_format: providerApiFormat,
+        })
+      }
+      qc.invalidateQueries({ queryKey: ['providers'] })
+      resetProviderForm()
+    } finally {
+      setProviderSaving(false)
+    }
+  }
+
+  const handleProviderDelete = async (id: number) => {
+    if (!confirm('确认删除此供应商？')) return
+    try {
+      await providersApi.delete(id)
+      qc.invalidateQueries({ queryKey: ['providers'] })
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || '删除失败')
+    }
+  }
+
   // ── Model library handlers ──────────────────────────────────────────────
 
   const resetForm = () => {
     setFormDisplayName('')
     setFormModelId('')
-    setFormProvider(PROVIDERS[0].label)
-    setFormApiFormat(PROVIDERS[0].api_format)
+    setFormProviderId(null)
     setEditingId(null)
     setShowAddForm(false)
-  }
-
-  const handleProviderChange = (label: string) => {
-    setFormProvider(label)
-    const p = PROVIDERS.find(p => p.label === label)
-    if (p) setFormApiFormat(p.api_format)
   }
 
   const startEdit = (m: ModelEntry) => {
     setEditingId(m.id)
     setFormDisplayName(m.display_name)
     setFormModelId(m.model_id)
-    setFormProvider(m.provider)
-    setFormApiFormat(m.api_format)
+    setFormProviderId(m.provider_id)
     setShowAddForm(true)
   }
 
   const handleModelSubmit = async () => {
-    if (!formModelId.trim()) return
+    if (!formModelId.trim() || !formProviderId) return
     setModelSaving(true)
     try {
       if (editingId !== null) {
         await modelLibraryApi.update(editingId, {
           display_name: formDisplayName,
           model_id: formModelId,
-          provider: formProvider,
-          api_format: formApiFormat,
+          provider_id: formProviderId,
         })
       } else {
         await modelLibraryApi.create({
           display_name: formDisplayName,
           model_id: formModelId,
-          provider: formProvider,
-          api_format: formApiFormat,
+          provider_id: formProviderId,
         })
       }
       qc.invalidateQueries({ queryKey: ['model-library'] })
@@ -207,10 +264,10 @@ export default function Settings() {
   const handleModelDelete = async (id: number) => {
     if (!confirm('确认删除此模型？')) return
     await modelLibraryApi.delete(id)
-    loadModels()
+    qc.invalidateQueries({ queryKey: ['model-library'] })
   }
 
-  const providerBadgeColor = (apiFormat: string) => {
+  const formatBadgeColor = (apiFormat: string) => {
     if (apiFormat === 'gemini') return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
     if (apiFormat === 'anthropic') return 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'
     return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
@@ -234,35 +291,157 @@ export default function Settings() {
 
       <main className="max-w-2xl mx-auto px-6 py-10 space-y-8">
 
-        {/* ── 1. API 配置 ─────────────────────────────────────────────── */}
+        {/* ── 1. 供应商配置 ──────────────────────────────────────────── */}
         <section>
-          <h2 className="font-semibold text-base mb-4">API 配置</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm font-medium mb-1 block">API Key</label>
-              {maskedKey && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1.5">
-                  <Key className="w-3 h-3" />
-                  当前 Key：<span className="font-mono">{maskedKey}</span>
-                </div>
-              )}
-              <input
-                type="password"
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder={maskedKey ? '留空保持当前 Key 不变' : '输入 AiHubMix API Key'}
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium mb-1 block">API Base URL</label>
-              <input
-                value={baseUrl}
-                onChange={e => setBaseUrl(e.target.value)}
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-            </div>
+          <h2 className="font-semibold text-base mb-2">供应商配置</h2>
+          <p className="text-xs text-muted-foreground mb-4">
+            添加 API 供应商（中转站或官方直连），每个供应商可配置独立的 Base URL 和 API Key。
+          </p>
+
+          {/* Preset chips */}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {PROVIDER_PRESETS.map(preset => {
+              const added = providers.some(p => p.name === preset.name)
+              return (
+                <button
+                  key={preset.name}
+                  onClick={() => handlePresetClick(preset)}
+                  className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                    added
+                      ? 'border-primary/50 bg-primary/10 text-primary'
+                      : 'border-border hover:border-muted-foreground/50 hover:bg-muted'
+                  }`}
+                >
+                  {added && <span className="mr-1">&#10003;</span>}
+                  {preset.name}
+                </button>
+              )
+            })}
+            <button
+              onClick={() => { resetProviderForm(); setShowProviderForm(true) }}
+              className="text-xs px-3 py-1.5 rounded-full border border-dashed hover:bg-muted transition-colors flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" />
+              自定义
+            </button>
           </div>
+
+          {/* Add / Edit provider form */}
+          {showProviderForm && (
+            <div className="border rounded-lg p-4 mb-4 bg-muted/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{editingProviderId ? '编辑供应商' : '添加供应商'}</span>
+                <button onClick={resetProviderForm} className="p-1 rounded hover:bg-muted">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">供应商名称 *</label>
+                  <input
+                    value={providerName}
+                    onChange={e => setProviderName(e.target.value)}
+                    placeholder="例：AiHubMix"
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">API 格式</label>
+                  <select
+                    value={providerApiFormat}
+                    onChange={e => setProviderApiFormat(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    <option value="openai">OpenAI 兼容</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Base URL</label>
+                <input
+                  value={providerBaseUrl}
+                  onChange={e => setProviderBaseUrl(e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">API Key</label>
+                <input
+                  type="password"
+                  value={providerApiKey}
+                  onChange={e => setProviderApiKey(e.target.value)}
+                  placeholder={editingProviderId ? '留空保持当前 Key 不变' : '输入 API Key'}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button onClick={resetProviderForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+                  取消
+                </button>
+                <button
+                  onClick={handleProviderSubmit}
+                  disabled={!providerName.trim() || providerSaving}
+                  className="text-sm px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {providerSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {editingProviderId ? '保存修改' : '添加'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Provider list */}
+          {providers.length === 0 ? (
+            <div className="text-sm text-muted-foreground text-center py-6 border rounded-lg border-dashed">
+              暂无供应商，点击上方预设或「自定义」添加
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {providers.map(p => (
+                <div key={p.id} className="flex items-center gap-3 border rounded-lg px-4 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{p.name}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${formatBadgeColor(p.api_format)}`}>
+                        {p.api_format}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="text-xs text-muted-foreground font-mono truncate">{p.base_url || '(default)'}</span>
+                      {p.api_key_set && (
+                        <>
+                          <span className="text-xs text-muted-foreground">·</span>
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                            <Key className="w-3 h-3" />
+                            {p.api_key_masked}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <button
+                      onClick={() => startEditProvider(p)}
+                      className="p-1.5 rounded hover:bg-muted transition-colors"
+                      title="编辑"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleProviderDelete(p.id)}
+                      className="p-1.5 rounded hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950 transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* ── 2. 模型库 ───────────────────────────────────────────────── */}
@@ -271,7 +450,7 @@ export default function Settings() {
             <div>
               <h2 className="font-semibold text-base">模型库</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
-                管理可选模型，下方下拉框将从此列表中读取。
+                管理可选模型，每个模型关联一个供应商，请求将通过该供应商的 API 发送。
               </p>
             </div>
             {!showAddForm && (
@@ -314,27 +493,21 @@ export default function Settings() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium mb-1 block">提供商</label>
-                  <select
-                    value={formProvider}
-                    onChange={e => handleProviderChange(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                  >
-                    {PROVIDERS.map(p => (
-                      <option key={p.label} value={p.label}>{p.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs font-medium mb-1 block">API 格式（自动填充）</label>
-                  <input
-                    value={formApiFormat}
-                    readOnly
-                    className="w-full border rounded-lg px-3 py-2 text-sm bg-muted text-muted-foreground cursor-not-allowed"
-                  />
-                </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">供应商 *</label>
+                <select
+                  value={formProviderId ?? ''}
+                  onChange={e => setFormProviderId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="">请选择供应商</option>
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.api_format})</option>
+                  ))}
+                </select>
+                {providers.length === 0 && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">请先在上方添加至少一个供应商</p>
+                )}
               </div>
               <div className="flex gap-2 justify-end">
                 <button onClick={resetForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
@@ -342,7 +515,7 @@ export default function Settings() {
                 </button>
                 <button
                   onClick={handleModelSubmit}
-                  disabled={!formModelId.trim() || modelSaving}
+                  disabled={!formModelId.trim() || !formProviderId || modelSaving}
                   className="text-sm px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
                 >
                   {modelSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
@@ -364,7 +537,7 @@ export default function Settings() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium truncate">{m.display_name || m.model_id}</span>
-                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${providerBadgeColor(m.api_format)}`}>
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${formatBadgeColor(m.api_format)}`}>
                         {m.api_format}
                       </span>
                     </div>
@@ -495,11 +668,11 @@ export default function Settings() {
           </button>
         </section>
 
-        {/* ── 6. 网络代理 + 原生端点 ──────────────────────────────────── */}
+        {/* ── 6. 网络代理 ──────────────────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-1">网络代理</h2>
           <p className="text-xs text-muted-foreground mb-4">
-            开启 VPN 时，若无法连接 API，请在此填写本地代理地址。留空则自动读取系统环境变量。
+            开启 VPN 时，若无法连接 API，请在此填写本地代理地址。所有 API 请求都会经过此代理。
           </p>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -510,7 +683,7 @@ export default function Settings() {
                 placeholder="例：http://127.0.0.1:7890"
                 className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
               />
-              <p className="text-xs text-muted-foreground mt-1">用于 HTTPS 请求（AiHubMix API）</p>
+              <p className="text-xs text-muted-foreground mt-1">用于 HTTPS 请求（所有 API 调用）</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">HTTP 代理</label>
@@ -521,26 +694,6 @@ export default function Settings() {
                 className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
               />
               <p className="text-xs text-muted-foreground mt-1">通常与 HTTPS 代理相同</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium mb-1 block">Gemini 原生端点</label>
-              <input
-                value={geminiBaseUrl}
-                onChange={e => setGeminiBaseUrl(e.target.value)}
-                placeholder="https://aihubmix.com/gemini"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-              />
-              <p className="text-xs text-muted-foreground mt-1">默认 AiHubMix 代理端点，留空则直连 Google</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium mb-1 block">Claude 原生端点</label>
-              <input
-                value={anthropicBaseUrl}
-                onChange={e => setAnthropicBaseUrl(e.target.value)}
-                placeholder="留空使用 SDK 默认（直连 Anthropic）"
-                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-              />
-              <p className="text-xs text-muted-foreground mt-1">Anthropic 原生格式端点，填写 AIHubMix 端点时走代理</p>
             </div>
           </div>
         </section>

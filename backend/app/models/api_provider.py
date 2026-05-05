@@ -4,13 +4,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
-class ModelEntry(Base):
-    __tablename__ = "model_library"
+class ApiProvider(Base):
+    __tablename__ = "api_providers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    api_key: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     api_format: Mapped[str] = mapped_column(String(20), nullable=False, default="openai")
-    provider_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

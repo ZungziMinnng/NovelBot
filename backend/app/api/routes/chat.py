@@ -62,9 +62,11 @@ async def chat_stream(
         volume=novel.current_volume or 1,
     )
     system_prompt = _build_chat_system_prompt(ctx)
+    if req.system_prompt.strip():
+        system_prompt += f"\n\n=== 用户自定义指令 ===\n{req.system_prompt}"
 
     # 应用消息轮次限制（1轮 = user+assistant 各1条 = 2条消息）
-    chat_rounds = novel.chat_context_rounds
+    chat_rounds = req.context_rounds if req.context_rounds > 0 else (novel.chat_context_rounds or 0)
     if chat_rounds and chat_rounds > 0:
         max_messages = chat_rounds * 2
         trimmed = req.messages[-max_messages:]
@@ -87,9 +89,14 @@ async def chat_stream(
                 messages=messages,
                 model=model,
                 api_format=api_format,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
             ):
                 if isinstance(chunk, tuple):
-                    in_tok, out_tok = chunk
+                    _, in_tok, out_tok = chunk
+                elif isinstance(chunk, dict):
+                    if "warning" in chunk:
+                        yield _sse("warning", chunk["warning"])
                 else:
                     yield _sse("token", chunk)
             yield _sse("done", {"input_tokens": in_tok, "output_tokens": out_tok})

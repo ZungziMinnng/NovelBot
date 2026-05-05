@@ -4,6 +4,8 @@ Orchestrator: LangGraph 风格的状态机，协调所有 Agent。
 """
 import asyncio
 import json
+import logging
+import time
 from typing import AsyncIterator, TypedDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete as sql_delete
@@ -12,9 +14,11 @@ from app.models.memory import Memory
 from app.models.novel import Novel
 from app.models.chapter import Chapter
 from app.services.context_builder import build_generation_context
-from app.services import summarizer
+from app.services import summarizer, llm_client
 from app.agents import writer, critic
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class NovelState(TypedDict):
@@ -40,6 +44,15 @@ def _sse(event: str, data: str) -> str:
 def _sse_json(event: str, data: dict) -> str:
     payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
     return f"data: {payload}\n\n"
+
+
+async def _timed(coro):
+    t0 = time.monotonic()
+    try:
+        result = await coro
+    except Exception as e:
+        result = e
+    return result, int((time.monotonic() - t0) * 1000)
 
 
 async def run_chapter_generation(
@@ -121,6 +134,8 @@ async def run_chapter_generation(
             writer_in_tok = 0
             writer_out_tok = 0
             writer_truncated = False
+            writer_payload = None
+            writer_start = time.monotonic()
             async for item in writer.stream_chapter(
                 ctx=state["context"],
                 instruction=state["instruction"],
@@ -137,7 +152,8 @@ async def run_chapter_generation(
                     if "warning" in item:
                         yield _sse("warning", item["warning"])
                     elif "llm_payload" in item:
-                        yield _sse_json("llm_request", item["llm_payload"])
+                        writer_payload = item["llm_payload"]
+                        yield _sse_json("llm_request", writer_payload)
                 elif isinstance(item, tuple):
                     finish_reason, writer_in_tok, writer_out_tok = item
                     if finish_reason == "length":
@@ -149,6 +165,16 @@ async def run_chapter_generation(
             state["generated_text"] = full_text
             state["total_input_tokens"] += writer_in_tok
             state["total_output_tokens"] += writer_out_tok
+            writer_duration = int((time.monotonic() - writer_start) * 1000)
+            yield _sse_json("llm_call", {
+                "agent": "writer",
+                "model": writer_payload.get("model", "") if writer_payload else "",
+                "status": "truncated" if writer_truncated else "ok",
+                "input_tokens": writer_in_tok,
+                "output_tokens": writer_out_tok,
+                "duration_ms": writer_duration,
+                "payload": writer_payload,
+            })
             yield _sse_json("agent_done", {
                 "agent": "writer",
                 "label": agent_label,
@@ -161,15 +187,25 @@ async def run_chapter_generation(
             if getattr(novel, "enable_critic", True):
                 yield _sse("stage", "reviewing")
                 yield _sse_json("agent_start", {"agent": "critic", "label": "质量审查"})
-                passed, issues, critic_in_tok, critic_out_tok = await critic.review_chapter(
+                critic_start = time.monotonic()
+                passed, issues, critic_in_tok, critic_out_tok, critic_model = await critic.review_chapter(
                     generated_text=state["generated_text"],
                     ctx=state["context"],
                     fast_model=novel.fast_model,
                 )
+                critic_duration = int((time.monotonic() - critic_start) * 1000)
                 state["passed"] = passed
                 state["critic_issues"] = issues
                 state["total_input_tokens"] += critic_in_tok
                 state["total_output_tokens"] += critic_out_tok
+                yield _sse_json("llm_call", {
+                    "agent": "critic",
+                    "model": critic_model,
+                    "status": "ok",
+                    "input_tokens": critic_in_tok,
+                    "output_tokens": critic_out_tok,
+                    "duration_ms": critic_duration,
+                })
                 yield _sse_json("agent_done", {
                     "agent": "critic",
                     "label": "质量审查",
@@ -196,18 +232,76 @@ async def run_chapter_generation(
         yield _sse("stage", "saving")
         chapter = await _save_chapter(session, state, novel)
 
-        # ── Node 5: Update Memory ─────────────────────────────────────────
+        # ── Node 5: Update Memory + Generate Suggestions (parallel) ────────
         yield _sse("stage", "updating_memory")
         yield _sse_json("agent_start", {"agent": "memory", "label": "更新记忆"})
         summary_coro = summarizer.summarize_chapter(session, chapter, novel)
         char_coro = summarizer.update_character_states(
             session, chapter, novel, instruction=state["instruction"]
         )
-        (_, sum_in, sum_out), (char_ok, char_warning, char_in, char_out) = (
-            await asyncio.gather(summary_coro, char_coro)
+        entity_coro = summarizer.update_entity_states(
+            session, chapter, novel, instruction=state["instruction"]
         )
-        mem_in = sum_in + char_in
-        mem_out = sum_out + char_out
+        from app.api.routes.generation import generate_plot_suggestions
+        suggestions_coro = generate_plot_suggestions(
+            novel, state["generated_text"], state["context"], state["chapter_number"],
+            writer_system_prompt=writer_system_prompt,
+        )
+        results = await asyncio.gather(
+            _timed(summary_coro), _timed(char_coro), _timed(entity_coro),
+            suggestions_coro,
+            return_exceptions=True,
+        )
+        mem_model, _ = llm_client.get_agent_client("memory", novel.fast_model)
+
+        r0, dur_sum = results[0]
+        r1, dur_char = results[1]
+        r2, dur_ent = results[2]
+
+        mem_warnings: list[str] = []
+        sum_in = sum_out = char_in = char_out = ent_in = ent_out = 0
+        char_ok = ent_ok = True
+        char_warning = ent_warning = ""
+
+        if isinstance(r0, BaseException):
+            logger.warning("章节摘要生成失败: %s", r0)
+            mem_warnings.append(f"摘要生成失败: {r0}")
+        else:
+            (_, sum_in, sum_out) = r0
+
+        if isinstance(r1, BaseException):
+            logger.warning("角色状态更新失败: %s", r1)
+            mem_warnings.append(f"角色状态更新失败: {r1}")
+        else:
+            (char_ok, char_warning, char_in, char_out) = r1
+
+        if isinstance(r2, BaseException):
+            logger.warning("实体状态更新失败: %s", r2)
+            mem_warnings.append(f"实体状态更新失败: {r2}")
+        else:
+            (ent_ok, ent_warning, ent_in, ent_out) = r2
+
+        yield _sse_json("llm_call", {
+            "agent": "summarizer", "model": mem_model,
+            "status": "error" if isinstance(r0, BaseException) else "ok",
+            "input_tokens": sum_in, "output_tokens": sum_out, "duration_ms": dur_sum,
+        })
+        yield _sse_json("llm_call", {
+            "agent": "char_update", "model": mem_model,
+            "status": "error" if isinstance(r1, BaseException) else "ok",
+            "input_tokens": char_in, "output_tokens": char_out, "duration_ms": dur_char,
+        })
+        yield _sse_json("llm_call", {
+            "agent": "entity_update", "model": mem_model,
+            "status": "error" if isinstance(r2, BaseException) else "ok",
+            "input_tokens": ent_in, "output_tokens": ent_out, "duration_ms": dur_ent,
+        })
+
+        suggestions = results[3] if not isinstance(results[3], BaseException) else []
+        if isinstance(results[3], BaseException):
+            logger.warning("plot_suggestions 在 gather 中失败: %s", results[3])
+        mem_in = sum_in + char_in + ent_in
+        mem_out = sum_out + char_out + ent_out
         state["total_input_tokens"] += mem_in
         state["total_output_tokens"] += mem_out
         yield _sse_json("agent_done", {
@@ -215,21 +309,57 @@ async def run_chapter_generation(
             "label": "更新记忆",
             "input_tokens": mem_in,
             "output_tokens": mem_out,
-            "passed": char_ok,
+            "passed": char_ok and ent_ok,
         })
-        await session.commit()
-        if char_warning:
-            yield _sse("warning", char_warning)
+        try:
+            await session.commit()
+        except Exception as e:
+            logger.warning("记忆更新 commit 失败: %s", e)
+            mem_warnings.append(f"记忆保存失败: {e}")
+            await session.rollback()
+        warnings = [w for w in (char_warning, ent_warning, *mem_warnings) if w]
+        if warnings:
+            yield _sse("warning", "; ".join(warnings))
+        if suggestions:
+            yield _sse_json("plot_suggestions", {"suggestions": suggestions})
 
-        # ── Node 6: Discover New Characters ──────────────────────────────
+        # 自动刷新故事弧概要（每 15 章生成一次，中间粒度摘要层）
+        ch_num = state["chapter_number"]
+        if ch_num >= 15 and ch_num % 15 == 0:
+            try:
+                await summarizer.generate_arc_summary(
+                    session, novel,
+                    start_chapter=ch_num - 14,
+                    end_chapter=ch_num,
+                )
+            except Exception:
+                logger.warning("自动刷新故事弧概要失败", exc_info=True)
+
+        # 自动刷新全书概要（每 5 章刷新一次）
+        if ch_num >= 5 and ch_num % 5 == 0:
+            try:
+                await summarizer.generate_book_summary(session, novel)
+                await session.commit()
+            except Exception:
+                logger.warning("自动刷新全书概要失败", exc_info=True)
+
+        # ── Node 6: Discover New Characters + Entities (parallel) ────────
         from app.agents import character_agent
         existing_names = [c["name"] for c in state["context"].get("characters", [])]
+        existing_entity_names = [e["name"] for e in state["context"].get("world_entities", [])]
         try:
-            candidates = await character_agent.discover_new_characters(
-                novel, state["generated_text"], existing_names
+            candidates, entity_candidates = await asyncio.gather(
+                character_agent.discover_new_characters(
+                    novel, state["generated_text"], existing_names
+                ),
+                character_agent.discover_new_entities(
+                    novel, state["generated_text"], existing_entity_names
+                ),
             )
             if candidates:
                 yield _sse_json("new_characters", {"candidates": candidates})
+            if entity_candidates:
+                yield _sse_json("new_entities", {"candidates": entity_candidates})
         except Exception:
             pass
 

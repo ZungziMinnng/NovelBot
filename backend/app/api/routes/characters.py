@@ -41,7 +41,6 @@ async def create_character(data: CharacterCreate, db: AsyncSession = Depends(get
     if not char.current_state:
         char.current_state = character_agent.init_character_state(char)
 
-    await character_agent.embed_character(char.novel_id, char)
     await db.commit()
     await db.refresh(char)
     return char
@@ -56,7 +55,6 @@ async def update_character(
         raise HTTPException(status_code=404, detail="角色不存在")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(char, k, v)
-    await character_agent.embed_character(char.novel_id, char)
     await db.commit()
     await db.refresh(char)
     return char

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete as sql_delete, func
@@ -6,30 +7,93 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.models.chapter import Chapter
 from app.models.memory import Memory, Outline
 from app.models.character import Character
+from app.models.world_entity import WorldEntity
 from app.models.novel import Novel
 from app.services import llm_client, vector_store
 from app.config import settings
 
+logger = logging.getLogger(__name__)
 
-CHAPTER_SUMMARY_PROMPT_PREFIX = """请将以下章节内容压缩为250字以内的情节摘要。
 
-输出规范（严格遵守）：
-- 只描述：人物去了哪里、做了什么决定、获得了什么信息、情节如何推进
-- 涉及亲密或暴力场景时，只写结果，不写任何过程细节
-- 若出现任何露骨词汇或动作描写，可改写或者减弱程度
-- 使用编辑/编剧视角的中性叙述语言"""
+def _build_analysis_messages(
+    prompt_prefix: str,
+    content: str,
+    prompt_suffix: str,
+    api_format: str,
+) -> list[dict]:
+    """组装「分析章节内容」类任务的消息列表。
 
-CHAPTER_SUMMARY_PROMPT_SUFFIX = "只输出摘要文本，不要任何前缀或说明。"
+    Gemini:  章节原文放 assistant(model) 角色，绕过 PROHIBITED_CONTENT 过滤。
+    OpenAI / DeepSeek:  合并为单条 user 消息，确保模型将原文视为待分析素材。
+    """
+    if api_format == "gemini":
+        return [
+            {"role": "user", "content": prompt_prefix},
+            {"role": "assistant", "content": f"--- 章节内容 ---\n{content}\n---"},
+            {"role": "user", "content": prompt_suffix},
+        ]
+    return [
+        {"role": "user", "content": f"{prompt_prefix}\n\n--- 章节内容 ---\n{content}\n---\n\n{prompt_suffix}"},
+    ]
+
+
+# ── 正文清理：截断 LLM 可能自行附加的剧情发展选项 ─────────────────────────
+_PLOT_SUGGESTION_PATTERNS = re.compile(
+    r'\n\s*(?:---+\s*\n\s*)?'
+    r'(?:剧情发展选项|剧情走向建议|下一章剧情发展|后续剧情发展|'
+    r'接下来的剧情|下一章可能的发展|剧情发展方向|可能的发展方向)'
+    r'[：:\s]',
+)
+
+
+def strip_plot_suggestions(text: str) -> str:
+    """去除章节正文末尾 LLM 自行附加的剧情发展选项段落。"""
+    m = _PLOT_SUGGESTION_PATTERNS.search(text)
+    if m:
+        return text[:m.start()].rstrip()
+    return text
+
+
+# ── 摘要清理：去除 LLM 自行添加的前缀标题 ──────────────────────────────────
+_SUMMARY_PREFIX_PATTERN = re.compile(
+    r'^[\s\n]*(?:\*{0,2})?'
+    r'(?:章节)?(?:剧情)?(?:梗概|摘要|概要|总结|概述)[：:]\s*(?:\*{0,2})?\s*\n?',
+)
+
+
+def _clean_summary(text: str) -> str:
+    """去除 LLM 在摘要开头自行添加的标题前缀（如"章节剧情梗概："）和 Markdown 格式。"""
+    cleaned = _SUMMARY_PREFIX_PATTERN.sub('', text).strip()
+    # 去除整体的 Markdown 加粗包裹
+    if cleaned.startswith('**') and '**' in cleaned[2:]:
+        cleaned = cleaned.replace('**', '')
+    return cleaned
+
+
+CHAPTER_SUMMARY_PROMPT_PREFIX = """你是一位小说编辑，需要将以下章节内容压缩为250字以内的剧情梗概。
+
+输出规范：
+- 梗概开头用【时间】标注本章覆盖的故事时间段（如：【三日后·白天】、【当天夜晚】）
+- 如果章节内发生了时间跳跃，必须明确标注
+- 如实记录章节中发生的所有重要事件，包括人物行为、决定、冲突、关系变化
+- 保留对后续剧情有影响的关键细节
+- 使用简洁的叙述语言"""
+
+CHAPTER_SUMMARY_PROMPT_SUFFIX = (
+    "请直接输出剧情梗概文本。\n"
+    "⚠️ 格式要求（必须遵守）：\n"
+    "1. 第一行必须以【时间】开头（如【当天夜晚】、【三日后·清晨】）\n"
+    "2. 不要输出任何标题、前缀（如『章节剧情梗概：』）或 Markdown 格式符号（如 ** 或 ##）\n"
+    "3. 直接以【时间标注】开始正文"
+)
 
 
 CHARACTER_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新角色状态卡。
 
-输出规范（严格遵守）：
-- 所有字段使用编辑/编剧视角的中性事实语言
-- 涉及亲密关系：只写"与X发生了亲密关系"或"与X关系发生变化"，不写任何细节
-- 涉及暴力/对抗：只写"击败/控制了X"，不写过程
-- 禁止出现任何露骨词汇、动作描写或场景描述
-- 只提取对后续剧情有影响的状态变化（位置、目标、已知秘密、关系结果）
+输出规范：
+- 如实记录本章中角色的状态变化
+- 提取对后续剧情有影响的变化：位置、目标、已知秘密、关系变化、能力变化
+- 使用简洁的事实语言
 
 小说当前角色状态：
 {character_states}"""
@@ -58,24 +122,68 @@ async def summarize_chapter(
     if not chapter.content.strip():
         return "", 0, 0
 
+    clean_content = strip_plot_suggestions(chapter.content)
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    # 章节原文放入 assistant 消息（Gemini model 角色），避免触发 PROHIBITED_CONTENT 过滤。
-    messages = [
-        {"role": "user", "content": CHAPTER_SUMMARY_PROMPT_PREFIX},
-        {"role": "assistant", "content": f"--- 章节内容 ---\n{chapter.content[:6000]}\n---"},
-        {"role": "user", "content": CHAPTER_SUMMARY_PROMPT_SUFFIX},
-    ]
+    messages = _build_analysis_messages(
+        CHAPTER_SUMMARY_PROMPT_PREFIX, clean_content[:6000],
+        CHAPTER_SUMMARY_PROMPT_SUFFIX, api_format,
+    )
     summary, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
         messages=messages,
         model=model,
         api_format=api_format,
         temperature=0.3,
-        max_tokens=500,
+        max_tokens=2000,
     )
+    summary = _clean_summary(summary)
+
+    # 检测输出截断：摘要未以正常标点结尾，说明被中途截断（token 耗尽或安全过滤）
+    _s = summary.strip()
+    _truncated = bool(_s) and _s[-1] not in '。！？…」】'
+    if _truncated:
+        logger.warning(
+            "章节 %s 摘要疑似被截断 (len=%d, tail=%r)，将使用脱敏提示重试",
+            chapter.number, len(_s), _s[-20:],
+        )
+    if not _s:
+        logger.warning("章节 %s 摘要为空，将使用脱敏提示重试", chapter.number)
+    if not _s or _truncated:
+        # 截断重试：换用更简洁的提示，减少输出长度
+        retry_messages = _build_analysis_messages(
+            "请为一部小说章节写一段200字的剧情梗概。\n如实记录所有重要事件，简洁概括即可。",
+            clean_content[:4000],
+            "请基于以上内容输出剧情梗概：",
+            api_format,
+        )
+        retry_summary, retry_in, retry_out = await llm_client.dispatch_chat_complete_with_usage(
+            messages=retry_messages,
+            model=model,
+            api_format=api_format,
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        in_tok += retry_in
+        out_tok += retry_out
+        retry_summary = _clean_summary(retry_summary)
+        if retry_summary.strip() and len(retry_summary.strip()) > len(summary.strip()):
+            logger.info(
+                "章节 %s 脱敏重试成功 (len=%d → %d)",
+                chapter.number, len(summary.strip()), len(retry_summary.strip()),
+            )
+            summary = retry_summary
+        else:
+            logger.warning(
+                "章节 %s 脱敏重试未改善 (original=%d, retry=%d)",
+                chapter.number, len(summary.strip()), len(retry_summary.strip()),
+            )
+
+    # LLM 返回空字符串时（内容过滤等），跳过保存，避免创建空 Memory 行
+    if not summary.strip():
+        return "", in_tok, out_tok
 
     # 保存摘要到章节
     chapter.summary = summary
-    chapter.word_count = len(chapter.content)
+    chapter.word_count = len(clean_content)
 
     # 先删除同章节的旧摘要，避免多次生成/确认产生重复行占用滚动窗口
     await session.execute(
@@ -96,9 +204,10 @@ async def summarize_chapter(
     session.add(memory)
 
     # 存入向量库（异步，不阻塞事件循环）
+    doc_id = f"chapter_{chapter.id}_summary"
     await vector_store.astore_text(
         novel_id=novel.id,
-        doc_id=f"chapter_{chapter.id}_summary",
+        doc_id=doc_id,
         text=summary,
         metadata={
             "type": "chapter_summary",
@@ -106,17 +215,7 @@ async def summarize_chapter(
             "chapter_number": chapter.number,
         },
     )
-    # 原文分段批量存入向量库（每500字一段，单次 upsert）
-    chunks = [chapter.content[i:i+500] for i in range(0, len(chapter.content), 500)]
-    batch_items = [
-        (
-            f"chapter_{chapter.id}_chunk_{idx}",
-            chunk,
-            {"type": "chapter_content", "volume": chapter.volume, "chapter_number": chapter.number},
-        )
-        for idx, chunk in enumerate(chunks)
-    ]
-    await vector_store.astore_texts_batch(novel.id, batch_items)
+    memory.embedding_id = doc_id
     return summary, in_tok, out_tok
 
 
@@ -136,6 +235,35 @@ def _repair_json(raw: str) -> str:
     text = re.sub(r'//[^\n]*', '', text)
     # 去除尾部逗号: ,} 或 ,]
     text = re.sub(r',\s*([}\]])', r'\1', text)
+    # 修复字符串值内的裸换行符（JSON 标准不允许字符串里有未转义换行）
+    # 逐字符扫描：在引号内部时将 \n \r \t 替换为转义形式
+    result = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and in_string and i + 1 < len(text):
+            result.append(ch)
+            result.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+        elif in_string and ch == '\n':
+            result.append('\\n')
+        elif in_string and ch == '\r':
+            result.append('\\r')
+        elif in_string and ch == '\t':
+            result.append('\\t')
+        else:
+            result.append(ch)
+        i += 1
+    text = ''.join(result)
+    # 修复未闭合的字符串（LLM 截断导致引号不配对）
+    unescaped_quotes = re.findall(r'(?<!\\)"', text)
+    if len(unescaped_quotes) % 2 != 0:
+        text += '"'
     # 截断修复：如果 JSON 未闭合，补齐缺失的闭合符号
     open_brackets = text.count('[') - text.count(']')
     open_braces = text.count('{') - text.count('}')
@@ -186,16 +314,13 @@ async def update_character_states(
     )
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
     prompt_prefix = CHARACTER_UPDATE_PROMPT_PREFIX.format(character_states=states_text)
-    # 章节原文放入 assistant 消息（Gemini model 角色），避免触发 PROHIBITED_CONTENT 过滤。
-    chapter_content = chapter.content[:6000]
+    chapter_content = strip_plot_suggestions(chapter.content)[:6000]
     if instruction:
         chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
-    messages = [
-        {"role": "user", "content": prompt_prefix},
-        {"role": "assistant", "content": f"--- 章节内容 ---\n{chapter_content}\n---"},
-        {"role": "user", "content": CHARACTER_UPDATE_PROMPT_SUFFIX},
-    ]
+    messages = _build_analysis_messages(
+        prompt_prefix, chapter_content, CHARACTER_UPDATE_PROMPT_SUFFIX, api_format,
+    )
 
     total_in, total_out = 0, 0
     try:
@@ -204,7 +329,7 @@ async def update_character_states(
             model=model,
             api_format=api_format,
             temperature=0.2,
-            max_tokens=800,
+            max_tokens=1500,
         )
         total_in += in_tok
         total_out += out_tok
@@ -223,7 +348,7 @@ async def update_character_states(
                 model=model,
                 api_format=api_format,
                 temperature=0.1,
-                max_tokens=800,
+                max_tokens=1500,
             )
             total_in += in_tok
             total_out += out_tok
@@ -247,16 +372,21 @@ async def update_character_states(
             continue
         existing = char_map[target_name].current_state or {}
         merged = dict(existing)
+        # titles 直接覆盖（当前称谓列表，不累积）；其余 list 字段合并去重
+        _OVERWRITE_LIST_KEYS = {"titles"}
         for key, val in state.items():
             if isinstance(val, list):
-                # list 字段保序去重合并（known_secrets, titles 等）
-                old_val = existing.get(key, [])
-                old_list = old_val if isinstance(old_val, list) else [old_val] if old_val else []
-                combined = list(dict.fromkeys(old_list + val))
-                # known_secrets 只保留最近 10 条，避免无限膨胀
-                if key == "known_secrets" and len(combined) > 10:
-                    combined = combined[-10:]
-                merged[key] = combined
+                if key in _OVERWRITE_LIST_KEYS:
+                    # 非空才覆盖，空数组不清除已有数据
+                    if val:
+                        merged[key] = val
+                else:
+                    old_val = existing.get(key, [])
+                    old_list = old_val if isinstance(old_val, list) else [old_val] if old_val else []
+                    combined = list(dict.fromkeys(old_list + val))
+                    if key == "known_secrets" and len(combined) > 10:
+                        combined = combined[-10:]
+                    merged[key] = combined
             elif val:  # 非空值才覆盖，避免清除上一章已存的信息
                 merged[key] = val
         char_map[target_name].current_state = merged
@@ -269,6 +399,204 @@ async def update_character_states(
     if matched_count == 0 and not unmatched:
         warning = "角色状态更新：LLM 未返回任何角色状态数据"
     return True, warning, total_in, total_out
+
+
+ENTITY_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新世界实体（道具/系统）的状态。
+
+输出规范：
+- 如实记录本章中实体的状态变化
+- 道具：关注持有者变化、新发现的能力
+- 系统：关注等级/层次变化、新解锁的能力
+- 只输出本章有变化的实体，无变化的不要输出
+
+当前世界实体状态：
+{entity_states}"""
+
+ENTITY_UPDATE_PROMPT_SUFFIX = """以 JSON 格式输出，格式为：
+{
+  "实体名": {
+    "owner": "当前持有者/归属者，无变化则留空字符串",
+    "description": "对该道具或系统的最新描述，补充本章揭示的新信息；无新信息则留空字符串",
+    "new_abilities": ["本章新发现/解锁的能力，无则为空数组"],
+    "level_changes": "等级/层次变化描述，无变化则留空字符串"
+  }
+}
+
+只输出 JSON，不要任何解释。"""
+
+
+async def update_entity_states(
+    session: AsyncSession,
+    chapter: Chapter,
+    novel: Novel,
+    instruction: str = "",
+) -> tuple[bool, str, int, int]:
+    """根据章节内容更新世界实体状态。
+    返回 (success, warning_message, input_tokens, output_tokens)。
+    """
+    result = await session.execute(
+        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
+    )
+    entities = result.scalars().all()
+    if not entities:
+        return True, "", 0, 0
+
+    states_text = json.dumps(
+        {e.name: {"type": e.type, **(e.current_state or {})} for e in entities},
+        ensure_ascii=False,
+        indent=2,
+    )
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    prompt_prefix = ENTITY_UPDATE_PROMPT_PREFIX.format(entity_states=states_text)
+    chapter_content = strip_plot_suggestions(chapter.content)[:6000]
+    if instruction:
+        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
+
+    messages = _build_analysis_messages(
+        prompt_prefix, chapter_content, ENTITY_UPDATE_PROMPT_SUFFIX, api_format,
+    )
+
+    total_in, total_out = 0, 0
+    try:
+        raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
+            messages=messages,
+            model=model,
+            api_format=api_format,
+            temperature=0.2,
+            max_tokens=1500,
+        )
+        total_in += in_tok
+        total_out += out_tok
+    except Exception as e:
+        return False, f"实体状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0
+
+    json_text = _repair_json(raw)
+    try:
+        updates = json.loads(json_text)
+    except json.JSONDecodeError:
+        try:
+            raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
+                messages=messages,
+                model=model,
+                api_format=api_format,
+                temperature=0.1,
+                max_tokens=1500,
+            )
+            total_in += in_tok
+            total_out += out_tok
+            json_text = _repair_json(raw)
+            updates = json.loads(json_text)
+        except Exception as e:
+            return False, f"实体状态更新：JSON 解析失败（含重试）({e})", total_in, total_out
+
+    if not isinstance(updates, dict):
+        return False, "实体状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out
+
+    entity_map = {e.name: e for e in entities}
+    unmatched = []
+    matched_count = 0
+    for name, state in updates.items():
+        if not isinstance(state, dict):
+            continue
+        target_name = _fuzzy_match_character(name, entity_map)
+        if target_name is None:
+            unmatched.append(name)
+            continue
+        existing = entity_map[target_name].current_state or {}
+        merged = dict(existing)
+        for key, val in state.items():
+            if isinstance(val, list):
+                old_val = existing.get(key, [])
+                old_list = old_val if isinstance(old_val, list) else [old_val] if old_val else []
+                combined = list(dict.fromkeys(old_list + val))
+                if key == "new_abilities" and len(combined) > 20:
+                    combined = combined[-20:]
+                merged[key] = combined
+            elif val:
+                merged[key] = val
+        entity_map[target_name].current_state = merged
+        flag_modified(entity_map[target_name], "current_state")
+        matched_count += 1
+
+    warning = ""
+    if unmatched:
+        warning = f"实体状态更新：以下名称未匹配到实体库 [{', '.join(unmatched)}]"
+    if matched_count == 0 and not unmatched:
+        warning = "实体状态更新：LLM 未返回任何实体状态数据"
+    return True, warning, total_in, total_out
+
+
+ARC_SUMMARY_PROMPT = """你是一位专业的文学编辑。以下是一部小说连续若干章的章节摘要，请将它们整合为一段故事弧概要。
+
+要求：
+- 聚焦这段章节内的主线进展、重要事件、核心角色变化
+- 保留新引入的伏笔和待解决的冲突
+- 控制在500字以内
+- 使用客观叙述语气，按时间线组织
+
+各章节摘要：
+{summaries}
+
+直接输出故事弧概要，不要任何前缀。"""
+
+
+async def generate_arc_summary(
+    session: AsyncSession,
+    novel: "Novel",  # noqa: F821
+    start_chapter: int,
+    end_chapter: int,
+) -> str:
+    """将 start_chapter 到 end_chapter 的章节摘要合并为一段故事弧概要，
+    存入 Memory 表（memory_type='arc_summary'）。"""
+    result = await session.execute(
+        select(Memory)
+        .where(
+            Memory.novel_id == novel.id,
+            Memory.memory_type == "chapter_summary",
+            Memory.chapter_number >= start_chapter,
+            Memory.chapter_number <= end_chapter,
+        )
+        .order_by(Memory.chapter_number.asc())
+    )
+    memories = result.scalars().all()
+    if not memories:
+        return ""
+
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+
+    summaries_text = "\n".join(
+        f"第{m.chapter_number}章：{m.content}" for m in memories
+    )
+    prompt = ARC_SUMMARY_PROMPT.format(summaries=summaries_text)
+    arc_summary = await llm_client.dispatch_chat_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_format=api_format,
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+    if not arc_summary.strip():
+        return ""
+
+    # 删除同范围的旧弧摘要（避免重复占用空间）
+    await session.execute(
+        sql_delete(Memory).where(
+            Memory.novel_id == novel.id,
+            Memory.memory_type == "arc_summary",
+            Memory.chapter_number == end_chapter,
+        )
+    )
+
+    # 存入 Memory 表
+    memory = Memory(
+        novel_id=novel.id,
+        memory_type="arc_summary",
+        content=arc_summary.strip(),
+        chapter_number=end_chapter,
+    )
+    session.add(memory)
+    return arc_summary.strip()
 
 
 BOOK_SUMMARY_PROMPT = """你是一位专业的文学编辑。以下是一部小说各章节的摘要，请将它们整合为一份全书概要。
@@ -323,16 +651,32 @@ async def generate_book_summary(
     novel: "Novel",  # noqa: F821
 ) -> str:
     """将所有章节摘要整合成全书概要，存入 novel.book_summary。
-    当章节数超过 BATCH_SIZE 时，自动分批概括再整合，支持百章级别。"""
-    result = await session.execute(
+    优先使用弧摘要（arc_summary）减少压缩层级；若无弧摘要则回退到章节摘要。
+    当摘要数超过 BATCH_SIZE 时，自动分批概括再整合，支持百章级别。"""
+    # 优先使用弧摘要（中间粒度，信息保留率更高）
+    arc_result = await session.execute(
         select(Memory)
         .where(
             Memory.novel_id == novel.id,
-            Memory.memory_type == "chapter_summary",
+            Memory.memory_type == "arc_summary",
         )
         .order_by(Memory.chapter_number.asc())
     )
-    memories = result.scalars().all()
+    arc_memories = arc_result.scalars().all()
+    if arc_memories:
+        memories = arc_memories
+    else:
+        # 回退到章节摘要
+        result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.novel_id == novel.id,
+                Memory.memory_type == "chapter_summary",
+            )
+            .order_by(Memory.chapter_number.asc())
+        )
+        memories = result.scalars().all()
+
     if not memories:
         return ""
 

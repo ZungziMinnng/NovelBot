@@ -3,7 +3,8 @@ import json
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.novel import Novel
 from app.models.character import Character
-from app.services import llm_client, vector_store
+from app.services import llm_client
+from app.services.summarizer import _build_analysis_messages
 from app.prompts.loader import render
 
 
@@ -14,12 +15,14 @@ async def generate_character_sheet(
     """使用 LLM 生成完整角色卡"""
     prompt = render(
         "character.jinja2",
-        core_setting=novel.core_setting[:500],
+        core_setting=novel.core_setting[:2000],
         name=character.name,
         role=character.role,
         age=character.age,
         description=character.description,
         premise=novel.premise,
+        genre=novel.genre,
+        writing_style=novel.writing_style,
     )
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)
@@ -46,7 +49,7 @@ def init_character_state(character: Character) -> dict:
     """初始化角色状态（故事开始前）"""
     return {
         "location": "故事起点",
-        "current_goal": character.full_sheet.get("motivation", ""),
+        "current_goal": "",
         "known_secrets": [],
         "relationship_changes": {},
     }
@@ -73,13 +76,12 @@ async def discover_new_characters(
     )
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)
+    messages = _build_analysis_messages(
+        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
+    )
     try:
         raw = await llm_client.dispatch_chat_complete(
-            messages=[
-                {"role": "user",      "content": prompt},
-                {"role": "assistant", "content": chapter_content[:3000]},
-                {"role": "user",      "content": "请输出 JSON 数组："},
-            ],
+            messages=messages,
             model=model,
             api_format=api_format,
             temperature=0.3,
@@ -95,17 +97,53 @@ async def discover_new_characters(
         return []
 
 
-async def embed_character(novel_id: int, character: Character) -> None:
-    """将角色信息写入向量库"""
-    text = (
-        f"角色：{character.name}（{character.role}）\n"
-        f"描述：{character.description}\n"
-        f"性格：{character.full_sheet.get('personality', '')}\n"
-        f"动机：{character.full_sheet.get('motivation', '')}"
+async def discover_new_entities(
+    novel: Novel,
+    chapter_content: str,
+    existing_names: list[str],
+) -> list[dict]:
+    """从章节内容中提取未录入的道具/系统，返回 [{name, type, description}]"""
+    if not chapter_content.strip():
+        return []
+
+    names_str = "、".join(existing_names) if existing_names else "（暂无）"
+    prompt = (
+        f"已知道具/系统：{names_str}\n\n"
+        f"请从以下章节内容中，找出所有首次出现的、有明确名称的重要道具或系统"
+        f"（不在已知列表中的）。\n"
+        f"道具(item)：武器、法宝、丹药、装备等有名称的具体物品\n"
+        f"系统(system)：修炼体系、功法系统、游戏面板、等级系统等机制\n\n"
+        f"只提取章节中实际描述过的，不要凭空捏造。忽略普通无名物品（如'一把剑'）。\n\n"
+        f"以 JSON 数组输出，格式：\n"
+        f'[{{"name": "名称", "type": "item", "description": "一句话简介"}}]\n'
+        f'type 只能是 "item" 或 "system"。\n'
+        f"如果没有新道具/系统，直接输出 []。只输出 JSON，不要任何说明。"
     )
-    vector_store.store_text(
-        novel_id=novel_id,
-        doc_id=f"character_{character.id}",
-        text=text,
-        metadata={"type": "character", "character_id": character.id, "name": character.name},
+
+    model, api_format = llm_client.get_agent_client("character", novel.fast_model)
+    messages = _build_analysis_messages(
+        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
     )
+    try:
+        raw = await llm_client.dispatch_chat_complete(
+            messages=messages,
+            model=model,
+            api_format=api_format,
+            temperature=0.3,
+            max_tokens=600,
+        )
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start == -1 or end <= 0:
+            return []
+        candidates = json.loads(raw[start:end])
+        valid_types = {"item", "system"}
+        return [
+            {**c, "type": c.get("type", "item") if c.get("type") in valid_types else "item"}
+            for c in candidates
+            if isinstance(c, dict) and "name" in c
+        ]
+    except Exception:
+        return []
+
+

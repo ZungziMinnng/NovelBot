@@ -5,6 +5,7 @@ import Home from '@/pages/Home/Home'
 import Editor from '@/pages/Editor/Editor'
 import Characters from '@/pages/Characters/Characters'
 import Outline from '@/pages/Outline/Outline'
+import Locations from '@/pages/Locations/Locations'
 import Settings from '@/pages/Settings/Settings'
 import Admin from '@/pages/Admin/Admin'
 import About from '@/pages/About/About'
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/novel/:id" element={<Editor />} />
         <Route path="/novel/:id/characters" element={<Characters />} />
         <Route path="/novel/:id/outline" element={<Outline />} />
+        <Route path="/novel/:id/locations" element={<Locations />} />
         <Route path="/novel/:id/data" element={<Admin />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/about" element={<About />} />
