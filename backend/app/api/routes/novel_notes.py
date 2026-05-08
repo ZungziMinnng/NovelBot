@@ -32,7 +32,7 @@ async def create_note(data: NoteCreate, db: AsyncSession = Depends(get_db)):
             novel_id=note.novel_id,
             doc_id=_vec_doc_id(note.id),
             text=f"{note.title}\n{note.content}",
-            metadata={"type": "novel_note"},
+            metadata={"type": "novel_note", "note_id": note.id},
         )
     return note
 
@@ -51,7 +51,7 @@ async def update_note(note_id: int, data: NoteUpdate, db: AsyncSession = Depends
             novel_id=note.novel_id,
             doc_id=_vec_doc_id(note.id),
             text=f"{note.title}\n{note.content}",
-            metadata={"type": "novel_note"},
+            metadata={"type": "novel_note", "note_id": note.id},
         )
     else:
         await vector_store.adelete_docs(note.novel_id, [_vec_doc_id(note.id)])

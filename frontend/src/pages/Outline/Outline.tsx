@@ -52,7 +52,7 @@ export default function Outline() {
 
   // ── Timeline extraction ──────────────────────────────────────────────────
   const timelineEntries = [...chapters]
-    .sort((a, b) => a.number - b.number)
+    .sort((a, b) => a.volume - b.volume || a.number - b.number)
     .filter(c => c.summary)
     .map(c => ({ chapter: c.number, time: extractTime(c), summary: c.summary! }))
 

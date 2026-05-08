@@ -428,7 +428,9 @@ async def run_chapter_generation(
                     session, novel,
                     start_chapter=ch_num - 14,
                     end_chapter=ch_num,
+                    volume=state["volume"],
                 )
+                await session.commit()
             except Exception:
                 logger.warning("自动刷新故事弧概要失败", exc_info=True)
 

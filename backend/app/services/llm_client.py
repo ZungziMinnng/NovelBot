@@ -4,6 +4,8 @@ from openai import AsyncOpenAI
 from typing import AsyncIterator, Union
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 # ─── 客户端字典缓存（按供应商凭据缓存，支持多个同格式供应商）──────────────
 _openai_clients: dict[tuple, AsyncOpenAI] = {}
 _gemini_clients: dict[tuple, object] = {}
@@ -23,8 +25,34 @@ _cached_anthropic_key: tuple = ("", "", "", "")
 _model_formats: dict[str, str] = {}
 
 # ─── 供应商缓存 ─────────────────────────────────────────────────────────────
-_providers_cache: dict[int, dict] = {}       # provider_id → {name, api_key, base_url, api_format}
-_model_provider_map: dict[str, int] = {}     # model_id → provider_id
+_providers_cache: dict[int, dict] = {}
+_model_provider_map: dict[str, int] = {}
+
+
+def clear_llm_client_cache() -> None:
+    global _cached_client, _cached_client_key
+    global _cached_gemini_client, _cached_gemini_key
+    global _cached_anthropic_client, _cached_anthropic_key
+    _openai_clients.clear()
+    _gemini_clients.clear()
+    _anthropic_clients.clear()
+    _cached_client = None
+    _cached_client_key = ("", "", "", "")
+    _cached_gemini_client = None
+    _cached_gemini_key = ("", "", "", "")
+    _cached_anthropic_client = None
+    _cached_anthropic_key = ("", "", "", "")
+
+
+def clear_llm_config_cache() -> None:
+    _model_formats.clear()
+    _providers_cache.clear()
+    _model_provider_map.clear()
+
+
+def clear_llm_cache() -> None:
+    clear_llm_client_cache()
+    clear_llm_config_cache()
 
 
 def _build_httpx_client() -> httpx.AsyncClient:
@@ -102,6 +130,7 @@ async def refresh_model_formats(session) -> None:
         _model_formats[m.model_id] = m.api_format
         if m.provider_id:
             _model_provider_map[m.model_id] = m.provider_id
+    logger.info("LLM 模型映射缓存已刷新: models=%d provider_links=%d", len(_model_formats), len(_model_provider_map))
 
 
 async def refresh_provider_cache(session) -> None:
@@ -109,6 +138,7 @@ async def refresh_provider_cache(session) -> None:
     from sqlalchemy import select
     from app.models.api_provider import ApiProvider
     result = await session.execute(select(ApiProvider))
+    clear_llm_client_cache()
     _providers_cache.clear()
     for p in result.scalars():
         _providers_cache[p.id] = {
@@ -117,6 +147,7 @@ async def refresh_provider_cache(session) -> None:
             "base_url": p.base_url,
             "api_format": p.api_format,
         }
+    logger.info("LLM 供应商缓存已刷新，客户端缓存已清空: providers=%d", len(_providers_cache))
 
 
 def _get_provider_config(model: str) -> dict | None:

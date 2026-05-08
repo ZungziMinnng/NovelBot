@@ -358,6 +358,8 @@ export const charactersApi = {
     api.post<Character>(`/characters/${characterId}/enhance`, data).then(r => r.data),
   relationshipGraph: (novelId: number) =>
     api.get<{ nodes: RelationshipNode[]; edges: RelationshipEdge[] }>(`/characters/novel/${novelId}/relationship-graph`).then(r => r.data),
+  generateHistory: (characterId: number) =>
+    api.post<Character>(`/characters/${characterId}/generate-history`, {}, { timeout: 300000 }).then(r => r.data),
 }
 
 // ── World Entity APIs ─────────────────────────────────────────────────────

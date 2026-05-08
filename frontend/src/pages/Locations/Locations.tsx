@@ -82,7 +82,7 @@ export default function Locations() {
   }
 
   const getIcon = (type: string) => {
-    const Icon = TYPE_ICONS[type] || Map
+    const Icon = TYPE_ICONS[type] || MapIcon
     return <Icon className="w-3.5 h-3.5" />
   }
 

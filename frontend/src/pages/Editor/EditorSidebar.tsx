@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { FolderOpen, Users, Globe, X, User, ExternalLink } from 'lucide-react'
 import type { Chapter, Novel, Character } from '@/api/client'
+import { techniquesApi } from '@/api/client'
 import ProjectTab from './sidebar/ProjectTab'
 import CharacterTab from './sidebar/CharacterTab'
 import WorldTab, {
@@ -9,15 +11,22 @@ import WorldTab, {
   WorldSettingView, LocationsView, EntitiesView, NotesView, TimelineView,
 } from './sidebar/WorldTab'
 import FactionsView from './sidebar/FactionsView'
-import TechniquesView from './sidebar/TechniquesView'
+import TechniquesView, { TechniqueDetail } from './sidebar/TechniquesView'
 import RelationshipGraphView from './sidebar/RelationshipGraphView'
 import CharacterEditPanel from './sidebar/CharacterEditPanel'
+import EntityDetailPanel, { NoteDetailPanel, LocationDetailPanel } from './sidebar/EntityDetailPanel'
 
 type Tab = 'project' | 'characters' | 'world'
 
 type DetailView =
   | { type: 'world'; key: string }
   | { type: 'character'; characterId: number; characterName: string }
+
+type EntitySelection =
+  | { kind: 'entity'; id: number }
+  | { kind: 'technique'; id: number }
+  | { kind: 'note'; id: number }
+  | { kind: 'location'; id: number }
 
 const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'project', label: '项目', icon: FolderOpen },
@@ -53,8 +62,10 @@ export default function EditorSidebar({
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<Tab>('project')
   const [detailView, setDetailView] = useState<DetailView | null>(null)
+  const [entitySelection, setEntitySelection] = useState<EntitySelection | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(256)
   const [panelWidth, setPanelWidth] = useState(420)
+  const [entityPanelWidth, setEntityPanelWidth] = useState(420)
   const dragRef = useRef({ startX: 0, startW: 0 })
 
   const createResizeHandler = useCallback((setter: React.Dispatch<React.SetStateAction<number>>, min: number, max: number) => {
@@ -81,6 +92,7 @@ export default function EditorSidebar({
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab)
     setDetailView(null)
+    setEntitySelection(null)
   }
 
   const handleOpenWorldDetail = (key: string) => {
@@ -89,6 +101,7 @@ export default function EditorSidebar({
     } else {
       setDetailView({ type: 'world', key })
     }
+    setEntitySelection(null)
   }
 
   const handleOpenCharacter = (c: Character) => {
@@ -97,7 +110,22 @@ export default function EditorSidebar({
     } else {
       setDetailView({ type: 'character', characterId: c.id, characterName: c.name })
     }
+    setEntitySelection(null)
   }
+
+  const entityType: 'item' | 'system' | null =
+    detailView?.type === 'world' && detailView.key === 'items' ? 'item'
+    : detailView?.type === 'world' && detailView.key === 'systems' ? 'system'
+    : null
+
+  const { data: techniques = [] } = useQuery({
+    queryKey: ['techniques', novelId],
+    queryFn: () => techniquesApi.list(novelId),
+    enabled: entitySelection?.kind === 'technique',
+  })
+  const selectedTechnique = entitySelection?.kind === 'technique'
+    ? techniques.find(t => t.id === entitySelection.id) ?? null
+    : null
 
   let DetailIcon: React.ElementType = Globe
   let detailTitle = ''
@@ -194,7 +222,7 @@ export default function EditorSidebar({
                 <ExternalLink className="w-3.5 h-3.5" />
               </button>
             )}
-            <button onClick={() => setDetailView(null)} className="p-1 rounded hover:bg-muted">
+            <button onClick={() => { setDetailView(null); setEntitySelection(null) }} className="p-1 rounded hover:bg-muted">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -202,12 +230,37 @@ export default function EditorSidebar({
             {detailView.type === 'world' && (
               <>
                 {detailView.key === 'world_setting' && <WorldSettingView novel={novel} onEdit={onOpenSettings} />}
-                {detailView.key === 'locations' && <LocationsView novelId={novelId} />}
-                {detailView.key === 'items' && <EntitiesView novelId={novelId} type="item" />}
-                {detailView.key === 'systems' && <EntitiesView novelId={novelId} type="system" />}
+                {detailView.key === 'locations' && (
+                  <LocationsView novelId={novelId}
+                    onSelectLocation={(id) => setEntitySelection({ kind: 'location', id })}
+                    selectedLocationId={entitySelection?.kind === 'location' ? entitySelection.id : null}
+                  />
+                )}
+                {detailView.key === 'items' && (
+                  <EntitiesView novelId={novelId} type="item"
+                    onSelectEntity={(id) => setEntitySelection({ kind: 'entity', id })}
+                    selectedEntityId={entitySelection?.kind === 'entity' ? entitySelection.id : null}
+                  />
+                )}
+                {detailView.key === 'systems' && (
+                  <EntitiesView novelId={novelId} type="system"
+                    onSelectEntity={(id) => setEntitySelection({ kind: 'entity', id })}
+                    selectedEntityId={entitySelection?.kind === 'entity' ? entitySelection.id : null}
+                  />
+                )}
                 {detailView.key === 'factions' && <FactionsView novelId={novelId} />}
-                {detailView.key === 'techniques' && <TechniquesView novelId={novelId} />}
-                {detailView.key === 'notes' && <NotesView novelId={novelId} />}
+                {detailView.key === 'techniques' && (
+                  <TechniquesView novelId={novelId}
+                    onSelectTechnique={(id) => setEntitySelection({ kind: 'technique', id })}
+                    selectedTechniqueId={entitySelection?.kind === 'technique' ? entitySelection.id : null}
+                  />
+                )}
+                {detailView.key === 'notes' && (
+                  <NotesView novelId={novelId}
+                    onSelectNote={(id) => setEntitySelection({ kind: 'note', id })}
+                    selectedNoteId={entitySelection?.kind === 'note' ? entitySelection.id : null}
+                  />
+                )}
                 {detailView.key === 'timeline' && <TimelineView novelId={novelId} />}
                 {detailView.key === 'relationships' && (
                   <RelationshipGraphView
@@ -230,6 +283,58 @@ export default function EditorSidebar({
           {/* Resize handle */}
           <div
             onMouseDown={createResizeHandler(setPanelWidth, 320, 640)}
+            className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          />
+        </div>
+      )}
+
+      {/* Entity Detail Panel (third column) */}
+      {entitySelection && (
+        <div className="border-r flex flex-col bg-background relative" style={{ width: entityPanelWidth }}>
+          <div className="flex items-center gap-2 px-3 py-2.5 border-b shrink-0">
+            <span className="text-sm font-medium flex-1 truncate">
+              {entitySelection.kind === 'entity' ? (entityType === 'item' ? '道具详情' : '系统详情')
+                : entitySelection.kind === 'technique' ? '功法详情'
+                : entitySelection.kind === 'location' ? '地点详情'
+                : '设定详情'}
+            </span>
+            <button onClick={() => setEntitySelection(null)} className="p-1 rounded hover:bg-muted">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {entitySelection.kind === 'entity' && entityType && (
+              <EntityDetailPanel
+                entityId={entitySelection.id}
+                novelId={novelId}
+                entityType={entityType}
+                onClose={() => setEntitySelection(null)}
+              />
+            )}
+            {entitySelection.kind === 'technique' && selectedTechnique && (
+              <TechniqueDetail
+                technique={selectedTechnique}
+                novelId={novelId}
+                onClose={() => setEntitySelection(null)}
+              />
+            )}
+            {entitySelection.kind === 'note' && (
+              <NoteDetailPanel
+                noteId={entitySelection.id}
+                novelId={novelId}
+                onClose={() => setEntitySelection(null)}
+              />
+            )}
+            {entitySelection.kind === 'location' && (
+              <LocationDetailPanel
+                locationId={entitySelection.id}
+                novelId={novelId}
+                onClose={() => setEntitySelection(null)}
+              />
+            )}
+          </div>
+          <div
+            onMouseDown={createResizeHandler(setEntityPanelWidth, 320, 640)}
             className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
           />
         </div>

@@ -71,19 +71,19 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
     novel = await db.get(Novel, chapter.novel_id)
     chapter.status = "confirmed"
 
+    summary = ""
+    char_warning = ""
+    ent_warning = ""
+    loc_warning = ""
     try:
-        (summary, _, _), (char_ok, char_warning, _, _), (ent_ok, ent_warning, _, _) = await asyncio.gather(
-            summarizer.summarize_chapter(db, chapter, novel),
-            summarizer.update_character_states(db, chapter, novel, instruction=chapter.instruction or ""),
-            summarizer.update_entity_states(db, chapter, novel, instruction=chapter.instruction or ""),
-        )
+        summary, _, _ = await summarizer.summarize_chapter(db, chapter, novel)
+        _, char_warning, _, _ = await summarizer.update_character_states(db, chapter, novel, instruction=chapter.instruction or "")
+        _, ent_warning, _, _ = await summarizer.update_entity_states(db, chapter, novel, instruction=chapter.instruction or "")
+        _, loc_warning, _, _ = await summarizer.update_location_states(db, chapter, novel, instruction=chapter.instruction or "")
     except Exception as e:
-        # LLM 调用失败不应阻塞确认
-        import logging
         logging.getLogger(__name__).warning("确认章节时记忆更新部分失败: %s", e)
-        summary = ""
-        char_warning = str(e)
-        ent_warning = ""
+        if not char_warning:
+            char_warning = str(e)
 
     # 更新小说当前进度
     novel.current_chapter = max(novel.current_chapter, chapter.number)
@@ -98,6 +98,7 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
                 db, novel,
                 start_chapter=chapter.number - 14,
                 end_chapter=chapter.number,
+                volume=chapter.volume,
             )
             await db.commit()
         except Exception:
@@ -114,7 +115,7 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
             import logging
             logging.getLogger(__name__).warning("自动刷新全书概要失败", exc_info=True)
 
-    warnings = [w for w in (char_warning, ent_warning) if w]
+    warnings = [w for w in (char_warning, ent_warning, loc_warning) if w]
     return {
         "summary": summary,
         "status": "confirmed",
@@ -191,12 +192,10 @@ async def delete_chapter(chapter_id: int, db: AsyncSession = Depends(get_db)):
     chapter = await db.get(Chapter, chapter_id)
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
-    # 删除该章节的所有 Memory 行（按 novel_id + chapter_number），
-    # 防止孤儿记录污染后续章节的滚动摘要窗口
+    # 删除该章节的所有 Memory 行，防止污染后续章节的滚动摘要窗口
     await db.execute(
         sql_delete(Memory).where(
-            Memory.novel_id == chapter.novel_id,
-            Memory.chapter_number == chapter.number,
+            Memory.chapter_id == chapter.id,
         )
     )
     # 清理 ChromaDB 中的 summary 向量（兼容清理历史遗留的 content chunk）

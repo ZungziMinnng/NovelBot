@@ -94,26 +94,26 @@ async def build_generation_context(
         vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=4, where={"type": {"$eq": "technique"}}),
     )
 
-    def _rag_filter(all_items, hits):
-        """向量命中 + 名称匹配兜底；无命中时全量回退。返回 (filtered_list, was_filtered)"""
+    def _entity_filter(all_items, hits, query: str):
+        """名称匹配优先，RAG 兜底，均无命中时全量回退。返回 (filtered_list, source)。"""
         if not all_items:
-            return [], False
+            return [], "empty"
+        name_matched = [item for item in all_items if item.name and item.name in query]
+        if name_matched:
+            return name_matched, "name"
         hit_ids = {h["metadata"]["entity_id"] for h in hits}
-        if not hit_ids:
-            return list(all_items), False
-        for item in all_items:
-            if item.name and item.name in world_query and item.id not in hit_ids:
-                hit_ids.add(item.id)
-        return [item for item in all_items if item.id in hit_ids], True
+        if hit_ids:
+            return [item for item in all_items if item.id in hit_ids], "rag"
+        return list(all_items), "full"
 
-    characters, char_filtered = _rag_filter(all_characters, char_hits)
+    characters, char_source = _entity_filter(all_characters, char_hits, world_query)
     all_items_list = [e for e in all_entities if e.type == "item"]
     all_systems_list = [e for e in all_entities if e.type == "system"]
-    items_list, items_filtered = _rag_filter(all_items_list, item_hits)
-    systems_list, sys_filtered = _rag_filter(all_systems_list, sys_hits)
-    locations, loc_filtered = _rag_filter(all_locations, loc_hits)
-    factions, fac_filtered = _rag_filter(all_factions, fac_hits)
-    techniques, tech_filtered = _rag_filter(all_techniques, tech_hits)
+    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query)
+    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query)
+    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query)
+    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query)
+    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query)
 
     def _rag_detail(filtered, total, unit):
         if not filtered:
@@ -130,11 +130,11 @@ async def build_generation_context(
     ]
     ctx["_all_character_names"] = [c.name for c in all_characters]
     if not _on("characters"):
-        meta.append({"key": "characters", "label": "角色状态", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "characters", "label": "角色状态", "detail": "已跳过", "source": char_source, "items": [], "content": ""})
     elif characters:
-        meta.append({"key": "characters", "label": "角色状态", "detail": _rag_detail(characters, len(all_characters), "角色"), "source": "rag", "items": [c.name for c in characters], "content": ""})
+        meta.append({"key": "characters", "label": "角色状态", "detail": _rag_detail(characters, len(all_characters), "角色"), "source": char_source, "items": [c.name for c in characters], "content": ""})
     else:
-        meta.append({"key": "characters", "label": "角色状态", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "characters", "label": "角色状态", "detail": "空", "source": char_source, "items": [], "content": ""})
 
     # 2b. 世界实体（道具/系统）
     filtered_entities = [e for e in all_entities if e.id in {x.id for x in items_list + systems_list}]
@@ -145,17 +145,17 @@ async def build_generation_context(
     ]
     ctx["_all_system_names"] = [e.name for e in all_entities]
     if not _on("items"):
-        meta.append({"key": "items", "label": "道具", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "items", "label": "道具", "detail": "已跳过", "source": items_source, "items": [], "content": ""})
     elif items_list:
-        meta.append({"key": "items", "label": "道具", "detail": _rag_detail(items_list, len(all_items_list), "道具"), "source": "rag", "items": [e.name for e in items_list], "content": ""})
+        meta.append({"key": "items", "label": "道具", "detail": _rag_detail(items_list, len(all_items_list), "道具"), "source": items_source, "items": [e.name for e in items_list], "content": ""})
     else:
-        meta.append({"key": "items", "label": "道具", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "items", "label": "道具", "detail": "空", "source": items_source, "items": [], "content": ""})
     if not _on("systems"):
-        meta.append({"key": "systems", "label": "系统", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "systems", "label": "系统", "detail": "已跳过", "source": sys_source, "items": [], "content": ""})
     elif systems_list:
-        meta.append({"key": "systems", "label": "系统", "detail": _rag_detail(systems_list, len(all_systems_list), "系统"), "source": "rag", "items": [e.name for e in systems_list], "content": ""})
+        meta.append({"key": "systems", "label": "系统", "detail": _rag_detail(systems_list, len(all_systems_list), "系统"), "source": sys_source, "items": [e.name for e in systems_list], "content": ""})
     else:
-        meta.append({"key": "systems", "label": "系统", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "systems", "label": "系统", "detail": "空", "source": sys_source, "items": [], "content": ""})
 
     # 2c. 地点
     ctx["locations"] = [
@@ -167,11 +167,11 @@ async def build_generation_context(
         for l in all_locations
     ]
     if not _on("locations"):
-        meta.append({"key": "locations", "label": "地点", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "locations", "label": "地点", "detail": "已跳过", "source": loc_source, "items": [], "content": ""})
     elif locations:
-        meta.append({"key": "locations", "label": "地点", "detail": _rag_detail(locations, len(all_locations), "地点"), "source": "rag", "items": [l.name for l in locations], "content": ""})
+        meta.append({"key": "locations", "label": "地点", "detail": _rag_detail(locations, len(all_locations), "地点"), "source": loc_source, "items": [l.name for l in locations], "content": ""})
     else:
-        meta.append({"key": "locations", "label": "地点", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "locations", "label": "地点", "detail": "空", "source": loc_source, "items": [], "content": ""})
 
     # 2d. 势力
     ctx["factions"] = [
@@ -180,11 +180,11 @@ async def build_generation_context(
         for f in factions
     ]
     if not _on("factions"):
-        meta.append({"key": "factions", "label": "势力", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "factions", "label": "势力", "detail": "已跳过", "source": fac_source, "items": [], "content": ""})
     elif factions:
-        meta.append({"key": "factions", "label": "势力", "detail": _rag_detail(factions, len(all_factions), "势力"), "source": "rag", "items": [f.name for f in factions], "content": ""})
+        meta.append({"key": "factions", "label": "势力", "detail": _rag_detail(factions, len(all_factions), "势力"), "source": fac_source, "items": [f.name for f in factions], "content": ""})
     else:
-        meta.append({"key": "factions", "label": "势力", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "factions", "label": "势力", "detail": "空", "source": fac_source, "items": [], "content": ""})
 
     # 2e. 功法/武技
     ctx["techniques"] = [
@@ -194,16 +194,26 @@ async def build_generation_context(
     ]
     ctx["_all_technique_names"] = [t.name for t in all_techniques]
     if not _on("techniques"):
-        meta.append({"key": "techniques", "label": "功法", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "techniques", "label": "功法", "detail": "已跳过", "source": tech_source, "items": [], "content": ""})
     elif techniques:
-        meta.append({"key": "techniques", "label": "功法", "detail": _rag_detail(techniques, len(all_techniques), "功法"), "source": "rag", "items": [t.name for t in techniques], "content": ""})
+        meta.append({"key": "techniques", "label": "功法", "detail": _rag_detail(techniques, len(all_techniques), "功法"), "source": tech_source, "items": [t.name for t in techniques], "content": ""})
     else:
-        meta.append({"key": "techniques", "label": "功法", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "techniques", "label": "功法", "detail": "空", "source": tech_source, "items": [], "content": ""})
 
     # 2f. 补充设定笔记
-    notes_result = await session.execute(
-        select(NovelNote).where(NovelNote.novel_id == novel.id)
+    note_hits = await vector_store.asearch_similar_with_meta(
+        novel.id, world_query, top_k=5,
+        where={"type": {"$eq": "novel_note"}},
     )
+    hit_note_ids = {
+        h.get("metadata", {}).get("note_id")
+        for h in note_hits
+        if h.get("metadata", {}).get("note_id") is not None
+    }
+    notes_query = select(NovelNote).where(NovelNote.novel_id == novel.id)
+    if hit_note_ids:
+        notes_query = notes_query.where(NovelNote.id.in_(hit_note_ids))
+    notes_result = await session.execute(notes_query)
     notes = notes_result.scalars().all()
     ctx["notes"] = [
         {"title": n.title, "content": n.content}
@@ -212,7 +222,8 @@ async def build_generation_context(
     if not _on("notes_context"):
         meta.append({"key": "notes_context", "label": "补充设定", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
     elif notes:
-        meta.append({"key": "notes_context", "label": "补充设定", "detail": f"{len(notes)}条设定", "source": "rag", "items": [n.title for n in notes], "content": ""})
+        detail = f"{len(notes)}条检索" if hit_note_ids else f"{len(notes)}条设定"
+        meta.append({"key": "notes_context", "label": "补充设定", "detail": detail, "source": "rag", "items": [n.title for n in notes], "content": ""})
     else:
         meta.append({"key": "notes_context", "label": "补充设定", "detail": "空", "source": "rag", "items": [], "content": ""})
 
@@ -238,6 +249,7 @@ async def build_generation_context(
     max_summaries = novel.rolling_summary_count or 5
     rolling_text, rolling_chapter_nums = await summarizer.get_rolling_summary(
         session, novel.id, chapter_number,
+        volume=volume,
         max_summaries=max_summaries,
     )
     ctx["rolling_summary"] = rolling_text
@@ -254,6 +266,7 @@ async def build_generation_context(
         .where(
             Memory.novel_id == novel.id,
             Memory.memory_type == "arc_summary",
+            Memory.volume == volume,
             Memory.chapter_number < chapter_number,
         )
         .order_by(Memory.chapter_number.desc())
@@ -276,6 +289,7 @@ async def build_generation_context(
         rag_chapter_filter: list = [
             {"chapter_number": {"$gte": max(1, chapter_number - 20)}},
             {"type": {"$eq": "chapter_summary"}},
+            {"volume": {"$eq": volume}},
         ]
         if len(excluded_chapters) == 1:
             rag_chapter_filter.append({"chapter_number": {"$ne": next(iter(excluded_chapters))}})

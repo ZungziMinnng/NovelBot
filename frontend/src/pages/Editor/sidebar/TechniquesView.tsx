@@ -6,6 +6,8 @@ import toast from 'react-hot-toast'
 
 interface Props {
   novelId: number
+  onSelectTechnique?: (id: number) => void
+  selectedTechniqueId?: number | null
 }
 
 const TYPES = ['全部', '功法', '武技', '身法', '秘术', '阵法'] as const
@@ -19,7 +21,7 @@ const TYPE_COLORS: Record<string, string> = {
   阵法: 'bg-green-500/20 text-green-400',
 }
 
-export default function TechniquesView({ novelId }: Props) {
+export default function TechniquesView({ novelId, onSelectTechnique, selectedTechniqueId }: Props) {
   const qc = useQueryClient()
   const { data: techniques = [] } = useQuery({
     queryKey: ['techniques', novelId],
@@ -28,7 +30,6 @@ export default function TechniquesView({ novelId }: Props) {
 
   const [search, setSearch] = useState('')
   const [filterType, setFilterType] = useState('全部')
-  const [selectedId, setSelectedId] = useState<number | null>(null)
   const [adding, setAdding] = useState(false)
   const [saving, setSaving] = useState(false)
   const [transferMenuId, setTransferMenuId] = useState<number | null>(null)
@@ -48,8 +49,6 @@ export default function TechniquesView({ novelId }: Props) {
     if (search && !t.name.includes(search) && !t.type.includes(search)) return false
     return true
   })
-
-  const selected = techniques.find((t) => t.id === selectedId) || null
 
   return (
     <div className="flex flex-col h-full">
@@ -86,9 +85,9 @@ export default function TechniquesView({ novelId }: Props) {
         {filtered.map((t) => (
           <div
             key={t.id}
-            onClick={() => setSelectedId(selectedId === t.id ? null : t.id)}
+            onClick={() => onSelectTechnique?.(t.id)}
             className={`group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors mb-0.5 relative ${
-              selectedId === t.id ? 'bg-muted ring-1 ring-primary' : 'hover:bg-muted'
+              selectedTechniqueId === t.id ? 'bg-muted ring-1 ring-primary' : 'hover:bg-muted'
             }`}
           >
             <div className="flex-1 min-w-0">
@@ -145,14 +144,6 @@ export default function TechniquesView({ novelId }: Props) {
         )}
       </div>
 
-      {selected && (
-        <TechniqueDetail
-          technique={selected}
-          novelId={novelId}
-          onClose={() => setSelectedId(null)}
-        />
-      )}
-
       {adding && (
         <AddTechniqueModal
           saving={saving}
@@ -171,7 +162,7 @@ export default function TechniquesView({ novelId }: Props) {
   )
 }
 
-function TechniqueDetail({ technique, novelId, onClose }: {
+export function TechniqueDetail({ technique, novelId, onClose }: {
   technique: Technique
   novelId: number
   onClose: () => void
@@ -203,7 +194,7 @@ function TechniqueDetail({ technique, novelId, onClose }: {
   const set = (key: string, val: string) => setForm({ ...form, [key]: val })
 
   return (
-    <div className="border-t px-3 py-3 space-y-2.5 max-h-[55%] overflow-y-auto">
+    <div className="px-3 py-3 space-y-2.5 overflow-y-auto">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">功法详情</span>
         <button onClick={handleDelete} className="p-1 hover:text-destructive transition-colors">

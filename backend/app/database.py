@@ -1,7 +1,12 @@
+import logging
+
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     settings.database_url,
@@ -33,6 +38,16 @@ async def get_db():
             yield session
         finally:
             await session.close()
+
+
+def _is_expected_migration_error(exc: Exception) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    message = str(exc).lower()
+    return (
+        "duplicate column name" in message
+        or "already exists" in message
+    )
 
 
 async def _run_migrations() -> None:
@@ -79,8 +94,11 @@ async def _run_migrations() -> None:
         for sql in migrations:
             try:
                 await conn.execute(text(sql))
-            except Exception:
-                pass  # 列已存在则忽略
+            except Exception as exc:
+                if _is_expected_migration_error(exc):
+                    continue
+                logger.exception("数据库迁移失败: %s", sql)
+                raise
 
 
 async def init_db():

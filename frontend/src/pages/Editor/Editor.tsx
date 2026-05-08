@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
-  ArrowLeft, Users, List, Map, Zap, Check, Edit3, Trash2,
+  ArrowLeft, List, Zap, Check, Edit3, Trash2,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, MessageSquare,
   Terminal, BookOpen, ClipboardCheck, Gauge, Search,
@@ -72,6 +72,8 @@ export default function Editor() {
   const [isConfirming, setIsConfirming] = useState(false)
   const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('novel_font_size') || 16))
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
+  const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('novel_font_family') || '')
+  const [fontWeight, setFontWeight] = useState(() => localStorage.getItem('novel_font_weight') || '')
 
   // ── Novel Data ────────────────────────────────────────────────────────────
   const { data: novel } = useQuery({
@@ -85,6 +87,7 @@ export default function Editor() {
   })
 
   const currentChapter = chapters.find((c: Chapter) => c.number === selectedChapterNum) || null
+  const selectedVolume = currentChapter?.volume ?? novel?.current_volume ?? 1
 
   // Sync editContent when chapter changes
   useEffect(() => {
@@ -92,7 +95,7 @@ export default function Editor() {
   }, [currentChapter?.id])
 
   // ── Generation Stream ─────────────────────────────────────────────────────
-  const gen = useGenerationStream(novelId, selectedChapterNum, instruction, targetWords, novel?.title || '')
+  const gen = useGenerationStream(novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novel?.title || '')
 
   // Derived state after generation completes for this chapter
   const justFinishedHere =
@@ -211,14 +214,6 @@ export default function Editor() {
               未设置世界观
             </span>
           )}
-          <button onClick={() => navigate(`/novel/${novelId}/characters`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
-            <Users className="w-3.5 h-3.5" /> 角色
-          </button>
-          <button onClick={() => navigate(`/novel/${novelId}/locations`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
-            <Map className="w-3.5 h-3.5" /> 地图
-          </button>
           <button onClick={() => navigate(`/novel/${novelId}/outline`)}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
             <List className="w-3.5 h-3.5" /> 总览
@@ -423,6 +418,8 @@ export default function Editor() {
               currentChapter={currentChapter}
               fontSize={fontSize}
               lineHeight={lineHeight}
+              fontFamily={fontFamily}
+              fontWeight={fontWeight}
               plotSuggestions={plotSuggestions}
               instruction={instruction}
               onEditContentChange={setEditContent}

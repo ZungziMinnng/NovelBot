@@ -21,6 +21,12 @@ async def _fill_from_provider(entry: ModelEntry, provider_id: int | None, db: As
     entry.api_format = provider.api_format
 
 
+async def _refresh_cache(db: AsyncSession):
+    from app.services import llm_client
+    llm_client.clear_llm_client_cache()
+    await llm_client.refresh_model_formats(db)
+
+
 @router.get("/", response_model=list[ModelEntryOut])
 async def list_models(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(ModelEntry).order_by(ModelEntry.id))
@@ -39,8 +45,7 @@ async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    from app.services import llm_client
-    await llm_client.refresh_model_formats(db)
+    await _refresh_cache(db)
     return entry
 
 
@@ -62,8 +67,7 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
             entry.api_format = data.api_format
     await db.commit()
     await db.refresh(entry)
-    from app.services import llm_client
-    await llm_client.refresh_model_formats(db)
+    await _refresh_cache(db)
     return entry
 
 
@@ -74,6 +78,5 @@ async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="模型不存在")
     await db.delete(entry)
     await db.commit()
-    from app.services import llm_client
-    await llm_client.refresh_model_formats(db)
+    await _refresh_cache(db)
     return {"ok": True}

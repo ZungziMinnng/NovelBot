@@ -116,7 +116,7 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
               onChange={(e) => setForm({ ...form, role: e.target.value })}
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             >
-              {['主角', '女主', '反派', '配角', '盟友'].map((r) => (
+              {['男主', '女主', '反派', '配角', '盟友'].map((r) => (
                 <option key={r} value={r}>{r}</option>
               ))}
             </select>

@@ -1,7 +1,11 @@
 import asyncio
+import logging
+
 import chromadb
 from chromadb.utils import embedding_functions
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _client: chromadb.ClientAPI | None = None
 
@@ -31,11 +35,21 @@ def store_text(
 ) -> None:
     """写入一段文本到向量库"""
     collection = _get_collection(novel_id)
-    collection.upsert(
-        ids=[doc_id],
-        documents=[text],
-        metadatas=[metadata or {}],
-    )
+    try:
+        collection.upsert(
+            ids=[doc_id],
+            documents=[text],
+            metadatas=[metadata or {}],
+        )
+    except Exception:
+        logger.warning(
+            "向量文档写入失败: novel_id=%s doc_id=%s metadata=%s",
+            novel_id,
+            doc_id,
+            metadata,
+            exc_info=True,
+        )
+        raise
 
 
 def search_similar(
@@ -55,6 +69,13 @@ def search_similar(
         docs = results.get("documents", [[]])[0]
         return [d for d in docs if d]
     except Exception:
+        logger.warning(
+            "向量检索失败: novel_id=%s top_k=%s where=%s",
+            novel_id,
+            top_k,
+            where,
+            exc_info=True,
+        )
         return []
 
 
@@ -82,6 +103,13 @@ def search_similar_with_meta(
             if d
         ]
     except Exception:
+        logger.warning(
+            "向量检索失败: novel_id=%s top_k=%s where=%s include_meta=1",
+            novel_id,
+            top_k,
+            where,
+            exc_info=True,
+        )
         return []
 
 
@@ -96,7 +124,17 @@ def store_texts_batch(
     ids = [item[0] for item in items]
     documents = [item[1] for item in items]
     metadatas = [item[2] for item in items]
-    collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    try:
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    except Exception:
+        logger.warning(
+            "向量文档批量写入失败: novel_id=%s count=%s ids=%s",
+            novel_id,
+            len(items),
+            ids,
+            exc_info=True,
+        )
+        raise
 
 
 def delete_docs(novel_id: int, doc_ids: list[str]) -> None:
@@ -107,7 +145,12 @@ def delete_docs(novel_id: int, doc_ids: list[str]) -> None:
     try:
         collection.delete(ids=doc_ids)
     except Exception:
-        pass
+        logger.warning(
+            "向量文档删除失败: novel_id=%s doc_ids=%s",
+            novel_id,
+            doc_ids,
+            exc_info=True,
+        )
 
 
 def delete_novel_collection(novel_id: int) -> None:
@@ -115,7 +158,11 @@ def delete_novel_collection(novel_id: int) -> None:
     try:
         client.delete_collection(f"novel_{novel_id}")
     except Exception:
-        pass
+        logger.warning(
+            "向量集合删除失败: novel_id=%s",
+            novel_id,
+            exc_info=True,
+        )
 
 
 # ─── 异步包装（避免阻塞事件循环）─────────────────────────────────────────────

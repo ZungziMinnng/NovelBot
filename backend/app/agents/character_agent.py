@@ -1,11 +1,19 @@
 """Character Agent: 生成角色卡和初始状态"""
+import asyncio
 import json
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.models.novel import Novel
+from app.models.chapter import Chapter
 from app.models.character import Character
 from app.services import llm_client
 from app.services.summarizer import _build_analysis_messages
 from app.prompts.loader import render
+
+logger = logging.getLogger(__name__)
+
+HISTORY_BATCH_SIZE = 20
 
 
 async def generate_character_sheet(
@@ -241,6 +249,102 @@ async def discover_new_techniques(
         return [c for c in candidates if isinstance(c, dict) and "name" in c]
     except Exception:
         return []
+
+
+async def generate_character_history(
+    session: AsyncSession,
+    novel: Novel,
+    character: Character,
+) -> tuple[list[dict], int, int]:
+    """扫描全文，分批提取角色在各章节中的关键经历。返回 (history[], in_tokens, out_tokens)"""
+    result = await session.execute(
+        select(Chapter)
+        .where(Chapter.novel_id == novel.id, Chapter.content != "")
+        .order_by(Chapter.number)
+    )
+    all_chapters = result.scalars().all()
+    chapters = [ch for ch in all_chapters if character.name in (ch.content or "")]
+    if not chapters:
+        return [], 0, 0
+
+    model, api_format = llm_client.get_agent_client("review")
+    batches = [chapters[i:i + HISTORY_BATCH_SIZE] for i in range(0, len(chapters), HISTORY_BATCH_SIZE)]
+
+    if len(batches) == 1:
+        history, in_tok, out_tok = await _history_batch(character, batches[0], model, api_format)
+        return history, in_tok, out_tok
+
+    tasks = [_history_batch(character, batch, model, api_format) for batch in batches]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_history: list[dict] = []
+    total_in = total_out = 0
+    for r in results:
+        if isinstance(r, Exception):
+            logger.error("角色经历批次失败: %s", r)
+            continue
+        history, in_tok, out_tok = r
+        all_history.extend(history)
+        total_in += in_tok
+        total_out += out_tok
+
+    return all_history, total_in, total_out
+
+
+async def _history_batch(
+    character: Character,
+    batch_chapters: list[Chapter],
+    model: str,
+    api_format: str,
+) -> tuple[list[dict], int, int]:
+    """处理单批章节，提取角色经历。"""
+    text_parts = []
+    for ch in batch_chapters:
+        text_parts.append(f"[第{ch.number}章]\n{ch.content}")
+    full_text = "\n\n".join(text_parts)
+
+    system_prompt = (
+        f"你是小说角色分析助手。以下每一章都包含角色「{character.name}」的相关内容。\n"
+        "请为每一章概括该角色的关键经历。\n"
+        "要求：\n"
+        f"1. 只关注「{character.name}」的行为和遭遇，忽略其他角色的独立剧情\n"
+        "2. 每章100字内概括\n"
+        "3. 每一章都必须输出对应条目\n"
+        "4. 严格以 JSON 数组返回，不要其他文字"
+    )
+    user_prompt = (
+        f"目标角色：{character.name}（{character.role}）\n"
+        f"角色简介：{(character.description or '')[:200]}\n\n"
+        f"{full_text}\n\n"
+        f"请概括「{character.name}」在以上每章中的经历，以 JSON 数组返回：\n"
+        f'[{{"chapter": 章号, "content": "100字内概括"}}]\n'
+        f"只输出 JSON。"
+    )
+
+    raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=model,
+        api_format=api_format,
+        temperature=0.3,
+        max_tokens=4096,
+    )
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        raw = raw.rsplit("```", 1)[0]
+
+    try:
+        entries = json.loads(raw)
+        if not isinstance(entries, list):
+            entries = []
+        return [e for e in entries if isinstance(e, dict) and "chapter" in e and "content" in e], in_tok, out_tok
+    except json.JSONDecodeError:
+        logger.warning("角色经历 JSON 解析失败: %s", raw[:500])
+        return [], in_tok, out_tok
 
 
 async def discover_new_entities(

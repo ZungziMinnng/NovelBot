@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(xargs -0 git rm --cached --ignore-unmatch)",
+      "Bash(python *)",
+      "Bash(npm *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

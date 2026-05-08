@@ -2,11 +2,11 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Globe, MapPin, Sword, Cog, FileText, Clock, Shield, Zap, Network,
-  Plus, Trash2, Loader2, RefreshCw, ChevronRight, ArrowRightLeft,
+  Plus, Trash2, Loader2, RefreshCw, ChevronRight,
 } from 'lucide-react'
 import {
   novelsApi, locationsApi, worldEntitiesApi, novelNotesApi, chaptersApi,
-  type Novel, type Location, type WorldEntity, type NovelNote, type Chapter,
+  type Novel, type Location, type Chapter,
 } from '@/api/client'
 import toast from 'react-hot-toast'
 
@@ -108,10 +108,11 @@ const LOC_TYPE_COLORS: Record<string, string> = {
 
 const LOC_TYPES = ['world', 'continent', 'region', 'city', 'building', 'landmark', 'other']
 
-function LocationTreeNode({ node, depth, onEdit, onDelete }: {
+function LocationTreeNode({ node, depth, onSelect, selectedId, onDelete }: {
   node: LocationNode
   depth: number
-  onEdit: (loc: Location) => void
+  onSelect: (id: number) => void
+  selectedId?: number | null
   onDelete: (e: React.MouseEvent, id: number) => void
 }) {
   const [expanded, setExpanded] = useState(true)
@@ -120,9 +121,11 @@ function LocationTreeNode({ node, depth, onEdit, onDelete }: {
   return (
     <>
       <div
-        className="group flex items-center gap-1 py-1.5 pr-2 rounded hover:bg-muted cursor-pointer transition-colors"
+        className={`group flex items-center gap-1 py-1.5 pr-2 rounded cursor-pointer transition-colors ${
+          selectedId === node.id ? 'bg-muted ring-1 ring-primary' : 'hover:bg-muted'
+        }`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={() => onEdit(node)}
+        onClick={() => onSelect(node.id)}
       >
         {hasChildren ? (
           <button
@@ -150,13 +153,17 @@ function LocationTreeNode({ node, depth, onEdit, onDelete }: {
         </button>
       </div>
       {expanded && node.children.map((child) => (
-        <LocationTreeNode key={child.id} node={child} depth={depth + 1} onEdit={onEdit} onDelete={onDelete} />
+        <LocationTreeNode key={child.id} node={child} depth={depth + 1} onSelect={onSelect} selectedId={selectedId} onDelete={onDelete} />
       ))}
     </>
   )
 }
 
-export function LocationsView({ novelId }: { novelId: number }) {
+export function LocationsView({ novelId, onSelectLocation, selectedLocationId }: {
+  novelId: number
+  onSelectLocation?: (id: number) => void
+  selectedLocationId?: number | null
+}) {
   const qc = useQueryClient()
   const { data: locations = [] } = useQuery({
     queryKey: ['locations', novelId],
@@ -165,7 +172,6 @@ export function LocationsView({ novelId }: { novelId: number }) {
   const [adding, setAdding] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ name: '', type: 'city', description: '', parent_id: null as number | null })
-  const [editing, setEditing] = useState<Location | null>(null)
 
   const tree = buildLocationTree(locations)
 
@@ -173,14 +179,9 @@ export function LocationsView({ novelId }: { novelId: number }) {
     if (!form.name.trim()) return
     setSaving(true)
     try {
-      if (editing) {
-        await locationsApi.update(editing.id, form)
-      } else {
-        await locationsApi.create({ ...form, novel_id: novelId })
-      }
+      await locationsApi.create({ ...form, novel_id: novelId })
       qc.invalidateQueries({ queryKey: ['locations', novelId] })
       setAdding(false)
-      setEditing(null)
       setForm({ name: '', type: 'city', description: '', parent_id: null })
     } finally { setSaving(false) }
   }
@@ -192,18 +193,12 @@ export function LocationsView({ novelId }: { novelId: number }) {
     qc.invalidateQueries({ queryKey: ['locations', novelId] })
   }
 
-  const openEdit = (loc: Location) => {
-    setForm({ name: loc.name, type: loc.type, description: loc.description, parent_id: loc.parent_id })
-    setEditing(loc)
-    setAdding(true)
-  }
-
   return (
     <div className="p-2">
       <div className="flex items-center justify-between px-1 pb-2">
         <span className="text-xs text-muted-foreground">地图层级 · {locations.length}</span>
         <button
-          onClick={() => { setAdding(true); setEditing(null); setForm({ name: '', type: 'city', description: '', parent_id: null }) }}
+          onClick={() => { setAdding(true); setForm({ name: '', type: 'city', description: '', parent_id: null }) }}
           className="flex items-center gap-1 text-xs px-2 py-1 text-primary hover:bg-muted rounded transition-colors"
         >
           <Plus className="w-3 h-3" /> 新建
@@ -211,7 +206,7 @@ export function LocationsView({ novelId }: { novelId: number }) {
       </div>
 
       {tree.map((node) => (
-        <LocationTreeNode key={node.id} node={node} depth={0} onEdit={openEdit} onDelete={handleDelete} />
+        <LocationTreeNode key={node.id} node={node} depth={0} onSelect={(id) => onSelectLocation?.(id)} selectedId={selectedLocationId} onDelete={handleDelete} />
       ))}
 
       {locations.length === 0 && !adding && (
@@ -219,9 +214,9 @@ export function LocationsView({ novelId }: { novelId: number }) {
       )}
 
       {adding && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => { setAdding(false); setEditing(null) }}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAdding(false)}>
           <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-medium">{editing ? '编辑地点' : '新建地点'}</h3>
+            <h3 className="font-medium">新建地点</h3>
             <input
               placeholder="地点名称"
               value={form.name}
@@ -242,7 +237,7 @@ export function LocationsView({ novelId }: { novelId: number }) {
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             >
               <option value="">无上级地点</option>
-              {locations.filter((l) => l.id !== editing?.id).map((l) => (
+              {locations.map((l) => (
                 <option key={l.id} value={l.id}>{l.name}</option>
               ))}
             </select>
@@ -254,9 +249,9 @@ export function LocationsView({ novelId }: { novelId: number }) {
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
             />
             <div className="flex justify-end gap-2">
-              <button onClick={() => { setAdding(false); setEditing(null) }} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
+              <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : editing ? '保存' : '创建'}
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '创建'}
               </button>
             </div>
           </div>
@@ -266,7 +261,11 @@ export function LocationsView({ novelId }: { novelId: number }) {
   )
 }
 
-export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' | 'system' }) {
+export function EntitiesView({ novelId, type, onSelectEntity, selectedEntityId }: {
+  novelId: number; type: 'item' | 'system'
+  onSelectEntity?: (id: number) => void
+  selectedEntityId?: number | null
+}) {
   const qc = useQueryClient()
   const queryKey = ['entities', novelId, type]
   const { data: entities = [] } = useQuery({
@@ -276,21 +275,14 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
   const [adding, setAdding] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ name: '', description: '' })
-  const [editing, setEditing] = useState<WorldEntity | null>(null)
-  const [transferMenuId, setTransferMenuId] = useState<number | null>(null)
 
   const handleSave = async () => {
     if (!form.name.trim()) return
     setSaving(true)
     try {
-      if (editing) {
-        await worldEntitiesApi.update(editing.id, form)
-      } else {
-        await worldEntitiesApi.create({ ...form, type, novel_id: novelId })
-      }
+      await worldEntitiesApi.create({ ...form, type, novel_id: novelId })
       qc.invalidateQueries({ queryKey })
       setAdding(false)
-      setEditing(null)
       setForm({ name: '', description: '' })
     } finally { setSaving(false) }
   }
@@ -302,39 +294,14 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
     qc.invalidateQueries({ queryKey })
   }
 
-  const handleTransfer = async (ent: WorldEntity, target: 'item' | 'system' | 'technique') => {
-    setTransferMenuId(null)
-    try {
-      if (target === 'technique') {
-        await worldEntitiesApi.convertToTechnique(ent.id)
-        qc.invalidateQueries({ queryKey: ['techniques', novelId] })
-      } else {
-        await worldEntitiesApi.update(ent.id, { type: target })
-        qc.invalidateQueries({ queryKey: ['entities', novelId, target] })
-      }
-      qc.invalidateQueries({ queryKey })
-      toast.success(`已将「${ent.name}」移至${target === 'item' ? '道具' : target === 'system' ? '系统' : '功法'}`)
-    } catch { toast.error('移动失败') }
-  }
-
-  const openEdit = (ent: WorldEntity) => {
-    setForm({ name: ent.name, description: ent.description })
-    setEditing(ent)
-    setAdding(true)
-  }
-
   const Icon = type === 'item' ? Sword : Cog
   const label = type === 'item' ? '道具' : '系统'
-
-  const transferTargets = type === 'item'
-    ? [{ key: 'system' as const, label: '系统' }, { key: 'technique' as const, label: '功法' }]
-    : [{ key: 'item' as const, label: '道具' }, { key: 'technique' as const, label: '功法' }]
 
   return (
     <div className="p-2 space-y-1">
       <div className="px-1 pb-1">
         <button
-          onClick={() => { setAdding(true); setEditing(null); setForm({ name: '', description: '' }) }}
+          onClick={() => { setAdding(true); setForm({ name: '', description: '' }) }}
           className="w-full flex items-center justify-center gap-1 px-3 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted"
         >
           <Plus className="w-3 h-3" /> 新建{label}
@@ -343,8 +310,10 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
       {entities.map((ent) => (
         <div
           key={ent.id}
-          onClick={() => openEdit(ent)}
-          className="group flex items-start gap-2 px-2 py-2 rounded-lg hover:bg-muted cursor-pointer transition-colors relative"
+          onClick={() => onSelectEntity?.(ent.id)}
+          className={`group flex items-start gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors relative ${
+            selectedEntityId === ent.id ? 'bg-muted ring-1 ring-primary' : 'hover:bg-muted'
+          }`}
         >
           <Icon className="w-3.5 h-3.5 mt-0.5 text-muted-foreground shrink-0" />
           <div className="flex-1 min-w-0">
@@ -353,35 +322,9 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
               <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{ent.description}</p>
             )}
           </div>
-          <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-            <button
-              onClick={(e) => { e.stopPropagation(); setTransferMenuId(transferMenuId === ent.id ? null : ent.id) }}
-              className="p-1 hover:text-primary"
-              title="转移"
-            >
-              <ArrowRightLeft className="w-3 h-3" />
-            </button>
-            <button onClick={(e) => handleDelete(e, ent.id)} className="p-1 hover:text-destructive">
-              <Trash2 className="w-3 h-3" />
-            </button>
-          </div>
-          {transferMenuId === ent.id && (
-            <div
-              className="absolute right-0 top-full z-20 bg-popover border rounded-lg shadow-md py-1 min-w-[100px]"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <p className="text-[10px] text-muted-foreground px-3 py-1">移至</p>
-              {transferTargets.map((t) => (
-                <button
-                  key={t.key}
-                  onClick={() => handleTransfer(ent, t.key)}
-                  className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors"
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )}
+          <button onClick={(e) => handleDelete(e, ent.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-destructive transition-opacity shrink-0">
+            <Trash2 className="w-3 h-3" />
+          </button>
         </div>
       ))}
       {entities.length === 0 && !adding && (
@@ -389,9 +332,9 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
       )}
 
       {adding && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => { setAdding(false); setEditing(null) }}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAdding(false)}>
           <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-medium">{editing ? `编辑${label}` : `新建${label}`}</h3>
+            <h3 className="font-medium">新建{label}</h3>
             <input
               placeholder="名称"
               value={form.name}
@@ -407,9 +350,9 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
             />
             <div className="flex justify-end gap-2">
-              <button onClick={() => { setAdding(false); setEditing(null) }} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
+              <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : editing ? '保存' : '创建'}
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '创建'}
               </button>
             </div>
           </div>
@@ -419,7 +362,11 @@ export function EntitiesView({ novelId, type }: { novelId: number; type: 'item' 
   )
 }
 
-export function NotesView({ novelId }: { novelId: number }) {
+export function NotesView({ novelId, onSelectNote, selectedNoteId }: {
+  novelId: number
+  onSelectNote?: (id: number) => void
+  selectedNoteId?: number | null
+}) {
   const qc = useQueryClient()
   const { data: notes = [] } = useQuery({
     queryKey: ['notes', novelId],
@@ -428,20 +375,14 @@ export function NotesView({ novelId }: { novelId: number }) {
   const [adding, setAdding] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ title: '', content: '' })
-  const [editing, setEditing] = useState<NovelNote | null>(null)
 
   const handleSave = async () => {
     if (!form.title.trim()) return
     setSaving(true)
     try {
-      if (editing) {
-        await novelNotesApi.update(editing.id, form)
-      } else {
-        await novelNotesApi.create({ ...form, novel_id: novelId })
-      }
+      await novelNotesApi.create({ ...form, novel_id: novelId })
       qc.invalidateQueries({ queryKey: ['notes', novelId] })
       setAdding(false)
-      setEditing(null)
       setForm({ title: '', content: '' })
     } finally { setSaving(false) }
   }
@@ -453,17 +394,11 @@ export function NotesView({ novelId }: { novelId: number }) {
     qc.invalidateQueries({ queryKey: ['notes', novelId] })
   }
 
-  const openEdit = (note: NovelNote) => {
-    setForm({ title: note.title, content: note.content })
-    setEditing(note)
-    setAdding(true)
-  }
-
   return (
     <div className="p-2 space-y-1">
       <div className="px-1 pb-1">
         <button
-          onClick={() => { setAdding(true); setEditing(null); setForm({ title: '', content: '' }) }}
+          onClick={() => { setAdding(true); setForm({ title: '', content: '' }) }}
           className="w-full flex items-center justify-center gap-1 px-3 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted"
         >
           <Plus className="w-3 h-3" /> 新建设定
@@ -472,8 +407,10 @@ export function NotesView({ novelId }: { novelId: number }) {
       {notes.map((note) => (
         <div
           key={note.id}
-          onClick={() => openEdit(note)}
-          className="group flex items-start gap-2 px-2 py-2 rounded-lg hover:bg-muted cursor-pointer transition-colors"
+          onClick={() => onSelectNote?.(note.id)}
+          className={`group flex items-start gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors ${
+            selectedNoteId === note.id ? 'bg-muted ring-1 ring-primary' : 'hover:bg-muted'
+          }`}
         >
           <FileText className="w-3.5 h-3.5 mt-0.5 text-muted-foreground shrink-0" />
           <div className="flex-1 min-w-0">
@@ -492,9 +429,9 @@ export function NotesView({ novelId }: { novelId: number }) {
       )}
 
       {adding && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => { setAdding(false); setEditing(null) }}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAdding(false)}>
           <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-medium">{editing ? '编辑设定' : '新建设定'}</h3>
+            <h3 className="font-medium">新建设定</h3>
             <input
               placeholder="标题"
               value={form.title}
@@ -510,9 +447,9 @@ export function NotesView({ novelId }: { novelId: number }) {
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
             />
             <div className="flex justify-end gap-2">
-              <button onClick={() => { setAdding(false); setEditing(null) }} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
+              <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : editing ? '保存' : '创建'}
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '创建'}
               </button>
             </div>
           </div>
@@ -535,9 +472,10 @@ export function TimelineView({ novelId }: { novelId: number }) {
   })
   const [reindexing, setReindexing] = useState(false)
 
-  const entries = chapters
+  const entries = [...chapters]
+    .sort((a, b) => a.volume - b.volume || a.number - b.number)
     .filter((c) => c.summary)
-    .map((c) => ({ chapter: c.number, time: extractTime(c), summary: c.summary! }))
+    .map((c) => ({ chapter: c.number, volume: c.volume, time: extractTime(c), summary: c.summary! }))
 
   return (
     <div className="p-2">

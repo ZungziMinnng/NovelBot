@@ -50,6 +50,7 @@ export interface GenerationStreamActions {
 export function useGenerationStream(
   novelId: number,
   selectedChapterNum: number,
+  selectedVolume: number,
   instruction: string,
   targetWords: number,
   novelTitle: string,
@@ -146,7 +147,7 @@ export function useGenerationStream(
       {
         novel_id: novelId,
         chapter_number: selectedChapterNum,
-        volume: 1,
+        volume: selectedVolume,
         instruction,
         target_words: targetWords,
       },
@@ -274,7 +275,7 @@ export function useGenerationStream(
     )
 
     useGenerationStore.getState().setAbortController(ctrl)
-  }, [novelId, selectedChapterNum, instruction, targetWords, novelTitle, qc, setChapterSuggestions])
+  }, [novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novelTitle, qc, setChapterSuggestions])
 
   // ── Abort / Generate ─────────────────────────────────────────────────────
   const handleAbortOrGenerate = useCallback(() => {
