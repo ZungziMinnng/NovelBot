@@ -40,6 +40,8 @@ class Novel(Base):
     chat_context_rounds: Mapped[int] = mapped_column(Integer, default=20)  # 0 = 无限
     enable_thinking: Mapped[bool] = mapped_column(Boolean, default=True)
     thinking_level: Mapped[str] = mapped_column(String(20), default="medium")
+    gemini_stream: Mapped[bool] = mapped_column(Boolean, default=False)
+    context_config: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -61,6 +63,18 @@ class Novel(Base):
     world_entities: Mapped[list["WorldEntity"]] = relationship(  # noqa: F821
         "WorldEntity", back_populates="novel", cascade="all, delete-orphan"
     )
+    factions: Mapped[list["Faction"]] = relationship(  # noqa: F821
+        "Faction", back_populates="novel", cascade="all, delete-orphan"
+    )
     locations: Mapped[list["Location"]] = relationship(  # noqa: F821
         "Location", back_populates="novel", cascade="all, delete-orphan"
+    )
+    notes: Mapped[list["NovelNote"]] = relationship(  # noqa: F821
+        "NovelNote", back_populates="novel", cascade="all, delete-orphan"
+    )
+    techniques: Mapped[list["Technique"]] = relationship(  # noqa: F821
+        "Technique", back_populates="novel", cascade="all, delete-orphan"
+    )
+    volumes: Mapped[list["Volume"]] = relationship(  # noqa: F821
+        "Volume", back_populates="novel", cascade="all, delete-orphan"
     )

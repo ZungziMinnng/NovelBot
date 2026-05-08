@@ -4,21 +4,22 @@ import { persist } from 'zustand/middleware'
 interface EditorDraft {
   instruction: string
   targetWords: number
-  plotSuggestions: string[]
 }
 
 interface EditorStore {
   drafts: Record<number, EditorDraft>
   chapterSuggestions: Record<string, string[]>
+  lastChapter: Record<number, number>
   getDraft: (novelId: number) => EditorDraft
   setInstruction: (novelId: number, instruction: string) => void
   setTargetWords: (novelId: number, targetWords: number) => void
-  setPlotSuggestions: (novelId: number, suggestions: string[]) => void
   getChapterSuggestions: (novelId: number, chapterNum: number) => string[]
   setChapterSuggestions: (novelId: number, chapterNum: number, suggestions: string[]) => void
+  getLastChapter: (novelId: number) => number
+  setLastChapter: (novelId: number, chapterNum: number) => void
 }
 
-const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 800, plotSuggestions: [] }
+const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 800 }
 const EMPTY_SUGGESTIONS: string[] = []
 
 export const useEditorStore = create<EditorStore>()(
@@ -26,6 +27,7 @@ export const useEditorStore = create<EditorStore>()(
     (set, get) => ({
       drafts: {},
       chapterSuggestions: {},
+      lastChapter: {},
 
       getDraft: (novelId) => get().drafts[novelId] ?? DEFAULT_DRAFT,
 
@@ -39,17 +41,19 @@ export const useEditorStore = create<EditorStore>()(
           drafts: { ...s.drafts, [novelId]: { ...(s.drafts[novelId] ?? DEFAULT_DRAFT), targetWords } },
         })),
 
-      setPlotSuggestions: (novelId, suggestions) =>
-        set((s) => ({
-          drafts: { ...s.drafts, [novelId]: { ...(s.drafts[novelId] ?? DEFAULT_DRAFT), plotSuggestions: suggestions } },
-        })),
-
       getChapterSuggestions: (novelId, chapterNum) =>
         get().chapterSuggestions[`${novelId}_${chapterNum}`] ?? EMPTY_SUGGESTIONS,
 
       setChapterSuggestions: (novelId, chapterNum, suggestions) =>
         set((s) => ({
           chapterSuggestions: { ...s.chapterSuggestions, [`${novelId}_${chapterNum}`]: suggestions },
+        })),
+
+      getLastChapter: (novelId) => get().lastChapter[novelId] ?? 1,
+
+      setLastChapter: (novelId, chapterNum) =>
+        set((s) => ({
+          lastChapter: { ...s.lastChapter, [novelId]: chapterNum },
         })),
     }),
     { name: 'novelbot-editor' }

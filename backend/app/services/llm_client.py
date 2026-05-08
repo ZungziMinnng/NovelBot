@@ -145,12 +145,6 @@ def _resolve_model(agent_type: str, novel_override: str = "") -> str:
     return settings.default_fast_model
 
 
-def get_writer_client(novel_writer_model: str = "") -> tuple[str, str]:
-    """返回 (model_id, api_format) 用于高质量生成"""
-    model = novel_writer_model or settings.default_writer_model
-    return model, get_model_api_format(model)
-
-
 def get_fast_client(novel_fast_model: str = "") -> tuple[str, str]:
     """返回 (model_id, api_format) 用于规划/摘要等低成本任务"""
     model = novel_fast_model or settings.default_fast_model
@@ -166,6 +160,7 @@ _AGENT_MODEL_MAP: dict[str, tuple[str, str]] = {
     "character":    ("agent_character_model",     "fast"),
     "orchestrator": ("agent_orchestrator_model",  "fast"),
     "world":        ("agent_orchestrator_model",  "fast"),
+    "review":       ("agent_review_model",        "fast"),
 }
 
 
@@ -277,13 +272,18 @@ async def dispatch_chat_stream_with_usage(
     temperature: float = 0.85,
     max_tokens: int = 4096,
     thinking_level: str = "medium",
+    gemini_stream: bool = False,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """根据 api_format 分发流式调用，yield str token 最后 yield (in_tok, out_tok)。
     可能 yield dict 表示元信息（如 {"warning": "..."} 重试提醒）。"""
     fmt, client = _resolve_client(model, api_format)
     if fmt == "gemini":
-        async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
-            yield item
+        if gemini_stream:
+            async for item in _gemini_true_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+                yield item
+        else:
+            async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+                yield item
     elif fmt == "anthropic":
         async for item in _anthropic_stream_with_usage(messages, model, temperature, max_tokens, client):
             yield item
@@ -315,6 +315,14 @@ def _is_gemini_flash(model_id: str) -> bool:
 def _is_deepseek_model(model_id: str) -> bool:
     """DeepSeek 模型，需要通过 extra_body 启用 thinking"""
     return "deepseek" in model_id.lower()
+
+
+def _deepseek_reasoning_effort(thinking_level: str) -> str:
+    """将前端 thinking_level 映射到 DeepSeek reasoning_effort 值。
+    DeepSeek V4 只支持 "high" 和 "max"（low/medium 被服务端映射为 high）。"""
+    if thinking_level == "high":
+        return "max"
+    return "high"
 
 
 # 参考 Cherry Studio THINKING_TOKEN_MAP (config/models/reasoning.ts:775-779)
@@ -527,6 +535,7 @@ async def _gemini_stream_with_usage(
     if "MAX_TOKENS" in finish_reason_str:
         finish_reason = "length"
 
+    # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
     # ── 空响应时记录原始响应用于诊断 ──
     if not text:
         prompt_feedback = getattr(response, "prompt_feedback", None)
@@ -583,6 +592,81 @@ async def _gemini_stream_with_usage(
     for i in range(0, len(text), CHUNK_SIZE):
         yield text[i:i + CHUNK_SIZE]
         await asyncio.sleep(0)
+
+    yield (finish_reason, in_tok, out_tok)
+
+
+async def _gemini_true_stream_with_usage(
+    messages: list[dict],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    thinking_level: str = "medium",
+    client=None,
+) -> AsyncIterator[Union[str, tuple[int, int]]]:
+    """Gemini 真实流式生成：使用 SDK generate_content_stream 逐 chunk 输出。"""
+    import asyncio
+    import logging
+    from google.genai import types as genai_types
+    logger = logging.getLogger(__name__)
+
+    if client is None:
+        client = _make_gemini_client()
+
+    system_instruction, contents = _to_gemini_contents(messages)
+    thinking_config = _resolve_gemini_thinking(model, thinking_level=thinking_level)
+
+    config_kwargs: dict = {"temperature": temperature}
+    if thinking_config is not None:
+        config_kwargs["thinking_config"] = thinking_config
+    if system_instruction:
+        config_kwargs["system_instruction"] = system_instruction
+
+    accumulated_text = ""
+    in_tok = 0
+    out_tok = 0
+    finish_reason: str | None = None
+
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=model,
+            contents=contents,
+            config=genai_types.GenerateContentConfig(**config_kwargs),
+        )
+        async for chunk in stream:
+            chunk_text = ""
+            if chunk.candidates:
+                candidate = chunk.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if part.text and not getattr(part, "thought", False):
+                            chunk_text += part.text
+                if candidate.finish_reason:
+                    reason_str = str(candidate.finish_reason.name) if hasattr(candidate.finish_reason, "name") else str(candidate.finish_reason)
+                    if "MAX_TOKENS" in reason_str:
+                        finish_reason = "length"
+
+            if chunk.usage_metadata:
+                in_tok = getattr(chunk.usage_metadata, "prompt_token_count", 0) or 0
+                out_tok = getattr(chunk.usage_metadata, "candidates_token_count", 0) or 0
+
+            if chunk_text:
+                accumulated_text += chunk_text
+                yield chunk_text
+                await asyncio.sleep(0)
+
+    except Exception as e:
+        logger.error("Gemini 真实流式调用失败: %s", e)
+        if not accumulated_text:
+            raise
+        # 已有部分输出则不重抛，正常结束
+
+    if not accumulated_text:
+        logger.warning("Gemini 真实流式返回空内容 (model=%s), 回退到非流式重试", model)
+        yield {"warning": "Gemini 流式生成无输出，正在回退到非流式重试..."}
+        async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+            yield item
+        return
 
     yield (finish_reason, in_tok, out_tok)
 
@@ -749,37 +833,6 @@ async def chat_complete_with_usage(
     return content, in_tok, out_tok
 
 
-async def chat_stream(
-    messages: list[dict],
-    model: str,
-    client: AsyncOpenAI,
-    temperature: float = 0.85,
-    max_tokens: int = 4096,
-    thinking_level: str = "off",
-) -> AsyncIterator[str]:
-    """流式调用，逐 token yield"""
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-    if _is_deepseek_model(model):
-        if thinking_level != "off":
-            kwargs["extra_body"] = {
-                "thinking": {"type": "enabled"},
-                "reasoning_effort": thinking_level,
-            }
-        else:
-            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-    stream = await client.chat.completions.create(**kwargs)
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
-
-
 async def chat_stream_with_usage(
     messages: list[dict],
     model: str,
@@ -805,7 +858,7 @@ async def chat_stream_with_usage(
         if thinking_level != "off":
             kwargs["extra_body"] = {
                 "thinking": {"type": "enabled"},
-                "reasoning_effort": thinking_level,
+                "reasoning_effort": _deepseek_reasoning_effort(thinking_level),
             }
         else:
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}

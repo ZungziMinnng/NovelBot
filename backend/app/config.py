@@ -19,8 +19,6 @@ class Settings(BaseSettings):
     # ── 模型配置（全局默认）─────────────────────────────────────────────────
     default_writer_model: str = "gpt-4o"
     default_fast_model: str = "gpt-4o-mini"
-    writer_temperature: float = 0.85
-    fast_temperature: float = 0.3
 
     # ── 各 Agent 独立模型配置（留空则回退到对应类别的全局默认）─────────────
     agent_writer_model: str = ""       # Writer Agent → 默认使用 default_writer_model
@@ -29,6 +27,7 @@ class Settings(BaseSettings):
     agent_outline_model: str = ""      # Outline Agent → 默认使用 default_fast_model
     agent_character_model: str = ""    # Character Agent → 默认使用 default_fast_model
     agent_orchestrator_model: str = "" # Orchestrator/World → 默认使用 default_fast_model
+    agent_review_model: str = ""       # 全文审查 Agent → 默认使用 default_fast_model
 
     # ── 网络代理（开启 VPN 时填写，例：http://127.0.0.1:7890）───────────────
     # 使用 NOVELBOT_ 前缀，避免与操作系统标准环境变量 HTTPS_PROXY/HTTP_PROXY 冲突
@@ -44,6 +43,8 @@ class Settings(BaseSettings):
     app_title: str = "NovelBot"
     debug: bool = True
     max_critic_retries: int = 1  # 1 = Writer 最多执行两次（初次 + 1 次修改）
+    enable_review: bool = False
+    review_interval: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

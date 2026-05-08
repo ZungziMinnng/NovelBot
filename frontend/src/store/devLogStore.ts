@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type DevLogType = 'request' | 'response' | 'sse' | 'llm_call'
+type DevLogType = 'request' | 'response' | 'sse' | 'llm_call'
 
 export interface DevLogEntry {
   id: string

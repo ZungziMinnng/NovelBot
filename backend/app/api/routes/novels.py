@@ -1,14 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from openai import AuthenticationError as OpenAIAuthError
 from app.database import get_db
 from app.models.novel import Novel
-from app.models.memory import Outline
+from app.models.memory import Outline, Memory
+from app.models.chapter import Chapter
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
 from app.agents import world_agent, outline_agent, character_agent
-from app.services import summarizer, context_builder
+from app.services import summarizer, context_builder, llm_client, entity_embeddings
 from app.models.character import Character
+from app.models.world_entity import WorldEntity
+from app.models.location import Location
+from app.models.faction import Faction
+from app.models.technique import Technique
+from app.models.novel_note import NovelNote
 from app.services import vector_store
 
 router = APIRouter()
@@ -67,6 +73,123 @@ async def delete_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(novel)
     await db.commit()
     return {"ok": True}
+
+
+# ── 搜索 ─────────────────────────────────────────────────────────────────
+
+@router.get("/{novel_id}/search")
+async def search_novel(
+    novel_id: int,
+    q: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """全文搜索：向量语义检索 + SQL 模糊匹配"""
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    import asyncio
+    pattern = f"%{q}%"
+
+    async def _vector_search():
+        return await vector_store.asearch_similar_with_meta(novel_id, q, top_k=10)
+
+    async def _sql_characters():
+        r = await db.execute(
+            select(Character).where(
+                Character.novel_id == novel_id,
+                or_(Character.name.ilike(pattern), Character.description.ilike(pattern)),
+            )
+        )
+        return [{"id": c.id, "name": c.name, "role": c.role, "description": c.description} for c in r.scalars()]
+
+    async def _sql_entities(entity_type: str):
+        r = await db.execute(
+            select(WorldEntity).where(
+                WorldEntity.novel_id == novel_id,
+                WorldEntity.type == entity_type,
+                or_(WorldEntity.name.ilike(pattern), WorldEntity.description.ilike(pattern)),
+            )
+        )
+        return [{"id": e.id, "name": e.name, "type": e.type, "description": e.description} for e in r.scalars()]
+
+    async def _sql_locations():
+        r = await db.execute(
+            select(Location).where(
+                Location.novel_id == novel_id,
+                or_(Location.name.ilike(pattern), Location.description.ilike(pattern)),
+            )
+        )
+        return [{"id": l.id, "name": l.name, "type": l.type, "description": l.description} for l in r.scalars()]
+
+    async def _sql_factions():
+        r = await db.execute(
+            select(Faction).where(
+                Faction.novel_id == novel_id,
+                or_(Faction.name.ilike(pattern), Faction.description.ilike(pattern)),
+            )
+        )
+        return [{"id": f.id, "name": f.name, "type": f.type, "description": f.description} for f in r.scalars()]
+
+    async def _sql_techniques():
+        r = await db.execute(
+            select(Technique).where(
+                Technique.novel_id == novel_id,
+                or_(Technique.name.ilike(pattern), Technique.description.ilike(pattern)),
+            )
+        )
+        return [{"id": t.id, "name": t.name, "type": t.type, "description": t.description} for t in r.scalars()]
+
+    async def _sql_notes():
+        r = await db.execute(
+            select(NovelNote).where(
+                NovelNote.novel_id == novel_id,
+                or_(NovelNote.title.ilike(pattern), NovelNote.content.ilike(pattern)),
+            )
+        )
+        return [{"id": n.id, "title": n.title, "content": n.content} for n in r.scalars()]
+
+    vec_results, characters, items, systems, locations, factions, techniques, notes = await asyncio.gather(
+        _vector_search(),
+        _sql_characters(),
+        _sql_entities("item"),
+        _sql_entities("system"),
+        _sql_locations(),
+        _sql_factions(),
+        _sql_techniques(),
+        _sql_notes(),
+    )
+
+    chapters = []
+    note_hits = []
+    for hit in vec_results:
+        meta = hit.get("metadata") or {}
+        doc_type = meta.get("type", "")
+        score = round(1 - hit.get("distance", 1), 3)
+        if doc_type == "chapter_summary":
+            chapters.append({
+                "chapter_number": meta.get("chapter_number"),
+                "summary": hit["text"],
+                "score": score,
+            })
+        elif doc_type == "note":
+            note_hits.append({
+                "title": meta.get("title", ""),
+                "content": hit["text"],
+                "score": score,
+            })
+    chapters.sort(key=lambda c: c.get("chapter_number") or 0)
+
+    return {
+        "chapters": chapters,
+        "characters": characters,
+        "items": items,
+        "systems": systems,
+        "locations": locations,
+        "factions": factions,
+        "techniques": techniques,
+        "notes": notes + note_hits,
+    }
 
 
 # ── 向导接口 ──────────────────────────────────────────────────────────────
@@ -231,18 +354,110 @@ async def get_context_preview(
         ctx, instruction=instruction, target_words=target_words,
     )
 
+    def _est_tokens(text: str) -> int:
+        """粗估中文 token 数（中文约 1.5 token/字，英文约 1 token/4字符）"""
+        if not text:
+            return 0
+        cn_chars = sum(1 for c in text if '一' <= c <= '鿿')
+        other_chars = len(text) - cn_chars
+        return int(cn_chars * 1.5 + other_chars * 0.25)
+
+    sections = {
+        "core_setting": ctx.get("core_setting", ""),
+        "book_summary": ctx.get("book_summary", ""),
+        "arc_summary": ctx.get("arc_summary", ""),
+        "chapter_outline": ctx.get("chapter_outline", ""),
+        "rolling_summary": ctx.get("rolling_summary", ""),
+        "rag_context": ctx.get("rag_context", ""),
+        "notes_context": "\n".join(f"【{n['title']}】{n['content']}" for n in ctx.get("notes", [])),
+        "recent_text": ctx.get("recent_text", ""),
+    }
+    section_tokens = {k: _est_tokens(v) for k, v in sections.items()}
+
+    import json as _json
+
+    def _chars_text(characters: list) -> str:
+        return "".join(
+            f"【{c['name']}·{c['role']}】{c['description']}\n"
+            + "".join(f"  {k}：{v}\n" for k, v in (c.get("full_sheet") or {}).items() if v)
+            + (f"  状态：{_json.dumps(c.get('state') or {}, ensure_ascii=False)}\n" if c.get("state") else "")
+            for c in characters
+        )
+
+    def _entities_text(entities: list) -> str:
+        return "".join(
+            f"【{e['name']}·{e['type']}】{e['description']}\n"
+            + (f"  状态：{_json.dumps(e.get('state') or {}, ensure_ascii=False)}\n" if e.get("state") else "")
+            for e in entities
+        )
+
+    def _locations_text(locations: list) -> str:
+        return "".join(
+            f"【{loc['name']}·{loc['type']}】{loc['description']}\n"
+            + (f"  状态：{_json.dumps(loc.get('state') or {}, ensure_ascii=False)}\n" if loc.get("state") else "")
+            for loc in locations
+        )
+
+    def _factions_text(factions: list) -> str:
+        return "".join(
+            f"【{f['name']}·{f.get('alignment', '')}】{f.get('type', '')} {f.get('description', '')}\n"
+            for f in factions
+        )
+
+    def _techniques_text(techniques: list) -> str:
+        return "".join(
+            f"【{t['name']}·{t.get('type', '')}】{t.get('description', '')}\n"
+            for t in techniques
+        )
+
+    all_entities = ctx.get("world_entities", [])
+    items_list = [e for e in all_entities if e.get("type") == "item"]
+    systems_list = [e for e in all_entities if e.get("type") == "system"]
+
+    chars_tokens = _est_tokens(_chars_text(ctx.get("characters", [])))
+    items_tokens = _est_tokens(_entities_text(items_list))
+    systems_tokens = _est_tokens(_entities_text(systems_list))
+    locations_tokens = _est_tokens(_locations_text(ctx.get("locations", [])))
+    factions_tokens = _est_tokens(_factions_text(ctx.get("factions", [])))
+    techniques_tokens = _est_tokens(_techniques_text(ctx.get("techniques", [])))
+    task_tokens = _est_tokens(task_instruction)
+    system_tokens = 150
+    total_est_tokens = (
+        sum(section_tokens.values())
+        + chars_tokens + items_tokens + systems_tokens + locations_tokens + factions_tokens + techniques_tokens
+        + task_tokens + system_tokens
+    )
+
+    cfg = novel.context_config or {}
+    context_config_keys = [
+        "core_setting", "book_summary", "arc_summary", "chapter_outline",
+        "rolling_summary", "rag_context", "notes_context", "recent_text",
+        "characters", "items", "systems", "locations", "factions", "techniques",
+    ]
+
     return {
         "chapter_number": chapter_number,
         "context": {
-            "core_setting": ctx.get("core_setting", ""),
-            "book_summary": ctx.get("book_summary", ""),
-            "arc_summary": ctx.get("arc_summary", ""),
-            "chapter_outline": ctx.get("chapter_outline", ""),
-            "rolling_summary": ctx.get("rolling_summary", ""),
-            "rag_context": ctx.get("rag_context", ""),
-            "recent_text": ctx.get("recent_text", ""),
+            **sections,
             "characters_count": len(ctx.get("characters", [])),
-            "entities_count": len(ctx.get("world_entities", [])),
+            "items_count": len(items_list),
+            "systems_count": len(systems_list),
+            "locations_count": len(ctx.get("locations", [])),
+            "factions_count": len(ctx.get("factions", [])),
+            "techniques_count": len(ctx.get("techniques", [])),
+        },
+        "context_config": {k: cfg.get(k, True) for k in context_config_keys},
+        "token_estimate": {
+            **section_tokens,
+            "characters": chars_tokens,
+            "items": items_tokens,
+            "systems": systems_tokens,
+            "locations": locations_tokens,
+            "factions": factions_tokens,
+            "techniques": techniques_tokens,
+            "task_instruction": task_tokens,
+            "system_prompt": system_tokens,
+            "total": total_est_tokens,
         },
         "writer_messages": [
             {"role": "system", "content": f"（系统提示由 writer.jinja2 渲染，genre={ctx.get('genre')}, writing_style={ctx.get('writing_style')}）"},
@@ -252,3 +467,119 @@ async def get_context_preview(
         ],
         "writer_model": novel.writer_model or "（使用全局默认 Writer 模型）",
     }
+
+
+@router.post("/{novel_id}/reindex-entities")
+async def reindex_entities(novel_id: int, db: AsyncSession = Depends(get_db)):
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    counts = await entity_embeddings.reindex_all_entities(db, novel_id)
+    return counts
+
+
+@router.post("/{novel_id}/reindex-timeline")
+async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
+    """批量重标注所有章节摘要的时间标记为绝对日期计数格式。"""
+    import re, json as _json, logging, traceback
+    log = logging.getLogger(__name__)
+
+    try:
+        novel = await db.get(Novel, novel_id)
+        if not novel:
+            raise HTTPException(status_code=404, detail="小说不存在")
+
+        result = await db.execute(
+            select(Chapter)
+            .where(Chapter.novel_id == novel.id, Chapter.summary.is_not(None), Chapter.summary != "")
+            .order_by(Chapter.number)
+        )
+        chapters = result.scalars().all()
+        if not chapters:
+            return {"updated": 0, "results": []}
+
+        summaries_text = "\n".join(
+            f"第{c.number}章：{c.summary}" for c in chapters
+        )
+
+        instruction = (
+            "你是一位时间线编辑。下面是一部小说各章节的剧情梗概，每章开头有一个用【】包裹的时间标记。\n"
+            "现在需要你将所有时间标记统一改为绝对日期计数格式。\n\n"
+            "规则：\n"
+            "- 第一章发生的故事为第一日\n"
+            "- 后续章节根据摘要中描述的时间流逝推算绝对日数\n"
+            "- 格式为：第X日 或 第X日·时段（清晨/上午/白天/午后/傍晚/晚上/深夜）\n"
+            "- 如果一章跨越多天：第X日·时段→第Y日·时段\n"
+        )
+        output_spec = (
+            '请输出 JSON 数组，每项格式为 {"chapter": 章节号, "time": "新时间标记"}。\n'
+            "只输出 JSON 数组，不要其他文字。"
+        )
+
+        model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+        log.warning("reindex-timeline: model=%s, api_format=%s, chapters=%d", model, api_format, len(chapters))
+
+        # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
+        # Gemini 安全过滤器对 user 角色的小说内容更严格，
+        # 将摘要放在 assistant 角色绕过（与 _build_analysis_messages 同模式）
+        if api_format == "gemini":
+            messages = [
+                {"role": "user", "content": instruction},
+                {"role": "assistant", "content": f"各章摘要：\n{summaries_text}"},
+                {"role": "user", "content": output_spec},
+            ]
+        else:
+            messages = [{"role": "user", "content": f"{instruction}\n各章摘要：\n{summaries_text}\n\n{output_spec}"}]
+
+        raw, _, _ = await llm_client.dispatch_chat_complete_with_usage(
+            messages=messages, model=model, api_format=api_format,
+            temperature=0.1, max_tokens=4000,
+        )
+
+        raw = raw.strip()
+        if not raw:
+            raise HTTPException(status_code=500, detail="LLM 返回空内容，可能被安全过滤器拦截，请尝试更换 fast 模型")
+        if raw.startswith("```"):
+            raw = re.sub(r'^```\w*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
+        raw = re.sub(r',\s*]', ']', raw)
+        time_map_list = _json.loads(raw)
+
+        time_map = {item["chapter"]: item["time"] for item in time_map_list if "chapter" in item and "time" in item}
+
+        updated = 0
+        results = []
+        for c in chapters:
+            new_time = time_map.get(c.number)
+            if not new_time:
+                continue
+            old_match = re.match(r'【(.+?)】', c.summary)
+            if old_match:
+                old_tag = old_match.group(0)
+                new_tag = f"【{new_time}】"
+                c.summary = c.summary.replace(old_tag, new_tag, 1)
+
+                mem_result = await db.execute(
+                    select(Memory).where(
+                        Memory.novel_id == novel.id,
+                        Memory.memory_type == "chapter_summary",
+                        Memory.chapter_number == c.number,
+                    )
+                )
+                for mem in mem_result.scalars().all():
+                    if old_tag in mem.content:
+                        mem.content = mem.content.replace(old_tag, new_tag, 1)
+
+                updated += 1
+                results.append({"chapter": c.number, "old": old_match.group(1), "new": new_time})
+
+        await db.commit()
+        return {"updated": updated, "results": results}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error("reindex-timeline failed:\n%s", tb)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb[-500:]}")

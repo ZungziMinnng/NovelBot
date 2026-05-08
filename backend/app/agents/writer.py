@@ -15,6 +15,7 @@ async def stream_chapter(
     temperature: float = 0.85,
     max_tokens: int = 4096,
     thinking_level: str = "medium",
+    gemini_stream: bool = False,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """
     流式生成章节内容。
@@ -54,6 +55,7 @@ async def stream_chapter(
         {"role": "system", "content": system_content},
     ]
 
+    # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
     if api_format == "gemini":
         # ── Gemini 消息结构 ──
         messages.append({"role": "user", "content": context_block or "请根据角色设定和写作任务创作小说章节。"})
@@ -91,6 +93,7 @@ async def stream_chapter(
         messages.append({"role": "user", "content": "\n\n".join(directive_parts)})
 
     if issues_feedback:
+        # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
         if api_format == "gemini":
             # Gemini: 指令放 assistant 角色绕过过滤
             messages.append({
@@ -145,13 +148,11 @@ async def stream_chapter(
 
     # ── DeepSeek：根据目标字数动态限制 max_tokens ──
     # DeepSeek 不遵守提示词中的字数要求，会填满整个 token 预算。
-    # 用 target_words 计算硬上限，让 max_tokens 与目标字数对齐。
-    # 中文约 1.5 token/字，取 2.0 留出余量；thinking 模式额外预留 token。
-    if llm_client._is_deepseek_model(model):
+    # 仅在关闭 thinking 时硬限制 max_tokens（中文约 1.5 token/字，取 2.0 留余量）。
+    # thinking 模式需要额外 token 预算给推理过程，不做限制以免截断。
+    if llm_client._is_deepseek_model(model) and thinking_level == "off":
         content_tokens = int(target_words * 2.0)
-        thinking_buffer = 1500 if thinking_level != "off" else 0
-        words_cap = content_tokens + thinking_buffer
-        max_tokens = min(max_tokens, words_cap)
+        max_tokens = min(max_tokens, content_tokens)
 
     # ── Dev: 将实际 LLM 请求 payload 发给前端 DevPanel ──
     def _truncate_messages(msgs: list[dict], max_len: int = 500) -> list[dict]:
@@ -179,5 +180,6 @@ async def stream_chapter(
         temperature=temperature,
         max_tokens=max_tokens,
         thinking_level=thinking_level,
+        gemini_stream=gemini_stream,
     ):
         yield item

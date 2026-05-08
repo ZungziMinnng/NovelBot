@@ -1,5 +1,4 @@
 from pydantic import BaseModel
-from typing import Optional
 
 
 class GenerateChapterRequest(BaseModel):
@@ -10,30 +9,11 @@ class GenerateChapterRequest(BaseModel):
     target_words: int = 800
 
 
-class GenerateOutlineRequest(BaseModel):
-    novel_id: int
-    level: str = "chapter"  # book / volume / chapter
-    volume: int = 1
-
-
-class GenerateCharacterRequest(BaseModel):
-    novel_id: int
-    character_id: int
-
-
-class GenerateWorldRequest(BaseModel):
-    novel_id: int
-    raw_setting: str
-    raw_rules: str = ""
-
-
 class PlotSuggestionsRequest(BaseModel):
     novel_id: int
     chapter_number: int
     volume: int = 1
 
 
-# SSE 事件结构
-class SSEEvent(BaseModel):
-    event: str  # stage / token / done / error
-    data: str
+class ReviewRequest(BaseModel):
+    novel_id: int

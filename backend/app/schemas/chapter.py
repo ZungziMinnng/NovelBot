@@ -16,6 +16,7 @@ class ChapterUpdate(BaseModel):
     content: Optional[str] = None
     summary: Optional[str] = None
     status: Optional[str] = None
+    volume: Optional[int] = None
 
 
 class ChapterOut(BaseModel):

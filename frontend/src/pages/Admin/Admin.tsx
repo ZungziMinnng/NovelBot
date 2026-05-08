@@ -15,7 +15,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'outlines', label: '大纲' },
 ]
 
-const STATE_FIELDS = ['location', 'current_goal', 'titles', 'affiliation', 'known_secrets', 'relationship_changes'] as const
+const STATE_FIELDS = ['location', 'current_goal', 'titles', 'affiliation', 'known_secrets'] as const
 
 const memoryTypeColor: Record<string, string> = {
   chapter_summary: 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300',

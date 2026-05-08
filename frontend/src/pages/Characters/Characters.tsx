@@ -1,7 +1,7 @@
-import { useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useState, useRef } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Plus, Trash2, User, Loader2, Sun, Moon, Pencil, X, Check, Package, Cog } from 'lucide-react'
+import { ArrowLeft, Plus, Trash2, User, Loader2, Sun, Moon, Pencil, X, Check, Package, Cog, RefreshCw, ImagePlus } from 'lucide-react'
 import { charactersApi, worldEntitiesApi, novelsApi, type Character, type WorldEntity } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 
@@ -20,7 +20,11 @@ export default function Characters() {
   const qc = useQueryClient()
   const { theme, toggleTheme } = useSettingsStore()
 
-  const [activeTab, setActiveTab] = useState<Tab>('character')
+  const [searchParams] = useSearchParams()
+  const initialTab = searchParams.get('tab')
+  const [activeTab, setActiveTab] = useState<Tab>(
+    initialTab === 'item' || initialTab === 'system' ? initialTab : 'character'
+  )
   const [selected, setSelected] = useState<Character | null>(null)
   const [selectedEntity, setSelectedEntity] = useState<WorldEntity | null>(null)
   const [adding, setAdding] = useState(false)
@@ -35,6 +39,10 @@ export default function Characters() {
   const [newEntity, setNewEntity] = useState({ name: '', description: '' })
   const [editingEntity, setEditingEntity] = useState<WorldEntity | null>(null)
   const [entityEditForm, setEntityEditForm] = useState({ name: '', description: '' })
+
+  const [refreshingAppearance, setRefreshingAppearance] = useState(false)
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
 
   // Inline key-value editing (shared for character sheet/state and entity props/state)
   const [editingSheet, setEditingSheet] = useState(false)
@@ -91,6 +99,40 @@ export default function Characters() {
       setSelected(updated)
       setEditing(null)
     } finally { setSaving(false) }
+  }
+
+  const handleRefreshAppearance = async () => {
+    if (!selected) return
+    setRefreshingAppearance(true)
+    try {
+      const updated = await charactersApi.refreshAppearance(selected.id)
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      setSelected(updated)
+    } finally { setRefreshingAppearance(false) }
+  }
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !selected) return
+    setUploadingAvatar(true)
+    try {
+      const updated = await charactersApi.uploadAvatar(selected.id, file)
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      setSelected(updated)
+    } finally {
+      setUploadingAvatar(false)
+      if (avatarInputRef.current) avatarInputRef.current.value = ''
+    }
+  }
+
+  const handleDeleteAvatar = async () => {
+    if (!selected) return
+    setUploadingAvatar(true)
+    try {
+      const updated = await charactersApi.deleteAvatar(selected.id)
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      setSelected(updated)
+    } finally { setUploadingAvatar(false) }
   }
 
   // ── Entity handlers ──
@@ -286,33 +328,75 @@ export default function Characters() {
   const renderCharacterDetail = () => {
     if (!selected) return null
     return (
-      <div className="max-w-2xl">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-14 h-14 rounded-full bg-muted flex items-center justify-center">
-            <User className="w-7 h-7 text-muted-foreground" />
-          </div>
-          <div className="flex-1">
-            <h2 className="text-xl font-bold">{selected.name}</h2>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <span className={`px-2 py-0.5 rounded-full text-xs ${roleColor[selected.role] || ''}`}>{selected.role}</span>
-              {selected.age && <span>· {selected.age}岁</span>}
+      <div className="flex gap-6">
+        {/* 左列：角色信息 */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-14 h-14 rounded-full bg-muted flex items-center justify-center shrink-0">
+              {selected.avatar_url ? (
+                <img src={selected.avatar_url} alt={selected.name} className="w-14 h-14 rounded-full object-cover object-top" />
+              ) : (
+                <User className="w-7 h-7 text-muted-foreground" />
+              )}
             </div>
+            <div className="flex-1">
+              <h2 className="text-xl font-bold">{selected.name}</h2>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <span className={`px-2 py-0.5 rounded-full text-xs ${roleColor[selected.role] || ''}`}>{selected.role}</span>
+                {selected.age && <span>· {selected.age}岁</span>}
+              </div>
+            </div>
+            <button onClick={handleRefreshAppearance} disabled={refreshingAppearance} className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors disabled:opacity-50">
+              {refreshingAppearance ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} 刷新外貌
+            </button>
+            <button onClick={() => handleOpenEdit(selected)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors">
+              <Pencil className="w-3 h-3" /> 编辑
+            </button>
           </div>
-          <button onClick={() => handleOpenEdit(selected)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors">
-            <Pencil className="w-3 h-3" /> 编辑
-          </button>
+          {selected.description && (
+            <div className="mb-4 p-4 bg-muted rounded-lg">
+              <p className="text-sm">{selected.description}</p>
+            </div>
+          )}
+          {renderKVSection('角色卡', selected.full_sheet, editingSheet,
+            () => openSheetEdit(selected.full_sheet), () => setEditingSheet(false), () => saveCharSheet('full_sheet'),
+            sheetDraft, setSheetDraft, 'sheet')}
+          {renderKVSection('当前状态', selected.current_state, editingState,
+            () => openStateEdit(selected.current_state), () => setEditingState(false), () => saveCharSheet('current_state'),
+            stateDraft, setStateDraft, 'state', true)}
         </div>
-        {selected.description && (
-          <div className="mb-4 p-4 bg-muted rounded-lg">
-            <p className="text-sm">{selected.description}</p>
-          </div>
-        )}
-        {renderKVSection('角色卡', selected.full_sheet, editingSheet,
-          () => openSheetEdit(selected.full_sheet), () => setEditingSheet(false), () => saveCharSheet('full_sheet'),
-          sheetDraft, setSheetDraft, 'sheet')}
-        {renderKVSection('当前状态', selected.current_state, editingState,
-          () => openStateEdit(selected.current_state), () => setEditingState(false), () => saveCharSheet('current_state'),
-          stateDraft, setStateDraft, 'state', true)}
+
+        {/* 右列：角色全身图 */}
+        <div className="w-[280px] shrink-0">
+          <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
+          {selected.avatar_url ? (
+            <div className="relative group">
+              <img src={selected.avatar_url} alt={selected.name} className="w-full aspect-[2/3] object-cover object-top rounded-lg border" />
+              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center gap-3">
+                {uploadingAvatar ? (
+                  <Loader2 className="w-6 h-6 text-white animate-spin" />
+                ) : (
+                  <>
+                    <button onClick={() => avatarInputRef.current?.click()} className="p-2 bg-white/20 rounded-full hover:bg-white/40 transition-colors">
+                      <ImagePlus className="w-5 h-5 text-white" />
+                    </button>
+                    <button onClick={handleDeleteAvatar} className="p-2 bg-white/20 rounded-full hover:bg-red-500/80 transition-colors">
+                      <Trash2 className="w-5 h-5 text-white" />
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div
+              onClick={() => !uploadingAvatar && avatarInputRef.current?.click()}
+              className="w-full aspect-[2/3] border-2 border-dashed rounded-lg flex flex-col items-center justify-center gap-2 text-muted-foreground hover:border-primary hover:text-primary transition-colors cursor-pointer"
+            >
+              {uploadingAvatar ? <Loader2 className="w-8 h-8 animate-spin" /> : <ImagePlus className="w-8 h-8" />}
+              <span className="text-xs">{uploadingAvatar ? '上传中...' : '上传角色图'}</span>
+            </div>
+          )}
+        </div>
       </div>
     )
   }

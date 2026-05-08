@@ -29,6 +29,8 @@ export interface Novel {
   chat_context_rounds: number
   enable_thinking: boolean
   thinking_level: string
+  gemini_stream: boolean
+  context_config: Record<string, boolean>
   created_at: string
   updated_at: string
 }
@@ -57,6 +59,7 @@ export interface Character {
   description: string
   full_sheet: Record<string, unknown>
   current_state: Record<string, unknown>
+  avatar_url: string
   created_at: string
   updated_at: string
 }
@@ -109,8 +112,11 @@ export interface OutlineEntry {
   level: string
   volume: number
   chapter_number: number
+  start_chapter: number
+  end_chapter: number
   title: string
   content: string
+  created_at: string
   updated_at: string
 }
 
@@ -140,6 +146,109 @@ export interface WriterPreset {
   prompt: string
   created_at: string
   updated_at: string
+}
+
+export interface NovelNote {
+  id: number
+  novel_id: number
+  title: string
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Faction {
+  id: number
+  novel_id: number
+  name: string
+  type: string
+  power_level: string
+  alignment: string
+  leader: string
+  headquarters: string
+  location_id: number | null
+  member_count: string
+  color: string
+  description: string
+  goals: string
+  traits: string
+  history: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Technique {
+  id: number
+  novel_id: number
+  name: string
+  type: string
+  description: string
+  practitioners: string
+  power_level: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Volume {
+  id: number
+  novel_id: number
+  number: number
+  title: string
+  description: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RelationshipNode {
+  id: number
+  name: string
+  role: string
+}
+
+export interface RelationshipEdge {
+  source: number
+  target: number
+  labels: Array<{ from: string; desc: string; type?: 'initial' | 'current' }>
+}
+
+export interface ContextStepData {
+  key: string
+  label: string
+  detail: string
+  source: string
+  items: string[]
+  content?: string
+}
+
+export interface NewLocationsData {
+  candidates: Array<{ name: string; type: string; description: string; parent_name: string }>
+}
+
+export interface ReviewIssue {
+  type: string
+  severity: string
+  description: string
+  chapters: number[]
+}
+
+export interface ReviewResult {
+  issues: ReviewIssue[]
+  input_tokens: number
+  output_tokens: number
+  model: string
+  chapter_count: number
+  word_count: number
+}
+
+export interface SearchResult {
+  chapters: Array<{ chapter_number: number; summary: string; score: number }>
+  characters: Array<{ id: number; name: string; role: string; description: string }>
+  items: Array<{ id: number; name: string; type: string; description: string }>
+  systems: Array<{ id: number; name: string; type: string; description: string }>
+  locations: Array<{ id: number; name: string; type: string; description: string }>
+  factions: Array<{ id: number; name: string; type: string; description: string }>
+  techniques: Array<{ id: number; name: string; type: string; description: string }>
+  notes: Array<{ id?: number; title: string; content: string; score?: number }>
 }
 
 export const PROVIDER_PRESETS = [
@@ -172,6 +281,12 @@ export const novelsApi = {
     api.get<ContextPreview>(`/novels/${novelId}/context-preview`, {
       params: { chapter_number: chapterNumber, instruction, target_words: targetWords },
     }).then(r => r.data),
+  reindexTimeline: (novelId: number) =>
+    api.post<{ updated: number; results: Array<{ chapter: number; old: string; new: string }> }>(`/novels/${novelId}/reindex-timeline`).then(r => r.data),
+  reindexEntities: (novelId: number) =>
+    api.post<Record<string, number>>(`/novels/${novelId}/reindex-entities`).then(r => r.data),
+  search: (novelId: number, query: string) =>
+    api.get<SearchResult>(`/novels/${novelId}/search`, { params: { q: query } }).then(r => r.data),
 }
 
 export interface WriterMessage {
@@ -191,9 +306,13 @@ export interface ContextPreview {
     recent_text: string
     characters_count: number
     entities_count: number
+    locations_count: number
+    notes_context: string
   }
   writer_messages: WriterMessage[]
   writer_model: string
+  token_estimate: Record<string, number>
+  context_config: Record<string, boolean>
 }
 
 // ── Chapter APIs ───────────────────────────────────────────────────────────
@@ -205,6 +324,15 @@ export const chaptersApi = {
   update: (id: number, data: Partial<Chapter>) => api.patch<Chapter>(`/chapters/${id}`, data).then(r => r.data),
   confirm: (chapterId: number) => api.post('/chapters/confirm', { chapter_id: chapterId }, { timeout: 120000 }).then(r => r.data),
   delete: (id: number) => api.delete(`/chapters/${id}`).then(r => r.data),
+  batchVolume: (chapterIds: number[], volume: number) =>
+    api.post('/chapters/batch-volume', { chapter_ids: chapterIds, volume }).then(r => r.data),
+  discover: (chapterId: number) =>
+    api.post<{
+      characters: Array<{ name: string; role: string; description: string }>
+      entities: Array<{ name: string; type: string; description: string }>
+      locations: Array<{ name: string; type: string; description: string; parent_name: string }>
+      techniques: Array<{ name: string; type: string; description: string }>
+    }>(`/chapters/${chapterId}/discover`, {}, { timeout: 60000 }).then(r => r.data),
 }
 
 // ── Character APIs ─────────────────────────────────────────────────────────
@@ -215,6 +343,21 @@ export const charactersApi = {
   create: (data: Partial<Character>) => api.post<Character>('/characters/', data).then(r => r.data),
   update: (id: number, data: Partial<Character>) => api.patch<Character>(`/characters/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/characters/${id}`).then(r => r.data),
+  uploadAvatar: (characterId: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post<Character>(`/characters/${characterId}/avatar`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+  deleteAvatar: (characterId: number) =>
+    api.delete<Character>(`/characters/${characterId}/avatar`).then(r => r.data),
+  refreshAppearance: (characterId: number) =>
+    api.post<Character>(`/characters/${characterId}/refresh-appearance`).then(r => r.data),
+  enhance: (characterId: number, data: { prompt: string; scope: string[] }) =>
+    api.post<Character>(`/characters/${characterId}/enhance`, data).then(r => r.data),
+  relationshipGraph: (novelId: number) =>
+    api.get<{ nodes: RelationshipNode[]; edges: RelationshipEdge[] }>(`/characters/novel/${novelId}/relationship-graph`).then(r => r.data),
 }
 
 // ── World Entity APIs ─────────────────────────────────────────────────────
@@ -226,6 +369,8 @@ export const worldEntitiesApi = {
   create: (data: Partial<WorldEntity>) => api.post<WorldEntity>('/world-entities/', data).then(r => r.data),
   update: (id: number, data: Partial<WorldEntity>) => api.patch<WorldEntity>(`/world-entities/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/world-entities/${id}`).then(r => r.data),
+  convertToTechnique: (entityId: number) =>
+    api.post<Technique>(`/world-entities/${entityId}/convert-to-technique`).then(r => r.data),
 }
 
 // ── Location APIs ────────────────────────────────────────────────────────────
@@ -297,6 +442,77 @@ export const generationApi = {
       chapter_number: chapterNumber,
       volume,
     }).then(r => r.data.suggestions),
+  review: (novelId: number) =>
+    api.post<ReviewResult>('/generation/review', { novel_id: novelId }, { timeout: 300000 }).then(r => r.data),
+}
+
+// ── Novel Notes APIs ──────────────────────────────────────────────────────
+
+export const novelNotesApi = {
+  list: (novelId: number) =>
+    api.get<NovelNote[]>(`/notes/novel/${novelId}`).then(r => r.data),
+  create: (data: { novel_id: number; title: string; content?: string }) =>
+    api.post<NovelNote>('/notes/', data).then(r => r.data),
+  update: (id: number, data: { title?: string; content?: string }) =>
+    api.patch<NovelNote>(`/notes/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/notes/${id}`).then(r => r.data),
+}
+
+// ── Faction APIs ──────────────────────────────────────────────────────────
+
+export const factionsApi = {
+  list: (novelId: number) =>
+    api.get<Faction[]>(`/factions/novel/${novelId}`).then(r => r.data),
+  create: (data: Partial<Faction> & { novel_id: number }) =>
+    api.post<Faction>('/factions/', data).then(r => r.data),
+  update: (id: number, data: Partial<Faction>) =>
+    api.patch<Faction>(`/factions/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/factions/${id}`).then(r => r.data),
+}
+
+// ── Technique APIs ────────────────────────────────────────────────────────
+
+export const techniquesApi = {
+  list: (novelId: number) =>
+    api.get<Technique[]>(`/techniques/novel/${novelId}`).then(r => r.data),
+  create: (data: Partial<Technique> & { novel_id: number }) =>
+    api.post<Technique>('/techniques/', data).then(r => r.data),
+  update: (id: number, data: Partial<Technique>) =>
+    api.patch<Technique>(`/techniques/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/techniques/${id}`).then(r => r.data),
+  convertToEntity: (id: number, type: 'item' | 'system') =>
+    api.post<WorldEntity>(`/techniques/${id}/convert-to-entity`, { type }).then(r => r.data),
+}
+
+// ── Volume APIs ───────────────────────────────────────────────────────────
+
+export const volumesApi = {
+  list: (novelId: number) =>
+    api.get<Volume[]>(`/volumes/novel/${novelId}`).then(r => r.data),
+  create: (data: { novel_id: number; number: number; title: string; description?: string }) =>
+    api.post<Volume>('/volumes/', data).then(r => r.data),
+  update: (id: number, data: { title?: string; description?: string }) =>
+    api.patch<Volume>(`/volumes/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/volumes/${id}`).then(r => r.data),
+}
+
+// ── Outline APIs ──────────────────────────────────────────────────────────
+
+export const outlinesApi = {
+  list: (novelId: number) =>
+    api.get<OutlineEntry[]>(`/outlines/novel/${novelId}`).then(r => r.data),
+  create: (data: { novel_id: number; start_chapter: number; end_chapter: number; title?: string; content: string; volume?: number }) =>
+    api.post<OutlineEntry>('/outlines/', data).then(r => r.data),
+  update: (id: number, data: { start_chapter?: number; end_chapter?: number; title?: string; content?: string }) =>
+    api.patch<OutlineEntry>(`/outlines/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/outlines/${id}`).then(r => r.data),
+  expand: (id: number) =>
+    api.post<OutlineEntry[]>(`/outlines/${id}/expand`).then(r => r.data),
 }
 
 // ── SSE Generation ─────────────────────────────────────────────────────────
@@ -331,6 +547,10 @@ export interface NewEntitiesData {
   candidates: Array<{ name: string; type: string; description: string }>
 }
 
+export interface NewTechniquesData {
+  candidates: Array<{ name: string; type: string; description: string }>
+}
+
 export interface PlotSuggestionsData {
   suggestions: string[]
 }
@@ -360,6 +580,9 @@ export type SSEMessage =
   | { event: 'plot_suggestions'; data: PlotSuggestionsData }
   | { event: 'llm_request'; data: Record<string, unknown> }
   | { event: 'llm_call'; data: LlmCallData }
+  | { event: 'new_locations'; data: NewLocationsData }
+  | { event: 'new_techniques'; data: NewTechniquesData }
+  | { event: 'context_step'; data: ContextStepData }
 
 // ── SSE Chat ───────────────────────────────────────────────────────────────
 

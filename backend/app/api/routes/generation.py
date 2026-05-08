@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.novel import Novel
 from app.models.chapter import Chapter
-from app.schemas.generation import GenerateChapterRequest, PlotSuggestionsRequest
+from app.schemas.generation import GenerateChapterRequest, PlotSuggestionsRequest, ReviewRequest
 from app.agents.orchestrator import run_chapter_generation
 from app.services import context_builder, llm_client
 
@@ -96,6 +96,38 @@ async def get_plot_suggestions(
     return {"suggestions": suggestions}
 
 
+@router.post("/review")
+async def fulltext_review(
+    req: ReviewRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    novel = await db.get(Novel, req.novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    from app.agents import review_agent
+    confirmed = await db.execute(
+        select(Chapter).where(
+            Chapter.novel_id == req.novel_id,
+            Chapter.content != "",
+        )
+    )
+    chapters = confirmed.scalars().all()
+    if not chapters:
+        raise HTTPException(status_code=400, detail="没有有内容的章节可供审查")
+
+    issues, in_tok, out_tok, model = await review_agent.run_fulltext_review(db, novel)
+    total_words = sum(ch.word_count or 0 for ch in chapters)
+    return {
+        "issues": issues,
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "model": model,
+        "chapter_count": len(chapters),
+        "word_count": total_words,
+    }
+
+
 async def generate_plot_suggestions(
     novel: Novel, chapter_content: str, ctx: dict, chapter_number: int,
     writer_system_prompt: str = "",
@@ -161,6 +193,7 @@ async def generate_plot_suggestions(
     if writer_system_prompt:
         messages.append({"role": "system", "content": writer_system_prompt})
 
+    # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
     if api_format == "gemini":
         # Gemini: 章节原文放 assistant(model) 角色，绕过 PROHIBITED_CONTENT 过滤
         messages.extend([

@@ -1,8 +1,10 @@
-import { Plus, Zap, Loader2, Square, Sparkles, Users, Database } from 'lucide-react'
+import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 
 interface NewCharCandidate { name: string; role: string; description: string }
 interface NewEntityCandidate { name: string; type: string; description: string }
+interface NewLocationCandidate { name: string; type: string; description: string; parent_name: string }
+interface NewTechCandidate { name: string; type: string; description: string }
 
 interface GenerationBarProps {
   // Generation
@@ -37,6 +39,22 @@ interface GenerationBarProps {
   onToggleEntity: (i: number) => void
   onAddEntities: () => void
   onDismissEntities: () => void
+
+  // New location discovery
+  newLocationCandidates: NewLocationCandidate[]
+  selectedLocationIndices: Set<number>
+  addingLocations: boolean
+  onToggleLocation: (i: number) => void
+  onAddLocations: () => void
+  onDismissLocations: () => void
+
+  // New technique discovery
+  newTechCandidates: NewTechCandidate[]
+  selectedTechIndices: Set<number>
+  addingTechs: boolean
+  onToggleTech: (i: number) => void
+  onAddTechs: () => void
+  onDismissTechs: () => void
 }
 
 export default function GenerationBar({
@@ -65,6 +83,18 @@ export default function GenerationBar({
   onToggleEntity,
   onAddEntities,
   onDismissEntities,
+  newLocationCandidates,
+  selectedLocationIndices,
+  addingLocations,
+  onToggleLocation,
+  onAddLocations,
+  onDismissLocations,
+  newTechCandidates,
+  selectedTechIndices,
+  addingTechs,
+  onToggleTech,
+  onAddTechs,
+  onDismissTechs,
 }: GenerationBarProps) {
   return (
     <div className="border-t px-4 py-3 shrink-0 space-y-2">
@@ -164,6 +194,88 @@ export default function GenerationBar({
           >
             {addingEntities ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
             添加选中实体（{selectedEntityIndices.size}/{newEntityCandidates.length}）
+          </button>
+        </div>
+      )}
+
+      {/* New Location Discovery */}
+      {newLocationCandidates.length > 0 && (
+        <div className="space-y-1.5 border rounded-lg p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground flex items-center gap-1">
+              <MapPin className="w-3 h-3" /> 发现新地点（本章首次出现）
+            </span>
+            <button
+              onClick={onDismissLocations}
+              className="text-xs text-muted-foreground hover:text-foreground px-1"
+            >
+              ×
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {newLocationCandidates.map((loc, i) => (
+              <button
+                key={i}
+                onClick={() => onToggleLocation(i)}
+                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                  selectedLocationIndices.has(i)
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-transparent bg-muted text-muted-foreground'
+                }`}
+              >
+                <span className="font-medium">{loc.name}</span>
+                {loc.parent_name && <span className="opacity-60">← {loc.parent_name}</span>}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={onAddLocations}
+            disabled={addingLocations || selectedLocationIndices.size === 0}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {addingLocations ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+            添加选中地点（{selectedLocationIndices.size}/{newLocationCandidates.length}）
+          </button>
+        </div>
+      )}
+
+      {/* New Technique Discovery */}
+      {newTechCandidates.length > 0 && (
+        <div className="space-y-1.5 border rounded-lg p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground flex items-center gap-1">
+              <Swords className="w-3 h-3" /> 发现新功法/武技（本章首次出现）
+            </span>
+            <button
+              onClick={onDismissTechs}
+              className="text-xs text-muted-foreground hover:text-foreground px-1"
+            >
+              ×
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {newTechCandidates.map((t, i) => (
+              <button
+                key={i}
+                onClick={() => onToggleTech(i)}
+                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                  selectedTechIndices.has(i)
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-transparent bg-muted text-muted-foreground'
+                }`}
+              >
+                <span className="font-medium">{t.name}</span>
+                <span className="opacity-60">·{t.type}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={onAddTechs}
+            disabled={addingTechs || selectedTechIndices.size === 0}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {addingTechs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+            添加选中功法（{selectedTechIndices.size}/{newTechCandidates.length}）
           </button>
         </div>
       )}

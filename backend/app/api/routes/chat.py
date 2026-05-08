@@ -15,10 +15,12 @@ def _sse(event: str, data) -> str:
     return f"data: {payload}\n\n"
 
 
-def _build_chat_system_prompt(ctx: dict) -> str:
+def _build_chat_system_prompt(ctx: dict, user_messages: list[str] | None = None) -> str:
     """将小说上下文组装成对话模式的 system prompt"""
+    genre = ctx.get("genre", "")
+    genre_hint = f"（{genre}类型）" if genre else ""
     parts = [
-        f"你是《{ctx.get('novel_title', '')}》的创作助手。"
+        f"你是《{ctx.get('novel_title', '')}》{genre_hint}的创作助手。"
         f"请基于以下小说设定回答用户的问题，提供专业的写作建议。"
     ]
     if ctx.get("core_setting"):
@@ -27,10 +29,35 @@ def _build_chat_system_prompt(ctx: dict) -> str:
         chars_text = ""
         for c in ctx["characters"]:
             state = c.get("state", {})
-            chars_text += f"【{c['name']}·{c['role']}】{c['description']}\n"
+            age_str = f"·{c['age']}" if c.get("age") else ""
+            chars_text += f"【{c['name']}·{c['role']}{age_str}】{c['description']}\n"
             if state:
                 chars_text += f"  当前状态：{json.dumps(state, ensure_ascii=False)}\n"
         parts.append(f"=== 角色状态 ===\n{chars_text.strip()}")
+    if ctx.get("world_entities") and user_messages:
+        query_text = "\n".join(user_messages)
+        matched = [e for e in ctx["world_entities"] if e["name"] in query_text]
+        if matched:
+            _TYPE_LABELS = {"item": "道具", "system": "系统"}
+            entities_text = ""
+            for e in matched:
+                type_label = _TYPE_LABELS.get(e["type"], e["type"])
+                entities_text += f"【{e['name']}·{type_label}】{e['description']}\n"
+                for key, val in (e.get("properties") or {}).items():
+                    if not val:
+                        continue
+                    if isinstance(val, list):
+                        entities_text += f"  {key}：{'、'.join(str(v) for v in val)}\n"
+                    elif isinstance(val, dict):
+                        entities_text += f"  {key}：{json.dumps(val, ensure_ascii=False)}\n"
+                    else:
+                        entities_text += f"  {key}：{val}\n"
+                state = e.get("state", {})
+                if state:
+                    entities_text += f"  当前状态：{json.dumps(state, ensure_ascii=False)}\n"
+            parts.append(f"=== 世界实体 ===\n{entities_text.strip()}")
+    if ctx.get("arc_summary"):
+        parts.append(f"=== 故事弧概要 ===\n{ctx['arc_summary']}")
     if ctx.get("rolling_summary"):
         parts.append(f"=== 近期剧情摘要 ===\n{ctx['rolling_summary']}")
     return "\n\n".join(parts)
@@ -61,7 +88,8 @@ async def chat_stream(
         chapter_number=novel.current_chapter or 1,
         volume=novel.current_volume or 1,
     )
-    system_prompt = _build_chat_system_prompt(ctx)
+    user_msgs = [m.content for m in req.messages if m.role == "user"]
+    system_prompt = _build_chat_system_prompt(ctx, user_messages=user_msgs)
     if req.system_prompt.strip():
         system_prompt += f"\n\n=== 用户自定义指令 ===\n{req.system_prompt}"
 

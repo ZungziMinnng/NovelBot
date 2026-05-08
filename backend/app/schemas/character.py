@@ -9,6 +9,7 @@ class CharacterCreate(BaseModel):
     role: str = "配角"
     age: str = ""
     description: str = ""
+    avatar_url: str = ""
     full_sheet: dict = {}
     current_state: dict = {}
 
@@ -18,8 +19,14 @@ class CharacterUpdate(BaseModel):
     role: Optional[str] = None
     age: Optional[str] = None
     description: Optional[str] = None
+    avatar_url: Optional[str] = None
     full_sheet: Optional[dict] = None
     current_state: Optional[dict] = None
+
+
+class EnhanceRequest(BaseModel):
+    prompt: str
+    scope: list[str] = []
 
 
 class CharacterOut(BaseModel):
@@ -29,6 +36,7 @@ class CharacterOut(BaseModel):
     role: str
     age: str
     description: str
+    avatar_url: str
     full_sheet: dict
     current_state: dict
     created_at: datetime

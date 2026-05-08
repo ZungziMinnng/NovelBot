@@ -13,6 +13,7 @@ class Character(Base):
     role: Mapped[str] = mapped_column(String(50), default="配角")  # 主角/反派/配角
     age: Mapped[str] = mapped_column(String(20), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    avatar_url: Mapped[str] = mapped_column(String(255), default="")
 
     # 完整角色卡（JSON）：性格、动机、弱点、背景、技能
     full_sheet: Mapped[dict] = mapped_column(JSON, default=dict)

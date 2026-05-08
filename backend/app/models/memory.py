@@ -37,6 +37,8 @@ class Outline(Base):
     level: Mapped[str] = mapped_column(String(20), nullable=False)
     volume: Mapped[int] = mapped_column(Integer, default=0)
     chapter_number: Mapped[int] = mapped_column(Integer, default=0)
+    start_chapter: Mapped[int] = mapped_column(Integer, default=0)
+    end_chapter: Mapped[int] = mapped_column(Integer, default=0)
     title: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text, nullable=False)
 

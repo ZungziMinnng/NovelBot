@@ -32,6 +32,8 @@ class NovelUpdate(BaseModel):
     chat_context_rounds: Optional[int] = None
     enable_thinking: Optional[bool] = None
     thinking_level: Optional[str] = None  # "off" | "low" | "medium" | "high"
+    gemini_stream: Optional[bool] = None
+    context_config: Optional[dict] = None
 
 
 class NovelOut(BaseModel):
@@ -56,6 +58,8 @@ class NovelOut(BaseModel):
     chat_context_rounds: int
     enable_thinking: bool
     thinking_level: str
+    gemini_stream: bool
+    context_config: dict
     created_at: datetime
     updated_at: datetime
 
@@ -63,14 +67,6 @@ class NovelOut(BaseModel):
 
 
 # 新建小说向导 payload
-class WizardStep1(BaseModel):
-    title: str = ""
-    premise: str
-    genre: str
-    target_length: str = "中篇"
-    writing_style: str = "严肃厚重"
-
-
 class WizardStep2(BaseModel):
     novel_id: int
     raw_world_setting: str
@@ -85,10 +81,6 @@ class WizardStep3(BaseModel):
 class WizardStep4(BaseModel):
     novel_id: int
     outline_detail: str = "标准"  # 粗略/标准/详细
-
-
-class WizardFinalize(BaseModel):
-    novel_id: int
 
 
 class WorldOptimizeRequest(BaseModel):

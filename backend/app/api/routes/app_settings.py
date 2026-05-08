@@ -25,12 +25,6 @@ def _write_env(key: str, value: str) -> None:
     _ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
-def _mask_key(key: str) -> str:
-    if len(key) <= 8:
-        return "****"
-    return key[:3] + "****" + key[-8:]
-
-
 class SettingsUpdate(BaseModel):
     default_writer_model: str = ""
     default_fast_model: str = ""
@@ -40,6 +34,9 @@ class SettingsUpdate(BaseModel):
     agent_outline_model: str = ""
     agent_character_model: str = ""
     agent_orchestrator_model: str = ""
+    agent_review_model: str = ""
+    enable_review: bool = False
+    review_interval: int = 10
     https_proxy: str = ""
     http_proxy: str = ""
 
@@ -54,6 +51,9 @@ class SettingsOut(BaseModel):
     agent_outline_model: str
     agent_character_model: str
     agent_orchestrator_model: str
+    agent_review_model: str
+    enable_review: bool
+    review_interval: int
     https_proxy: str
     http_proxy: str
 
@@ -70,6 +70,9 @@ async def get_settings():
         agent_outline_model=settings.agent_outline_model,
         agent_character_model=settings.agent_character_model,
         agent_orchestrator_model=settings.agent_orchestrator_model,
+        agent_review_model=settings.agent_review_model,
+        enable_review=settings.enable_review,
+        review_interval=settings.review_interval,
         https_proxy=settings.https_proxy,
         http_proxy=settings.http_proxy,
     )
@@ -98,6 +101,12 @@ async def update_settings(data: SettingsUpdate):
     _write_env("AGENT_CHARACTER_MODEL", data.agent_character_model)
     settings.agent_orchestrator_model = data.agent_orchestrator_model
     _write_env("AGENT_ORCHESTRATOR_MODEL", data.agent_orchestrator_model)
+    settings.agent_review_model = data.agent_review_model
+    _write_env("AGENT_REVIEW_MODEL", data.agent_review_model)
+    settings.enable_review = data.enable_review
+    _write_env("ENABLE_REVIEW", str(data.enable_review).lower())
+    settings.review_interval = data.review_interval
+    _write_env("REVIEW_INTERVAL", str(data.review_interval))
     # 代理设置（允许保存空字符串以清除代理）
     settings.https_proxy = data.https_proxy
     _write_env("NOVELBOT_HTTPS_PROXY", data.https_proxy)

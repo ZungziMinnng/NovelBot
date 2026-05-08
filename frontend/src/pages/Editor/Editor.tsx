@@ -6,21 +6,24 @@ import {
   ArrowLeft, Users, List, Map, Zap, Check, Edit3, Trash2,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, MessageSquare,
-  Terminal,
+  Terminal, BookOpen, ClipboardCheck, Gauge, Search,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, type Chapter,
+  novelsApi, chaptersApi, type Chapter, type ReviewResult,
 } from '@/api/client'
 import AgentLog from '@/components/AgentLog/AgentLog'
 import ContextPanel from '@/components/ContextPanel/ContextPanel'
 import NovelSettingsDrawer from '@/components/NovelSettingsDrawer/NovelSettingsDrawer'
 import ChatPanel from '@/components/ChatPanel/ChatPanel'
 import DevPanel from '@/components/DevPanel/DevPanel'
+import ReviewModal from '@/components/ReviewModal/ReviewModal'
+import OutlineModal from '@/components/OutlineModal/OutlineModal'
+import TokenPanel from '@/components/TokenPanel/TokenPanel'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
 import { useGenerationStream } from './useGenerationStream'
-import ChapterSidebar from './ChapterSidebar'
+import EditorSidebar from './EditorSidebar'
 import ChapterContentArea from './ChapterContentArea'
 import GenerationBar from './GenerationBar'
 
@@ -62,6 +65,10 @@ export default function Editor() {
   const [showTokens, setShowTokens] = useState(true)
   const [logCollapsed, setLogCollapsed] = useState(false)
   const [showDevPanel, setShowDevPanel] = useState(false)
+  const [showReviewModal, setShowReviewModal] = useState(false)
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
+  const [showOutlineModal, setShowOutlineModal] = useState(false)
+  const [showTokenPanel, setShowTokenPanel] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('novel_font_size') || 16))
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
@@ -220,6 +227,18 @@ export default function Editor() {
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
             <Terminal className="w-3.5 h-3.5" /> 数据
           </button>
+          <button onClick={() => setShowOutlineModal(true)}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            <BookOpen className="w-3.5 h-3.5" /> 大纲
+          </button>
+          <button onClick={() => setShowReviewModal(true)}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            <ClipboardCheck className="w-3.5 h-3.5" /> 审查
+          </button>
+          <button onClick={() => setShowTokenPanel(true)}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            <Gauge className="w-3.5 h-3.5" /> Token
+          </button>
           <button
             onClick={() => setShowSettingsDrawer(true)}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
@@ -255,8 +274,10 @@ export default function Editor() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Chapter List Sidebar */}
-        <ChapterSidebar
+        {/* Sidebar */}
+        <EditorSidebar
+          novelId={novelId}
+          novel={novel}
           chapters={chapters}
           selectedChapterNum={selectedChapterNum}
           isGenerating={genStore.isGenerating}
@@ -264,6 +285,7 @@ export default function Editor() {
           generatingChapterNum={genStore.chapterNum}
           onSelectChapter={setSelectedChapterNum}
           onNewChapter={handleNewChapter}
+          onOpenSettings={() => setShowSettingsDrawer(true)}
         />
 
         {/* Main Editor */}
@@ -338,6 +360,14 @@ export default function Editor() {
                       className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                       {isConfirming ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
                       {isConfirming ? '确认中...' : currentChapter.status === 'confirmed' ? '重新确认' : '确认章节'}
+                    </button>
+                    <button
+                      onClick={() => currentChapter?.id && gen.handleDiscover(currentChapter.id)}
+                      disabled={gen.isDiscovering}
+                      className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {gen.isDiscovering ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
+                      {gen.isDiscovering ? '发现中...' : '重新发现'}
                     </button>
                   </>
                 )}
@@ -442,6 +472,18 @@ export default function Editor() {
               onToggleEntity={gen.toggleEntitySelection}
               onAddEntities={gen.handleAddNewEntities}
               onDismissEntities={() => gen.setNewEntityCandidates([])}
+              newLocationCandidates={gen.newLocationCandidates}
+              selectedLocationIndices={gen.selectedLocationIndices}
+              addingLocations={gen.addingLocations}
+              onToggleLocation={gen.toggleLocationSelection}
+              onAddLocations={gen.handleAddNewLocations}
+              onDismissLocations={() => gen.setNewLocationCandidates([])}
+              newTechCandidates={gen.newTechCandidates}
+              selectedTechIndices={gen.selectedTechIndices}
+              addingTechs={gen.addingTechs}
+              onToggleTech={gen.toggleTechSelection}
+              onAddTechs={gen.handleAddNewTechs}
+              onDismissTechs={() => gen.setNewTechCandidates([])}
             />
           </>}
         </div>
@@ -453,7 +495,7 @@ export default function Editor() {
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">上下文状态</p>
             </div>
             <div className="flex-1 overflow-hidden p-3">
-              <ContextPanel novelId={novelId} rollingStage={genStore.agentStage} />
+              <ContextPanel novelId={novelId} rollingStage={genStore.agentStage} contextSteps={genStore.contextSteps} />
             </div>
           </div>
         )}
@@ -470,6 +512,34 @@ export default function Editor() {
       {/* Developer View Panel */}
       {showDevPanel && (
         <DevPanel onClose={() => setShowDevPanel(false)} />
+      )}
+
+      {/* Review Modal */}
+      {showReviewModal && (
+        <ReviewModal
+          novelId={novelId}
+          result={reviewResult}
+          onResult={setReviewResult}
+          onClose={() => setShowReviewModal(false)}
+        />
+      )}
+
+      {/* Outline Modal */}
+      {showOutlineModal && (
+        <OutlineModal
+          novelId={novelId}
+          currentChapter={selectedChapterNum}
+          onClose={() => setShowOutlineModal(false)}
+        />
+      )}
+
+      {/* Token Panel */}
+      {showTokenPanel && novel && (
+        <TokenPanel
+          novelId={novelId}
+          novel={novel}
+          onClose={() => setShowTokenPanel(false)}
+        />
       )}
     </div>
   )

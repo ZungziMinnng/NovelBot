@@ -66,6 +66,14 @@ async def _run_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS idx_locations_novel_type ON locations(novel_id, type)",
         # 供应商关联
         "ALTER TABLE model_library ADD COLUMN provider_id INTEGER DEFAULT NULL",
+        "ALTER TABLE characters ADD COLUMN avatar_url TEXT DEFAULT ''",
+        "ALTER TABLE novels ADD COLUMN context_config TEXT DEFAULT '{}'",
+        "ALTER TABLE novels ADD COLUMN gemini_stream INTEGER DEFAULT 0",
+        # 大纲范围支持
+        "ALTER TABLE outlines ADD COLUMN start_chapter INTEGER DEFAULT 0",
+        "ALTER TABLE outlines ADD COLUMN end_chapter INTEGER DEFAULT 0",
+        "UPDATE outlines SET start_chapter = chapter_number, end_chapter = chapter_number WHERE chapter_number > 0 AND start_chapter = 0",
+        "CREATE INDEX IF NOT EXISTS idx_outlines_novel_range ON outlines(novel_id, volume, start_chapter, end_chapter)",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -76,7 +84,7 @@ async def _run_migrations() -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_migrations()

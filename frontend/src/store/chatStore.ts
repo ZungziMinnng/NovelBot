@@ -29,7 +29,6 @@ interface ChatStore {
   messages: Record<number, ChatMessage[]>
   updateSettings: (novelId: number, partial: Partial<ChatSettings>) => void
   resetSettings: (novelId: number) => void
-  setMessages: (novelId: number, messages: ChatMessage[]) => void
   appendMessage: (novelId: number, message: ChatMessage) => void
   updateLastAssistant: (novelId: number, updater: (content: string) => string) => void
   clearMessages: (novelId: number) => void
@@ -54,9 +53,6 @@ export const useChatStore = create<ChatStore>()(
           const { [novelId]: _, ...rest } = s.settings
           return { settings: rest }
         }),
-
-      setMessages: (novelId, messages) =>
-        set((s) => ({ messages: { ...s.messages, [novelId]: messages } })),
 
       appendMessage: (novelId, message) =>
         set((s) => ({

@@ -17,6 +17,8 @@ interface ChapterContentAreaProps {
   currentChapter: Chapter | null
   fontSize: number
   lineHeight: number
+  fontFamily: string
+  fontWeight: string
   plotSuggestions: string[]
   instruction: string
   onEditContentChange: (v: string) => void
@@ -38,6 +40,8 @@ export default function ChapterContentArea({
   currentChapter,
   fontSize,
   lineHeight,
+  fontFamily,
+  fontWeight,
   plotSuggestions,
   instruction,
   onEditContentChange,
@@ -65,7 +69,7 @@ export default function ChapterContentArea({
           value={editContent}
           onChange={e => onEditContentChange(e.target.value)}
           className="w-full h-full p-8 resize-none bg-background focus:outline-none novel-content font-serif"
-          style={{ fontSize: `${fontSize}px`, lineHeight }}
+          style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}
           placeholder="在此输入内容..."
         />
       ) : warningMessage && !isCurrentlyGenerating ? (
@@ -74,7 +78,7 @@ export default function ChapterContentArea({
             <span className="shrink-0 mt-0.5">⚠</span>
             <span>{warningMessage}</span>
           </div>
-          <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight }}>
+          <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
             {displayText}
           </div>
         </div>
@@ -105,7 +109,7 @@ export default function ChapterContentArea({
               </details>
             </div>
           )}
-          <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight }}>
+          <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
             {displayText || (
               <span className="text-muted-foreground/50">
                 {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}

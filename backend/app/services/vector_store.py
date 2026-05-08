@@ -58,6 +58,33 @@ def search_similar(
         return []
 
 
+def search_similar_with_meta(
+    novel_id: int,
+    query: str,
+    top_k: int = 10,
+    where: dict | None = None,
+) -> list[dict]:
+    """语义检索，返回 [{text, metadata, distance}]"""
+    collection = _get_collection(novel_id)
+    try:
+        results = collection.query(
+            query_texts=[query],
+            n_results=top_k,
+            where=where,
+            include=["documents", "metadatas", "distances"],
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        return [
+            {"text": d, "metadata": m, "distance": dist}
+            for d, m, dist in zip(docs, metas, dists)
+            if d
+        ]
+    except Exception:
+        return []
+
+
 def store_texts_batch(
     novel_id: int,
     items: list[tuple[str, str, dict]],
@@ -103,6 +130,10 @@ async def astore_texts_batch(novel_id: int, items: list[tuple[str, str, dict]]) 
 
 async def asearch_similar(novel_id: int, query: str, top_k: int = 3, where: dict | None = None) -> list[str]:
     return await asyncio.to_thread(search_similar, novel_id, query, top_k, where)
+
+
+async def asearch_similar_with_meta(novel_id: int, query: str, top_k: int = 10, where: dict | None = None) -> list[dict]:
+    return await asyncio.to_thread(search_similar_with_meta, novel_id, query, top_k, where)
 
 
 async def adelete_docs(novel_id: int, doc_ids: list[str]) -> None:

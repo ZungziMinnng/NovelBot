@@ -1,13 +1,19 @@
 import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
 from app.database import get_db
 from app.models.chapter import Chapter
 from app.models.novel import Novel
+from app.models.character import Character
+from app.models.world_entity import WorldEntity
+from app.models.location import Location
+from app.models.technique import Technique
 from app.models.memory import Memory
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
+from app.agents import character_agent
 from app.services import summarizer, vector_store
 
 router = APIRouter()
@@ -117,19 +123,90 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
     }
 
 
+@router.post("/{chapter_id}/discover")
+async def discover_entities(chapter_id: int, db: AsyncSession = Depends(get_db)):
+    """对已有章节重新运行角色/实体/地点发现"""
+    chapter = await db.get(Chapter, chapter_id)
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if not chapter.content:
+        raise HTTPException(status_code=400, detail="章节无内容")
+
+    novel = await db.get(Novel, chapter.novel_id)
+
+    char_result = await db.execute(
+        select(Character.name).where(Character.novel_id == novel.id)
+    )
+    existing_char_names = [r[0] for r in char_result]
+
+    entity_result = await db.execute(
+        select(WorldEntity.name).where(WorldEntity.novel_id == novel.id)
+    )
+    existing_entity_names = [r[0] for r in entity_result]
+
+    loc_result = await db.execute(
+        select(Location.name, Location.type).where(Location.novel_id == novel.id)
+    )
+    existing_locations = [{"name": r[0], "type": r[1], "parent_name": ""} for r in loc_result]
+
+    tech_result = await db.execute(
+        select(Technique.name).where(Technique.novel_id == novel.id)
+    )
+    existing_tech_names = [r[0] for r in tech_result]
+
+    characters, entities, locations, techniques = await asyncio.gather(
+        character_agent.discover_new_characters(novel, chapter.content, existing_char_names),
+        character_agent.discover_new_entities(novel, chapter.content, existing_entity_names),
+        character_agent.discover_new_locations(novel, chapter.content, existing_locations),
+        character_agent.discover_new_techniques(novel, chapter.content, existing_tech_names),
+    )
+
+    return {
+        "characters": characters,
+        "entities": entities,
+        "locations": locations,
+        "techniques": techniques,
+    }
+
+
+class BatchVolumeRequest(BaseModel):
+    chapter_ids: list[int]
+    volume: int
+
+
+@router.post("/batch-volume")
+async def batch_update_volume(body: BatchVolumeRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Chapter).where(Chapter.id.in_(body.chapter_ids))
+    )
+    chapters = result.scalars().all()
+    for ch in chapters:
+        ch.volume = body.volume
+    await db.commit()
+    return {"ok": True, "updated": len(chapters)}
+
+
 @router.delete("/{chapter_id}")
 async def delete_chapter(chapter_id: int, db: AsyncSession = Depends(get_db)):
     chapter = await db.get(Chapter, chapter_id)
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")
-    # 解除 memories 表的外键引用，避免删除时外键约束失败
-    result = await db.execute(select(Memory).where(Memory.chapter_id == chapter_id))
-    for mem in result.scalars():
-        mem.chapter_id = None
+    # 删除该章节的所有 Memory 行（按 novel_id + chapter_number），
+    # 防止孤儿记录污染后续章节的滚动摘要窗口
+    await db.execute(
+        sql_delete(Memory).where(
+            Memory.novel_id == chapter.novel_id,
+            Memory.chapter_number == chapter.number,
+        )
+    )
     # 清理 ChromaDB 中的 summary 向量（兼容清理历史遗留的 content chunk）
     doc_ids = [f"chapter_{chapter_id}_summary"]
     doc_ids.extend(f"chapter_{chapter_id}_chunk_{i}" for i in range(50))
     await vector_store.adelete_docs(chapter.novel_id, doc_ids)
+    # 若删除的是最新章节，回退小说进度
+    novel = await db.get(Novel, chapter.novel_id)
+    if novel and chapter.number == novel.current_chapter:
+        novel.current_chapter = chapter.number - 1
     await db.delete(chapter)
     await db.commit()
     return {"ok": True}

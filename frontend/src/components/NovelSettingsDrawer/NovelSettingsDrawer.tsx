@@ -91,6 +91,7 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   const [ragTopK, setRagTopK] = useState(novel.rag_top_k ?? 3)
   const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
   const [thinkingLevel, setThinkingLevel] = useState(novel.thinking_level || 'medium')
+  const [geminiStream, setGeminiStream] = useState(novel.gemini_stream ?? false)
 
   // ── UI state ──
   const [saving, setSaving] = useState(false)
@@ -120,6 +121,7 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
     setRagTopK(novel.rag_top_k ?? 3)
     setChatContextRounds(novel.chat_context_rounds ?? 20)
     setThinkingLevel(novel.thinking_level || 'medium')
+    setGeminiStream(novel.gemini_stream ?? false)
   }, [novel.id])
 
   const { data: writerPresets = [] } = useQuery({
@@ -200,6 +202,7 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
         rag_top_k: ragTopK,
         chat_context_rounds: chatContextRounds,
         thinking_level: thinkingLevel,
+        gemini_stream: geminiStream,
       })
       qc.invalidateQueries({ queryKey: ['novel', novel.id] })
       setSaved(true)
@@ -544,6 +547,20 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                       <option value="medium">中（默认）</option>
                       <option value="high">高</option>
                     </select>
+                  </div>
+
+                  {/* Gemini stream */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">Gemini 真实流式</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
+                    </div>
+                    <button
+                      onClick={() => setGeminiStream(!geminiStream)}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${geminiStream ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow ${geminiStream ? 'translate-x-5' : ''}`} />
+                    </button>
                   </div>
 
                   {/* Temperature slider */}

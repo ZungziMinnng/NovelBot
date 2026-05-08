@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { AgentLogEntry } from '@/components/AgentLog/AgentLog'
+import type { ContextStepData } from '@/api/client'
 
 interface GenerationState {
   isGenerating: boolean
@@ -12,6 +13,7 @@ interface GenerationState {
   streamingText: string
   originalDraft: string   // 首次 Critic 失败前的初稿（有重写时才有值）
   agentLogEntries: AgentLogEntry[]
+  contextSteps: ContextStepData[]
   totalInputTokens: number
   totalOutputTokens: number
   abortController: AbortController | null
@@ -26,6 +28,7 @@ interface GenerationState {
   addLogEntry: (entry: AgentLogEntry) => void
   updateLogEntry: (id: string, updates: Partial<AgentLogEntry>) => void
   setTotalTokens: (input: number, output: number) => void
+  addContextStep: (step: ContextStepData) => void
   finishGeneration: () => void
   abortGeneration: () => void
 }
@@ -61,6 +64,7 @@ export const useGenerationStore = create<GenerationState>()((set, get) => ({
   streamingText: '',
   originalDraft: '',
   agentLogEntries: [],
+  contextSteps: [],
   totalInputTokens: 0,
   totalOutputTokens: 0,
   abortController: null,
@@ -78,6 +82,7 @@ export const useGenerationStore = create<GenerationState>()((set, get) => ({
       streamingText: '',
       originalDraft: '',
       agentLogEntries: [],
+      contextSteps: [],
       totalInputTokens: 0,
       totalOutputTokens: 0,
       abortController: null,
@@ -100,6 +105,8 @@ export const useGenerationStore = create<GenerationState>()((set, get) => ({
   },
 
   setOriginalDraft: (text) => set({ originalDraft: text }),
+
+  addContextStep: (step) => set((s) => ({ contextSteps: [...s.contextSteps, step] })),
 
   addLogEntry: (entry) => set((s) => ({ agentLogEntries: [...s.agentLogEntries, entry] })),
 

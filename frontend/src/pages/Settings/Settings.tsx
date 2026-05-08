@@ -50,6 +50,9 @@ export default function Settings() {
   const [agentOutlineModel, setAgentOutlineModel] = useState('')
   const [agentCharacterModel, setAgentCharacterModel] = useState('')
   const [agentOrchestratorModel, setAgentOrchestratorModel] = useState('')
+  const [agentReviewModel, setAgentReviewModel] = useState('')
+  const [enableReview, setEnableReview] = useState(false)
+  const [reviewInterval, setReviewInterval] = useState(10)
   const [httpsProxy, setHttpsProxy] = useState('')
   const [httpProxy, setHttpProxy] = useState('')
   const [saving, setSaving] = useState(false)
@@ -93,6 +96,9 @@ export default function Settings() {
       agent_outline_model: string
       agent_character_model: string
       agent_orchestrator_model: string
+      agent_review_model: string
+      enable_review: boolean
+      review_interval: number
       https_proxy: string
       http_proxy: string
     }) => {
@@ -105,6 +111,9 @@ export default function Settings() {
       setAgentOutlineModel(s.agent_outline_model || '')
       setAgentCharacterModel(s.agent_character_model || '')
       setAgentOrchestratorModel(s.agent_orchestrator_model || '')
+      setAgentReviewModel(s.agent_review_model || '')
+      setEnableReview(s.enable_review ?? false)
+      setReviewInterval(s.review_interval ?? 10)
       setHttpsProxy(s.https_proxy || '')
       setHttpProxy(s.http_proxy || '')
     }).catch(() => {})
@@ -124,6 +133,9 @@ export default function Settings() {
         agent_outline_model: agentOutlineModel,
         agent_character_model: agentCharacterModel,
         agent_orchestrator_model: agentOrchestratorModel,
+        agent_review_model: agentReviewModel,
+        enable_review: enableReview,
+        review_interval: reviewInterval,
         https_proxy: httpsProxy,
         http_proxy: httpProxy,
       })
@@ -636,6 +648,47 @@ export default function Settings() {
               <ModelSelect value={agentOrchestratorModel} onChange={setAgentOrchestratorModel} placeholder="留空使用默认 Fast 模型" models={models} />
               <p className="text-xs text-muted-foreground mt-1">负责世界观扩写</p>
             </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">全文审查 (Review) Agent</label>
+              <ModelSelect value={agentReviewModel} onChange={setAgentReviewModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <p className="text-xs text-muted-foreground mt-1">百万上下文全文审查，推荐 DeepSeek V4 Pro</p>
+            </div>
+          </div>
+        </section>
+
+        {/* ── 全文审查配置 ──────────────────────────────────────────── */}
+        <section>
+          <h2 className="font-semibold text-base mb-1">全文审查</h2>
+          <p className="text-xs text-muted-foreground mb-4">
+            利用百万上下文模型审查全文一致性，检测情节矛盾、角色不一致、遗忘伏笔等问题。
+          </p>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">启用自动审查</p>
+                <p className="text-xs text-muted-foreground mt-0.5">生成到指定章节数时自动触发全文审查</p>
+              </div>
+              <button
+                onClick={() => setEnableReview(!enableReview)}
+                className={`w-10 h-6 rounded-full transition-colors relative ${enableReview ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+              >
+                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${enableReview ? 'translate-x-5' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            {enableReview && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm">每隔</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={reviewInterval}
+                  onChange={e => setReviewInterval(Number(e.target.value) || 10)}
+                  className="w-20 border rounded-lg px-2 py-1.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                <label className="text-sm">章自动触发</label>
+              </div>
+            )}
           </div>
         </section>
 

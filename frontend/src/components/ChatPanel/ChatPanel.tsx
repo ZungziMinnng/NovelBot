@@ -244,7 +244,7 @@ export default function ChatPanel({ novelId, novel }: Props) {
             placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
             rows={2}
             disabled={isStreaming}
-            className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-none disabled:opacity-50"
+            className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y disabled:opacity-50"
           />
           <button
             onClick={handleSend}

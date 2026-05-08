@@ -106,7 +106,7 @@ CHARACTER_UPDATE_PROMPT_SUFFIX = """以 JSON 格式输出，格式为：
     "titles": ["称谓/头衔列表，如：师姐、掌门、院长；本章无新称谓则为空数组"],
     "affiliation": "所属门派/组织/学院，如：太渊宫；本章无变化则保持原值或留空字符串",
     "known_secrets": ["仅限：阴谋、隐藏身份、未公开的关键情报；不要记录普通对话或公开信息"],
-    "relationship_changes": {"其他角色名": "关系描述"}
+    "relationship_changes": {"其他角色名": "当前最显著的关系变化（仅1-2条最重要的）"}
   }
 }
 
@@ -387,6 +387,15 @@ async def update_character_states(
                     if key == "known_secrets" and len(combined) > 10:
                         combined = combined[-10:]
                     merged[key] = combined
+            elif key == "relationship_changes" and isinstance(val, dict):
+                initial = dict(merged.get("initial_relationships", {}))
+                if not isinstance(initial, dict):
+                    initial = {}
+                for tgt, lbl in val.items():
+                    if tgt not in initial:
+                        initial[tgt] = lbl
+                merged["initial_relationships"] = initial
+                merged[key] = val
             elif val:  # 非空值才覆盖，避免清除上一章已存的信息
                 merged[key] = val
         char_map[target_name].current_state = merged

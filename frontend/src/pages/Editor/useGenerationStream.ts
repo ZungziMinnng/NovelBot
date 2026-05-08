@@ -1,10 +1,10 @@
 import { useState, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import {
-  chaptersApi, charactersApi, generationApi, worldEntitiesApi,
+  chaptersApi, charactersApi, generationApi, worldEntitiesApi, locationsApi, techniquesApi,
   streamChapterGeneration,
 } from '@/api/client'
-import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, LlmCallData } from '@/api/client'
+import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, LlmCallData, ContextStepData } from '@/api/client'
 import { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
@@ -14,23 +14,37 @@ import { useQueryClient } from '@tanstack/react-query'
 export interface GenerationStreamState {
   newCharCandidates: Array<{ name: string; role: string; description: string }>
   newEntityCandidates: Array<{ name: string; type: string; description: string }>
+  newLocationCandidates: Array<{ name: string; type: string; description: string; parent_name: string }>
+  newTechCandidates: Array<{ name: string; type: string; description: string }>
   selectedCharIndices: Set<number>
   selectedEntityIndices: Set<number>
+  selectedLocationIndices: Set<number>
+  selectedTechIndices: Set<number>
   addingChars: boolean
   addingEntities: boolean
+  addingLocations: boolean
+  addingTechs: boolean
   isLoadingSuggestions: boolean
+  isDiscovering: boolean
 }
 
 export interface GenerationStreamActions {
   handleGenerate: () => void
   handleAbortOrGenerate: () => void
   handleFetchSuggestions: () => Promise<void>
+  handleDiscover: (chapterId: number) => Promise<void>
   toggleCharSelection: (i: number) => void
   toggleEntitySelection: (i: number) => void
+  toggleTechSelection: (i: number) => void
   handleAddNewChars: () => Promise<void>
   handleAddNewEntities: () => Promise<void>
+  toggleLocationSelection: (i: number) => void
+  handleAddNewLocations: () => Promise<void>
+  handleAddNewTechs: () => Promise<void>
   setNewCharCandidates: (v: Array<{ name: string; role: string; description: string }>) => void
   setNewEntityCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
+  setNewLocationCandidates: (v: Array<{ name: string; type: string; description: string; parent_name: string }>) => void
+  setNewTechCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
 }
 
 export function useGenerationStream(
@@ -47,10 +61,17 @@ export function useGenerationStream(
   const [newCharCandidates, setNewCharCandidates] = useState<Array<{ name: string; role: string; description: string }>>([])
   const [newEntityCandidates, setNewEntityCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
   const [selectedCharIndices, setSelectedCharIndices] = useState<Set<number>>(new Set())
+  const [newLocationCandidates, setNewLocationCandidates] = useState<Array<{ name: string; type: string; description: string; parent_name: string }>>([])
   const [selectedEntityIndices, setSelectedEntityIndices] = useState<Set<number>>(new Set())
+  const [selectedLocationIndices, setSelectedLocationIndices] = useState<Set<number>>(new Set())
   const [addingChars, setAddingChars] = useState(false)
   const [addingEntities, setAddingEntities] = useState(false)
+  const [addingLocations, setAddingLocations] = useState(false)
+  const [newTechCandidates, setNewTechCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
+  const [selectedTechIndices, setSelectedTechIndices] = useState<Set<number>>(new Set())
+  const [addingTechs, setAddingTechs] = useState(false)
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
+  const [isDiscovering, setIsDiscovering] = useState(false)
 
   const isCurrentlyGenerating = useGenerationStore((s) =>
     s.isGenerating && s.novelId === novelId && s.chapterNum === selectedChapterNum,
@@ -70,6 +91,42 @@ export function useGenerationStream(
     }
   }, [novelId, selectedChapterNum, setChapterSuggestions])
 
+  // ── Discover (manual re-discovery) ───────────────────────────────────────
+  const handleDiscover = useCallback(async (chapterId: number) => {
+    setIsDiscovering(true)
+    setNewCharCandidates([])
+    setNewEntityCandidates([])
+    setNewLocationCandidates([])
+    setNewTechCandidates([])
+    try {
+      const result = await chaptersApi.discover(chapterId)
+      if (result.characters?.length) {
+        setNewCharCandidates(result.characters)
+        setSelectedCharIndices(new Set(result.characters.map((_, i) => i)))
+      }
+      if (result.entities?.length) {
+        setNewEntityCandidates(result.entities)
+        setSelectedEntityIndices(new Set(result.entities.map((_, i) => i)))
+      }
+      if (result.locations?.length) {
+        setNewLocationCandidates(result.locations)
+        setSelectedLocationIndices(new Set(result.locations.map((_, i) => i)))
+      }
+      if (result.techniques?.length) {
+        setNewTechCandidates(result.techniques)
+        setSelectedTechIndices(new Set(result.techniques.map((_, i) => i)))
+      }
+      const total = (result.characters?.length || 0) + (result.entities?.length || 0) +
+        (result.locations?.length || 0) + (result.techniques?.length || 0)
+      if (total === 0) toast('未发现新的角色、道具、地点或功法', { icon: 'ℹ️' })
+    } catch (e) {
+      console.error('Discover failed:', e)
+      toast.error('发现失败')
+    } finally {
+      setIsDiscovering(false)
+    }
+  }, [novelId])
+
   // ── Generate ─────────────────────────────────────────────────────────────
   const handleGenerate = useCallback(() => {
     const gs = useGenerationStore.getState()
@@ -79,6 +136,8 @@ export function useGenerationStream(
     setChapterSuggestions(novelId, selectedChapterNum, [])
     setNewCharCandidates([])
     setNewEntityCandidates([])
+    setNewLocationCandidates([])
+    setNewTechCandidates([])
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map()
@@ -159,6 +218,22 @@ export function useGenerationStream(
             }
             break
           }
+          case 'new_locations': {
+            const d = msg.data as NewLocationsData
+            if (d.candidates?.length) {
+              setNewLocationCandidates(d.candidates)
+              setSelectedLocationIndices(new Set(d.candidates.map((_, i) => i)))
+            }
+            break
+          }
+          case 'new_techniques': {
+            const d = msg.data as NewTechniquesData
+            if (d.candidates?.length) {
+              setNewTechCandidates(d.candidates)
+              setSelectedTechIndices(new Set(d.candidates.map((_, i) => i)))
+            }
+            break
+          }
           case 'plot_suggestions': {
             const d = msg.data as { suggestions: string[] }
             if (d.suggestions?.length) setChapterSuggestions(novelId, selectedChapterNum, d.suggestions)
@@ -176,6 +251,11 @@ export function useGenerationStream(
               durationMs: d.duration_ms,
               payload: d.payload,
             })
+            break
+          }
+          case 'context_step': {
+            const d = msg.data as ContextStepData
+            s.addContextStep(d)
             break
           }
           case 'warning': {
@@ -262,25 +342,105 @@ export function useGenerationStream(
     }
   }, [newEntityCandidates, selectedEntityIndices, addingEntities, novelId, qc])
 
+  // ── Discovery: Location ───────────────────────────────────────────────────
+  const toggleLocationSelection = useCallback((i: number) => {
+    setSelectedLocationIndices(prev => {
+      const next = new Set(prev)
+      next.has(i) ? next.delete(i) : next.add(i)
+      return next
+    })
+  }, [])
+
+  const handleAddNewLocations = useCallback(async () => {
+    if (!selectedLocationIndices.size || addingLocations) return
+    setAddingLocations(true)
+    try {
+      const existingLocations = await locationsApi.list(novelId)
+      const nameToId = new Map(existingLocations.map(l => [l.name, l.id]))
+      for (const i of selectedLocationIndices) {
+        const loc = newLocationCandidates[i]
+        const parentId = loc.parent_name ? (nameToId.get(loc.parent_name) ?? null) : null
+        await locationsApi.create({
+          novel_id: novelId,
+          name: loc.name,
+          type: loc.type,
+          description: loc.description,
+          parent_id: parentId,
+        })
+      }
+      qc.invalidateQueries({ queryKey: ['locations', novelId] })
+      const remaining = newLocationCandidates.filter((_, i) => !selectedLocationIndices.has(i))
+      setNewLocationCandidates(remaining)
+      setSelectedLocationIndices(new Set())
+    } finally {
+      setAddingLocations(false)
+    }
+  }, [newLocationCandidates, selectedLocationIndices, addingLocations, novelId, qc])
+
+  // ── Discovery: Technique ──────────────────────────────────────────────────
+  const toggleTechSelection = useCallback((i: number) => {
+    setSelectedTechIndices(prev => {
+      const next = new Set(prev)
+      next.has(i) ? next.delete(i) : next.add(i)
+      return next
+    })
+  }, [])
+
+  const handleAddNewTechs = useCallback(async () => {
+    if (!selectedTechIndices.size || addingTechs) return
+    setAddingTechs(true)
+    try {
+      for (const i of selectedTechIndices) {
+        const t = newTechCandidates[i]
+        await techniquesApi.create({
+          novel_id: novelId,
+          name: t.name,
+          type: t.type,
+          description: t.description,
+        })
+      }
+      qc.invalidateQueries({ queryKey: ['techniques', novelId] })
+      const remaining = newTechCandidates.filter((_, i) => !selectedTechIndices.has(i))
+      setNewTechCandidates(remaining)
+      setSelectedTechIndices(new Set())
+    } finally {
+      setAddingTechs(false)
+    }
+  }, [newTechCandidates, selectedTechIndices, addingTechs, novelId, qc])
+
   return {
     // state
     newCharCandidates,
     newEntityCandidates,
+    newLocationCandidates,
+    newTechCandidates,
     selectedCharIndices,
     selectedEntityIndices,
+    selectedLocationIndices,
+    selectedTechIndices,
     addingChars,
     addingEntities,
+    addingLocations,
+    addingTechs,
     isLoadingSuggestions,
+    isDiscovering,
     isCurrentlyGenerating,
     // actions
     handleGenerate,
     handleAbortOrGenerate,
     handleFetchSuggestions,
+    handleDiscover,
     toggleCharSelection,
     toggleEntitySelection,
+    toggleLocationSelection,
+    toggleTechSelection,
     handleAddNewChars,
     handleAddNewEntities,
+    handleAddNewLocations,
+    handleAddNewTechs,
     setNewCharCandidates,
     setNewEntityCandidates,
+    setNewLocationCandidates,
+    setNewTechCandidates,
   }
 }
