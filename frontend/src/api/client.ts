@@ -5,6 +5,8 @@ export const api = axios.create({
   timeout: 30000,
 })
 
+export type ContextConfigValue = boolean | number
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface Novel {
@@ -22,6 +24,9 @@ export interface Novel {
   fast_model: string
   writer_system_prompt: string
   enable_critic: boolean
+  critic_model: string
+  enable_detail_review: boolean
+  detail_review_model: string
   writer_temperature: number
   writer_max_tokens: number
   rolling_summary_count: number
@@ -30,7 +35,7 @@ export interface Novel {
   enable_thinking: boolean
   thinking_level: string
   gemini_stream: boolean
-  context_config: Record<string, boolean>
+  context_config: Record<string, ContextConfigValue>
   created_at: string
   updated_at: string
 }
@@ -313,7 +318,7 @@ export interface ContextPreview {
   writer_messages: WriterMessage[]
   writer_model: string
   token_estimate: Record<string, number>
-  context_config: Record<string, boolean>
+  context_config: Record<string, ContextConfigValue>
 }
 
 // ── Chapter APIs ───────────────────────────────────────────────────────────
@@ -361,6 +366,8 @@ export const charactersApi = {
     api.get<{ nodes: RelationshipNode[]; edges: RelationshipEdge[] }>(`/characters/novel/${novelId}/relationship-graph`).then(r => r.data),
   generateHistory: (characterId: number) =>
     api.post<Character>(`/characters/${characterId}/generate-history`, {}, { timeout: 300000 }).then(r => r.data),
+  generateImagePrompt: (characterId: number, style: 'sd_tags' | 'natural_zh') =>
+    api.post<{ prompt: string }>(`/characters/${characterId}/generate-image-prompt`, { style }, { timeout: 60000 }).then(r => r.data),
 }
 
 // ── World Entity APIs ─────────────────────────────────────────────────────
@@ -581,6 +588,7 @@ export type SSEMessage =
   | { event: 'new_characters'; data: NewCharactersData }
   | { event: 'new_entities'; data: NewEntitiesData }
   | { event: 'plot_suggestions'; data: PlotSuggestionsData }
+  | { event: 'review_result'; data: ReviewResult }
   | { event: 'llm_request'; data: Record<string, unknown> }
   | { event: 'llm_call'; data: LlmCallData }
   | { event: 'new_locations'; data: NewLocationsData }

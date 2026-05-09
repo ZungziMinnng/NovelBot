@@ -18,7 +18,6 @@ import ChatPanel from '@/components/ChatPanel/ChatPanel'
 import DevPanel from '@/components/DevPanel/DevPanel'
 import ReviewModal from '@/components/ReviewModal/ReviewModal'
 import OutlineModal from '@/components/OutlineModal/OutlineModal'
-import TokenPanel from '@/components/TokenPanel/TokenPanel'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
@@ -67,6 +66,7 @@ export default function Editor() {
   const [editContent, setEditContent] = useState('')
   const [showContext, setShowContext] = useState(true)
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false)
+  const [settingsDrawerTab, setSettingsDrawerTab] = useState<'content' | 'creation' | 'context'>('content')
   const [showDiff, setShowDiff] = useState(false)
   const [showTokens, setShowTokens] = useState(true)
   const [logCollapsed, setLogCollapsed] = useState(false)
@@ -74,7 +74,6 @@ export default function Editor() {
   const [showReviewModal, setShowReviewModal] = useState(false)
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
   const [showOutlineModal, setShowOutlineModal] = useState(false)
-  const [showTokenPanel, setShowTokenPanel] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('novel_font_size') || 16))
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
@@ -237,12 +236,12 @@ export default function Editor() {
             <ClipboardCheck className="w-3.5 h-3.5" /> 审查
           </button>
           <div className="w-px h-4 bg-border mx-0.5" />
-          <button onClick={() => setShowTokenPanel(true)}
+          <button onClick={() => { setSettingsDrawerTab('context'); setShowSettingsDrawer(true) }}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground">
             <Gauge className="w-3.5 h-3.5" /> Token
           </button>
           <button
-            onClick={() => setShowSettingsDrawer(true)}
+            onClick={() => { setSettingsDrawerTab('content'); setShowSettingsDrawer(true) }}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground"
           >
             <Settings2 className="w-3.5 h-3.5" /> 设置
@@ -531,6 +530,7 @@ export default function Editor() {
       {showSettingsDrawer && novel && (
         <NovelSettingsDrawer
           novel={novel}
+          initialTab={settingsDrawerTab}
           onClose={() => setShowSettingsDrawer(false)}
         />
       )}
@@ -559,14 +559,6 @@ export default function Editor() {
         />
       )}
 
-      {/* Token Panel */}
-      {showTokenPanel && novel && (
-        <TokenPanel
-          novelId={novelId}
-          novel={novel}
-          onClose={() => setShowTokenPanel(false)}
-        />
-      )}
     </div>
   )
 }

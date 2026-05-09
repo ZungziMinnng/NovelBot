@@ -170,6 +170,7 @@ export function TechniqueDetail({ technique, novelId, onClose }: {
   const qc = useQueryClient()
   const [form, setForm] = useState(toForm(technique))
   const [saving, setSaving] = useState(false)
+  const [transferOpen, setTransferOpen] = useState(false)
 
   useEffect(() => { setForm(toForm(technique)) }, [technique.id])
 
@@ -191,15 +192,53 @@ export function TechniqueDetail({ technique, novelId, onClose }: {
     onClose()
   }
 
+  const handleTransfer = async (target: 'item' | 'system') => {
+    setTransferOpen(false)
+    try {
+      await techniquesApi.convertToEntity(technique.id, target)
+      qc.invalidateQueries({ queryKey: ['techniques', novelId] })
+      qc.invalidateQueries({ queryKey: ['entities', novelId, target] })
+      toast.success(`已移至${target === 'item' ? '道具' : '系统'}`)
+      onClose()
+    } catch { toast.error('移动失败') }
+  }
+
   const set = (key: string, val: string) => setForm({ ...form, [key]: val })
 
   return (
     <div className="px-3 py-3 space-y-2.5 overflow-y-auto">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">功法详情</span>
-        <button onClick={handleDelete} className="p-1 hover:text-destructive transition-colors">
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <div className="relative">
+            <button
+              onClick={() => setTransferOpen(!transferOpen)}
+              className="flex items-center gap-1 text-xs px-2 py-1.5 border rounded hover:bg-muted transition-colors"
+            >
+              <ArrowRightLeft className="w-3 h-3" /> 转移
+            </button>
+            {transferOpen && (
+              <div className="absolute right-0 top-full z-20 mt-1 bg-popover border rounded-lg shadow-md py-1 min-w-[100px]">
+                <p className="text-[10px] text-muted-foreground px-3 py-1">移至</p>
+                <button
+                  onClick={() => handleTransfer('item')}
+                  className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors"
+                >
+                  道具
+                </button>
+                <button
+                  onClick={() => handleTransfer('system')}
+                  className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors"
+                >
+                  系统
+                </button>
+              </div>
+            )}
+          </div>
+          <button onClick={handleDelete} className="p-1 hover:text-destructive transition-colors">
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2">

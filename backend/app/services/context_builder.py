@@ -107,17 +107,36 @@ async def build_generation_context(
         select(Technique).where(Technique.novel_id == novel.id)
     )).scalars().all()
 
-    # 6 路并行向量检索
+    def _cfg_top_k(key: str, default: int) -> int:
+        try:
+            return max(0, int(cfg.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    async def _entity_hits(doc_type: str, top_k: int) -> list[dict]:
+        if top_k <= 0:
+            return []
+        return await vector_store.asearch_similar_with_meta(
+            novel.id, world_query, top_k=top_k, where={"type": {"$eq": doc_type}}
+        )
+
+    # 6 路并行向量检索（top_k 可由用户在 context_config 中自定义；0 表示关闭该类 RAG 兜底）
+    char_top_k = _cfg_top_k("characters_top_k", 8)
+    item_top_k = _cfg_top_k("items_top_k", 5)
+    sys_top_k = _cfg_top_k("systems_top_k", 3)
+    loc_top_k = _cfg_top_k("locations_top_k", 5)
+    fac_top_k = _cfg_top_k("factions_top_k", 4)
+    tech_top_k = _cfg_top_k("techniques_top_k", 4)
     char_hits, item_hits, sys_hits, loc_hits, fac_hits, tech_hits = await asyncio.gather(
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=8, where={"type": {"$eq": "character"}}),
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=5, where={"type": {"$eq": "entity_item"}}),
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=3, where={"type": {"$eq": "entity_system"}}),
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=5, where={"type": {"$eq": "location"}}),
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=4, where={"type": {"$eq": "faction"}}),
-        vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=4, where={"type": {"$eq": "technique"}}),
+        _entity_hits("character", char_top_k),
+        _entity_hits("entity_item", item_top_k),
+        _entity_hits("entity_system", sys_top_k),
+        _entity_hits("location", loc_top_k),
+        _entity_hits("faction", fac_top_k),
+        _entity_hits("technique", tech_top_k),
     )
 
-    def _entity_filter(all_items, hits, query: str, extra: list | None = None, match_text: str = ""):
+    def _entity_filter(all_items, hits, query: str, extra: list | None = None, match_text: str = "", allow_full: bool = True):
         """名称匹配优先，RAG 兜底，均无命中时全量回退。返回 (filtered_list, source)。"""
         if not all_items:
             return [], "empty"
@@ -131,18 +150,20 @@ async def build_generation_context(
         hit_ids = {h["metadata"]["entity_id"] for h in hits}
         if hit_ids:
             return [item for item in all_items if item.id in hit_ids], "rag"
-        return list(all_items), "full"
+        if allow_full:
+            return list(all_items), "full"
+        return [], "rag"
 
     # 角色：额外支持按 role 匹配（如指令中写"男主"匹配 role="男主" 的角色）
     role_matched = [c for c in all_characters if c.role and c.role in world_query]
-    characters, char_source = _entity_filter(all_characters, char_hits, world_query, extra=role_matched, match_text=name_match_text)
+    characters, char_source = _entity_filter(all_characters, char_hits, world_query, extra=role_matched, match_text=name_match_text, allow_full=char_top_k > 0)
     all_items_list = [e for e in all_entities if e.type == "item"]
     all_systems_list = [e for e in all_entities if e.type == "system"]
-    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query, match_text=name_match_text)
-    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query, match_text=name_match_text)
-    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query, match_text=name_match_text)
-    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query, match_text=name_match_text)
-    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query, match_text=name_match_text)
+    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query, match_text=name_match_text, allow_full=item_top_k > 0)
+    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query, match_text=name_match_text, allow_full=sys_top_k > 0)
+    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query, match_text=name_match_text, allow_full=loc_top_k > 0)
+    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query, match_text=name_match_text, allow_full=fac_top_k > 0)
+    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query, match_text=name_match_text, allow_full=tech_top_k > 0)
 
     def _rag_detail(filtered, total, unit):
         if not filtered:
@@ -234,10 +255,13 @@ async def build_generation_context(
         select(NovelNote).where(NovelNote.novel_id == novel.id)
     )).scalars().all()
 
-    note_hits = await vector_store.asearch_similar_with_meta(
-        novel.id, world_query, top_k=5,
-        where={"type": {"$eq": "novel_note"}},
-    )
+    note_top_k = _cfg_top_k("notes_top_k", 5)
+    note_hits = []
+    if note_top_k > 0:
+        note_hits = await vector_store.asearch_similar_with_meta(
+            novel.id, world_query, top_k=note_top_k,
+            where={"type": {"$eq": "novel_note"}},
+        )
 
     effective_text = name_match_text or world_query
     name_matched_notes = [n for n in all_notes if n.title and n.title in effective_text]
@@ -253,9 +277,12 @@ async def build_generation_context(
         if hit_note_ids:
             notes = [n for n in all_notes if n.id in hit_note_ids]
             notes_source = "rag"
-        else:
+        elif note_top_k > 0:
             notes = list(all_notes)
             notes_source = "full"
+        else:
+            notes = []
+            notes_source = "rag"
 
     ctx["notes"] = [
         {"title": n.title, "content": n.content}
@@ -392,8 +419,9 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
             sheet = c.get("full_sheet", {})
             age_part = f"·{c['age']}岁" if c.get('age') else ""
             chars_text += f"【{c['name']}·{c['role']}{age_part}】{c['description']}\n"
+            _SKIP_SHEET_KEYS = {"sd_prompt", "natural_prompt", "character_history"}
             for key, val in sheet.items():
-                if not val:
+                if not val or key in _SKIP_SHEET_KEYS:
                     continue
                 label = _SHEET_LABELS.get(key, key)
                 if isinstance(val, list):

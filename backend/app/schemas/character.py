@@ -29,6 +29,10 @@ class EnhanceRequest(BaseModel):
     scope: list[str] = []
 
 
+class ImagePromptRequest(BaseModel):
+    style: str = "sd_tags"
+
+
 class CharacterOut(BaseModel):
     id: int
     novel_id: int

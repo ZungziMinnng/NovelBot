@@ -435,6 +435,15 @@ async def get_context_preview(
         "rolling_summary", "rag_context", "notes_context", "recent_text",
         "characters", "items", "systems", "locations", "factions", "techniques",
     ]
+    context_top_k_defaults = {
+        "characters_top_k": 8,
+        "items_top_k": 5,
+        "systems_top_k": 3,
+        "locations_top_k": 5,
+        "factions_top_k": 4,
+        "techniques_top_k": 4,
+        "notes_top_k": 5,
+    }
 
     return {
         "chapter_number": chapter_number,
@@ -448,7 +457,10 @@ async def get_context_preview(
             "factions_count": len(ctx.get("factions", [])),
             "techniques_count": len(ctx.get("techniques", [])),
         },
-        "context_config": {k: cfg.get(k, True) for k in context_config_keys},
+        "context_config": {
+            **{k: cfg.get(k, True) for k in context_config_keys},
+            **{k: cfg.get(k, default) for k, default in context_top_k_defaults.items()},
+        },
         "token_estimate": {
             **section_tokens,
             "characters": chars_tokens,

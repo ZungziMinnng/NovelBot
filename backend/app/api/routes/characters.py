@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.character import Character
 from app.models.novel import Novel
-from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut, EnhanceRequest
+from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut, EnhanceRequest, ImagePromptRequest
 from app.agents import character_agent
 from app.services.entity_embeddings import embed_character, remove_entity_embedding
 
@@ -196,6 +196,23 @@ async def enhance_character_endpoint(
     await db.refresh(char)
     await embed_character(char.novel_id, char)
     return char
+
+
+@router.post("/{character_id}/generate-image-prompt")
+async def generate_image_prompt(
+    character_id: int,
+    body: ImagePromptRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    char = await db.get(Character, character_id)
+    if not char:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    novel = await db.get(Novel, char.novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    prompt = await character_agent.generate_image_prompt(novel, char, body.style)
+    return {"prompt": prompt}
 
 
 @router.post("/{character_id}/generate-history", response_model=CharacterOut)

@@ -12,6 +12,7 @@ const STAGE_CONFIG: Record<string, { label: string; icon: React.ComponentType<{ 
   revising_1: { label: 'Critic 发现问题，修改中（第1次）...', icon: Brain },
   revising_2: { label: 'Critic 发现问题，修改中（第2次）...', icon: Brain },
   reviewing: { label: 'Critic Agent 审查中...', icon: CheckCircle },
+  detail_reviewing: { label: '剧情细节审查中...', icon: CheckCircle },
   saving: { label: '保存章节...', icon: Loader2 },
   updating_memory: { label: '更新记忆库...', icon: Brain },
 }

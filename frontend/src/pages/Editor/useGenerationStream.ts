@@ -240,6 +240,13 @@ export function useGenerationStream(
             if (d.suggestions?.length) setChapterSuggestions(novelId, selectedChapterNum, d.suggestions)
             break
           }
+          case 'review_result': {
+            const d = msg.data as { issues?: unknown[] }
+            if (d.issues?.length) {
+              s.setWarning(`剧情细节审查发现 ${d.issues.length} 个问题，正在尝试修订`)
+            }
+            break
+          }
           case 'llm_call': {
             const d = msg.data as LlmCallData
             useDevLogStore.getState().addEntry({
@@ -358,6 +365,13 @@ export function useGenerationStream(
           case 'original_draft': {
             const d = msg.data as OriginalDraftData
             s.setOriginalDraft(d.text)
+            break
+          }
+          case 'review_result': {
+            const d = msg.data as { issues?: unknown[] }
+            if (d.issues?.length) {
+              s.setWarning(`剧情细节审查发现 ${d.issues.length} 个问题，正在尝试修订`)
+            }
             break
           }
           case 'llm_call': {

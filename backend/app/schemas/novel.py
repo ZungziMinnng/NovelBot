@@ -25,6 +25,9 @@ class NovelUpdate(BaseModel):
     fast_model: Optional[str] = None
     writer_system_prompt: Optional[str] = None
     enable_critic: Optional[bool] = None
+    critic_model: Optional[str] = None
+    enable_detail_review: Optional[bool] = None
+    detail_review_model: Optional[str] = None
     writer_temperature: Optional[float] = None
     writer_max_tokens: Optional[int] = None
     rolling_summary_count: Optional[int] = None
@@ -51,6 +54,9 @@ class NovelOut(BaseModel):
     fast_model: str
     writer_system_prompt: str
     enable_critic: bool
+    critic_model: str
+    enable_detail_review: bool
+    detail_review_model: str
     writer_temperature: float
     writer_max_tokens: int
     rolling_summary_count: int

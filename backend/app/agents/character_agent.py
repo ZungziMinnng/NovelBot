@@ -350,6 +350,63 @@ async def _history_batch(
         return [], in_tok, out_tok
 
 
+async def generate_image_prompt(novel: Novel, char: Character, style: str) -> str:
+    """根据角色信息生成图像提示词：sd_tags (Illustrious 标签) 或 natural_zh (中文自然语言)"""
+    model, api_format = llm_client.get_agent_client("character", novel.fast_model)
+    sheet = char.full_sheet or {}
+    appearance = sheet.get("appearance", "")
+    body_traits = sheet.get("body_traits", "")
+    personality = sheet.get("personality", "")
+
+    char_info = (
+        f"角色名：{char.name}\n"
+        f"定位：{char.role}\n"
+        f"年龄：{char.age}\n"
+        f"描述：{char.description}\n"
+        f"外貌：{appearance}\n"
+        f"身体特质：{body_traits}\n"
+        f"性格：{personality}\n"
+        f"小说类型：{novel.genre}\n"
+    )
+
+    if style == "sd_tags":
+        system = (
+            "你是 Stable Diffusion 提示词专家，擅长为 Illustrious/光辉系列模型生成高质量的角色画像提示词。\n"
+            "根据角色信息生成英文 tag 提示词，格式为逗号分隔的标签。\n"
+            "要求：\n"
+            "1. 以质量标签开头：masterpiece, best quality, highres\n"
+            "2. 然后是角色外貌特征标签（发色、发型、瞳色、体型等）\n"
+            "3. 然后是服装和配饰标签\n"
+            "4. 然后是表情和姿态标签\n"
+            "5. 最后是画面构图和背景标签\n"
+            "6. 只输出标签，不要其他文字\n"
+            "7. 标签之间用逗号加空格分隔"
+        )
+    else:
+        system = (
+            "你是图像生成提示词专家，需要根据角色信息生成一段中文自然语言描述，"
+            "用于 image turbo 类型的图像生成模型。\n"
+            "要求：\n"
+            "1. 用流畅的中文描述角色的外貌、穿着、气质、姿态\n"
+            "2. 包含画面构图和氛围描述\n"
+            "3. 描述要具体且有画面感\n"
+            "4. 控制在 200 字以内\n"
+            "5. 只输出描述文本，不要其他文字"
+        )
+
+    result = await llm_client.dispatch_chat_complete(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"请为以下角色生成图像提示词：\n\n{char_info}"},
+        ],
+        model=model,
+        api_format=api_format,
+        temperature=0.7,
+        max_tokens=1024,
+    )
+    return result.strip()
+
+
 async def discover_new_entities(
     novel: Novel,
     chapter_content: str,

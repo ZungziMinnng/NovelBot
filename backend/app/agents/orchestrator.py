@@ -228,7 +228,7 @@ async def run_chapter_generation(
                 passed, issues, critic_in_tok, critic_out_tok, critic_model = await critic.review_chapter(
                     generated_text=state["generated_text"],
                     ctx=state["context"],
-                    fast_model=novel.fast_model,
+                    fast_model=getattr(novel, "critic_model", "") or novel.fast_model,
                 )
                 critic_duration = int((time.monotonic() - critic_start) * 1000)
                 state["passed"] = passed
@@ -251,15 +251,71 @@ async def run_chapter_generation(
                     "passed": passed,
                 })
 
-                if passed:
-                    break
-                # 首次 Critic 失败时，先发出初稿内容，让前端展示对比视图
-                if state["revision_count"] == 0:
-                    yield _sse_json("original_draft", {"text": state["generated_text"]})
-                state["revision_count"] += 1
+                if not passed:
+                    # 首次 Critic 失败时，先发出初稿内容，让前端展示对比视图
+                    if state["revision_count"] == 0:
+                        yield _sse_json("original_draft", {"text": state["generated_text"]})
+                    state["revision_count"] += 1
+                    continue
             else:
-                # Critic 已关闭，直接使用 Writer 生成结果
-                break
+                # Critic 已关闭，继续执行可选的剧情细节审查
+                state["passed"] = True
+
+            # ── Node 3b: 剧情细节审查（可选，基于前 20 章） ───────────────
+            if getattr(novel, "enable_detail_review", False):
+                from app.agents import review_agent
+
+                yield _sse("stage", "detail_reviewing")
+                yield _sse_json("agent_start", {"agent": "detail_review", "label": "剧情细节审查"})
+                detail_start = time.monotonic()
+                detail_passed, detail_issues, detail_in_tok, detail_out_tok, detail_model = (
+                    await review_agent.review_generated_with_recent_chapters(
+                        session=session,
+                        novel=novel,
+                        generated_text=state["generated_text"],
+                        chapter_number=chapter_number,
+                        volume=volume,
+                        model_override=getattr(novel, "detail_review_model", "") or "",
+                    )
+                )
+                detail_duration = int((time.monotonic() - detail_start) * 1000)
+                state["total_input_tokens"] += detail_in_tok
+                state["total_output_tokens"] += detail_out_tok
+                yield _sse_json("llm_call", {
+                    "agent": "detail_review",
+                    "model": detail_model,
+                    "status": "ok",
+                    "input_tokens": detail_in_tok,
+                    "output_tokens": detail_out_tok,
+                    "duration_ms": detail_duration,
+                })
+                yield _sse_json("agent_done", {
+                    "agent": "detail_review",
+                    "label": "剧情细节审查",
+                    "input_tokens": detail_in_tok,
+                    "output_tokens": detail_out_tok,
+                    "passed": detail_passed,
+                })
+
+                if detail_issues:
+                    yield _sse_json("review_result", {
+                        "issues": detail_issues,
+                        "input_tokens": detail_in_tok,
+                        "output_tokens": detail_out_tok,
+                        "model": detail_model,
+                    })
+
+                if not detail_passed:
+                    issue_text = "\n".join(
+                        f"- {issue.get('description', '')}" for issue in detail_issues
+                    ).strip()
+                    state["critic_issues"] = f"剧情细节审查发现以下问题，请修订本章：\n{issue_text}"
+                    if state["revision_count"] == 0:
+                        yield _sse_json("original_draft", {"text": state["generated_text"]})
+                    state["revision_count"] += 1
+                    continue
+
+            break
 
         # ── Node 4: Save Chapter ───────────────────────────────────────────
         if not state["generated_text"].strip():
@@ -445,7 +501,7 @@ async def run_chapter_generation(
             except Exception:
                 logger.warning("自动刷新全书概要失败", exc_info=True)
 
-        # 全文审查（按间隔自动触发）
+        # 全文审查（按全局间隔自动触发）
         from app.config import settings as app_settings
         if getattr(app_settings, "enable_review", False):
             interval = getattr(app_settings, "review_interval", 10)

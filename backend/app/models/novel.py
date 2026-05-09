@@ -31,6 +31,9 @@ class Novel(Base):
 
     # 生成参数（覆盖硬编码默认值）
     enable_critic: Mapped[bool] = mapped_column(Boolean, default=True)
+    critic_model: Mapped[str] = mapped_column(String(100), default="")
+    enable_detail_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    detail_review_model: Mapped[str] = mapped_column(String(100), default="")
     writer_temperature: Mapped[float] = mapped_column(Float, default=0.85)
     writer_max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
 

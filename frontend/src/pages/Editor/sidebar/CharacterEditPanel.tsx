@@ -2,10 +2,11 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Loader2, Trash2, User, Pencil, X, Check, Plus,
-  RefreshCw, ImagePlus, Sparkles, ScrollText,
+  RefreshCw, ImagePlus, Sparkles, ScrollText, Maximize2, Wand2,
 } from 'lucide-react'
 import { charactersApi, type Character } from '@/api/client'
 import RelationshipGraphView from './RelationshipGraphView'
+import CharacterPromptDrawer from './CharacterPromptDrawer'
 import toast from 'react-hot-toast'
 
 type Tab = 'basic' | 'skills' | 'state' | 'history' | 'relationships'
@@ -80,6 +81,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const [refreshingAppearance, setRefreshingAppearance] = useState(false)
   const [generatingHistory, setGeneratingHistory] = useState(false)
+  const [showLightbox, setShowLightbox] = useState(false)
+  const [showPromptDrawer, setShowPromptDrawer] = useState(false)
 
   // Relationship editing
   const [addingRel, setAddingRel] = useState(false)
@@ -653,6 +656,18 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
               {character.age && <span className="text-[10px] text-muted-foreground">{character.age}岁</span>}
             </div>
           </div>
+          <div className="flex flex-col gap-1 shrink-0">
+            {character.avatar_url && (
+              <button onClick={() => setShowLightbox(true)}
+                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors">
+                <Maximize2 className="w-3 h-3" /> 查看大图
+              </button>
+            )}
+            <button onClick={() => setShowPromptDrawer(true)}
+              className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-cyan-200 text-cyan-600 hover:bg-cyan-50 dark:border-cyan-800 dark:text-cyan-400 dark:hover:bg-cyan-900/30 transition-colors">
+              <Wand2 className="w-3 h-3" /> 生成提示词
+            </button>
+          </div>
         </div>
         <div className="flex gap-1.5">
           <button onClick={() => { setBasicForm({ name: character.name, role: character.role, age: character.age, description: character.description }); setEditingBasic(true) }}
@@ -731,6 +746,25 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           {activeTab === 'state' && renderStateTab()}
           {activeTab === 'history' && renderHistoryTab()}
         </div>
+      )}
+
+      {/* Image lightbox */}
+      {showLightbox && character.avatar_url && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center"
+          onClick={() => setShowLightbox(false)}>
+          <button onClick={() => setShowLightbox(false)}
+            className="absolute top-4 right-4 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 z-10">
+            <X className="w-5 h-5" />
+          </button>
+          <img src={character.avatar_url} alt={character.name}
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg"
+            onClick={e => e.stopPropagation()} />
+        </div>
+      )}
+
+      {/* Prompt generation drawer */}
+      {showPromptDrawer && (
+        <CharacterPromptDrawer character={character} novelId={novelId} onClose={() => setShowPromptDrawer(false)} />
       )}
 
       {/* Edit basic info modal */}

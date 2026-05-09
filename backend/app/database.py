@@ -89,6 +89,10 @@ async def _run_migrations() -> None:
         "ALTER TABLE outlines ADD COLUMN end_chapter INTEGER DEFAULT 0",
         "UPDATE outlines SET start_chapter = chapter_number, end_chapter = chapter_number WHERE chapter_number > 0 AND start_chapter = 0",
         "CREATE INDEX IF NOT EXISTS idx_outlines_novel_range ON outlines(novel_id, volume, start_chapter, end_chapter)",
+        # Critic 模型 + 剧情细节审查
+        "ALTER TABLE novels ADD COLUMN critic_model TEXT DEFAULT ''",
+        "ALTER TABLE novels ADD COLUMN enable_detail_review INTEGER DEFAULT 0",
+        "ALTER TABLE novels ADD COLUMN detail_review_model TEXT DEFAULT ''",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

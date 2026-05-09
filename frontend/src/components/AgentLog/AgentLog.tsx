@@ -23,6 +23,7 @@ interface Props {
 const AGENT_COLORS: Record<string, string> = {
   writer: 'bg-blue-500',
   critic: 'bg-purple-500',
+  detail_review: 'bg-amber-500',
 }
 
 const STATUS_DOT: Record<AgentLogEntry['status'], string> = {
@@ -86,8 +87,8 @@ export default function AgentLog({
                 </span>
               )}
 
-              {/* Passed/failed indicator for critic */}
-              {entry.agent === 'critic' && entry.status === 'done' && (
+              {/* Passed/failed indicator for review agents */}
+              {(entry.agent === 'critic' || entry.agent === 'detail_review') && entry.status === 'done' && (
                 <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full ${entry.passed ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}>
                   {entry.passed ? '通过' : '修改'}
                 </span>

@@ -12,6 +12,7 @@ from app.services import llm_client
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 20
+DETAIL_REVIEW_WINDOW = 20
 
 ISSUE_TYPES = {
     "plot_contradiction": "情节矛盾",
@@ -40,6 +41,7 @@ def _build_other_summaries(all_chapters: list[Chapter], batch_chapters: list[Cha
 async def run_fulltext_review(
     session: AsyncSession,
     novel: Novel,
+    model_override: str = "",
 ) -> tuple[list[dict], int, int, str]:
     """
     分批审查：每 BATCH_SIZE 章一批并行送审，汇总所有问题。
@@ -64,7 +66,7 @@ async def run_fulltext_review(
         char_list += f"- {c.name}（{c.role}）：{c.description[:100] if c.description else '无描述'}\n"
 
     world_setting = (novel.core_setting or "")[:2000]
-    model, api_format = llm_client.get_agent_client("review")
+    model, api_format = llm_client.get_agent_client("review", model_override)
 
     batches = [chapters[i:i + BATCH_SIZE] for i in range(0, len(chapters), BATCH_SIZE)]
 
@@ -93,6 +95,96 @@ async def run_fulltext_review(
         total_out += out_tok
 
     return all_issues, total_in, total_out, model
+
+
+async def review_generated_with_recent_chapters(
+    session: AsyncSession,
+    novel: Novel,
+    generated_text: str,
+    chapter_number: int,
+    volume: int = 1,
+    model_override: str = "",
+    window: int = DETAIL_REVIEW_WINDOW,
+) -> tuple[bool, list[dict], int, int, str]:
+    """
+    Review a newly generated chapter against the previous N chapters before saving.
+    Returns (passed, issues[], input_tokens, output_tokens, model).
+    """
+    result = await session.execute(
+        select(Chapter)
+        .where(
+            Chapter.novel_id == novel.id,
+            Chapter.volume == volume,
+            Chapter.number < chapter_number,
+            Chapter.content != "",
+        )
+        .order_by(Chapter.number.desc())
+        .limit(window)
+    )
+    recent_chapters = list(reversed(result.scalars().all()))
+
+    model, api_format = llm_client.get_agent_client("review", model_override)
+    type_list = "\n".join(f"- {k}: {v}" for k, v in ISSUE_TYPES.items())
+
+    recent_parts: list[str] = []
+    for ch in recent_chapters:
+        summary = (ch.summary or "").strip()
+        content = (ch.content or "").strip()
+        recent_parts.append(
+            f"=== 第{ch.number}章 {ch.title or ''} ===\n"
+            f"摘要：{summary or '无摘要'}\n"
+            f"正文：\n{content}"
+        )
+    recent_text = "\n\n".join(recent_parts) or "（无前文，仅审查新章节内部文字连续性）"
+
+    system_prompt = (
+        "你是小说章节文字细节审查编辑。你的任务是在新章节保存前，"
+        "只基于前20章正文和新生成章节正文，检查新章节文字本身是否存在叙事连续性问题。"
+        "不要审查角色卡、势力库、系统库、道具库等设定库一致性；这些由 Critic Agent 负责。\n\n"
+        f"问题类型：\n{type_list}\n\n"
+        "要求：\n"
+        "1. 只报告新章节文字相对前文正文的具体矛盾、重复、断裂或时间线问题，不要提出泛泛的写作建议。\n"
+        "2. 每个问题必须说明新章节与哪一章正文冲突，或指出新章节内部哪段文字自相矛盾。\n"
+        "3. severity 只能是 high/medium/low。\n"
+        "4. 如果没有问题，返回空数组 []。\n"
+        "5. 严格返回 JSON 数组，不要输出 Markdown 或额外文字。"
+    )
+
+    user_prompt = (
+        f"小说：《{novel.title}》\n"
+        f"当前审查：即将保存的第{chapter_number}章\n\n"
+        f"【前{window}章参考】\n{recent_text}\n\n"
+        f"【新生成章节全文】\n{generated_text}\n\n"
+        "请只审查新生成章节文字相对前文正文的连续性、矛盾、重复和时间线问题。返回格式：\n"
+        '[{"type":"plot_contradiction","severity":"high","chapters":[12,21],'
+        '"description":"第21章中...，但第12章已明确..."}]'
+    )
+
+    raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=model,
+        api_format=api_format,
+        temperature=0.2,
+        max_tokens=2048,
+    )
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        raw = raw.rsplit("```", 1)[0]
+
+    try:
+        issues = json.loads(raw)
+        if not isinstance(issues, list):
+            issues = []
+    except json.JSONDecodeError:
+        logger.warning("剧情细节审查结果 JSON 解析失败，原文: %s", raw[:500])
+        issues = [{"type": "other", "severity": "low", "chapters": [chapter_number], "description": raw[:500]}]
+
+    return len(issues) == 0, issues, in_tok, out_tok, model
 
 
 async def _review_batch(

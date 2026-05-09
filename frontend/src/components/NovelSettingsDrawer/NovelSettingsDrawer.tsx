@@ -1,11 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen } from 'lucide-react'
 import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
+import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
+
+type Tab = 'content' | 'creation' | 'context'
 
 interface Props {
   novel: Novel
+  initialTab?: Tab
   onClose: () => void
 }
 
@@ -56,7 +60,10 @@ function mergeCoreSetting(bg: string, rank: string): string {
   return bg + RANK_SEPARATOR + rank
 }
 
-export default function NovelSettingsDrawer({ novel, onClose }: Props) {
+const MIN_WIDTH = 320
+const MAX_WIDTH = 640
+
+export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Props) {
   const qc = useQueryClient()
   const { data: modelLibrary = [] } = useQuery({
     queryKey: ['model-library'],
@@ -64,7 +71,43 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   })
 
   // ── Tab state ──
-  const [activeTab, setActiveTab] = useState<'content' | 'creation'>('content')
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab || 'content')
+
+  // ── Resizable drawer ──
+  const [drawerWidth, setDrawerWidth] = useState(384)
+  const dragging = useRef(false)
+  const startX = useRef(0)
+  const startWidth = useRef(384)
+
+  const onMouseMove = useCallback((e: MouseEvent) => {
+    if (!dragging.current) return
+    const delta = startX.current - e.clientX
+    const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta))
+    setDrawerWidth(newWidth)
+  }, [])
+
+  const onMouseUp = useCallback(() => {
+    dragging.current = false
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }, [])
+
+  useEffect(() => {
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [onMouseMove, onMouseUp])
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    dragging.current = true
+    startX.current = e.clientX
+    startWidth.current = drawerWidth
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }
 
   // ── Novel content fields ──
   const [title, setTitle] = useState(novel.title)
@@ -84,7 +127,10 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   const [writerSystemPrompt, setWriterSystemPrompt] = useState(novel.writer_system_prompt || '')
   const [writerModel, setWriterModel] = useState(novel.writer_model || '')
   const [fastModel, setFastModel] = useState(novel.fast_model || '')
+  const [criticModel, setCriticModel] = useState(novel.critic_model || '')
   const [enableCritic, setEnableCritic] = useState(novel.enable_critic ?? true)
+  const [enableDetailReview, setEnableDetailReview] = useState(novel.enable_detail_review ?? false)
+  const [detailReviewModel, setDetailReviewModel] = useState(novel.detail_review_model || '')
   const [writerTemperature, setWriterTemperature] = useState(novel.writer_temperature ?? 0.85)
   const [writerMaxTokens, setWriterMaxTokens] = useState(novel.writer_max_tokens ?? 4096)
   const [rollingSummaryCount, setRollingSummaryCount] = useState(novel.rolling_summary_count ?? 5)
@@ -114,7 +160,10 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
     setWriterSystemPrompt(novel.writer_system_prompt || '')
     setWriterModel(novel.writer_model || '')
     setFastModel(novel.fast_model || '')
+    setCriticModel(novel.critic_model || '')
     setEnableCritic(novel.enable_critic ?? true)
+    setEnableDetailReview(novel.enable_detail_review ?? false)
+    setDetailReviewModel(novel.detail_review_model || '')
     setWriterTemperature(novel.writer_temperature ?? 0.85)
     setWriterMaxTokens(novel.writer_max_tokens ?? 4096)
     setRollingSummaryCount(novel.rolling_summary_count ?? 5)
@@ -132,12 +181,10 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
   // ── World-setting split toggle ──
   const handleToggleSplit = () => {
     if (splitWorld) {
-      // Merging: combine back into coreSetting
       const merged = mergeCoreSetting(backgroundSetting, rankSetting)
       setCoreSetting(merged)
       setSplitWorld(false)
     } else {
-      // Splitting: parse coreSetting
       const s = splitCoreSetting(coreSetting)
       setBackgroundSetting(s.bg)
       setRankSetting(s.rank)
@@ -145,7 +192,6 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
     }
   }
 
-  // ── Resolve final coreSetting for save ──
   const getFinalCoreSetting = () => {
     if (splitWorld) return mergeCoreSetting(backgroundSetting, rankSetting)
     return coreSetting
@@ -195,7 +241,10 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
         writer_system_prompt: writerSystemPrompt,
         writer_model: writerModel,
         fast_model: fastModel,
+        critic_model: criticModel,
         enable_critic: enableCritic,
+        enable_detail_review: enableDetailReview,
+        detail_review_model: detailReviewModel,
         writer_temperature: writerTemperature,
         writer_max_tokens: writerMaxTokens,
         rolling_summary_count: rollingSummaryCount,
@@ -222,7 +271,16 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
         onClick={onClose}
       />
       {/* Drawer */}
-      <div className="fixed right-0 top-0 h-full w-96 bg-background border-l shadow-2xl z-50 flex flex-col">
+      <div
+        className="fixed right-0 top-0 h-full bg-background border-l shadow-2xl z-50 flex flex-col"
+        style={{ width: drawerWidth }}
+      >
+        {/* Resize handle */}
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10"
+          onMouseDown={handleDragStart}
+        />
+
         <div className="flex items-center justify-between px-5 py-4 border-b shrink-0">
           <h2 className="font-semibold">小说设置</h2>
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-muted transition-colors">
@@ -232,26 +290,23 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
 
         {/* Tab bar */}
         <div className="flex px-5 pt-3 pb-0 gap-1 shrink-0">
-          <button
-            onClick={() => setActiveTab('content')}
-            className={`flex-1 py-2 text-sm font-medium rounded-t-lg border border-b-0 transition-colors ${
-              activeTab === 'content'
-                ? 'bg-background text-foreground border-border'
-                : 'bg-muted/40 text-muted-foreground border-transparent hover:text-foreground'
-            }`}
-          >
-            小说内容
-          </button>
-          <button
-            onClick={() => setActiveTab('creation')}
-            className={`flex-1 py-2 text-sm font-medium rounded-t-lg border border-b-0 transition-colors ${
-              activeTab === 'creation'
-                ? 'bg-background text-foreground border-border'
-                : 'bg-muted/40 text-muted-foreground border-transparent hover:text-foreground'
-            }`}
-          >
-            创作设置
-          </button>
+          {([
+            { key: 'content' as const, label: '小说内容' },
+            { key: 'creation' as const, label: '创作设置' },
+            { key: 'context' as const, label: '上下文配置' },
+          ]).map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`flex-1 py-2 text-sm font-medium rounded-t-lg border border-b-0 transition-colors ${
+                activeTab === tab.key
+                  ? 'bg-background text-foreground border-border'
+                  : 'bg-muted/40 text-muted-foreground border-transparent hover:text-foreground'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -510,6 +565,15 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                       models={modelLibrary}
                     />
                   </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Critic 模型</label>
+                    <ModelSelect
+                      value={criticModel}
+                      onChange={setCriticModel}
+                      placeholder="留空使用 Fast 模型"
+                      models={modelLibrary}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -521,7 +585,7 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium">Critic 审查</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">关闭后跳过质量审查，直接保存生成内容</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">检查角色、势力、系统、实体、道具等设定一致性和本章任务完成度</p>
                     </div>
                     <button
                       onClick={() => setEnableCritic(v => !v)}
@@ -530,6 +594,31 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
                       <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableCritic ? 'translate-x-5' : 'translate-x-0'}`} />
                     </button>
                   </div>
+
+                  {/* Detail review toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">剧情细节审查</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">专注章节正文文字，基于前 20 章检查连续性、重复、矛盾和时间线问题</p>
+                    </div>
+                    <button
+                      onClick={() => setEnableDetailReview(v => !v)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableDetailReview ? 'bg-primary' : 'bg-muted'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableDetailReview ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+                  {enableDetailReview && (
+                    <div>
+                      <label className="text-sm font-medium mb-1 block">细节审查模型</label>
+                      <ModelSelect
+                        value={detailReviewModel}
+                        onChange={setDetailReviewModel}
+                        placeholder="留空使用全局设置"
+                        models={modelLibrary}
+                      />
+                    </div>
+                  )}
 
                   {/* Thinking level */}
                   <div className="flex items-center justify-between">
@@ -659,18 +748,25 @@ export default function NovelSettingsDrawer({ novel, onClose }: Props) {
               </div>
             </>
           )}
+
+          {/* ═══════════════════ Tab 3: 上下文配置 ═══════════════════ */}
+          {activeTab === 'context' && (
+            <ContextConfigContent novelId={novel.id} novel={novel} />
+          )}
         </div>
 
-        <div className="px-5 py-4 border-t shrink-0">
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {saved ? '已保存' : saving ? '保存中...' : '保存'}
-          </button>
-        </div>
+        {activeTab !== 'context' && (
+          <div className="px-5 py-4 border-t shrink-0">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              {saved ? '已保存' : saving ? '保存中...' : '保存'}
+            </button>
+          </div>
+        )}
       </div>
     </>
   )
