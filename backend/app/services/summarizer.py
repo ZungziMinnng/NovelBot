@@ -831,7 +831,20 @@ async def generate_book_summary(
     )
     arc_memories = arc_result.scalars().all()
     if arc_memories:
-        memories = arc_memories
+        memories = list(arc_memories)
+        last_arc_chapter = max(m.chapter_number or 0 for m in arc_memories)
+        # Include chapter summaries after the latest arc summary, otherwise chapters
+        # 16-20, 31-35, etc. are invisible until the next 15-chapter arc exists.
+        trailing_result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.novel_id == novel.id,
+                Memory.memory_type == "chapter_summary",
+                Memory.chapter_number > last_arc_chapter,
+            )
+            .order_by(Memory.chapter_number.asc())
+        )
+        memories.extend(trailing_result.scalars().all())
     else:
         # 回退到章节摘要
         result = await session.execute(

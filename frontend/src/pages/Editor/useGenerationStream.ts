@@ -197,6 +197,7 @@ export function useGenerationStream(
             s.setAgentStage('done')
             qc.invalidateQueries({ queryKey: ['chapters', novelId] })
             qc.invalidateQueries({ queryKey: ['characters', novelId] })
+            qc.invalidateQueries({ queryKey: ['novel', novelId] })
             break
           case 'original_draft': {
             const d = msg.data as OriginalDraftData
@@ -360,6 +361,7 @@ export function useGenerationStream(
             s.setAgentStage('done')
             qc.invalidateQueries({ queryKey: ['chapters', novelId] })
             qc.invalidateQueries({ queryKey: ['characters', novelId] })
+            qc.invalidateQueries({ queryKey: ['novel', novelId] })
             useEditorStore.getState().clearAnnotations(novelId, selectedChapterNum)
             break
           case 'original_draft': {

@@ -1,9 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen } from 'lucide-react'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, SlidersHorizontal, Database, MessageSquare } from 'lucide-react'
 import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
+
+type CreationSection = 'prompt' | 'models' | 'review' | 'params' | 'context' | 'chat' | null
+
+const CREATION_SECTIONS: { key: CreationSection & string; label: string; desc: string; icon: typeof FileText }[] = [
+  { key: 'prompt', label: '提示词与概要', desc: '全书概要、Writer 自定义提示词', icon: FileText },
+  { key: 'models', label: '模型选择', desc: 'Writer / Fast / Critic 模型覆盖', icon: Cpu },
+  { key: 'review', label: '审查设置', desc: 'Critic 审查、剧情细节审查', icon: Shield },
+  { key: 'params', label: '生成参数', desc: '温度、Token 上限、Thinking、流式', icon: SlidersHorizontal },
+  { key: 'context', label: '生成上下文', desc: '滚动摘要章数、RAG 检索条数', icon: Database },
+  { key: 'chat', label: '对话设置', desc: '对话历史轮数', icon: MessageSquare },
+]
 
 type Tab = 'content' | 'creation' | 'context'
 
@@ -72,6 +83,10 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
 
   // ── Tab state ──
   const [activeTab, setActiveTab] = useState<Tab>(initialTab || 'content')
+  const handleTabChange = (tab: Tab) => {
+    setActiveTab(tab)
+    if (tab !== 'creation') setActiveSection(null)
+  }
 
   // ── Resizable drawer ──
   const [drawerWidth, setDrawerWidth] = useState(384)
@@ -145,6 +160,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [optimizing, setOptimizing] = useState(false)
   const [showPromptPreview, setShowPromptPreview] = useState(false)
   const [generatingBookSummary, setGeneratingBookSummary] = useState(false)
+  const [activeSection, setActiveSection] = useState<CreationSection>(null)
 
   useEffect(() => {
     setTitle(novel.title)
@@ -268,7 +284,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
       {/* Overlay */}
       <div
         className="fixed inset-0 bg-black/40 z-40"
-        onClick={onClose}
+        onClick={() => { setActiveSection(null); onClose() }}
       />
       {/* Drawer */}
       <div
@@ -297,7 +313,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
           ]).map(tab => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabChange(tab.key)}
               className={`flex-1 py-2 text-sm font-medium rounded-t-lg border border-b-0 transition-colors ${
                 activeTab === tab.key
                   ? 'bg-background text-foreground border-border'
@@ -459,294 +475,26 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
             </>
           )}
 
-          {/* ═══════════════════ Tab 2: 创作设置 ═══════════════════ */}
+          {/* ═══════════════════ Tab 2: 创作设置（菜单列表）═══════════════════ */}
           {activeTab === 'creation' && (
-            <>
-              {/* Book Summary */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">全书概要（长程记忆）</label>
-                  <button
-                    onClick={handleGenerateBookSummary}
-                    disabled={generatingBookSummary}
-                    className={`flex items-center gap-1.5 text-xs transition-opacity ${
-                      generatingBookSummary
-                        ? 'text-muted-foreground cursor-not-allowed'
-                        : 'text-primary hover:opacity-75'
-                    }`}
-                  >
-                    {generatingBookSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookOpen className="w-3.5 h-3.5" />}
-                    {generatingBookSummary ? '生成中...' : '重新整理'}
-                  </button>
-                </div>
-                <textarea
-                  value={bookSummary}
-                  onChange={e => setBookSummary(e.target.value)}
-                  placeholder="写了一定章节后，点击「重新整理」让 AI 从所有章节摘要生成全书概要，之后生成新章节时会自动携带此概要作为长程记忆..."
-                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-none h-28 focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <p className="text-xs text-muted-foreground mt-1">覆盖 rolling_summary（5章）无法触及的早期剧情，保存时同步入库。</p>
-              </div>
-
-              {/* Custom Writer prompt */}
-              <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">自定义 Writer 提示词</label>
-                {writerPresets.length > 0 && (
-                  <select
-                    defaultValue=""
-                    onChange={e => {
-                      const preset = writerPresets.find(p => p.id === Number(e.target.value))
-                      if (preset) setWriterSystemPrompt(preset.prompt)
-                      e.target.value = ''
-                    }}
-                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring mb-2"
-                  >
-                    <option value="">从预设填充...</option>
-                    {writerPresets.map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                )}
-                <textarea
-                  value={writerSystemPrompt}
-                  onChange={e => setWriterSystemPrompt(e.target.value)}
-                  placeholder="追加到 Writer 系统提示词末尾，例如：叙述视角为第一人称、对话使用古文风格..."
-                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-none h-24 focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <p className="text-xs text-muted-foreground mt-1">此提示词将追加到 Writer Agent 模板末尾，优先级最高。</p>
-
-                {/* Prompt preview */}
-                <div className="mt-3 border rounded-lg overflow-hidden">
-                  <button
-                    onClick={() => setShowPromptPreview(v => !v)}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted transition-colors"
-                  >
-                    {showPromptPreview ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                    预览完整 Writer System Prompt
-                  </button>
-                  {showPromptPreview && (
-                    <pre className="px-3 py-2 text-xs leading-relaxed bg-muted/40 whitespace-pre-wrap break-words border-t font-mono max-h-64 overflow-y-auto">
-{writerSystemPrompt.trim()
-  ? writerSystemPrompt.trim()
-  : `你是一位专业的中文小说作家，擅长${genre || '（未设置类型）'}类型的写作，文风${writingStyle || '（未设置风格）'}。
-你的任务是根据以下背景资料，创作小说的章节正文。
-
-严格要求：
-- 保持角色性格和状态的一致性
-- 情节必须符合已有大纲走向
-- 不要与历史章节内容重复或矛盾
-- 直接输出正文，不要章节标题
-- 目标字数约 （生成时由用户指定） 字
-- 严格遵守用户指令中指定的角色姓名，不得擅自更改或替换`}
-                    </pre>
-                  )}
-                </div>
-              </div>
-
-              {/* Per-novel model override */}
-              <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">本小说模型覆盖（可选）</label>
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Writer 模型</label>
-                    <ModelSelect
-                      value={writerModel}
-                      onChange={setWriterModel}
-                      placeholder="留空使用全局设置"
-                      models={modelLibrary}
-                    />
+            <div className="space-y-1">
+              {CREATION_SECTIONS.map(({ key, label, desc, icon: Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setActiveSection(key)}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left hover:bg-muted/60 transition-colors group"
+                >
+                  <div className="p-2 rounded-lg bg-muted group-hover:bg-primary/10 transition-colors shrink-0">
+                    <Icon className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
                   </div>
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Fast 模型</label>
-                    <ModelSelect
-                      value={fastModel}
-                      onChange={setFastModel}
-                      placeholder="留空使用全局设置"
-                      models={modelLibrary}
-                    />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">{label}</p>
+                    <p className="text-xs text-muted-foreground truncate">{desc}</p>
                   </div>
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Critic 模型</label>
-                    <ModelSelect
-                      value={criticModel}
-                      onChange={setCriticModel}
-                      placeholder="留空使用 Fast 模型"
-                      models={modelLibrary}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Generation params */}
-              <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">生成参数</label>
-                <div className="space-y-4">
-                  {/* Critic toggle */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Critic 审查</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">检查角色、势力、系统、实体、道具等设定一致性和本章任务完成度</p>
-                    </div>
-                    <button
-                      onClick={() => setEnableCritic(v => !v)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableCritic ? 'bg-primary' : 'bg-muted'}`}
-                    >
-                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableCritic ? 'translate-x-5' : 'translate-x-0'}`} />
-                    </button>
-                  </div>
-
-                  {/* Detail review toggle */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">剧情细节审查</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">专注章节正文文字，基于前 20 章检查连续性、重复、矛盾和时间线问题</p>
-                    </div>
-                    <button
-                      onClick={() => setEnableDetailReview(v => !v)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableDetailReview ? 'bg-primary' : 'bg-muted'}`}
-                    >
-                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableDetailReview ? 'translate-x-5' : 'translate-x-0'}`} />
-                    </button>
-                  </div>
-                  {enableDetailReview && (
-                    <div>
-                      <label className="text-sm font-medium mb-1 block">细节审查模型</label>
-                      <ModelSelect
-                        value={detailReviewModel}
-                        onChange={setDetailReviewModel}
-                        placeholder="留空使用全局设置"
-                        models={modelLibrary}
-                      />
-                    </div>
-                  )}
-
-                  {/* Thinking level */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Thinking 深度思考</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">控制模型深度思考强度（Gemini / DeepSeek / o 系列），关闭可减少空响应</p>
-                    </div>
-                    <select
-                      value={thinkingLevel}
-                      onChange={e => setThinkingLevel(e.target.value)}
-                      className="text-sm border rounded-lg px-2 py-1.5 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value="off">关闭</option>
-                      <option value="low">低</option>
-                      <option value="medium">中（默认）</option>
-                      <option value="high">高</option>
-                    </select>
-                  </div>
-
-                  {/* Gemini stream */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Gemini 真实流式</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
-                    </div>
-                    <button
-                      onClick={() => setGeminiStream(!geminiStream)}
-                      className={`relative w-10 h-5 rounded-full transition-colors ${geminiStream ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-                    >
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow ${geminiStream ? 'translate-x-5' : ''}`} />
-                    </button>
-                  </div>
-
-                  {/* Temperature slider */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-sm font-medium">生成温度</label>
-                      <span className="text-sm font-mono text-muted-foreground">{writerTemperature.toFixed(2)}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0.1}
-                      max={1.5}
-                      step={0.05}
-                      value={writerTemperature}
-                      onChange={e => setWriterTemperature(Number(e.target.value))}
-                      className="w-full accent-primary"
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                      <span>保守 0.1</span>
-                      <span>1.5 发散</span>
-                    </div>
-                  </div>
-
-                  {/* Max tokens */}
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">最大输出 Token</label>
-                    <select
-                      value={writerMaxTokens}
-                      onChange={e => setWriterMaxTokens(Number(e.target.value))}
-                      className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value={2048}>2048（约 1500 字）</option>
-                      <option value={4096}>4096（约 3000 字，默认）</option>
-                      <option value={8192}>8192（约 6000 字）</option>
-                      <option value={16384}>16384（约 12000 字）</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Generation context */}
-              <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">生成上下文</label>
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-sm font-medium">滚动摘要章数</label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={rollingSummaryCount}
-                        onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-                        className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-sm font-medium">RAG 检索条数</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={ragTopK}
-                        onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-                        className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Chat context */}
-              <div>
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">对话上下文</label>
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-sm font-medium">对话历史轮数</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={chatContextRounds}
-                        onChange={e => setChatContextRounds(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                        className="w-16 text-center border rounded-lg px-2 py-1 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground">与 AI 助手对话时携带的最近消息轮数，0 表示不限制</p>
-                  </div>
-                </div>
-              </div>
-            </>
+                  <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                </button>
+              ))}
+            </div>
           )}
 
           {/* ═══════════════════ Tab 3: 上下文配置 ═══════════════════ */}
@@ -768,6 +516,305 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
           </div>
         )}
       </div>
+
+      {/* ═══════════ Creation detail panel (slides left) ═══════════ */}
+      {activeSection && (
+        <>
+          <div className="fixed inset-0 z-[55]" onClick={() => setActiveSection(null)} />
+          <div
+            className="fixed top-0 h-full bg-background border-r shadow-2xl z-[56] flex flex-col"
+            style={{ width: 480, right: drawerWidth }}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+              <h3 className="text-sm font-semibold">
+                {CREATION_SECTIONS.find(s => s.key === activeSection)?.label}
+              </h3>
+              <button onClick={() => setActiveSection(null)} className="p-1.5 rounded-md hover:bg-muted transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              {/* ── 提示词与概要 ── */}
+              {activeSection === 'prompt' && (
+                <>
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">全书概要（长程记忆）</label>
+                      <button
+                        onClick={handleGenerateBookSummary}
+                        disabled={generatingBookSummary}
+                        className={`flex items-center gap-1.5 text-xs transition-opacity ${
+                          generatingBookSummary ? 'text-muted-foreground cursor-not-allowed' : 'text-primary hover:opacity-75'
+                        }`}
+                      >
+                        {generatingBookSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookOpen className="w-3.5 h-3.5" />}
+                        {generatingBookSummary ? '生成中...' : '重新整理'}
+                      </button>
+                    </div>
+                    <textarea
+                      value={bookSummary}
+                      onChange={e => setBookSummary(e.target.value)}
+                      placeholder="写了一定章节后，点击「重新整理」让 AI 从所有章节摘要生成全书概要..."
+                      className="w-full border rounded-lg px-4 py-3 text-sm bg-background resize-y min-h-[10rem] focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1.5">覆盖 rolling_summary 无法触及的早期剧情，保存时同步入库。</p>
+                  </div>
+
+                  <div className="border-t pt-5">
+                    <label className="text-sm font-medium mb-2 block">自定义 Writer 提示词</label>
+                    {writerPresets.length > 0 && (
+                      <select
+                        defaultValue=""
+                        onChange={e => {
+                          const preset = writerPresets.find(p => p.id === Number(e.target.value))
+                          if (preset) setWriterSystemPrompt(preset.prompt)
+                          e.target.value = ''
+                        }}
+                        className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring mb-2"
+                      >
+                        <option value="">从预设填充...</option>
+                        {writerPresets.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <textarea
+                      value={writerSystemPrompt}
+                      onChange={e => setWriterSystemPrompt(e.target.value)}
+                      placeholder="追加到 Writer 系统提示词末尾，例如：叙述视角为第一人称、对话使用古文风格..."
+                      className="w-full border rounded-lg px-4 py-3 text-sm bg-background resize-y min-h-[8rem] focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1.5">此提示词将追加到 Writer Agent 模板末尾，优先级最高。</p>
+
+                    <div className="mt-3 border rounded-lg overflow-hidden">
+                      <button
+                        onClick={() => setShowPromptPreview(v => !v)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {showPromptPreview ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                        预览完整 Writer System Prompt
+                      </button>
+                      {showPromptPreview && (
+                        <pre className="px-3 py-2 text-xs leading-relaxed bg-muted/40 whitespace-pre-wrap break-words border-t font-mono max-h-64 overflow-y-auto">
+{writerSystemPrompt.trim()
+  ? writerSystemPrompt.trim()
+  : `你是一位专业的中文小说作家，擅长${genre || '（未设置类型）'}类型的写作，文风${writingStyle || '（未设置风格）'}。
+你的任务是根据以下背景资料，创作小说的章节正文。
+
+严格要求：
+- 保持角色性格和状态的一致性
+- 情节必须符合已有大纲走向
+- 不要与历史章节内容重复或矛盾
+- 直接输出正文，不要章节标题
+- 目标字数约 （生成时由用户指定） 字
+- 严格遵守用户指令中指定的角色姓名，不得擅自更改或替换`}
+                        </pre>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* ── 模型选择 ── */}
+              {activeSection === 'models' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Writer 模型</label>
+                    <ModelSelect value={writerModel} onChange={setWriterModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                    <p className="text-xs text-muted-foreground mt-1.5">用于章节正文生成的主力模型</p>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Fast 模型</label>
+                    <ModelSelect value={fastModel} onChange={setFastModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                    <p className="text-xs text-muted-foreground mt-1.5">用于摘要、角色分析等低成本任务</p>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Critic 模型</label>
+                    <ModelSelect value={criticModel} onChange={setCriticModel} placeholder="留空使用 Fast 模型" models={modelLibrary} />
+                    <p className="text-xs text-muted-foreground mt-1.5">用于章节审查和评分</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── 审查设置 ── */}
+              {activeSection === 'review' && (
+                <div className="space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 mr-4">
+                      <p className="text-sm font-medium">Critic 审查</p>
+                      <p className="text-xs text-muted-foreground mt-1">检查角色、势力、系统、实体、道具等设定一致性和本章任务完成度</p>
+                    </div>
+                    <button
+                      onClick={() => setEnableCritic(v => !v)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableCritic ? 'bg-primary' : 'bg-muted'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableCritic ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+
+                  <div className="border-t pt-5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 mr-4">
+                        <p className="text-sm font-medium">剧情细节审查</p>
+                        <p className="text-xs text-muted-foreground mt-1">专注章节正文文字，基于前 20 章检查连续性、重复、矛盾和时间线问题</p>
+                      </div>
+                      <button
+                        onClick={() => setEnableDetailReview(v => !v)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableDetailReview ? 'bg-primary' : 'bg-muted'}`}
+                      >
+                        <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableDetailReview ? 'translate-x-5' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+                    {enableDetailReview && (
+                      <div className="mt-3">
+                        <label className="text-sm font-medium mb-1.5 block">细节审查模型</label>
+                        <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ── 生成参数 ── */}
+              {activeSection === 'params' && (
+                <div className="space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 mr-4">
+                      <p className="text-sm font-medium">Thinking 深度思考</p>
+                      <p className="text-xs text-muted-foreground mt-1">控制模型深度思考强度（Gemini / DeepSeek / o 系列），关闭可减少空响应</p>
+                    </div>
+                    <select
+                      value={thinkingLevel}
+                      onChange={e => setThinkingLevel(e.target.value)}
+                      className="text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="off">关闭</option>
+                      <option value="low">低</option>
+                      <option value="medium">中（默认）</option>
+                      <option value="high">高</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 mr-4">
+                      <p className="text-sm font-medium">Gemini 真实流式</p>
+                      <p className="text-xs text-muted-foreground mt-1">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
+                    </div>
+                    <button
+                      onClick={() => setGeminiStream(!geminiStream)}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${geminiStream ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow ${geminiStream ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="border-t pt-5">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">生成温度</label>
+                      <span className="text-sm font-mono text-muted-foreground">{writerTemperature.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={1.5}
+                      step={0.05}
+                      value={writerTemperature}
+                      onChange={e => setWriterTemperature(Number(e.target.value))}
+                      className="w-full accent-primary"
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                      <span>保守 0.1</span>
+                      <span>1.5 发散</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">最大输出 Token</label>
+                    <select
+                      value={writerMaxTokens}
+                      onChange={e => setWriterMaxTokens(Number(e.target.value))}
+                      className="w-full border rounded-lg px-3 py-2.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value={2048}>2048（约 1500 字）</option>
+                      <option value={4096}>4096（约 3000 字，默认）</option>
+                      <option value={8192}>8192（约 6000 字）</option>
+                      <option value={16384}>16384（约 12000 字）</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* ── 生成上下文 ── */}
+              {activeSection === 'context' && (
+                <div className="space-y-5">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">滚动摘要章数</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={rollingSummaryCount}
+                        onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">RAG 检索条数</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={ragTopK}
+                        onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── 对话设置 ── */}
+              {activeSection === 'chat' && (
+                <div className="space-y-5">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">对话历史轮数</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={chatContextRounds}
+                        onChange={e => setChatContextRounds(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">与 AI 助手对话时携带的最近消息轮数，0 表示不限制</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Save button in detail panel */}
+            <div className="px-6 py-4 border-t shrink-0">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+              >
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                {saved ? '已保存' : saving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </>
   )
 }
