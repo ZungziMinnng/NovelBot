@@ -8,8 +8,8 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.novel import Novel
 from app.models.chapter import Chapter
-from app.schemas.generation import GenerateChapterRequest, PlotSuggestionsRequest, ReviewRequest
-from app.agents.orchestrator import run_chapter_generation
+from app.schemas.generation import GenerateChapterRequest, PlotSuggestionsRequest, ReviewRequest, RewriteChapterRequest
+from app.agents.orchestrator import run_chapter_generation, run_chapter_rewrite
 from app.services import context_builder, llm_client
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,38 @@ async def generate_chapter(
             chapter_number=req.chapter_number,
             volume=req.volume,
             instruction=req.instruction,
+            target_words=req.target_words,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/rewrite-chapter")
+async def rewrite_chapter(
+    req: RewriteChapterRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    novel = await db.get(Novel, req.novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    await db.refresh(novel)
+
+    annotations = [a.model_dump() for a in req.annotations]
+
+    async def event_stream():
+        async for chunk in run_chapter_rewrite(
+            session=db,
+            novel=novel,
+            chapter_number=req.chapter_number,
+            annotations=annotations,
             target_words=req.target_words,
         ):
             yield chunk

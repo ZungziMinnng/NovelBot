@@ -25,7 +25,7 @@ import { useEditorStore } from '@/store/editorStore'
 import { useGenerationStream } from './useGenerationStream'
 import EditorSidebar from './EditorSidebar'
 import ChapterContentArea from './ChapterContentArea'
-import GenerationBar from './GenerationBar'
+import GenerationBar, { type BarMode } from './GenerationBar'
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>()
@@ -57,6 +57,12 @@ export default function Editor() {
   const instruction = editorDraft.instruction
   const targetWords = editorDraft.targetWords
   const plotSuggestions = useEditorStore((s) => s.getChapterSuggestions(novelId, selectedChapterNum))
+  const [barMode, setBarMode] = useState<BarMode>('write')
+  const annotations = useEditorStore((s) => s.getAnnotations(novelId, selectedChapterNum))
+  const addAnnotation = useEditorStore((s) => s.addAnnotation)
+  const removeAnnotation = useEditorStore((s) => s.removeAnnotation)
+  const clearAnnotations = useEditorStore((s) => s.clearAnnotations)
+
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [showContext, setShowContext] = useState(true)
@@ -215,34 +221,35 @@ export default function Editor() {
             </span>
           )}
           <button onClick={() => navigate(`/novel/${novelId}/outline`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors">
             <List className="w-3.5 h-3.5" /> 总览
           </button>
           <button onClick={() => navigate(`/novel/${novelId}/data`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/30 transition-colors">
             <Terminal className="w-3.5 h-3.5" /> 数据
           </button>
           <button onClick={() => setShowOutlineModal(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors">
             <BookOpen className="w-3.5 h-3.5" /> 大纲
           </button>
           <button onClick={() => setShowReviewModal(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-colors">
             <ClipboardCheck className="w-3.5 h-3.5" /> 审查
           </button>
+          <div className="w-px h-4 bg-border mx-0.5" />
           <button onClick={() => setShowTokenPanel(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground">
             <Gauge className="w-3.5 h-3.5" /> Token
           </button>
           <button
             onClick={() => setShowSettingsDrawer(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground"
           >
             <Settings2 className="w-3.5 h-3.5" /> 设置
           </button>
           <button
             onClick={() => setShowDevPanel(v => !v)}
-            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDevPanel ? 'text-primary bg-primary/10' : ''}`}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDevPanel ? 'text-primary bg-primary/10' : 'text-muted-foreground'}`}
             title="开发者视图"
           >
             <Terminal className="w-3.5 h-3.5" /> Dev
@@ -424,10 +431,21 @@ export default function Editor() {
               instruction={instruction}
               onEditContentChange={setEditContent}
               onCloseDiff={() => setShowDiff(false)}
+              rewriteMode={barMode === 'rewrite'}
               onSelectSuggestion={(s) => {
                 setInstruction(novelId, s)
                 gen.setNewCharCandidates([])
                 gen.setNewEntityCandidates([])
+              }}
+              onAddParagraphAnnotation={(paragraph) => {
+                const text = prompt(`段落${paragraph}的批注内容：`)
+                if (text?.trim()) {
+                  addAnnotation(novelId, selectedChapterNum, {
+                    id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                    paragraph,
+                    text: text.trim(),
+                  })
+                }
               }}
             />
 
@@ -444,6 +462,9 @@ export default function Editor() {
 
             {/* Generation Controls */}
             <GenerationBar
+              barMode={barMode}
+              onBarModeChange={setBarMode}
+              hasChapterContent={!!currentChapter?.content}
               agentStage={genStore.agentStage}
               isCurrentlyGenerating={gen.isCurrentlyGenerating}
               isOtherGenerating={genStore.isGenerating && !gen.isCurrentlyGenerating}
@@ -453,7 +474,15 @@ export default function Editor() {
               onInstructionChange={(v) => setInstruction(novelId, v)}
               onTargetWordsChange={(v) => setTargetWords(novelId, v)}
               onGenerate={gen.handleGenerate}
-              onAbortOrGenerate={gen.handleAbortOrGenerate}
+              onAbortOrGenerate={barMode === 'rewrite' ? gen.handleRewriteOrAbort : gen.handleAbortOrGenerate}
+              annotations={annotations}
+              onRemoveAnnotation={(id) => removeAnnotation(novelId, selectedChapterNum, id)}
+              onClearAnnotations={() => clearAnnotations(novelId, selectedChapterNum)}
+              onAddGlobalAnnotation={(text) => addAnnotation(novelId, selectedChapterNum, {
+                id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                text,
+              })}
+              onRewrite={gen.handleRewrite}
               plotSuggestions={plotSuggestions}
               isLoadingSuggestions={gen.isLoadingSuggestions}
               onFetchSuggestions={gen.handleFetchSuggestions}

@@ -24,7 +24,7 @@ async def list_chapters(novel_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Chapter)
         .where(Chapter.novel_id == novel_id)
-        .order_by(Chapter.volume, Chapter.number)
+        .order_by(Chapter.number)
     )
     return result.scalars().all()
 
@@ -77,9 +77,9 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
     loc_warning = ""
     try:
         summary, _, _ = await summarizer.summarize_chapter(db, chapter, novel)
-        _, char_warning, _, _ = await summarizer.update_character_states(db, chapter, novel, instruction=chapter.instruction or "")
-        _, ent_warning, _, _ = await summarizer.update_entity_states(db, chapter, novel, instruction=chapter.instruction or "")
-        _, loc_warning, _, _ = await summarizer.update_location_states(db, chapter, novel, instruction=chapter.instruction or "")
+        _, char_warning, _, _, _ = await summarizer.update_character_states(db, chapter, novel, instruction=chapter.instruction or "")
+        _, ent_warning, _, _, _ = await summarizer.update_entity_states(db, chapter, novel, instruction=chapter.instruction or "")
+        _, loc_warning, _, _, _ = await summarizer.update_location_states(db, chapter, novel, instruction=chapter.instruction or "")
     except Exception as e:
         logging.getLogger(__name__).warning("确认章节时记忆更新部分失败: %s", e)
         if not char_warning:

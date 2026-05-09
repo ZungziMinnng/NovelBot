@@ -172,7 +172,7 @@ async def search_novel(
                 "summary": hit["text"],
                 "score": score,
             })
-        elif doc_type == "note":
+        elif doc_type in ("novel_note", "note"):
             note_hits.append({
                 "title": meta.get("title", ""),
                 "content": hit["text"],
@@ -350,6 +350,7 @@ async def get_context_preview(
         volume=novel.current_volume or 1,
         scene_hint=instruction,
     )
+    context_meta = ctx.get("_meta", [])
     context_block, chars_block, task_instruction = context_builder.format_context_for_writer(
         ctx, instruction=instruction, target_words=target_words,
     )
@@ -437,6 +438,7 @@ async def get_context_preview(
 
     return {
         "chapter_number": chapter_number,
+        "meta": context_meta,
         "context": {
             **sections,
             "characters_count": len(ctx.get("characters", [])),
@@ -498,55 +500,85 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
         if not chapters:
             return {"updated": 0, "results": []}
 
-        summaries_text = "\n".join(
-            f"第{c.number}章：{c.summary}" for c in chapters
-        )
+        model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+        log.warning("reindex-timeline: model=%s, api_format=%s, chapters=%d", model, api_format, len(chapters))
 
-        instruction = (
-            "你是一位时间线编辑。下面是一部小说各章节的剧情梗概，每章开头有一个用【】包裹的时间标记。\n"
-            "现在需要你将所有时间标记统一改为绝对日期计数格式。\n\n"
-            "规则：\n"
-            "- 第一章发生的故事为第一日\n"
-            "- 后续章节根据摘要中描述的时间流逝推算绝对日数\n"
-            "- 格式为：第X日 或 第X日·时段（清晨/上午/白天/午后/傍晚/晚上/深夜）\n"
-            "- 如果一章跨越多天：第X日·时段→第Y日·时段\n"
-        )
+        BATCH_SIZE = 15
+        OVERLAP = 3
+
         output_spec = (
             '请输出 JSON 数组，每项格式为 {"chapter": 章节号, "time": "新时间标记"}。\n'
             "只输出 JSON 数组，不要其他文字。"
         )
 
-        model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-        log.warning("reindex-timeline: model=%s, api_format=%s, chapters=%d", model, api_format, len(chapters))
+        def _parse_raw(raw_text: str) -> list:
+            raw_text = raw_text.strip()
+            if not raw_text:
+                return []
+            if raw_text.startswith("```"):
+                raw_text = re.sub(r'^```\w*\n?', '', raw_text)
+                raw_text = re.sub(r'\n?```$', '', raw_text)
+            raw_text = raw_text.strip()
+            raw_text = re.sub(r',\s*]', ']', raw_text)
+            return _json.loads(raw_text)
 
-        # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
-        # Gemini 安全过滤器对 user 角色的小说内容更严格，
-        # 将摘要放在 assistant 角色绕过（与 _build_analysis_messages 同模式）
-        if api_format == "gemini":
-            messages = [
-                {"role": "user", "content": instruction},
-                {"role": "assistant", "content": f"各章摘要：\n{summaries_text}"},
-                {"role": "user", "content": output_spec},
-            ]
-        else:
-            messages = [{"role": "user", "content": f"{instruction}\n各章摘要：\n{summaries_text}\n\n{output_spec}"}]
+        time_map: dict[int, str] = {}
+        resolved_tail: list[tuple[int, str]] = []  # (chapter_number, time) of last few resolved
 
-        raw, _, _ = await llm_client.dispatch_chat_complete_with_usage(
-            messages=messages, model=model, api_format=api_format,
-            temperature=0.1, max_tokens=4000,
-        )
+        for i in range(0, len(chapters), BATCH_SIZE):
+            batch = chapters[i:i + BATCH_SIZE]
 
-        raw = raw.strip()
-        if not raw:
-            raise HTTPException(status_code=500, detail="LLM 返回空内容，可能被安全过滤器拦截，请尝试更换 fast 模型")
-        if raw.startswith("```"):
-            raw = re.sub(r'^```\w*\n?', '', raw)
-            raw = re.sub(r'\n?```$', '', raw)
-        raw = raw.strip()
-        raw = re.sub(r',\s*]', ']', raw)
-        time_map_list = _json.loads(raw)
+            # 构建指令
+            instruction = (
+                "你是一位时间线编辑。下面是一部小说各章节的剧情梗概。\n"
+                "请为每一章确定一个绝对日期计数格式的时间标记。\n\n"
+                "规则：\n"
+                "- 格式为：第X日 或 第X日·时段（清晨/上午/白天/午后/傍晚/晚上/深夜）\n"
+                "- 如果一章跨越多天：第X日·时段→第Y日·时段\n"
+                "- 日数必须单调递增，不能回退或重置\n"
+                "- 即使某章缺少时间标记，也必须根据上下文推算\n"
+            )
 
-        time_map = {item["chapter"]: item["time"] for item in time_map_list if "chapter" in item and "time" in item}
+            if resolved_tail:
+                instruction += "\n已确定的前几章时间（作为参照，不要输出这些章）：\n"
+                for ch_num, ch_time in resolved_tail:
+                    instruction += f"  第{ch_num}章 → 【{ch_time}】\n"
+                last_time = resolved_tail[-1][1]
+                instruction += f"\n⚠ 本批第一章（第{batch[0].number}章）的日数必须 ≥ {last_time}，严禁回退到第1日。\n"
+            else:
+                instruction += "- 第一章发生的故事为第1日\n"
+
+            summaries_text = "\n".join(f"第{c.number}章：{c.summary}" for c in batch)
+            instruction += f"\n需要标注的章节：\n{summaries_text}"
+
+            # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
+            if api_format == "gemini":
+                messages = [
+                    {"role": "user", "content": instruction},
+                    {"role": "assistant", "content": "好的，我来为这些章节标注绝对日期。"},
+                    {"role": "user", "content": output_spec},
+                ]
+            else:
+                messages = [{"role": "user", "content": f"{instruction}\n\n{output_spec}"}]
+
+            raw, _, _ = await llm_client.dispatch_chat_complete_with_usage(
+                messages=messages, model=model, api_format=api_format,
+                temperature=0.1, max_tokens=2000,
+            )
+
+            batch_results = _parse_raw(raw)
+            if not batch_results and i == 0:
+                raise HTTPException(status_code=500, detail="LLM 返回空内容，可能被安全过滤器拦截，请尝试更换 fast 模型")
+
+            for item in batch_results:
+                ch_num = item.get("chapter")
+                ch_time = item.get("time")
+                if ch_num is not None and ch_time:
+                    time_map[ch_num] = ch_time
+
+            # 保留本批最后 OVERLAP 条结果作为下一批的参照
+            valid_results = [(item["chapter"], item["time"]) for item in batch_results if "chapter" in item and "time" in item]
+            resolved_tail = valid_results[-OVERLAP:] if valid_results else resolved_tail
 
         updated = 0
         results = []
@@ -554,25 +586,29 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
             new_time = time_map.get(c.number)
             if not new_time:
                 continue
+            new_tag = f"【{new_time}】"
             old_match = re.match(r'【(.+?)】', c.summary)
             if old_match:
                 old_tag = old_match.group(0)
-                new_tag = f"【{new_time}】"
                 c.summary = c.summary.replace(old_tag, new_tag, 1)
+            else:
+                c.summary = new_tag + c.summary
 
-                mem_result = await db.execute(
-                    select(Memory).where(
-                        Memory.novel_id == novel.id,
-                        Memory.memory_type == "chapter_summary",
-                        Memory.chapter_number == c.number,
-                    )
+            mem_result = await db.execute(
+                select(Memory).where(
+                    Memory.novel_id == novel.id,
+                    Memory.memory_type == "chapter_summary",
+                    Memory.chapter_number == c.number,
                 )
-                for mem in mem_result.scalars().all():
-                    if old_tag in mem.content:
-                        mem.content = mem.content.replace(old_tag, new_tag, 1)
+            )
+            for mem in mem_result.scalars().all():
+                if old_match and old_match.group(0) in mem.content:
+                    mem.content = mem.content.replace(old_match.group(0), new_tag, 1)
+                elif not re.match(r'【(.+?)】', mem.content):
+                    mem.content = new_tag + mem.content
 
-                updated += 1
-                results.append({"chapter": c.number, "old": old_match.group(1), "new": new_time})
+            updated += 1
+            results.append({"chapter": c.number, "old": old_match.group(1) if old_match else "(无)", "new": new_time})
 
         await db.commit()
         return {"updated": updated, "results": results}

@@ -473,7 +473,7 @@ export function TimelineView({ novelId }: { novelId: number }) {
   const [reindexing, setReindexing] = useState(false)
 
   const entries = [...chapters]
-    .sort((a, b) => a.volume - b.volume || a.number - b.number)
+    .sort((a, b) => a.number - b.number)
     .filter((c) => c.summary)
     .map((c) => ({ chapter: c.number, volume: c.volume, time: extractTime(c), summary: c.summary! }))
 

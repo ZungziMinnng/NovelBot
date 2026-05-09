@@ -251,10 +251,11 @@ export default function NovelWizard({ onClose, onComplete }: Props) {
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-                      <select value={c.role} onChange={e => updateChar(i, 'role', e.target.value)}
-                        className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none">
-                        {['主角','反派','配角','盟友'].map(r => <option key={r}>{r}</option>)}
-                      </select>
+                      <input list={`role-options-wizard-${i}`} value={c.role} onChange={e => updateChar(i, 'role', e.target.value)}
+                        className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+                      <datalist id={`role-options-wizard-${i}`}>
+                        {['男主', '女主', '主角', '配角', '反派', '朋友'].map(r => <option key={r} value={r} />)}
+                      </datalist>
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">年龄</label>

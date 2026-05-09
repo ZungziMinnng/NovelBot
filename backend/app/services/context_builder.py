@@ -36,19 +36,39 @@ async def build_generation_context(
         text = text.strip()
         return (text[:limit] + "…") if len(text) > limit else text
 
-    # 1. 核心设定（世界观，RAG 按需检索相关段落）
-    world_query = scene_hint or ""
-    if not world_query:
-        outline_result_tmp = await session.execute(
-            select(Outline).where(
-                Outline.novel_id == novel.id,
-                Outline.level == "chapter",
-                Outline.volume == volume,
-                Outline.chapter_number == chapter_number,
-            )
+    # 0. 预加载大纲、近期摘要、上一章原文（用于 world_query + 名称匹配）
+    outline_result = await session.execute(
+        select(Outline).where(
+            Outline.novel_id == novel.id,
+            Outline.level == "chapter",
+            Outline.volume == volume,
+            Outline.chapter_number == chapter_number,
         )
-        outline_tmp = outline_result_tmp.scalar_one_or_none()
-        world_query = outline_tmp.content if outline_tmp else f"第{chapter_number}章"
+    )
+    outline = outline_result.scalar_one_or_none()
+    outline_content = outline.content if outline else ""
+
+    max_summaries = novel.rolling_summary_count or 5
+    rolling_text, rolling_chapter_nums = await summarizer.get_rolling_summary(
+        session, novel.id, chapter_number,
+        volume=volume,
+        max_summaries=max_summaries,
+    )
+
+    prev_result = await session.execute(
+        select(Chapter).where(
+            Chapter.novel_id == novel.id,
+            Chapter.number == chapter_number - 1,
+            Chapter.volume == volume,
+        )
+    )
+    prev_chapter = prev_result.scalar_one_or_none()
+    prev_content = ""
+    if prev_chapter:
+        prev_content = summarizer.strip_plot_suggestions(prev_chapter.content or "")
+
+    # 1. 核心设定（世界观，RAG 按需检索相关段落）
+    world_query = scene_hint or outline_content or f"第{chapter_number}章"
 
     world_chunks = await vector_store.asearch_similar(
         novel.id, world_query, top_k=3,
@@ -67,7 +87,10 @@ async def build_generation_context(
     else:
         meta.append({"key": "core_setting", "label": "世界观设定", "detail": "空", "source": "rag", "items": [], "content": ""})
 
-    # 2. 实体加载（RAG 过滤：向量检索 + 名称匹配 + 全量回退）
+    # 名称匹配文本 = 指令 + 上一章原文 + 近期摘要 + 大纲
+    name_match_text = "\n".join(filter(None, [world_query, prev_content, rolling_text, outline_content]))
+
+    # 2b. 实体加载（名称匹配优先 → RAG 兜底 → 全量回退）
     all_characters = (await session.execute(
         select(Character).where(Character.novel_id == novel.id)
     )).scalars().all()
@@ -94,11 +117,15 @@ async def build_generation_context(
         vector_store.asearch_similar_with_meta(novel.id, world_query, top_k=4, where={"type": {"$eq": "technique"}}),
     )
 
-    def _entity_filter(all_items, hits, query: str):
+    def _entity_filter(all_items, hits, query: str, extra: list | None = None, match_text: str = ""):
         """名称匹配优先，RAG 兜底，均无命中时全量回退。返回 (filtered_list, source)。"""
         if not all_items:
             return [], "empty"
-        name_matched = [item for item in all_items if item.name and item.name in query]
+        effective_text = match_text or query
+        name_matched = [item for item in all_items if item.name and item.name in effective_text]
+        if extra:
+            seen = {id(x) for x in name_matched}
+            name_matched.extend(x for x in extra if id(x) not in seen)
         if name_matched:
             return name_matched, "name"
         hit_ids = {h["metadata"]["entity_id"] for h in hits}
@@ -106,14 +133,16 @@ async def build_generation_context(
             return [item for item in all_items if item.id in hit_ids], "rag"
         return list(all_items), "full"
 
-    characters, char_source = _entity_filter(all_characters, char_hits, world_query)
+    # 角色：额外支持按 role 匹配（如指令中写"男主"匹配 role="男主" 的角色）
+    role_matched = [c for c in all_characters if c.role and c.role in world_query]
+    characters, char_source = _entity_filter(all_characters, char_hits, world_query, extra=role_matched, match_text=name_match_text)
     all_items_list = [e for e in all_entities if e.type == "item"]
     all_systems_list = [e for e in all_entities if e.type == "system"]
-    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query)
-    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query)
-    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query)
-    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query)
-    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query)
+    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query, match_text=name_match_text)
+    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query, match_text=name_match_text)
+    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query, match_text=name_match_text)
+    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query, match_text=name_match_text)
+    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query, match_text=name_match_text)
 
     def _rag_detail(filtered, total, unit):
         if not filtered:
@@ -124,7 +153,7 @@ async def build_generation_context(
 
     # 2a. 角色
     ctx["characters"] = [
-        {"name": c.name, "role": c.role, "description": c.description,
+        {"name": c.name, "role": c.role, "age": c.age, "description": c.description,
          "full_sheet": c.full_sheet or {}, "state": c.current_state}
         for c in characters
     ]
@@ -200,44 +229,47 @@ async def build_generation_context(
     else:
         meta.append({"key": "techniques", "label": "功法", "detail": "空", "source": tech_source, "items": [], "content": ""})
 
-    # 2f. 补充设定笔记
+    # 2f. 补充设定笔记（名称匹配优先 → RAG 兜底 → 全量回退）
+    all_notes = (await session.execute(
+        select(NovelNote).where(NovelNote.novel_id == novel.id)
+    )).scalars().all()
+
     note_hits = await vector_store.asearch_similar_with_meta(
         novel.id, world_query, top_k=5,
         where={"type": {"$eq": "novel_note"}},
     )
-    hit_note_ids = {
-        h.get("metadata", {}).get("note_id")
-        for h in note_hits
-        if h.get("metadata", {}).get("note_id") is not None
-    }
-    notes_query = select(NovelNote).where(NovelNote.novel_id == novel.id)
-    if hit_note_ids:
-        notes_query = notes_query.where(NovelNote.id.in_(hit_note_ids))
-    notes_result = await session.execute(notes_query)
-    notes = notes_result.scalars().all()
+
+    effective_text = name_match_text or world_query
+    name_matched_notes = [n for n in all_notes if n.title and n.title in effective_text]
+    if name_matched_notes:
+        notes = name_matched_notes
+        notes_source = "name"
+    else:
+        hit_note_ids = {
+            h.get("metadata", {}).get("note_id")
+            for h in note_hits
+            if h.get("metadata", {}).get("note_id") is not None
+        }
+        if hit_note_ids:
+            notes = [n for n in all_notes if n.id in hit_note_ids]
+            notes_source = "rag"
+        else:
+            notes = list(all_notes)
+            notes_source = "full"
+
     ctx["notes"] = [
         {"title": n.title, "content": n.content}
         for n in notes
     ]
     if not _on("notes_context"):
-        meta.append({"key": "notes_context", "label": "补充设定", "detail": "已跳过", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "notes_context", "label": "补充设定", "detail": "已跳过", "source": notes_source, "items": [], "content": ""})
     elif notes:
-        detail = f"{len(notes)}条检索" if hit_note_ids else f"{len(notes)}条设定"
-        meta.append({"key": "notes_context", "label": "补充设定", "detail": detail, "source": "rag", "items": [n.title for n in notes], "content": ""})
+        meta.append({"key": "notes_context", "label": "补充设定", "detail": _rag_detail(notes, len(all_notes), "设定"), "source": notes_source, "items": [n.title for n in notes], "content": ""})
     else:
-        meta.append({"key": "notes_context", "label": "补充设定", "detail": "空", "source": "rag", "items": [], "content": ""})
+        meta.append({"key": "notes_context", "label": "补充设定", "detail": "空", "source": notes_source, "items": [], "content": ""})
 
-    # 3. 大纲：当前章节目标
-    outline_result = await session.execute(
-        select(Outline).where(
-            Outline.novel_id == novel.id,
-            Outline.level == "chapter",
-            Outline.volume == volume,
-            Outline.chapter_number == chapter_number,
-        )
-    )
-    outline = outline_result.scalar_one_or_none()
-    ctx["chapter_outline"] = outline.content if outline else ""
+    # 3. 大纲：当前章节目标（复用上面已加载的 outline）
+    ctx["chapter_outline"] = outline_content
     if not _on("chapter_outline"):
         meta.append({"key": "chapter_outline", "label": "本章大纲", "detail": "已跳过", "source": "full", "items": [], "content": ""})
     elif ctx["chapter_outline"]:
@@ -245,13 +277,7 @@ async def build_generation_context(
     else:
         meta.append({"key": "chapter_outline", "label": "本章大纲", "detail": "空", "source": "full", "items": [], "content": ""})
 
-    # 4. 最近章节摘要（滚动窗口）
-    max_summaries = novel.rolling_summary_count or 5
-    rolling_text, rolling_chapter_nums = await summarizer.get_rolling_summary(
-        session, novel.id, chapter_number,
-        volume=volume,
-        max_summaries=max_summaries,
-    )
+    # 4. 最近章节摘要（复用上面已加载的 rolling_text）
     ctx["rolling_summary"] = rolling_text
     if not _on("rolling_summary"):
         meta.append({"key": "rolling_summary", "label": "近期摘要", "detail": "已跳过", "source": "full", "items": [], "content": ""})
@@ -310,17 +336,8 @@ async def build_generation_context(
     else:
         meta.append({"key": "rag_context", "label": "RAG历史检索", "detail": "空", "source": "rag", "items": [], "content": ""})
 
-    # 6. 即时上下文：上一章全文（场景级衔接）
-    prev_result = await session.execute(
-        select(Chapter).where(
-            Chapter.novel_id == novel.id,
-            Chapter.number == chapter_number - 1,
-            Chapter.volume == volume,
-        )
-    )
-    prev_chapter = prev_result.scalar_one_or_none()
+    # 6. 即时上下文：上一章全文（复用上面已加载的 prev_chapter）
     if prev_chapter:
-        prev_content = summarizer.strip_plot_suggestions(prev_chapter.content or "")
         prev_summary = prev_chapter.summary or ""
         ctx["recent_text"] = prev_content.strip() or prev_summary.strip()
     else:
@@ -373,7 +390,8 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         for c in ctx.get("characters", []):
             state = c.get("state", {})
             sheet = c.get("full_sheet", {})
-            chars_text += f"【{c['name']}·{c['role']}】{c['description']}\n"
+            age_part = f"·{c['age']}岁" if c.get('age') else ""
+            chars_text += f"【{c['name']}·{c['role']}{age_part}】{c['description']}\n"
             for key, val in sheet.items():
                 if not val:
                     continue

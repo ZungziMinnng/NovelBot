@@ -4,7 +4,7 @@ import { X, Loader2, Save, RefreshCw } from 'lucide-react'
 import { novelsApi, chaptersApi, type Novel } from '@/api/client'
 import toast from 'react-hot-toast'
 
-const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'full' | 'field' }> = [
+const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'full' | 'field' | 'name' }> = [
   { key: 'core_setting', label: '世界观设定', source: 'rag' },
   { key: 'book_summary', label: '全书概要', source: 'field' },
   { key: 'arc_summary', label: '故事弧概要', source: 'full' },
@@ -13,15 +13,16 @@ const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'ful
   { key: 'rag_context', label: 'RAG 历史检索', source: 'rag' },
   { key: 'notes_context', label: '补充设定', source: 'rag' },
   { key: 'recent_text', label: '上一章原文', source: 'full' },
-  { key: 'characters', label: '角色状态', source: 'rag' },
-  { key: 'items', label: '道具', source: 'rag' },
-  { key: 'systems', label: '系统', source: 'rag' },
-  { key: 'locations', label: '地点', source: 'rag' },
-  { key: 'factions', label: '势力', source: 'rag' },
-  { key: 'techniques', label: '功法', source: 'rag' },
+  { key: 'characters', label: '角色状态', source: 'name' },
+  { key: 'items', label: '道具', source: 'name' },
+  { key: 'systems', label: '系统', source: 'name' },
+  { key: 'locations', label: '地点', source: 'name' },
+  { key: 'factions', label: '势力', source: 'name' },
+  { key: 'techniques', label: '功法', source: 'name' },
 ]
 
 const SOURCE_BADGE: Record<string, { text: string; cls: string }> = {
+  name:  { text: '名称匹配', cls: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' },
   rag:   { text: 'RAG', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
   full:  { text: '全量', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
   field: { text: '字段', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400' },
@@ -41,7 +42,8 @@ export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps)
     queryFn: () => chaptersApi.list(novelId),
   })
 
-  const [chapterNum, setChapterNum] = useState(() => (novel.current_chapter || 0) + 1)
+  const maxChapterNum = chapters.length > 0 ? Math.max(...chapters.map(c => c.number)) : 0
+  const [chapterNum, setChapterNum] = useState(() => maxChapterNum + 1)
   const [config, setConfig] = useState<Record<string, boolean>>({})
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -83,6 +85,9 @@ export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps)
 
   const tokens = preview?.token_estimate || {}
   const totalTokens = tokens.total || 0
+  const metaSourceMap: Record<string, string> = Object.fromEntries(
+    (preview?.meta || []).map((m: any) => [m.key, m.source])
+  )
 
   return (
     <>
@@ -106,10 +111,10 @@ export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps)
               onChange={e => setChapterNum(Number(e.target.value))}
               className="flex-1 border rounded-lg px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
             >
-              <option value={(novel.current_chapter || 0) + 1}>
-                第 {(novel.current_chapter || 0) + 1} 章（下一章）
+              <option value={maxChapterNum + 1}>
+                第 {maxChapterNum + 1} 章（下一章）
               </option>
-              {chapters.map(c => (
+              {[...chapters].sort((a, b) => a.number - b.number).map(c => (
                 <option key={c.id} value={c.number}>第 {c.number} 章</option>
               ))}
             </select>
@@ -131,10 +136,11 @@ export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps)
 
           {/* Section list */}
           <div className="space-y-1">
-            {CONTEXT_SECTIONS.map(({ key, label, source }) => {
+            {CONTEXT_SECTIONS.map(({ key, label, source: defaultSource }) => {
               const tok = tokens[key] ?? 0
               const enabled = config[key] ?? true
-              const badge = SOURCE_BADGE[source]
+              const actualSource = metaSourceMap[key] || defaultSource
+              const badge = SOURCE_BADGE[actualSource]
               return (
                 <label
                   key={key}
@@ -149,7 +155,7 @@ export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps)
                     className="rounded border-gray-300 text-primary focus:ring-primary/50 h-3.5 w-3.5"
                   />
                   <span className="text-xs flex-1">{label}</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>
+                  {badge && <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
                   <span className={`text-xs tabular-nums w-14 text-right ${tok > 0 ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}>
                     {tok > 0 ? `~${tok.toLocaleString()}` : '0'}
                   </span>

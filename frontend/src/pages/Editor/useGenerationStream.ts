@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import {
   chaptersApi, charactersApi, generationApi, worldEntitiesApi, locationsApi, techniquesApi,
-  streamChapterGeneration,
+  streamChapterGeneration, streamChapterRewrite,
 } from '@/api/client'
 import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, LlmCallData, ContextStepData } from '@/api/client'
 import { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
@@ -287,6 +287,125 @@ export function useGenerationStream(
     handleGenerate()
   }, [novelId, selectedChapterNum, handleGenerate])
 
+  // ── Rewrite ─────────────────────────────────────────────────────────────
+  const handleRewrite = useCallback(() => {
+    const gs = useGenerationStore.getState()
+    if (gs.isGenerating) return
+
+    const annotations = useEditorStore.getState().getAnnotations(novelId, selectedChapterNum)
+    if (!annotations.length) return
+
+    gs.startGeneration(novelId, novelTitle, selectedChapterNum)
+
+    let entryCounter = 0
+    const runningEntryIds: Map<string, string> = new Map()
+
+    const ctrl = streamChapterRewrite(
+      {
+        novel_id: novelId,
+        chapter_number: selectedChapterNum,
+        annotations: annotations.map(a => ({ paragraph: a.paragraph, text: a.text })),
+        target_words: targetWords,
+      },
+      (msg: SSEMessage) => {
+        const s = useGenerationStore.getState()
+        switch (msg.event) {
+          case 'stage':
+            s.setAgentStage(msg.data as string)
+            break
+          case 'token':
+            s.appendToken(msg.data as string)
+            break
+          case 'agent_start': {
+            const d = msg.data as { agent: string; label: string }
+            const entryId = `${d.agent}-${entryCounter++}`
+            const entry: AgentLogEntry = {
+              id: entryId,
+              agent: d.agent,
+              label: d.label,
+              status: 'running',
+              inputTokens: 0,
+              outputTokens: 0,
+            }
+            runningEntryIds.set(d.agent, entryId)
+            s.addLogEntry(entry)
+            break
+          }
+          case 'agent_done': {
+            const d = msg.data as AgentDoneData
+            const entryId = runningEntryIds.get(d.agent)
+            if (entryId) {
+              s.updateLogEntry(entryId, {
+                status: 'done',
+                inputTokens: d.input_tokens,
+                outputTokens: d.output_tokens,
+                passed: d.passed,
+              })
+            }
+            break
+          }
+          case 'total_usage': {
+            const d = msg.data as TotalUsageData
+            s.setTotalTokens(d.input_tokens, d.output_tokens)
+            break
+          }
+          case 'done':
+            s.setAgentStage('done')
+            qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+            qc.invalidateQueries({ queryKey: ['characters', novelId] })
+            useEditorStore.getState().clearAnnotations(novelId, selectedChapterNum)
+            break
+          case 'original_draft': {
+            const d = msg.data as OriginalDraftData
+            s.setOriginalDraft(d.text)
+            break
+          }
+          case 'llm_call': {
+            const d = msg.data as LlmCallData
+            useDevLogStore.getState().addEntry({
+              type: 'llm_call',
+              agent: d.agent,
+              model: d.model,
+              llmStatus: d.status,
+              inputTokens: d.input_tokens,
+              outputTokens: d.output_tokens,
+              durationMs: d.duration_ms,
+              payload: d.payload,
+            })
+            break
+          }
+          case 'context_step': {
+            const d = msg.data as ContextStepData
+            s.addContextStep(d)
+            break
+          }
+          case 'warning': {
+            s.setWarning(String(msg.data))
+            toast(String(msg.data), { icon: '⚠️' })
+            break
+          }
+          case 'error':
+            s.setError(String(msg.data))
+            break
+        }
+      },
+      () => {
+        useGenerationStore.getState().finishGeneration()
+      },
+    )
+
+    useGenerationStore.getState().setAbortController(ctrl)
+  }, [novelId, selectedChapterNum, targetWords, novelTitle, qc])
+
+  const handleRewriteOrAbort = useCallback(() => {
+    const gs = useGenerationStore.getState()
+    if (gs.isGenerating && gs.novelId === novelId && gs.chapterNum === selectedChapterNum) {
+      gs.abortGeneration()
+      return
+    }
+    handleRewrite()
+  }, [novelId, selectedChapterNum, handleRewrite])
+
   // ── Discovery: Character ─────────────────────────────────────────────────
   const toggleCharSelection = useCallback((i: number) => {
     setSelectedCharIndices(prev => {
@@ -429,6 +548,8 @@ export function useGenerationStream(
     // actions
     handleGenerate,
     handleAbortOrGenerate,
+    handleRewrite,
+    handleRewriteOrAbort,
     handleFetchSuggestions,
     handleDiscover,
     toggleCharSelection,

@@ -231,11 +231,14 @@ export default function Characters() {
     else setStateDraft(prev => { const n = { ...prev }; delete n[key]; return n })
   }
 
+  const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
   const roleColor: Record<string, string> = {
-    '主角': 'bg-blue-100 text-blue-700',
+    '男主': 'bg-amber-100 text-amber-700',
+    '女主': 'bg-pink-100 text-pink-700',
+    '主角': 'bg-amber-100 text-amber-700',
     '反派': 'bg-red-100 text-red-700',
     '配角': 'bg-gray-100 text-gray-700',
-    '盟友': 'bg-green-100 text-green-700',
+    '朋友': 'bg-blue-100 text-blue-700',
   }
 
   const typeColor: Record<string, string> = {
@@ -342,7 +345,7 @@ export default function Characters() {
             <div className="flex-1">
               <h2 className="text-xl font-bold">{selected.name}</h2>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <span className={`px-2 py-0.5 rounded-full text-xs ${roleColor[selected.role] || ''}`}>{selected.role}</span>
+                <span className={`px-2 py-0.5 rounded-full text-xs ${roleColor[selected.role] || roleColor['配角']}`}>{selected.role}</span>
                 {selected.age && <span>· {selected.age}岁</span>}
               </div>
             </div>
@@ -570,10 +573,11 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-              <select value={newChar.role} onChange={e => setNewChar({...newChar, role: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background">
-                {['主角','反派','配角','盟友'].map(r => <option key={r}>{r}</option>)}
-              </select>
+              <input list="role-options-chars-new" value={newChar.role} onChange={e => setNewChar({...newChar, role: e.target.value})}
+                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              <datalist id="role-options-chars-new">
+                {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
+              </datalist>
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
@@ -634,10 +638,11 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-              <select value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background">
-                {['主角','反派','配角','盟友'].map(r => <option key={r}>{r}</option>)}
-              </select>
+              <input list="role-options-chars-edit" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}
+                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              <datalist id="role-options-chars-edit">
+                {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
+              </datalist>
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>

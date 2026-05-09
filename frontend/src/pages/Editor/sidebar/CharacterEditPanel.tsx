@@ -8,22 +8,24 @@ import { charactersApi, type Character } from '@/api/client'
 import RelationshipGraphView from './RelationshipGraphView'
 import toast from 'react-hot-toast'
 
-type Tab = 'basic' | 'skills' | 'state' | 'relationships'
+type Tab = 'basic' | 'skills' | 'state' | 'history' | 'relationships'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'basic', label: '基本信息' },
   { key: 'skills', label: '技能道具' },
   { key: 'state', label: '当前状态' },
+  { key: 'history', label: '经历' },
   { key: 'relationships', label: '关系' },
 ]
 
-const ROLE_OPTIONS = ['主角', '女主', '反派', '配角', '盟友']
+const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
 const ROLE_COLORS: Record<string, string> = {
-  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  男主: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   女主: 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
+  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   反派: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
   配角: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  盟友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  朋友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
 }
 
 const APPEARANCE_KEYS = ['appearance', 'personality', 'speech_style', 'weaknesses']
@@ -168,11 +170,14 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   // ── KV editing ──
   const [editingKeys, setEditingKeys] = useState<string[]>([])
 
-  const openKVEdit = (sectionKey: string, data: Record<string, unknown>, keys: string[]) => {
+  const openKVEdit = (sectionKey: string, data: Record<string, unknown>, keys: string[], prefill = false) => {
     const flat: Record<string, string> = {}
     for (const k of keys) {
       const v = data[k]
-      if (v === undefined) continue
+      if (v === undefined) {
+        if (prefill) flat[k] = ''
+        continue
+      }
       flat[k] = Array.isArray(v) ? v.join('、') : String(v ?? '')
     }
     setKvDraft(flat)
@@ -190,7 +195,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       }
       Object.assign(base, kvDraft)
       await charactersApi.update(characterId, { [field]: base } as Partial<Character>)
-      invalidate()
+      await invalidate()
       setEditingKV(null)
       toast.success('已保存')
     } finally { setSavingKV(false) }
@@ -312,7 +317,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           </div>
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-muted-foreground uppercase">定位</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ROLE_COLORS[character.role] || ''}`}>{character.role}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ROLE_COLORS[character.role] || ROLE_COLORS['配角']}`}>{character.role}</span>
           </div>
           {character.age && (
             <div className="flex items-center justify-between">
@@ -338,45 +343,12 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
 
         {/* Body traits */}
         {renderKVSection('身体特质', sheet, allBodyKeys, 'body', 'full_sheet')}
-        {!allBodyKeys.some(k => sheet[k] !== undefined) && editingKV !== 'body' && (
-          <button onClick={() => openKVEdit('body', {}, allBodyKeys)}
+        {!allBodyKeys.some(k => sheet[k] !== undefined && sheet[k] !== '') && editingKV !== 'body' && (
+          <button onClick={() => openKVEdit('body', sheet, allBodyKeys, true)}
             className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted">
             <Plus className="w-3 h-3" /> 添加身体特质
           </button>
         )}
-
-        {/* Character history */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <ScrollText className="w-3.5 h-3.5 text-muted-foreground" />
-            <h4 className="text-xs font-medium">角色经历</h4>
-          </div>
-          {Array.isArray(sheet.character_history) && sheet.character_history.length > 0 ? (
-            <>
-              <div className="relative">
-                <div className="absolute left-2.5 top-0 bottom-0 w-0.5 bg-border" />
-                {(sheet.character_history as { chapter: number; content: string }[]).map((entry, i) => (
-                  <div key={i} className="relative pl-7 py-1.5">
-                    <div className="absolute left-1 top-2.5 w-3 h-3 rounded-full bg-primary/80 border-2 border-background" />
-                    <span className="text-[10px] font-mono text-muted-foreground">第{entry.chapter}章</span>
-                    <p className="text-xs text-muted-foreground leading-relaxed">{entry.content}</p>
-                  </div>
-                ))}
-              </div>
-              <button onClick={handleGenerateHistory} disabled={generatingHistory}
-                className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50">
-                {generatingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                {generatingHistory ? '生成中...' : '重新生成'}
-              </button>
-            </>
-          ) : (
-            <button onClick={handleGenerateHistory} disabled={generatingHistory}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50">
-              {generatingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScrollText className="w-3 h-3" />}
-              {generatingHistory ? '生成中...' : '生成角色经历'}
-            </button>
-          )}
-        </div>
       </div>
     )
   }
@@ -615,6 +587,36 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     )
   }
 
+  const renderHistoryTab = () => (
+    <div className="space-y-2">
+      {Array.isArray(sheet.character_history) && sheet.character_history.length > 0 ? (
+        <>
+          <div className="relative">
+            <div className="absolute left-2.5 top-0 bottom-0 w-0.5 bg-border" />
+            {(sheet.character_history as { chapter: number; content: string }[]).map((entry, i) => (
+              <div key={i} className="relative pl-7 py-1.5">
+                <div className="absolute left-1 top-2.5 w-3 h-3 rounded-full bg-primary/80 border-2 border-background" />
+                <span className="text-[10px] font-mono text-muted-foreground">第{entry.chapter}章</span>
+                <p className="text-xs text-muted-foreground leading-relaxed">{entry.content}</p>
+              </div>
+            ))}
+          </div>
+          <button onClick={handleGenerateHistory} disabled={generatingHistory}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50">
+            {generatingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            {generatingHistory ? '生成中...' : '重新生成'}
+          </button>
+        </>
+      ) : (
+        <button onClick={handleGenerateHistory} disabled={generatingHistory}
+          className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50">
+          {generatingHistory ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScrollText className="w-3 h-3" />}
+          {generatingHistory ? '生成中...' : '生成角色经历'}
+        </button>
+      )}
+    </div>
+  )
+
   return (
     <div className="flex flex-col h-full">
       {/* Rich header */}
@@ -654,15 +656,15 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         </div>
         <div className="flex gap-1.5">
           <button onClick={() => { setBasicForm({ name: character.name, role: character.role, age: character.age, description: character.description }); setEditingBasic(true) }}
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] border rounded-md hover:bg-muted transition-colors">
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded-md border border-blue-200 text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors">
             <Pencil className="w-3 h-3" /> 编辑
           </button>
           <button onClick={() => setShowEnhance(!showEnhance)}
-            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] border rounded-md transition-colors ${showEnhance ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}>
+            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded-md transition-colors ${showEnhance ? 'bg-violet-600 text-white border border-violet-600' : 'border border-violet-200 text-violet-600 hover:bg-violet-50 dark:border-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30'}`}>
             <Sparkles className="w-3 h-3" /> AI 完善
           </button>
           <button onClick={handleDelete}
-            className="px-2 py-1 text-[10px] border rounded-md text-destructive hover:bg-destructive/10 transition-colors">
+            className="px-2 py-1 text-[10px] rounded-md border border-red-200 text-red-500 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors">
             <Trash2 className="w-3 h-3" />
           </button>
         </div>
@@ -727,6 +729,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           {activeTab === 'basic' && renderBasicTab()}
           {activeTab === 'skills' && renderSkillsTab()}
           {activeTab === 'state' && renderStateTab()}
+          {activeTab === 'history' && renderHistoryTab()}
         </div>
       )}
 
@@ -741,13 +744,16 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               placeholder="角色名"
             />
-            <select
+            <input
+              list="role-options-edit"
               value={basicForm.role}
               onChange={e => setBasicForm({ ...basicForm, role: e.target.value })}
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-            >
-              {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
+              placeholder="角色定位"
+            />
+            <datalist id="role-options-edit">
+              {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
+            </datalist>
             <input
               value={basicForm.age}
               onChange={e => setBasicForm({ ...basicForm, age: e.target.value })}

@@ -1,7 +1,9 @@
 import { useRef, useEffect } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Plus } from 'lucide-react'
 import DiffView from '@/components/DiffView/DiffView'
 import type { Chapter } from '@/api/client'
+
+const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
 
 interface ChapterContentAreaProps {
   displayText: string
@@ -21,9 +23,11 @@ interface ChapterContentAreaProps {
   fontWeight: string
   plotSuggestions: string[]
   instruction: string
+  rewriteMode: boolean
   onEditContentChange: (v: string) => void
   onCloseDiff: () => void
   onSelectSuggestion: (s: string) => void
+  onAddParagraphAnnotation: (paragraph: number) => void
 }
 
 export default function ChapterContentArea({
@@ -44,9 +48,11 @@ export default function ChapterContentArea({
   fontWeight,
   plotSuggestions,
   instruction,
+  rewriteMode,
   onEditContentChange,
   onCloseDiff,
   onSelectSuggestion,
+  onAddParagraphAnnotation,
 }: ChapterContentAreaProps) {
   const contentEndRef = useRef<HTMLDivElement>(null)
 
@@ -55,6 +61,31 @@ export default function ChapterContentArea({
       contentEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [isCurrentlyGenerating, streamingMode])
+
+  const renderParagraphs = (text: string) => {
+    const paragraphs = text.split('\n').filter(p => p.trim())
+    return (
+      <div className="space-y-0" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+        {paragraphs.map((p, i) => {
+          const num = i < CIRCLED_NUMS.length ? CIRCLED_NUMS[i] : `(${i + 1})`
+          return (
+            <div key={i} className="group flex gap-0 py-1 hover:bg-muted/30 rounded transition-colors -mx-2 px-2">
+              <span className="shrink-0 w-6 text-muted-foreground/50 text-xs font-mono select-none pt-0.5">
+                {num}
+              </span>
+              <span className="flex-1 novel-content whitespace-pre-wrap">{p}</span>
+              <button
+                onClick={() => onAddParagraphAnnotation(i + 1)}
+                className="shrink-0 opacity-0 group-hover:opacity-100 ml-2 mt-0.5 flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-all"
+              >
+                <Plus className="w-3 h-3" />批注
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
 
   return (
     <div className={`flex-1 ${showDiff && !isCurrentlyGenerating && originalDraft ? 'overflow-hidden' : 'overflow-y-auto'}`}>
@@ -78,9 +109,15 @@ export default function ChapterContentArea({
             <span className="shrink-0 mt-0.5">⚠</span>
             <span>{warningMessage}</span>
           </div>
-          <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
-            {displayText}
-          </div>
+          {rewriteMode && displayText ? (
+            <div className="p-8 flex-1">
+              {renderParagraphs(displayText)}
+            </div>
+          ) : (
+            <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+              {displayText}
+            </div>
+          )}
         </div>
       ) : errorMessage ? (
         <div className="p-8 flex flex-col items-center justify-center h-full gap-3">
@@ -109,14 +146,20 @@ export default function ChapterContentArea({
               </details>
             </div>
           )}
-          <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
-            {displayText || (
-              <span className="text-muted-foreground/50">
-                {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
-              </span>
-            )}
-            <div ref={contentEndRef} />
-          </div>
+          {rewriteMode && displayText && !isCurrentlyGenerating ? (
+            <div className="p-8 flex-1">
+              {renderParagraphs(displayText)}
+            </div>
+          ) : (
+            <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+              {displayText || (
+                <span className="text-muted-foreground/50">
+                  {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
+                </span>
+              )}
+              <div ref={contentEndRef} />
+            </div>
+          )}
           {plotSuggestions.length > 0 && (
             <div className="px-8 pt-1 pb-6 shrink-0">
               <details open>

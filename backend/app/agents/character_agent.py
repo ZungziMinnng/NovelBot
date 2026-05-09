@@ -80,7 +80,7 @@ async def discover_new_characters(
         f"只提取实际出现在章节中的角色，不要凭空捏造。\n\n"
         f"以 JSON 数组输出，格式：\n"
         f'[{{"name": "姓名", "role": "配角", "description": "一句话简介"}}]\n'
-        f"role 只能是：主角、反派、配角、盟友 之一。\n"
+        f"role 只能是：男主、女主、主角、配角、反派、朋友 之一。\n"
         f"如果没有新角色，直接输出 []。只输出 JSON，不要任何说明。"
     )
 
@@ -101,7 +101,8 @@ async def discover_new_characters(
         if start == -1 or end <= 0:
             return []
         candidates = json.loads(raw[start:end])
-        return [c for c in candidates if isinstance(c, dict) and "name" in c]
+        existing_set = {n.strip() for n in existing_names}
+        return [c for c in candidates if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set]
     except Exception:
         return []
 
@@ -198,10 +199,11 @@ async def discover_new_locations(
         if start == -1 or end <= 0:
             return []
         candidates = json.loads(raw[start:end])
+        existing_set = {l["name"].strip() for l in existing_locations}
         return [
             {**c, "parent_name": c.get("parent_name", "")}
             for c in candidates
-            if isinstance(c, dict) and "name" in c
+            if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set
         ]
     except Exception:
         return []
@@ -246,7 +248,8 @@ async def discover_new_techniques(
         if start == -1 or end <= 0:
             return []
         candidates = json.loads(raw[start:end])
-        return [c for c in candidates if isinstance(c, dict) and "name" in c]
+        existing_set = {n.strip() for n in existing_names}
+        return [c for c in candidates if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set]
     except Exception:
         return []
 
@@ -388,10 +391,11 @@ async def discover_new_entities(
             return []
         candidates = json.loads(raw[start:end])
         valid_types = {"item", "system"}
+        existing_set = {n.strip() for n in existing_names}
         return [
             {**c, "type": c.get("type", "item") if c.get("type") in valid_types else "item"}
             for c in candidates
-            if isinstance(c, dict) and "name" in c
+            if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set
         ]
     except Exception:
         return []

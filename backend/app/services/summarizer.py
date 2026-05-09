@@ -125,8 +125,30 @@ async def summarize_chapter(
 
     clean_content = strip_plot_suggestions(chapter.content)
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+
+    # 查询上一章摘要的时间标记，为当前章提供日期连续性上下文
+    prev_time_hint = ""
+    if chapter.number > 1:
+        prev_mem_result = await session.execute(
+            select(Memory.content)
+            .where(
+                Memory.novel_id == novel.id,
+                Memory.memory_type == "chapter_summary",
+                Memory.chapter_number == chapter.number - 1,
+            )
+            .order_by(Memory.id.desc())
+            .limit(1)
+        )
+        prev_summary = prev_mem_result.scalar_one_or_none()
+        if prev_summary:
+            import re as _re
+            m = _re.match(r'【(.+?)】', prev_summary)
+            if m:
+                prev_time_hint = f"\n- 上一章（第{chapter.number - 1}章）的时间标记为【{m.group(1)}】，请根据本章内容推算本章的时间，保持日期连续性"
+
+    prompt_prefix = CHAPTER_SUMMARY_PROMPT_PREFIX + prev_time_hint
     messages = _build_analysis_messages(
-        CHAPTER_SUMMARY_PROMPT_PREFIX, clean_content[:6000],
+        prompt_prefix, clean_content[:6000],
         CHAPTER_SUMMARY_PROMPT_SUFFIX, api_format,
     )
     summary, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
@@ -356,10 +378,10 @@ async def update_character_states(
             json_text = _repair_json(raw)
             updates = json.loads(json_text)
         except Exception as e:
-            return False, f"角色状态更新：JSON 解析失败（含重试）({e})", total_in, total_out
+            return False, f"角色状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
 
     if not isinstance(updates, dict):
-        return False, "角色状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out
+        return False, "角色状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
 
     char_map = {c.name: c for c in characters}
     unmatched = []
@@ -408,7 +430,7 @@ async def update_character_states(
         warning = f"角色状态更新：以下名称未匹配到角色库 [{', '.join(unmatched)}]"
     if matched_count == 0 and not unmatched:
         warning = "角色状态更新：LLM 未返回任何角色状态数据"
-    return True, warning, total_in, total_out
+    return True, warning, total_in, total_out, unmatched
 
 
 ENTITY_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新世界实体（道具/系统）的状态。
@@ -517,10 +539,10 @@ async def update_entity_states(
             json_text = _repair_json(raw)
             updates = json.loads(json_text)
         except Exception as e:
-            return False, f"实体状态更新：JSON 解析失败（含重试）({e})", total_in, total_out
+            return False, f"实体状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
 
     if not isinstance(updates, dict):
-        return False, "实体状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out
+        return False, "实体状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
 
     entity_map = {e.name: e for e in entities}
     unmatched = []
@@ -547,7 +569,7 @@ async def update_entity_states(
         warning = f"实体状态更新：以下名称未匹配到实体库 [{', '.join(unmatched)}]"
     if matched_count == 0 and not unmatched:
         warning = "实体状态更新：LLM 未返回任何实体状态数据"
-    return True, warning, total_in, total_out
+    return True, warning, total_in, total_out, unmatched
 
 
 LOCATION_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新地点的动态状态。
@@ -631,10 +653,10 @@ async def update_location_states(
             json_text = _repair_json(raw)
             updates = json.loads(json_text)
         except Exception as e:
-            return False, f"地点状态更新：JSON 解析失败（含重试）({e})", total_in, total_out
+            return False, f"地点状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
 
     if not isinstance(updates, dict):
-        return False, "地点状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out
+        return False, "地点状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
 
     location_map = {l.name: l for l in locations}
     unmatched = []
@@ -664,7 +686,7 @@ async def update_location_states(
         warning = f"地点状态更新：以下名称未匹配到地点库 [{', '.join(unmatched)}]"
     if matched_count == 0 and not unmatched:
         warning = "地点状态更新：LLM 未返回任何地点状态数据"
-    return True, warning, total_in, total_out
+    return True, warning, total_in, total_out, unmatched
 
 
 ARC_SUMMARY_PROMPT = """你是一位专业的文学编辑。以下是一部小说连续若干章的章节摘要，请将它们整合为一段故事弧概要。

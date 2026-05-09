@@ -42,7 +42,8 @@ export default function Outline() {
     queryFn: () => chaptersApi.list(novelId),
   })
 
-  const effectiveChapter = chapterNum || (novel?.current_chapter || 0) + 1
+  const maxChapterNum = chapters.length > 0 ? Math.max(...chapters.map(c => c.number)) : 0
+  const effectiveChapter = chapterNum || maxChapterNum + 1
 
   const { data: preview, isLoading: previewLoading } = useQuery({
     queryKey: ['context-preview', novelId, effectiveChapter],
@@ -52,9 +53,9 @@ export default function Outline() {
 
   // ── Timeline extraction ──────────────────────────────────────────────────
   const timelineEntries = [...chapters]
-    .sort((a, b) => a.volume - b.volume || a.number - b.number)
+    .sort((a, b) => a.number - b.number)
     .filter(c => c.summary)
-    .map(c => ({ chapter: c.number, time: extractTime(c), summary: c.summary! }))
+    .map(c => ({ chapter: c.number, volume: c.volume, time: extractTime(c), summary: c.summary! }))
 
   return (
     <div className="min-h-screen bg-background">
@@ -116,7 +117,7 @@ export default function Outline() {
                 className="border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
               >
                 <option value="0">第 {effectiveChapter} 章（下一章）</option>
-                {chapters.map(c => (
+                {[...chapters].sort((a, b) => a.number - b.number).map(c => (
                   <option key={c.id} value={c.number}>第 {c.number} 章</option>
                 ))}
               </select>
@@ -239,7 +240,7 @@ export default function Outline() {
                       <div className="absolute left-2.5 top-5 w-3 h-3 rounded-full bg-primary border-2 border-background -translate-x-1/2" />
                       <div className="flex items-baseline gap-2 mb-1">
                         <span className="text-xs font-mono text-muted-foreground">
-                          第{entry.chapter}章
+                          {entry.volume > 1 && `卷${entry.volume}·`}第{entry.chapter}章
                         </span>
                         {entry.time && (
                           <span className="text-xs font-medium bg-primary/10 text-primary px-2 py-0.5 rounded-full">

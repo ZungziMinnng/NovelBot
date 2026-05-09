@@ -5,7 +5,9 @@
       "Bash(xargs -0 git rm --cached --ignore-unmatch)",
       "Bash(python *)",
       "Bash(npm *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Read(//c/Users/user/.claude/plans/**)",
+      "Bash(mkdir -p \"C:/Users/user/.claude/plans/\")"
     ]
   }
 }

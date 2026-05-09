@@ -296,6 +296,7 @@ export interface WriterMessage {
 
 export interface ContextPreview {
   chapter_number: number
+  meta: Array<{ key: string; label: string; detail: string; source: string; items: string[]; content: string }>
   context: {
     core_setting: string
     book_summary: string
@@ -598,6 +599,40 @@ export type ChatSSEMessage =
   | { event: 'done'; data: { input_tokens: number; output_tokens: number } }
   | { event: 'error'; data: string }
 
+async function readSseStream<T>(
+  response: Response,
+  onMessage: (msg: T) => void,
+) {
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(text || `HTTP ${response.status} ${response.statusText}`)
+  }
+  if (!response.body) {
+    throw new Error('服务器未返回流式响应')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          onMessage(JSON.parse(line.slice(6)) as T)
+        } catch {}
+      }
+    }
+  }
+}
+
 export function streamChat(
   payload: {
     novel_id: number
@@ -619,27 +654,44 @@ export function streamChat(
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const msg = JSON.parse(line.slice(6)) as ChatSSEMessage
-            onMessage(msg)
-          } catch {}
-        }
-      }
+    await readSseStream<ChatSSEMessage>(response, onMessage)
+    onClose()
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      onMessage({ event: 'error', data: String(err) })
     }
+    onClose()
+  })
+
+  return controller
+}
+
+// ── SSE Rewrite ───────────────────────────────────────────────────────────
+
+export interface AnnotationItem {
+  paragraph?: number
+  text: string
+}
+
+export function streamChapterRewrite(
+  payload: {
+    novel_id: number
+    chapter_number: number
+    annotations: AnnotationItem[]
+    target_words: number
+  },
+  onMessage: (msg: SSEMessage) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+
+  fetch('/api/generation/rewrite-chapter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async (response) => {
+    await readSseStream<SSEMessage>(response, onMessage)
     onClose()
   }).catch((err) => {
     if (err.name !== 'AbortError') {
@@ -672,27 +724,7 @@ export function streamChapterGeneration(
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const msg = JSON.parse(line.slice(6)) as SSEMessage
-            onMessage(msg)
-          } catch {}
-        }
-      }
-    }
+    await readSseStream<SSEMessage>(response, onMessage)
     onClose()
   }).catch((err) => {
     if (err.name !== 'AbortError') {

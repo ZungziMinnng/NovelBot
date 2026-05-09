@@ -10,12 +10,14 @@ interface Props {
   activeCharacterId?: number | null
 }
 
+const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
 const ROLE_COLORS: Record<string, string> = {
-  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  男主: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   女主: 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
+  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   反派: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
   配角: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  盟友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  朋友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
 }
 
 export default function CharacterTab({ novelId, onOpenCharacter, activeCharacterId }: Props) {
@@ -111,15 +113,16 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               autoFocus
             />
-            <select
+            <input
+              list="role-options-new"
               value={form.role}
               onChange={(e) => setForm({ ...form, role: e.target.value })}
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-            >
-              {['男主', '女主', '反派', '配角', '盟友'].map((r) => (
-                <option key={r} value={r}>{r}</option>
-              ))}
-            </select>
+              placeholder="角色定位"
+            />
+            <datalist id="role-options-new">
+              {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
+            </datalist>
             <input
               placeholder="年龄"
               value={form.age}

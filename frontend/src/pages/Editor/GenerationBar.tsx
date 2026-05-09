@@ -1,12 +1,21 @@
-import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords } from 'lucide-react'
+import { useState } from 'react'
+import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
+import type { Annotation } from '@/store/editorStore'
 
 interface NewCharCandidate { name: string; role: string; description: string }
 interface NewEntityCandidate { name: string; type: string; description: string }
 interface NewLocationCandidate { name: string; type: string; description: string; parent_name: string }
 interface NewTechCandidate { name: string; type: string; description: string }
 
+export type BarMode = 'write' | 'rewrite'
+
 interface GenerationBarProps {
+  // Mode
+  barMode: BarMode
+  onBarModeChange: (mode: BarMode) => void
+  hasChapterContent: boolean
+
   // Generation
   agentStage: string
   isCurrentlyGenerating: boolean
@@ -18,6 +27,13 @@ interface GenerationBarProps {
   onTargetWordsChange: (v: number) => void
   onGenerate: () => void
   onAbortOrGenerate: () => void
+
+  // Rewrite
+  annotations: Annotation[]
+  onRemoveAnnotation: (id: string) => void
+  onClearAnnotations: () => void
+  onAddGlobalAnnotation: (text: string) => void
+  onRewrite: () => void
 
   // Plot suggestions
   plotSuggestions: string[]
@@ -57,7 +73,12 @@ interface GenerationBarProps {
   onDismissTechs: () => void
 }
 
+const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
+
 export default function GenerationBar({
+  barMode,
+  onBarModeChange,
+  hasChapterContent,
   agentStage,
   isCurrentlyGenerating,
   isOtherGenerating,
@@ -68,6 +89,11 @@ export default function GenerationBar({
   onTargetWordsChange,
   onGenerate,
   onAbortOrGenerate,
+  annotations,
+  onRemoveAnnotation,
+  onClearAnnotations,
+  onAddGlobalAnnotation,
+  onRewrite,
   plotSuggestions,
   isLoadingSuggestions,
   onFetchSuggestions,
@@ -96,230 +122,279 @@ export default function GenerationBar({
   onAddTechs,
   onDismissTechs,
 }: GenerationBarProps) {
+  const [globalInput, setGlobalInput] = useState('')
+
+  const handleAddGlobal = () => {
+    if (!globalInput.trim()) return
+    onAddGlobalAnnotation(globalInput.trim())
+    setGlobalInput('')
+  }
+
   return (
     <div className="border-t px-4 py-3 shrink-0 space-y-2">
       <AgentStatus stage={agentStage} visible={isCurrentlyGenerating} />
 
-      {/* Plot Suggestions — fetch button only */}
-      {justFinishedHere && plotSuggestions.length === 0 && (
-        <div className="flex items-center gap-2">
+      {/* Mode toggle */}
+      {!isCurrentlyGenerating && (
+        <div className="flex items-center gap-1 p-0.5 bg-muted rounded-lg w-fit">
           <button
-            onClick={onFetchSuggestions}
-            disabled={isLoadingSuggestions}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
-          >
-            {isLoadingSuggestions
-              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 生成建议中...</>
-              : <><Sparkles className="w-3.5 h-3.5" /> 获取下章剧情建议</>
-            }
-          </button>
-        </div>
-      )}
-
-      {/* New Character Discovery */}
-      {newCharCandidates.length > 0 && (
-        <div className="space-y-1.5 border rounded-lg p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <Users className="w-3 h-3" /> 发现新角色（本章首次出现）
-            </span>
-            <button
-              onClick={onDismissChars}
-              className="text-xs text-muted-foreground hover:text-foreground px-1"
-            >
-              ×
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {newCharCandidates.map((c, i) => (
-              <button
-                key={i}
-                onClick={() => onToggleChar(i)}
-                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
-                  selectedCharIndices.has(i)
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-transparent bg-muted text-muted-foreground'
-                }`}
-              >
-                <span className="font-medium">{c.name}</span>
-                <span className="opacity-60">·{c.role}</span>
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={onAddChars}
-            disabled={addingChars || selectedCharIndices.size === 0}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {addingChars ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            添加选中角色（{selectedCharIndices.size}/{newCharCandidates.length}）
-          </button>
-        </div>
-      )}
-
-      {/* New Entity Discovery */}
-      {newEntityCandidates.length > 0 && (
-        <div className="space-y-1.5 border rounded-lg p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <Database className="w-3 h-3" /> 发现新道具/系统（本章首次出现）
-            </span>
-            <button
-              onClick={onDismissEntities}
-              className="text-xs text-muted-foreground hover:text-foreground px-1"
-            >
-              ×
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {newEntityCandidates.map((e, i) => (
-              <button
-                key={i}
-                onClick={() => onToggleEntity(i)}
-                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
-                  selectedEntityIndices.has(i)
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-transparent bg-muted text-muted-foreground'
-                }`}
-              >
-                <span className="font-medium">{e.name}</span>
-                <span className="opacity-60">·{e.type === 'system' ? '系统' : '道具'}</span>
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={onAddEntities}
-            disabled={addingEntities || selectedEntityIndices.size === 0}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {addingEntities ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            添加选中实体（{selectedEntityIndices.size}/{newEntityCandidates.length}）
-          </button>
-        </div>
-      )}
-
-      {/* New Location Discovery */}
-      {newLocationCandidates.length > 0 && (
-        <div className="space-y-1.5 border rounded-lg p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <MapPin className="w-3 h-3" /> 发现新地点（本章首次出现）
-            </span>
-            <button
-              onClick={onDismissLocations}
-              className="text-xs text-muted-foreground hover:text-foreground px-1"
-            >
-              ×
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {newLocationCandidates.map((loc, i) => (
-              <button
-                key={i}
-                onClick={() => onToggleLocation(i)}
-                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
-                  selectedLocationIndices.has(i)
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-transparent bg-muted text-muted-foreground'
-                }`}
-              >
-                <span className="font-medium">{loc.name}</span>
-                {loc.parent_name && <span className="opacity-60">← {loc.parent_name}</span>}
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={onAddLocations}
-            disabled={addingLocations || selectedLocationIndices.size === 0}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {addingLocations ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            添加选中地点（{selectedLocationIndices.size}/{newLocationCandidates.length}）
-          </button>
-        </div>
-      )}
-
-      {/* New Technique Discovery */}
-      {newTechCandidates.length > 0 && (
-        <div className="space-y-1.5 border rounded-lg p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <Swords className="w-3 h-3" /> 发现新功法/武技（本章首次出现）
-            </span>
-            <button
-              onClick={onDismissTechs}
-              className="text-xs text-muted-foreground hover:text-foreground px-1"
-            >
-              ×
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {newTechCandidates.map((t, i) => (
-              <button
-                key={i}
-                onClick={() => onToggleTech(i)}
-                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
-                  selectedTechIndices.has(i)
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-transparent bg-muted text-muted-foreground'
-                }`}
-              >
-                <span className="font-medium">{t.name}</span>
-                <span className="opacity-60">·{t.type}</span>
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={onAddTechs}
-            disabled={addingTechs || selectedTechIndices.size === 0}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {addingTechs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            添加选中功法（{selectedTechIndices.size}/{newTechCandidates.length}）
-          </button>
-        </div>
-      )}
-
-      {/* Instruction + Generate */}
-      <div className="flex flex-col gap-2">
-        <textarea
-          value={instruction}
-          onChange={e => onInstructionChange(e.target.value)}
-          placeholder="生成指令（可选）：重点描写心理活动..."
-          rows={3}
-          className="w-full text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[38px]"
-        />
-        <div className="flex items-center gap-2">
-          <select
-            value={targetWords}
-            onChange={e => onTargetWordsChange(Number(e.target.value))}
-            className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none"
-          >
-            <option value={500}>500字</option>
-            <option value={800}>800字</option>
-            <option value={1200}>1200字</option>
-            <option value={2000}>2000字</option>
-            <option value={3000}>3000字</option>
-          </select>
-          <div className="flex-1" />
-          <button
-            onClick={onAbortOrGenerate}
-            disabled={isOtherGenerating}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
-              isCurrentlyGenerating
-                ? 'bg-destructive text-destructive-foreground hover:opacity-90'
-                : 'bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50'
+            onClick={() => onBarModeChange('write')}
+            className={`flex items-center gap-1 text-xs px-3 py-1 rounded-md transition-colors ${
+              barMode === 'write' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
-            {isCurrentlyGenerating
-              ? <><Square className="w-4 h-4" /> 终止</>
-              : isOtherGenerating
-                ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
-                : <><Zap className="w-4 h-4" /> 生成章节</>
-            }
+            <PenLine className="w-3 h-3" /> 续写
+          </button>
+          <button
+            onClick={() => onBarModeChange('rewrite')}
+            disabled={!hasChapterContent}
+            className={`flex items-center gap-1 text-xs px-3 py-1 rounded-md transition-colors disabled:opacity-40 ${
+              barMode === 'rewrite' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <MessageSquareQuote className="w-3 h-3" /> 重写
           </button>
         </div>
-      </div>
+      )}
+
+      {barMode === 'write' ? (
+        <>
+          {/* Plot Suggestions — fetch button only */}
+          {justFinishedHere && plotSuggestions.length === 0 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onFetchSuggestions}
+                disabled={isLoadingSuggestions}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                {isLoadingSuggestions
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 生成建议中...</>
+                  : <><Sparkles className="w-3.5 h-3.5" /> 获取下章剧情建议</>
+                }
+              </button>
+            </div>
+          )}
+
+          {/* New Character Discovery */}
+          {newCharCandidates.length > 0 && (
+            <div className="space-y-1.5 border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Users className="w-3 h-3" /> 发现新角色（本章首次出现）
+                </span>
+                <button onClick={onDismissChars} className="text-xs text-muted-foreground hover:text-foreground px-1">×</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {newCharCandidates.map((c, i) => (
+                  <button key={i} onClick={() => onToggleChar(i)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                      selectedCharIndices.has(i) ? 'border-primary bg-primary/10 text-primary' : 'border-transparent bg-muted text-muted-foreground'
+                    }`}>
+                    <span className="font-medium">{c.name}</span>
+                    <span className="opacity-60">·{c.role}</span>
+                  </button>
+                ))}
+              </div>
+              <button onClick={onAddChars} disabled={addingChars || selectedCharIndices.size === 0}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {addingChars ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                添加选中角色（{selectedCharIndices.size}/{newCharCandidates.length}）
+              </button>
+            </div>
+          )}
+
+          {/* New Entity Discovery */}
+          {newEntityCandidates.length > 0 && (
+            <div className="space-y-1.5 border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Database className="w-3 h-3" /> 发现新道具/系统（本章首次出现）
+                </span>
+                <button onClick={onDismissEntities} className="text-xs text-muted-foreground hover:text-foreground px-1">×</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {newEntityCandidates.map((e, i) => (
+                  <button key={i} onClick={() => onToggleEntity(i)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                      selectedEntityIndices.has(i) ? 'border-primary bg-primary/10 text-primary' : 'border-transparent bg-muted text-muted-foreground'
+                    }`}>
+                    <span className="font-medium">{e.name}</span>
+                    <span className="opacity-60">·{e.type === 'system' ? '系统' : '道具'}</span>
+                  </button>
+                ))}
+              </div>
+              <button onClick={onAddEntities} disabled={addingEntities || selectedEntityIndices.size === 0}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {addingEntities ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                添加选中实体（{selectedEntityIndices.size}/{newEntityCandidates.length}）
+              </button>
+            </div>
+          )}
+
+          {/* New Location Discovery */}
+          {newLocationCandidates.length > 0 && (
+            <div className="space-y-1.5 border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <MapPin className="w-3 h-3" /> 发现新地点（本章首次出现）
+                </span>
+                <button onClick={onDismissLocations} className="text-xs text-muted-foreground hover:text-foreground px-1">×</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {newLocationCandidates.map((loc, i) => (
+                  <button key={i} onClick={() => onToggleLocation(i)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                      selectedLocationIndices.has(i) ? 'border-primary bg-primary/10 text-primary' : 'border-transparent bg-muted text-muted-foreground'
+                    }`}>
+                    <span className="font-medium">{loc.name}</span>
+                    {loc.parent_name && <span className="opacity-60">← {loc.parent_name}</span>}
+                  </button>
+                ))}
+              </div>
+              <button onClick={onAddLocations} disabled={addingLocations || selectedLocationIndices.size === 0}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {addingLocations ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                添加选中地点（{selectedLocationIndices.size}/{newLocationCandidates.length}）
+              </button>
+            </div>
+          )}
+
+          {/* New Technique Discovery */}
+          {newTechCandidates.length > 0 && (
+            <div className="space-y-1.5 border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Swords className="w-3 h-3" /> 发现新功法/武技（本章首次出现）
+                </span>
+                <button onClick={onDismissTechs} className="text-xs text-muted-foreground hover:text-foreground px-1">×</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {newTechCandidates.map((t, i) => (
+                  <button key={i} onClick={() => onToggleTech(i)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                      selectedTechIndices.has(i) ? 'border-primary bg-primary/10 text-primary' : 'border-transparent bg-muted text-muted-foreground'
+                    }`}>
+                    <span className="font-medium">{t.name}</span>
+                    <span className="opacity-60">·{t.type}</span>
+                  </button>
+                ))}
+              </div>
+              <button onClick={onAddTechs} disabled={addingTechs || selectedTechIndices.size === 0}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {addingTechs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                添加选中功法（{selectedTechIndices.size}/{newTechCandidates.length}）
+              </button>
+            </div>
+          )}
+
+          {/* Instruction + Generate */}
+          <div className="flex flex-col gap-2">
+            <textarea
+              value={instruction}
+              onChange={e => onInstructionChange(e.target.value)}
+              placeholder="生成指令（可选）：重点描写心理活动..."
+              rows={3}
+              className="w-full text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[38px]"
+            />
+            <div className="flex items-center gap-2">
+              <select
+                value={targetWords}
+                onChange={e => onTargetWordsChange(Number(e.target.value))}
+                className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none"
+              >
+                <option value={500}>500字</option>
+                <option value={1200}>1200字</option>
+                <option value={2000}>2000字</option>
+                <option value={3000}>3000字</option>
+                <option value={4000}>4000字</option>
+                <option value={5000}>5000字</option>
+              </select>
+              <div className="flex-1" />
+              <button
+                onClick={onAbortOrGenerate}
+                disabled={isOtherGenerating}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
+                  isCurrentlyGenerating
+                    ? 'bg-destructive text-destructive-foreground hover:opacity-90'
+                    : 'bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50'
+                }`}
+              >
+                {isCurrentlyGenerating
+                  ? <><Square className="w-4 h-4" /> 终止</>
+                  : isOtherGenerating
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
+                    : <><Zap className="w-4 h-4" /> 生成章节</>
+                }
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        /* ── Rewrite mode ── */
+        <div className="space-y-2">
+          {/* Annotation list */}
+          {annotations.length > 0 && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">批注列表（{annotations.length}）</span>
+                <button onClick={onClearAnnotations} className="text-[10px] text-muted-foreground hover:text-destructive">
+                  清空全部
+                </button>
+              </div>
+              {annotations.map(a => (
+                <div key={a.id} className="flex items-start gap-2 px-2.5 py-1.5 border rounded-lg text-xs group">
+                  <span className={`shrink-0 mt-0.5 font-medium ${a.paragraph != null ? 'text-blue-600 dark:text-blue-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                    {a.paragraph != null
+                      ? (a.paragraph <= CIRCLED_NUMS.length ? `段落${CIRCLED_NUMS[a.paragraph - 1]}` : `段落(${a.paragraph})`)
+                      : '全局'}
+                  </span>
+                  <span className="flex-1 text-foreground">{a.text}</span>
+                  <button onClick={() => onRemoveAnnotation(a.id)}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-destructive transition-all shrink-0">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Global annotation input */}
+          <div className="flex items-center gap-2">
+            <input
+              value={globalInput}
+              onChange={e => setGlobalInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleAddGlobal() }}
+              placeholder="添加全局批注：语气再沉稳些..."
+              className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button onClick={handleAddGlobal} disabled={!globalInput.trim()}
+              className="text-xs px-3 py-2 border rounded-lg hover:bg-muted disabled:opacity-40 transition-colors">
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Rewrite button */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1" />
+            <button
+              onClick={onAbortOrGenerate}
+              disabled={isOtherGenerating || (!isCurrentlyGenerating && annotations.length === 0)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity shrink-0 ${
+                isCurrentlyGenerating
+                  ? 'bg-destructive text-destructive-foreground hover:opacity-90'
+                  : 'bg-amber-600 text-white hover:opacity-90 disabled:opacity-50'
+              }`}
+            >
+              {isCurrentlyGenerating
+                ? <><Square className="w-4 h-4" /> 终止</>
+                : isOtherGenerating
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> 其他章节生成中</>
+                  : <><RotateCcw className="w-4 h-4" /> 重写本章（{annotations.length}条批注）</>
+              }
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -15,8 +15,8 @@ router = APIRouter()
 async def list_memories(novel_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Memory)
-        .where(Memory.novel_id == novel_id)
-        .order_by(Memory.volume, Memory.chapter_number, Memory.id)
+        .where(Memory.novel_id == novel_id, Memory.memory_type != "state_snapshot")
+        .order_by(Memory.chapter_number, Memory.id)
     )
     return result.scalars().all()
 
