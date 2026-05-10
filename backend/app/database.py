@@ -93,6 +93,9 @@ async def _run_migrations() -> None:
         "ALTER TABLE novels ADD COLUMN critic_model TEXT DEFAULT ''",
         "ALTER TABLE novels ADD COLUMN enable_detail_review INTEGER DEFAULT 0",
         "ALTER TABLE novels ADD COLUMN detail_review_model TEXT DEFAULT ''",
+        # 全文上下文实验功能
+        "ALTER TABLE novels ADD COLUMN enable_full_text_context INTEGER DEFAULT 0",
+        "ALTER TABLE novels ADD COLUMN full_text_chapters INTEGER DEFAULT 20",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

@@ -44,6 +44,8 @@ class Novel(Base):
     enable_thinking: Mapped[bool] = mapped_column(Boolean, default=True)
     thinking_level: Mapped[str] = mapped_column(String(20), default="medium")
     gemini_stream: Mapped[bool] = mapped_column(Boolean, default=False)
+    enable_full_text_context: Mapped[bool] = mapped_column(Boolean, default=False)
+    full_text_chapters: Mapped[int] = mapped_column(Integer, default=20)
     context_config: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

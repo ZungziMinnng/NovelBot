@@ -9,6 +9,7 @@ from app.models.novel import Novel
 from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut, EnhanceRequest, ImagePromptRequest
 from app.agents import character_agent
 from app.services.entity_embeddings import embed_character, remove_entity_embedding
+from app.services.relevance_selector import select_character_appearance_context
 
 router = APIRouter()
 
@@ -168,12 +169,26 @@ async def refresh_appearance(character_id: int, db: AsyncSession = Depends(get_d
     if not novel:
         raise HTTPException(status_code=404, detail="小说不存在")
 
-    appearance = await character_agent.refresh_appearance(novel, char)
+    appearance_selection = await select_character_appearance_context(
+        db,
+        novel.id,
+        char.name,
+        query=f"{char.name} {char.role or ''} 外貌 容貌 衣着 身形 气质",
+        top_k=8,
+    )
+    appearance_context = "\n\n".join(appearance_selection.items)
+    appearance = await character_agent.refresh_appearance(
+        novel,
+        char,
+        appearance_context=appearance_context,
+        context_source=appearance_selection.source,
+    )
     sheet = dict(char.full_sheet or {})
     sheet["appearance"] = appearance
     char.full_sheet = sheet
     await db.commit()
     await db.refresh(char)
+    await embed_character(char.novel_id, char)
     return char
 
 

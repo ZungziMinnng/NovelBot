@@ -1,19 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, SlidersHorizontal, Database, MessageSquare } from 'lucide-react'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, SlidersHorizontal, FlaskConical, AlertTriangle } from 'lucide-react'
 import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
 
-type CreationSection = 'prompt' | 'models' | 'review' | 'params' | 'context' | 'chat' | null
+type CreationSection = 'prompt' | 'models' | 'review' | 'params' | 'fulltext' | null
 
 const CREATION_SECTIONS: { key: CreationSection & string; label: string; desc: string; icon: typeof FileText }[] = [
   { key: 'prompt', label: '提示词与概要', desc: '全书概要、Writer 自定义提示词', icon: FileText },
   { key: 'models', label: '模型选择', desc: 'Writer / Fast / Critic 模型覆盖', icon: Cpu },
   { key: 'review', label: '审查设置', desc: 'Critic 审查、剧情细节审查', icon: Shield },
-  { key: 'params', label: '生成参数', desc: '温度、Token 上限、Thinking、流式', icon: SlidersHorizontal },
-  { key: 'context', label: '生成上下文', desc: '滚动摘要章数、RAG 检索条数', icon: Database },
-  { key: 'chat', label: '对话设置', desc: '对话历史轮数', icon: MessageSquare },
+  { key: 'params', label: '生成参数', desc: '温度、Token、摘要、RAG、Thinking', icon: SlidersHorizontal },
+  { key: 'fulltext', label: '全文上下文（实验）', desc: '将前 N 章正文全量传入上下文', icon: FlaskConical },
 ]
 
 type Tab = 'content' | 'creation' | 'context'
@@ -153,6 +152,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
   const [thinkingLevel, setThinkingLevel] = useState(novel.thinking_level || 'medium')
   const [geminiStream, setGeminiStream] = useState(novel.gemini_stream ?? false)
+  const [enableFullTextContext, setEnableFullTextContext] = useState(novel.enable_full_text_context ?? false)
+  const [fullTextChapters, setFullTextChapters] = useState(novel.full_text_chapters ?? 20)
 
   // ── UI state ──
   const [saving, setSaving] = useState(false)
@@ -187,6 +188,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setChatContextRounds(novel.chat_context_rounds ?? 20)
     setThinkingLevel(novel.thinking_level || 'medium')
     setGeminiStream(novel.gemini_stream ?? false)
+    setEnableFullTextContext(novel.enable_full_text_context ?? false)
+    setFullTextChapters(novel.full_text_chapters ?? 20)
   }, [novel.id])
 
   const { data: writerPresets = [] } = useQuery({
@@ -268,6 +271,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         chat_context_rounds: chatContextRounds,
         thinking_level: thinkingLevel,
         gemini_stream: geminiStream,
+        enable_full_text_context: enableFullTextContext,
+        full_text_chapters: fullTextChapters,
       })
       qc.invalidateQueries({ queryKey: ['novel', novel.id] })
       setSaved(true)
@@ -621,7 +626,13 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                 <div className="space-y-4">
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Writer 模型</label>
-                    <ModelSelect value={writerModel} onChange={setWriterModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                    <ModelSelect value={writerModel} onChange={v => {
+                      setWriterModel(v)
+                      if (enableFullTextContext) {
+                        setEnableFullTextContext(false)
+                        toast('已自动关闭全文上下文，切换模型后需手动重新开启', { icon: '⚠️' })
+                      }
+                    }} placeholder="留空使用全局设置" models={modelLibrary} />
                     <p className="text-xs text-muted-foreground mt-1.5">用于章节正文生成的主力模型</p>
                   </div>
                   <div>
@@ -742,61 +753,92 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                       <option value={16384}>16384（约 12000 字）</option>
                     </select>
                   </div>
-                </div>
-              )}
 
-              {/* ── 生成上下文 ── */}
-              {activeSection === 'context' && (
-                <div className="space-y-5">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium">滚动摘要章数</label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={rollingSummaryCount}
-                        onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
+                  <div className="border-t pt-5 space-y-5">
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium">滚动摘要章数</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={rollingSummaryCount}
+                          onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                          className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
                     </div>
-                    <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
-                  </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium">RAG 检索条数</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={ragTopK}
-                        onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium">RAG 检索条数</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={10}
+                          value={ragTopK}
+                          onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                          className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
                     </div>
-                    <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
                   </div>
                 </div>
               )}
 
-              {/* ── 对话设置 ── */}
-              {activeSection === 'chat' && (
+              {/* ── 全文上下文（实验）── */}
+              {activeSection === 'fulltext' && (
                 <div className="space-y-5">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium">对话历史轮数</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={chatContextRounds}
-                        onChange={e => setChatContextRounds(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                        className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                      />
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                    <div className="flex gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-700 dark:text-amber-400 space-y-1">
+                        <p className="font-medium">实验性功能</p>
+                        <p>开启后，上下文构建时会将前 N 章的完整正文一字不差地传入 LLM，Token 消耗极高。</p>
+                        <p>建议搭配高性价比模型使用，如 DeepSeek V3/R1、Gemini 免费额度等。切换 Writer 模型时此功能会自动关闭。</p>
+                      </div>
                     </div>
-                    <p className="text-xs text-muted-foreground">与 AI 助手对话时携带的最近消息轮数，0 表示不限制</p>
                   </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 mr-4">
+                      <p className="text-sm font-medium">启用全文上下文</p>
+                      <p className="text-xs text-muted-foreground mt-1">将前 N 章正文全量作为上下文记忆传给 LLM</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (!enableFullTextContext) {
+                          const ok = window.confirm(
+                            '开启全文上下文会大幅增加 Token 消耗，请确保使用高性价比模型（如 DeepSeek V3/R1、Gemini 免费额度等）。\n\n确定开启？'
+                          )
+                          if (!ok) return
+                        }
+                        setEnableFullTextContext(v => !v)
+                      }}
+                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableFullTextContext ? 'bg-primary' : 'bg-muted'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableFullTextContext ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+
+                  {enableFullTextContext && (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium">读取章节数</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={fullTextChapters}
+                          onChange={e => setFullTextChapters(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+                          className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">将当前章节之前最近 N 章的完整正文作为上下文传入</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -35,6 +35,8 @@ export interface Novel {
   enable_thinking: boolean
   thinking_level: string
   gemini_stream: boolean
+  enable_full_text_context: boolean
+  full_text_chapters: number
   context_config: Record<string, ContextConfigValue>
   created_at: string
   updated_at: string

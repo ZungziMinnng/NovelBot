@@ -107,14 +107,27 @@ async def discover_new_characters(
         return []
 
 
-async def refresh_appearance(novel: Novel, character: Character) -> str:
+async def refresh_appearance(
+    novel: Novel,
+    character: Character,
+    appearance_context: str = "",
+    context_source: str = "",
+) -> str:
     """使用 LLM 根据角色卡和当前状态重新生成外貌描写"""
     sheet_str = json.dumps(character.full_sheet, ensure_ascii=False)[:1500]
     state_str = json.dumps(character.current_state, ensure_ascii=False)[:500]
+    context_block = ""
+    if appearance_context.strip():
+        context_block = (
+            f"\n正文检索来源：{context_source or 'unknown'}\n"
+            f"正文中与该角色相关的描写片段：\n{appearance_context[:3000]}\n"
+        )
     prompt = (
         f"角色名：{character.name}\n角色定位：{character.role}\n"
-        f"角色卡片：{sheet_str}\n当前状态：{state_str}\n\n"
-        f"请根据以上信息，生成一段简洁的角色外貌描写（100-200字），"
+        f"角色卡片：{sheet_str}\n当前状态：{state_str}\n"
+        f"{context_block}\n"
+        f"请根据角色卡、当前状态以及正文检索到的描写片段，生成一段简洁的角色外貌描写（100-200字）。"
+        f"如果正文片段中有明确外貌、服饰、气质描写，优先采用正文事实；不要编造与正文冲突的外貌。"
         f"包括体型、面容、发型、服饰等。只输出描写文本，不要任何格式标记。"
     )
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)

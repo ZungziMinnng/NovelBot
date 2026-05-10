@@ -12,6 +12,12 @@ from app.models.technique import Technique
 from app.models.novel_note import NovelNote
 from app.models.memory import Memory, Outline
 from app.services import vector_store, summarizer
+from app.services.relevance_selector import (
+    cfg_top_k,
+    rag_hits_by_type,
+    select_by_name_then_rag,
+    select_notes_by_title_then_rag,
+)
 
 
 async def build_generation_context(
@@ -107,63 +113,38 @@ async def build_generation_context(
         select(Technique).where(Technique.novel_id == novel.id)
     )).scalars().all()
 
-    def _cfg_top_k(key: str, default: int) -> int:
-        try:
-            return max(0, int(cfg.get(key, default)))
-        except (TypeError, ValueError):
-            return default
-
-    async def _entity_hits(doc_type: str, top_k: int) -> list[dict]:
-        if top_k <= 0:
-            return []
-        return await vector_store.asearch_similar_with_meta(
-            novel.id, world_query, top_k=top_k, where={"type": {"$eq": doc_type}}
-        )
-
     # 6 路并行向量检索（top_k 可由用户在 context_config 中自定义；0 表示关闭该类 RAG 兜底）
-    char_top_k = _cfg_top_k("characters_top_k", 8)
-    item_top_k = _cfg_top_k("items_top_k", 5)
-    sys_top_k = _cfg_top_k("systems_top_k", 3)
-    loc_top_k = _cfg_top_k("locations_top_k", 5)
-    fac_top_k = _cfg_top_k("factions_top_k", 4)
-    tech_top_k = _cfg_top_k("techniques_top_k", 4)
+    char_top_k = cfg_top_k(cfg, "characters_top_k", 8)
+    item_top_k = cfg_top_k(cfg, "items_top_k", 5)
+    sys_top_k = cfg_top_k(cfg, "systems_top_k", 3)
+    loc_top_k = cfg_top_k(cfg, "locations_top_k", 5)
+    fac_top_k = cfg_top_k(cfg, "factions_top_k", 4)
+    tech_top_k = cfg_top_k(cfg, "techniques_top_k", 4)
     char_hits, item_hits, sys_hits, loc_hits, fac_hits, tech_hits = await asyncio.gather(
-        _entity_hits("character", char_top_k),
-        _entity_hits("entity_item", item_top_k),
-        _entity_hits("entity_system", sys_top_k),
-        _entity_hits("location", loc_top_k),
-        _entity_hits("faction", fac_top_k),
-        _entity_hits("technique", tech_top_k),
+        rag_hits_by_type(novel.id, world_query, "character", char_top_k),
+        rag_hits_by_type(novel.id, world_query, "entity_item", item_top_k),
+        rag_hits_by_type(novel.id, world_query, "entity_system", sys_top_k),
+        rag_hits_by_type(novel.id, world_query, "location", loc_top_k),
+        rag_hits_by_type(novel.id, world_query, "faction", fac_top_k),
+        rag_hits_by_type(novel.id, world_query, "technique", tech_top_k),
     )
-
-    def _entity_filter(all_items, hits, query: str, extra: list | None = None, match_text: str = "", allow_full: bool = True):
-        """名称匹配优先，RAG 兜底，均无命中时全量回退。返回 (filtered_list, source)。"""
-        if not all_items:
-            return [], "empty"
-        effective_text = match_text or query
-        name_matched = [item for item in all_items if item.name and item.name in effective_text]
-        if extra:
-            seen = {id(x) for x in name_matched}
-            name_matched.extend(x for x in extra if id(x) not in seen)
-        if name_matched:
-            return name_matched, "name"
-        hit_ids = {h["metadata"]["entity_id"] for h in hits}
-        if hit_ids:
-            return [item for item in all_items if item.id in hit_ids], "rag"
-        if allow_full:
-            return list(all_items), "full"
-        return [], "rag"
 
     # 角色：额外支持按 role 匹配（如指令中写"男主"匹配 role="男主" 的角色）
     role_matched = [c for c in all_characters if c.role and c.role in world_query]
-    characters, char_source = _entity_filter(all_characters, char_hits, world_query, extra=role_matched, match_text=name_match_text, allow_full=char_top_k > 0)
+    char_selection = select_by_name_then_rag(all_characters, char_hits, world_query, extra=role_matched, match_text=name_match_text, allow_full=char_top_k > 0)
+    characters, char_source = char_selection.items, char_selection.source
     all_items_list = [e for e in all_entities if e.type == "item"]
     all_systems_list = [e for e in all_entities if e.type == "system"]
-    items_list, items_source = _entity_filter(all_items_list, item_hits, world_query, match_text=name_match_text, allow_full=item_top_k > 0)
-    systems_list, sys_source = _entity_filter(all_systems_list, sys_hits, world_query, match_text=name_match_text, allow_full=sys_top_k > 0)
-    locations, loc_source = _entity_filter(all_locations, loc_hits, world_query, match_text=name_match_text, allow_full=loc_top_k > 0)
-    factions, fac_source = _entity_filter(all_factions, fac_hits, world_query, match_text=name_match_text, allow_full=fac_top_k > 0)
-    techniques, tech_source = _entity_filter(all_techniques, tech_hits, world_query, match_text=name_match_text, allow_full=tech_top_k > 0)
+    item_selection = select_by_name_then_rag(all_items_list, item_hits, world_query, match_text=name_match_text, allow_full=item_top_k > 0)
+    sys_selection = select_by_name_then_rag(all_systems_list, sys_hits, world_query, match_text=name_match_text, allow_full=sys_top_k > 0)
+    loc_selection = select_by_name_then_rag(all_locations, loc_hits, world_query, match_text=name_match_text, allow_full=loc_top_k > 0)
+    fac_selection = select_by_name_then_rag(all_factions, fac_hits, world_query, match_text=name_match_text, allow_full=fac_top_k > 0)
+    tech_selection = select_by_name_then_rag(all_techniques, tech_hits, world_query, match_text=name_match_text, allow_full=tech_top_k > 0)
+    items_list, items_source = item_selection.items, item_selection.source
+    systems_list, sys_source = sys_selection.items, sys_selection.source
+    locations, loc_source = loc_selection.items, loc_selection.source
+    factions, fac_source = fac_selection.items, fac_selection.source
+    techniques, tech_source = tech_selection.items, tech_selection.source
 
     def _rag_detail(filtered, total, unit):
         if not filtered:
@@ -255,34 +236,20 @@ async def build_generation_context(
         select(NovelNote).where(NovelNote.novel_id == novel.id)
     )).scalars().all()
 
-    note_top_k = _cfg_top_k("notes_top_k", 5)
+    note_top_k = cfg_top_k(cfg, "notes_top_k", 5)
     note_hits = []
     if note_top_k > 0:
-        note_hits = await vector_store.asearch_similar_with_meta(
-            novel.id, world_query, top_k=note_top_k,
-            where={"type": {"$eq": "novel_note"}},
-        )
+        note_hits = await rag_hits_by_type(novel.id, world_query, "novel_note", note_top_k)
 
     effective_text = name_match_text or world_query
-    name_matched_notes = [n for n in all_notes if n.title and n.title in effective_text]
-    if name_matched_notes:
-        notes = name_matched_notes
-        notes_source = "name"
-    else:
-        hit_note_ids = {
-            h.get("metadata", {}).get("note_id")
-            for h in note_hits
-            if h.get("metadata", {}).get("note_id") is not None
-        }
-        if hit_note_ids:
-            notes = [n for n in all_notes if n.id in hit_note_ids]
-            notes_source = "rag"
-        elif note_top_k > 0:
-            notes = list(all_notes)
-            notes_source = "full"
-        else:
-            notes = []
-            notes_source = "rag"
+    note_selection = select_notes_by_title_then_rag(
+        all_notes,
+        note_hits,
+        world_query,
+        match_text=effective_text,
+        allow_full=note_top_k > 0,
+    )
+    notes, notes_source = note_selection.items, note_selection.source
 
     ctx["notes"] = [
         {"title": n.title, "content": n.content}
@@ -385,7 +352,33 @@ async def build_generation_context(
     else:
         meta.append({"key": "book_summary", "label": "全书概要", "detail": "空", "source": "field", "items": [], "content": ""})
 
-    # 8. 元信息
+    # 8. 全文上下文（实验性功能：将前 N 章完整正文传入）
+    if novel.enable_full_text_context:
+        n = novel.full_text_chapters or 20
+        start_ch = max(1, chapter_number - n)
+        full_text_result = await session.execute(
+            select(Chapter).where(
+                Chapter.novel_id == novel.id,
+                Chapter.volume == volume,
+                Chapter.number >= start_ch,
+                Chapter.number < chapter_number,
+            ).order_by(Chapter.number.asc())
+        )
+        full_text_chapters = full_text_result.scalars().all()
+        full_texts = []
+        for ch in full_text_chapters:
+            content = summarizer.strip_plot_suggestions(ch.content or "")
+            if content.strip():
+                full_texts.append(f"--- 第{ch.number}章 ---\n{content}")
+        ctx["full_text_context"] = "\n\n".join(full_texts)
+        if full_texts:
+            meta.append({"key": "full_text_context", "label": "全文上下文", "detail": f"{len(full_texts)}章全文", "source": "full", "items": [], "content": f"前{len(full_texts)}章完整正文"})
+        else:
+            meta.append({"key": "full_text_context", "label": "全文上下文", "detail": "空", "source": "full", "items": [], "content": ""})
+    else:
+        ctx["full_text_context"] = ""
+
+    # 9. 元信息
     ctx["novel_title"] = novel.title
     ctx["genre"] = novel.genre
     ctx["writing_style"] = novel.writing_style
@@ -531,6 +524,9 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         parts.append(f"=== 近期剧情摘要 ===\n{ctx['rolling_summary']}")
     if _on("rag_context") and ctx.get("rag_context"):
         parts.append(f"=== 相关历史场景（参考）===\n{ctx['rag_context']}")
+
+    if ctx.get("full_text_context"):
+        parts.append(f"=== 前文正文（全文）===\n{ctx['full_text_context']}")
 
     context_block = "\n\n".join(parts)
 

@@ -36,6 +36,8 @@ class NovelUpdate(BaseModel):
     enable_thinking: Optional[bool] = None
     thinking_level: Optional[str] = None  # "off" | "low" | "medium" | "high"
     gemini_stream: Optional[bool] = None
+    enable_full_text_context: Optional[bool] = None
+    full_text_chapters: Optional[int] = None
     context_config: Optional[dict] = None
 
 
@@ -65,6 +67,8 @@ class NovelOut(BaseModel):
     enable_thinking: bool
     thinking_level: str
     gemini_stream: bool
+    enable_full_text_context: bool
+    full_text_chapters: int
     context_config: dict
     created_at: datetime
     updated_at: datetime

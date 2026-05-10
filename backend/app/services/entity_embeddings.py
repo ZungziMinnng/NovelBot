@@ -19,7 +19,14 @@ log = logging.getLogger(__name__)
 # ── 嵌入文本构建 ──────────────────────────────────────────────────────────
 
 def _char_text(c: Character) -> str:
-    return f"{c.name} ({c.role})\n{c.description}"
+    parts = [f"{c.name} ({c.role})"]
+    if c.description:
+        parts.append(c.description)
+    sheet = c.full_sheet if isinstance(c.full_sheet, dict) else {}
+    appearance = sheet.get("appearance")
+    if appearance:
+        parts.append(f"外貌: {appearance}")
+    return "\n".join(parts)
 
 
 def _entity_text(e: WorldEntity) -> str:
