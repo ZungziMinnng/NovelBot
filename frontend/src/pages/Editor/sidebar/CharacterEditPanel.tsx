@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Loader2, Trash2, User, Pencil, X, Check, Plus,
@@ -19,15 +19,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'relationships', label: '关系' },
 ]
 
-const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
-const ROLE_COLORS: Record<string, string> = {
-  男主: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  女主: 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
-  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  反派: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
-  配角: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  朋友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-}
+import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
 const APPEARANCE_KEYS = ['appearance', 'personality', 'speech_style', 'weaknesses']
 const BODY_KEYS = ['body_traits']
@@ -58,6 +50,11 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     queryFn: () => charactersApi.list(novelId),
   })
   const character = characters.find((c) => c.id === characterId)
+
+  const allRoles = useMemo(() => {
+    const custom = characters.map(c => c.role).filter(r => r && !ROLE_OPTIONS.includes(r))
+    return [...ROLE_OPTIONS, ...Array.from(new Set(custom))]
+  }, [characters])
 
   const [activeTab, setActiveTab] = useState<Tab>('basic')
   const [editingBasic, setEditingBasic] = useState(false)
@@ -320,7 +317,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           </div>
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-muted-foreground uppercase">定位</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ROLE_COLORS[character.role] || ROLE_COLORS['配角']}`}>{character.role}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${getRoleColor(character.role)}`}>{character.role}</span>
           </div>
           {character.age && (
             <div className="flex items-center justify-between">
@@ -650,7 +647,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-semibold truncate">{character.name}</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`text-[10px] px-1.5 py-px rounded-full ${ROLE_COLORS[character.role] || ROLE_COLORS['配角']}`}>
+              <span className={`text-[10px] px-1.5 py-px rounded-full ${getRoleColor(character.role)}`}>
                 {character.role}
               </span>
               {character.age && <span className="text-[10px] text-muted-foreground">{character.age}岁</span>}
@@ -772,35 +769,67 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setEditingBasic(false)}>
           <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={e => e.stopPropagation()}>
             <h3 className="font-medium text-sm">编辑基本信息</h3>
-            <input
-              value={basicForm.name}
-              onChange={e => setBasicForm({ ...basicForm, name: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-              placeholder="角色名"
-            />
-            <input
-              list="role-options-edit"
-              value={basicForm.role}
-              onChange={e => setBasicForm({ ...basicForm, role: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-              placeholder="角色定位"
-            />
-            <datalist id="role-options-edit">
-              {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
-            </datalist>
-            <input
-              value={basicForm.age}
-              onChange={e => setBasicForm({ ...basicForm, age: e.target.value })}
-              placeholder="年龄"
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-            />
-            <textarea
-              value={basicForm.description}
-              onChange={e => setBasicForm({ ...basicForm, description: e.target.value })}
-              rows={4}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
-              placeholder="描述"
-            />
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">角色名</label>
+              <input
+                value={basicForm.name}
+                onChange={e => setBasicForm({ ...basicForm, name: e.target.value })}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                placeholder="输入角色名"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">角色定位</label>
+              <div className="flex items-center gap-2">
+                {basicForm.role && (
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(basicForm.role)}`}>
+                    {basicForm.role}
+                  </span>
+                )}
+                <select
+                  value={allRoles.includes(basicForm.role) ? basicForm.role : '__custom__'}
+                  onChange={e => {
+                    if (e.target.value === '__custom__') {
+                      setBasicForm({ ...basicForm, role: '' })
+                    } else {
+                      setBasicForm({ ...basicForm, role: e.target.value })
+                    }
+                  }}
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm bg-background"
+                >
+                  {allRoles.map(r => <option key={r} value={r}>{r}</option>)}
+                  <option value="__custom__">自定义...</option>
+                </select>
+              </div>
+              {!allRoles.includes(basicForm.role) && (
+                <input
+                  value={basicForm.role}
+                  onChange={e => setBasicForm({ ...basicForm, role: e.target.value })}
+                  placeholder="输入自定义定位"
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background mt-1"
+                  autoFocus
+                />
+              )}
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">年龄</label>
+              <input
+                value={basicForm.age}
+                onChange={e => setBasicForm({ ...basicForm, age: e.target.value })}
+                placeholder="输入年龄"
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">描述</label>
+              <textarea
+                value={basicForm.description}
+                onChange={e => setBasicForm({ ...basicForm, description: e.target.value })}
+                rows={4}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                placeholder="输入角色描述"
+              />
+            </div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditingBasic(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleSaveBasic} disabled={saving}

@@ -20,6 +20,59 @@ from app.services.relevance_selector import (
 )
 
 
+def _text_for_reference_scan(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _character_reference_text(character: Character) -> str:
+    return "\n".join(
+        part for part in (
+            character.description or "",
+            _text_for_reference_scan(character.full_sheet or {}),
+            _text_for_reference_scan(character.current_state or {}),
+        )
+        if part
+    )
+
+
+def _add_entities_referenced_by_characters(
+    characters: list[Character],
+    items: list[WorldEntity],
+    systems: list[WorldEntity],
+    all_items: list[WorldEntity],
+    all_systems: list[WorldEntity],
+) -> tuple[int, int]:
+    """Include item/system cards mentioned inside selected character data."""
+    scan_text = "\n".join(_character_reference_text(c) for c in characters)
+    if not scan_text:
+        return 0, 0
+
+    selected_ids = {e.id for e in items + systems}
+    added_items = 0
+    added_systems = 0
+    for entity in [*all_items, *all_systems]:
+        name = (entity.name or "").strip()
+        if entity.id in selected_ids or len(name) < 2:
+            continue
+        if name not in scan_text:
+            continue
+        if entity.type == "system":
+            systems.append(entity)
+            added_systems += 1
+        else:
+            items.append(entity)
+            added_items += 1
+        selected_ids.add(entity.id)
+    return added_items, added_systems
+
+
 async def build_generation_context(
     session: AsyncSession,
     novel: Novel,
@@ -145,6 +198,18 @@ async def build_generation_context(
     locations, loc_source = loc_selection.items, loc_selection.source
     factions, fac_source = fac_selection.items, fac_selection.source
     techniques, tech_source = tech_selection.items, tech_selection.source
+
+    ref_items, ref_systems = _add_entities_referenced_by_characters(
+        characters,
+        items_list,
+        systems_list,
+        all_items_list,
+        all_systems_list,
+    )
+    if ref_items:
+        items_source = f"{items_source}+ref" if len(items_list) > ref_items else "ref"
+    if ref_systems:
+        sys_source = f"{sys_source}+ref" if len(systems_list) > ref_systems else "ref"
 
     def _rag_detail(filtered, total, unit):
         if not filtered:

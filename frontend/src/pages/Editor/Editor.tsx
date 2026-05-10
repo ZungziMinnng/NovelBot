@@ -9,7 +9,7 @@ import {
   Terminal, BookOpen, ClipboardCheck, Gauge, Search,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, type Chapter, type ReviewResult,
+  novelsApi, chaptersApi, modelLibraryApi, type Chapter, type ReviewResult,
 } from '@/api/client'
 import AgentLog from '@/components/AgentLog/AgentLog'
 import ContextPanel from '@/components/ContextPanel/ContextPanel'
@@ -65,6 +65,7 @@ export default function Editor() {
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [showContext, setShowContext] = useState(true)
+  const [rightTab, setRightTab] = useState<'context' | 'agent'>('context')
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false)
   const [settingsDrawerTab, setSettingsDrawerTab] = useState<'content' | 'creation' | 'context'>('content')
   const [showDiff, setShowDiff] = useState(false)
@@ -79,6 +80,7 @@ export default function Editor() {
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
   const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('novel_font_family') || '')
   const [fontWeight, setFontWeight] = useState(() => localStorage.getItem('novel_font_weight') || '')
+  const [rewriteModel, setRewriteModel] = useState('')
 
   // ── Novel Data ────────────────────────────────────────────────────────────
   const { data: novel } = useQuery({
@@ -91,6 +93,11 @@ export default function Editor() {
     queryFn: () => chaptersApi.list(novelId),
   })
 
+  const { data: modelLibrary = [] } = useQuery({
+    queryKey: ['model-library'],
+    queryFn: () => modelLibraryApi.list(),
+  })
+
   const currentChapter = chapters.find((c: Chapter) => c.number === selectedChapterNum) || null
   const selectedVolume = currentChapter?.volume ?? novel?.current_volume ?? 1
 
@@ -100,7 +107,8 @@ export default function Editor() {
   }, [currentChapter?.id])
 
   // ── Generation Stream ─────────────────────────────────────────────────────
-  const gen = useGenerationStream(novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novel?.title || '')
+  const resetRewriteModel = useCallback(() => setRewriteModel(''), [])
+  const gen = useGenerationStream(novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novel?.title || '', rewriteModel, resetRewriteModel)
 
   // Derived state after generation completes for this chapter
   const justFinishedHere =
@@ -145,6 +153,12 @@ export default function Editor() {
   const agentLogEntries = hasGenDataHere ? genStore.agentLogEntries : []
   const totalInputTokens = hasGenDataHere ? genStore.totalInputTokens : 0
   const totalOutputTokens = hasGenDataHere ? genStore.totalOutputTokens : 0
+
+  useEffect(() => {
+    if (agentLogEntries.length > 0 && gen.isCurrentlyGenerating) {
+      setRightTab('agent')
+    }
+  }, [agentLogEntries.length > 0 && gen.isCurrentlyGenerating])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleConfirm = useCallback(async () => {
@@ -448,17 +462,6 @@ export default function Editor() {
               }}
             />
 
-            {/* Agent Log */}
-            <AgentLog
-              entries={agentLogEntries}
-              totalInputTokens={totalInputTokens}
-              totalOutputTokens={totalOutputTokens}
-              showTokens={showTokens}
-              onToggleTokens={() => setShowTokens(v => !v)}
-              collapsed={logCollapsed}
-              onToggleCollapse={() => setLogCollapsed(v => !v)}
-            />
-
             {/* Generation Controls */}
             <GenerationBar
               barMode={barMode}
@@ -482,6 +485,10 @@ export default function Editor() {
                 text,
               })}
               onRewrite={gen.handleRewrite}
+              rewriteModel={rewriteModel}
+              onRewriteModelChange={setRewriteModel}
+              writerModel={novel?.writer_model || ''}
+              modelLibrary={modelLibrary}
               plotSuggestions={plotSuggestions}
               isLoadingSuggestions={gen.isLoadingSuggestions}
               onFetchSuggestions={gen.handleFetchSuggestions}
@@ -513,14 +520,45 @@ export default function Editor() {
           </>}
         </div>
 
-        {/* Context Panel */}
+        {/* Right Sidebar: Context + Agent Log tabs */}
         {showContext && (
-          <div className="w-64 border-l flex flex-col shrink-0">
-            <div className="p-3 border-b">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">上下文状态</p>
+          <div className="w-72 border-l flex flex-col shrink-0">
+            <div className="flex border-b shrink-0">
+              <button
+                onClick={() => setRightTab('context')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  rightTab === 'context' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                上下文状态
+              </button>
+              <button
+                onClick={() => setRightTab('agent')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  rightTab === 'agent' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Agent 日志{agentLogEntries.length > 0 ? ` (${agentLogEntries.length})` : ''}
+              </button>
             </div>
-            <div className="flex-1 overflow-hidden p-3">
-              <ContextPanel novelId={novelId} rollingStage={genStore.agentStage} contextSteps={genStore.contextSteps} />
+            <div className="flex-1 overflow-hidden">
+              {rightTab === 'context' ? (
+                <div className="p-3 h-full overflow-auto">
+                  <ContextPanel novelId={novelId} rollingStage={genStore.agentStage} contextSteps={genStore.contextSteps} />
+                </div>
+              ) : (
+                <div className="p-3 h-full overflow-auto">
+                  <AgentLog
+                    entries={agentLogEntries}
+                    totalInputTokens={totalInputTokens}
+                    totalOutputTokens={totalOutputTokens}
+                    showTokens={showTokens}
+                    onToggleTokens={() => setShowTokens(v => !v)}
+                    collapsed={logCollapsed}
+                    onToggleCollapse={() => setLogCollapsed(v => !v)}
+                  />
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 import type { Annotation } from '@/store/editorStore'
+import type { ModelEntry } from '@/api/client'
 
 interface NewCharCandidate { name: string; role: string; description: string }
 interface NewEntityCandidate { name: string; type: string; description: string }
@@ -34,6 +35,10 @@ interface GenerationBarProps {
   onClearAnnotations: () => void
   onAddGlobalAnnotation: (text: string) => void
   onRewrite: () => void
+  rewriteModel: string
+  onRewriteModelChange: (v: string) => void
+  writerModel: string
+  modelLibrary: ModelEntry[]
 
   // Plot suggestions
   plotSuggestions: string[]
@@ -94,6 +99,10 @@ export default function GenerationBar({
   onClearAnnotations,
   onAddGlobalAnnotation,
   onRewrite,
+  rewriteModel,
+  onRewriteModelChange,
+  writerModel,
+  modelLibrary,
   plotSuggestions,
   isLoadingSuggestions,
   onFetchSuggestions,
@@ -372,6 +381,23 @@ export default function GenerationBar({
               <Plus className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {/* Rewrite model selector */}
+          {!isCurrentlyGenerating && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-muted-foreground shrink-0">重写模型</label>
+              <select
+                value={rewriteModel}
+                onChange={e => onRewriteModelChange(e.target.value)}
+                className="flex-1 text-xs border rounded-lg px-2 py-1.5 bg-background truncate"
+              >
+                <option value="">与 Writer 一致{writerModel ? ` (${writerModel})` : ''}</option>
+                {modelLibrary.map(m => (
+                  <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Rewrite button */}
           <div className="flex items-center gap-2">

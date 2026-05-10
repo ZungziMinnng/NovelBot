@@ -591,6 +591,7 @@ async def run_chapter_rewrite(
     chapter_number: int,
     annotations: list[dict],
     target_words: int = 0,
+    rewrite_model: str = "",
 ) -> AsyncIterator[str]:
     try:
         result = await session.execute(
@@ -621,7 +622,7 @@ async def run_chapter_rewrite(
         yield _sse("stage", "rewriting")
         yield _sse_json("agent_start", {"agent": "writer", "label": "批注重写"})
 
-        writer_model = novel.writer_model or ""
+        writer_model = rewrite_model or novel.writer_model or ""
         writer_system_prompt = novel.writer_system_prompt or ""
         temperature = getattr(novel, "writer_temperature", None)
         if temperature is None:

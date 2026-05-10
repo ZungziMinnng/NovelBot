@@ -44,9 +44,9 @@ export default function AgentLog({
   if (entries.length === 0) return null
 
   return (
-    <div className="border-t bg-background">
+    <div className="bg-background">
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-2 cursor-pointer hover:bg-muted/50 transition-colors" onClick={onToggleCollapse}>
+      <div className="flex items-center gap-2 py-2 cursor-pointer hover:bg-muted/50 transition-colors" onClick={onToggleCollapse}>
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Agent 调用日志</span>
         {!collapsed && totalInputTokens > 0 && (
           <span className="text-xs text-muted-foreground ml-2">
@@ -66,7 +66,7 @@ export default function AgentLog({
       </div>
 
       {!collapsed && (
-        <div className="px-4 pb-3 space-y-1 max-h-40 overflow-y-auto">
+        <div className="pb-3 space-y-1">
           {entries.map(entry => (
             <div key={entry.id} className="flex items-center gap-2 text-xs py-0.5">
               {/* Status dot */}

@@ -20,6 +20,7 @@ class RewriteChapterRequest(BaseModel):
     chapter_number: int
     annotations: list[AnnotationItem]
     target_words: int = 0
+    rewrite_model: str = ""
 
 
 class PlotSuggestionsRequest(BaseModel):

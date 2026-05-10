@@ -689,6 +689,7 @@ export function streamChapterRewrite(
     chapter_number: number
     annotations: AnnotationItem[]
     target_words: number
+    rewrite_model?: string
   },
   onMessage: (msg: SSEMessage) => void,
   onClose: () => void,

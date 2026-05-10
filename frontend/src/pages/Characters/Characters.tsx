@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Plus, Trash2, User, Loader2, Sun, Moon, Pencil, X, Check, Package, Cog, RefreshCw, ImagePlus } from 'lucide-react'
 import { charactersApi, worldEntitiesApi, novelsApi, type Character, type WorldEntity } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
+import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
 type Tab = 'character' | 'item' | 'system'
 
@@ -231,15 +232,6 @@ export default function Characters() {
     else setStateDraft(prev => { const n = { ...prev }; delete n[key]; return n })
   }
 
-  const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
-  const roleColor: Record<string, string> = {
-    '男主': 'bg-amber-100 text-amber-700',
-    '女主': 'bg-pink-100 text-pink-700',
-    '主角': 'bg-amber-100 text-amber-700',
-    '反派': 'bg-red-100 text-red-700',
-    '配角': 'bg-gray-100 text-gray-700',
-    '朋友': 'bg-blue-100 text-blue-700',
-  }
 
   const typeColor: Record<string, string> = {
     'item': 'bg-amber-100 text-amber-700',
@@ -345,7 +337,7 @@ export default function Characters() {
             <div className="flex-1">
               <h2 className="text-xl font-bold">{selected.name}</h2>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <span className={`px-2 py-0.5 rounded-full text-xs ${roleColor[selected.role] || roleColor['配角']}`}>{selected.role}</span>
+                <span className={`px-2 py-0.5 rounded-full text-xs ${getRoleColor(selected.role)}`}>{selected.role}</span>
                 {selected.age && <span>· {selected.age}岁</span>}
               </div>
             </div>
@@ -498,7 +490,7 @@ export default function Characters() {
                       </div>
                       <div>
                         <p className="font-medium text-sm">{c.name}</p>
-                        <span className={`text-xs px-1.5 py-0.5 rounded-full ${roleColor[c.role] || 'bg-gray-100 text-gray-700'}`}>{c.role}</span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full ${getRoleColor(c.role)}`}>{c.role}</span>
                       </div>
                     </div>
                     <button onClick={e => handleDeleteChar(e, c.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-destructive transition-all">
@@ -573,8 +565,13 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-              <input list="role-options-chars-new" value={newChar.role} onChange={e => setNewChar({...newChar, role: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              <div className="flex items-center gap-2">
+                {newChar.role && (
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(newChar.role)}`}>{newChar.role}</span>
+                )}
+                <input list="role-options-chars-new" value={newChar.role} onChange={e => setNewChar({...newChar, role: e.target.value})}
+                  className="flex-1 border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              </div>
               <datalist id="role-options-chars-new">
                 {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
               </datalist>
@@ -638,8 +635,13 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-              <input list="role-options-chars-edit" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              <div className="flex items-center gap-2">
+                {editForm.role && (
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(editForm.role)}`}>{editForm.role}</span>
+                )}
+                <input list="role-options-chars-edit" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}
+                  className="flex-1 border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
+              </div>
               <datalist id="role-options-chars-edit">
                 {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
               </datalist>

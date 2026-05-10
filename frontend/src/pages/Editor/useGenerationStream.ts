@@ -54,6 +54,8 @@ export function useGenerationStream(
   instruction: string,
   targetWords: number,
   novelTitle: string,
+  rewriteModel: string = '',
+  resetRewriteModel?: () => void,
 ) {
   const qc = useQueryClient()
   const setChapterSuggestions = useEditorStore((s) => s.setChapterSuggestions)
@@ -314,6 +316,7 @@ export function useGenerationStream(
         chapter_number: selectedChapterNum,
         annotations: annotations.map(a => ({ paragraph: a.paragraph, text: a.text })),
         target_words: targetWords,
+        rewrite_model: rewriteModel || undefined,
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
@@ -407,11 +410,12 @@ export function useGenerationStream(
       },
       () => {
         useGenerationStore.getState().finishGeneration()
+        resetRewriteModel?.()
       },
     )
 
     useGenerationStore.getState().setAbortController(ctrl)
-  }, [novelId, selectedChapterNum, targetWords, novelTitle, qc])
+  }, [novelId, selectedChapterNum, targetWords, novelTitle, qc, rewriteModel, resetRewriteModel])
 
   const handleRewriteOrAbort = useCallback(() => {
     const gs = useGenerationStore.getState()

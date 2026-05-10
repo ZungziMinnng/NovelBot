@@ -10,15 +10,7 @@ interface Props {
   activeCharacterId?: number | null
 }
 
-const ROLE_OPTIONS = ['男主', '女主', '主角', '配角', '反派', '朋友']
-const ROLE_COLORS: Record<string, string> = {
-  男主: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  女主: 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
-  主角: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  反派: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
-  配角: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  朋友: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-}
+import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
 export default function CharacterTab({ novelId, onOpenCharacter, activeCharacterId }: Props) {
   const qc = useQueryClient()
@@ -80,7 +72,7 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-medium truncate">{c.name}</span>
-                <span className={`text-[10px] px-1.5 py-px rounded-full leading-tight ${ROLE_COLORS[c.role] || ROLE_COLORS['配角']}`}>
+                <span className={`text-[10px] px-1.5 py-px rounded-full leading-tight ${getRoleColor(c.role)}`}>
                   {c.role}
                 </span>
               </div>

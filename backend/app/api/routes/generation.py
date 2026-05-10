@@ -79,6 +79,7 @@ async def rewrite_chapter(
             chapter_number=req.chapter_number,
             annotations=annotations,
             target_words=req.target_words,
+            rewrite_model=req.rewrite_model,
         ):
             yield chunk
 

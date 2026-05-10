@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Users, Check, X } from 'lucide-react'
 import { charactersApi, type RelationshipNode, type RelationshipEdge, type Character } from '@/api/client'
 import toast from 'react-hot-toast'
+import { getRoleFill } from '@/constants/roles'
 import {
   forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide,
   type SimulationNodeDatum, type SimulationLinkDatum,
@@ -17,13 +18,6 @@ interface Props {
 type SimNode = RelationshipNode & SimulationNodeDatum
 type SimLink = SimulationLinkDatum<SimNode> & { labels: RelationshipEdge['labels']; index?: number }
 
-const ROLE_FILL: Record<string, string> = {
-  主角: '#f59e0b',
-  女主: '#ec4899',
-  反派: '#ef4444',
-  配角: '#6b7280',
-  盟友: '#3b82f6',
-}
 
 export default function RelationshipGraphView({ novelId, focusCharacterId, onSelectCharacter }: Props) {
   const qc = useQueryClient()
@@ -275,7 +269,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
         {/* Nodes */}
         {nodes.map((node) => {
           if (node.x == null || node.y == null) return null
-          const fill = ROLE_FILL[node.role] || ROLE_FILL['配角']
+          const fill = getRoleFill(node.role)
           const isHovered = hoveredNode === node.id
           const isFocus = focusCharacterId === node.id
           const r = isFocus ? 22 : isHovered ? 20 : 18
