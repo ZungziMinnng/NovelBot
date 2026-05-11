@@ -106,6 +106,8 @@ async def remove_entity_embedding(novel_id: int, type_key: str, db_id: int) -> N
 # ── 批量重建 ─────────────────────────────────────────────────────────────
 
 async def reindex_all_entities(session: AsyncSession, novel_id: int) -> dict:
+    await vector_store.ensure_embedding_configured(novel_id, session)
+
     counts: dict[str, int] = {}
     batch: list[tuple[str, str, dict]] = []
 

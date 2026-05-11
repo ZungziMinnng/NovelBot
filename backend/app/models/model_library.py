@@ -12,5 +12,6 @@ class ModelEntry(Base):
     model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     api_format: Mapped[str] = mapped_column(String(20), nullable=False, default="openai")
+    model_type: Mapped[str] = mapped_column(String(20), nullable=False, default="chat")
     provider_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

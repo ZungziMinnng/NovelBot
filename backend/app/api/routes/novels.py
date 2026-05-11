@@ -16,8 +16,45 @@ from app.models.faction import Faction
 from app.models.technique import Technique
 from app.models.novel_note import NovelNote
 from app.services import vector_store
+from app.models.memory import Memory
 
 router = APIRouter()
+
+
+async def _reindex_after_embedding_change(db, novel):
+    """嵌入模型变更后：删除旧向量集合，配置新嵌入函数，重建全部向量。"""
+    import logging
+    log = logging.getLogger(__name__)
+    log.info("embedding_model changed for novel %d, rebuilding vector store", novel.id)
+
+    vector_store.delete_novel_collection(novel.id)
+    await vector_store.ensure_embedding_configured(novel.id, db)
+
+    await entity_embeddings.reindex_all_entities(db, novel.id)
+
+    if novel.core_setting:
+        await world_agent.embed_world_setting(novel.id, novel.core_setting)
+
+    result = await db.execute(
+        select(Memory).where(
+            Memory.novel_id == novel.id,
+            Memory.memory_type == "chapter_summary",
+            Memory.content != "",
+        )
+    )
+    summaries = result.scalars().all()
+    if summaries:
+        batch = []
+        for m in summaries:
+            doc_id = m.embedding_id or f"summary_v{m.volume}_ch{m.chapter_number}"
+            batch.append((doc_id, m.content, {
+                "type": "chapter_summary",
+                "volume": m.volume,
+                "chapter_number": m.chapter_number,
+            }))
+        await vector_store.astore_texts_batch(novel.id, batch)
+
+    log.info("vector store rebuilt for novel %d: %d summaries re-embedded", novel.id, len(summaries))
 
 
 @router.get("/dashboard")
@@ -74,6 +111,7 @@ async def update_novel(novel_id: int, data: NovelUpdate, db: AsyncSession = Depe
         raise HTTPException(status_code=404, detail="小说不存在")
     updates = data.model_dump(exclude_none=True)
     core_setting_changed = "core_setting" in updates and updates["core_setting"] != novel.core_setting
+    embedding_changed = "embedding_model" in updates and updates["embedding_model"] != novel.embedding_model
     for k, v in updates.items():
         setattr(novel, k, v)
     try:
@@ -85,6 +123,8 @@ async def update_novel(novel_id: int, data: NovelUpdate, db: AsyncSession = Depe
         raise HTTPException(status_code=500, detail=f"保存失败: {e}")
     if core_setting_changed:
         await world_agent.embed_world_setting(novel.id, novel.core_setting)
+    if embedding_changed:
+        await _reindex_after_embedding_change(db, novel)
     return novel
 
 

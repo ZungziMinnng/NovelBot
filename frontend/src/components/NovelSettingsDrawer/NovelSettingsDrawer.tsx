@@ -142,6 +142,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [writerModel, setWriterModel] = useState(novel.writer_model || '')
   const [fastModel, setFastModel] = useState(novel.fast_model || '')
   const [criticModel, setCriticModel] = useState(novel.critic_model || '')
+  const [embeddingModel, setEmbeddingModel] = useState(novel.embedding_model || '')
   const [enableCritic, setEnableCritic] = useState(novel.enable_critic ?? true)
   const [enableDetailReview, setEnableDetailReview] = useState(novel.enable_detail_review ?? false)
   const [detailReviewModel, setDetailReviewModel] = useState(novel.detail_review_model || '')
@@ -178,6 +179,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setWriterModel(novel.writer_model || '')
     setFastModel(novel.fast_model || '')
     setCriticModel(novel.critic_model || '')
+    setEmbeddingModel(novel.embedding_model || '')
     setEnableCritic(novel.enable_critic ?? true)
     setEnableDetailReview(novel.enable_detail_review ?? false)
     setDetailReviewModel(novel.detail_review_model || '')
@@ -261,6 +263,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         writer_model: writerModel,
         fast_model: fastModel,
         critic_model: criticModel,
+        embedding_model: embeddingModel,
         enable_critic: enableCritic,
         enable_detail_review: enableDetailReview,
         detail_review_model: detailReviewModel,
@@ -632,18 +635,36 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         setEnableFullTextContext(false)
                         toast('已自动关闭全文上下文，切换模型后需手动重新开启', { icon: '⚠️' })
                       }
-                    }} placeholder="留空使用全局设置" models={modelLibrary} />
+                    }} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
                     <p className="text-xs text-muted-foreground mt-1.5">用于章节正文生成的主力模型</p>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Fast 模型</label>
-                    <ModelSelect value={fastModel} onChange={setFastModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                    <ModelSelect value={fastModel} onChange={setFastModel} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
                     <p className="text-xs text-muted-foreground mt-1.5">用于摘要、角色分析等低成本任务</p>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Critic 模型</label>
-                    <ModelSelect value={criticModel} onChange={setCriticModel} placeholder="留空使用 Fast 模型" models={modelLibrary} />
+                    <ModelSelect value={criticModel} onChange={setCriticModel} placeholder="留空使用 Fast 模型" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
                     <p className="text-xs text-muted-foreground mt-1.5">用于章节审查和评分</p>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">嵌入模型</label>
+                    <select
+                      value={embeddingModel}
+                      onChange={e => setEmbeddingModel(e.target.value)}
+                      className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="">默认 (all-MiniLM-L6-v2, 本地)</option>
+                      {modelLibrary.filter(m => m.model_type === 'embedding').map(m => (
+                        <option key={m.id} value={m.model_id}>
+                          [{m.provider}] {m.display_name || m.model_id}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground mt-1.5">
+                      用于 RAG 向量检索，中文小说推荐使用中文优化的嵌入模型。更换后将自动重建向量库
+                    </p>
                   </div>
                 </div>
               )}
@@ -680,7 +701,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                     {enableDetailReview && (
                       <div className="mt-3">
                         <label className="text-sm font-medium mb-1.5 block">细节审查模型</label>
-                        <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary} />
+                        <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
                       </div>
                     )}
                   </div>

@@ -84,6 +84,8 @@ async def build_generation_context(
     组装生成章节所需的全部上下文，返回结构化 dict。
     各 Agent 从这个 dict 中取自己需要的部分。
     """
+    await vector_store.ensure_embedding_configured(novel.id, session)
+
     ctx = {}
     meta: list[dict] = []
     cfg = novel.context_config or {}

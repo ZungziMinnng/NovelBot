@@ -40,6 +40,7 @@ async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db
         model_id=data.model_id,
         provider=data.provider,
         api_format=data.api_format,
+        model_type=data.model_type,
     )
     await _fill_from_provider(entry, data.provider_id, db)
     db.add(entry)
@@ -58,6 +59,8 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
         entry.display_name = data.display_name
     if data.model_id is not None:
         entry.model_id = data.model_id
+    if data.model_type is not None:
+        entry.model_type = data.model_type
     if data.provider_id is not None:
         await _fill_from_provider(entry, data.provider_id, db)
     else:

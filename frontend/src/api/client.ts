@@ -22,6 +22,7 @@ export interface Novel {
   book_summary: string
   writer_model: string
   fast_model: string
+  embedding_model: string
   writer_system_prompt: string
   enable_critic: boolean
   critic_model: string
@@ -133,6 +134,7 @@ export interface ModelEntry {
   model_id: string
   provider: string
   api_format: string
+  model_type: string
   provider_id: number | null
   created_at: string
 }
@@ -441,9 +443,9 @@ export const providersApi = {
 
 export const modelLibraryApi = {
   list: () => api.get<ModelEntry[]>('/models/').then(r => r.data),
-  create: (data: { display_name: string; model_id: string; provider_id: number; provider?: string; api_format?: string }) =>
+  create: (data: { display_name: string; model_id: string; provider_id: number; provider?: string; api_format?: string; model_type?: string }) =>
     api.post<ModelEntry>('/models/', data).then(r => r.data),
-  update: (id: number, data: { display_name?: string; model_id?: string; provider_id?: number }) =>
+  update: (id: number, data: { display_name?: string; model_id?: string; provider_id?: number; model_type?: string }) =>
     api.patch<ModelEntry>(`/models/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/models/${id}`).then(r => r.data),
 }

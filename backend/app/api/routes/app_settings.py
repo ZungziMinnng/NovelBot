@@ -1,7 +1,12 @@
 from pathlib import Path
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.config import settings
+from app.database import get_db
+from app.models.api_provider import ApiProvider
+from app.models.model_library import ModelEntry
 
 router = APIRouter()
 
@@ -120,18 +125,63 @@ class TestRequest(BaseModel):
 
 
 @router.post("/test")
-async def test_connection(data: TestRequest = TestRequest()):
+async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = Depends(get_db)):
     """测试连接：支持指定模型，自动按 api_format 路由到对应 SDK"""
     from app.services import llm_client
     model = data.model or settings.default_fast_model
-    api_format = llm_client.get_model_api_format(model)
     try:
+        entry = None
+        if data.model:
+            result = await db.execute(
+                select(ModelEntry).where(ModelEntry.model_id == data.model).limit(1)
+            )
+            entry = result.scalar_one_or_none()
+
+        if entry and entry.model_type == "embedding":
+            if entry.api_format != "openai":
+                raise ValueError("嵌入模型测试目前仅支持 OpenAI 兼容接口")
+            if not entry.provider_id:
+                raise ValueError("嵌入模型未绑定供应商")
+            provider = await db.get(ApiProvider, entry.provider_id)
+            if not provider or not provider.api_key or not provider.base_url:
+                raise ValueError("嵌入模型供应商缺少 API Key 或 Base URL")
+
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
+            response = await client.embeddings.create(
+                input="测试文本",
+                model=model,
+            )
+            dimensions = len(response.data[0].embedding)
+            return {
+                "ok": True,
+                "response": f"嵌入测试成功，向量维度 {dimensions}",
+                "model": model,
+                "api_format": entry.api_format,
+                "model_type": "embedding",
+            }
+
+        api_format = llm_client.get_model_api_format(model)
         response = await llm_client.dispatch_chat_complete(
             messages=[{"role": "user", "content": "回复数字1"}],
             model=model,
             api_format=api_format,
             max_tokens=5,
         )
-        return {"ok": True, "response": response, "model": model, "api_format": api_format}
+        return {
+            "ok": True,
+            "response": response,
+            "model": model,
+            "api_format": api_format,
+            "model_type": entry.model_type if entry else "chat",
+        }
     except Exception as e:
-        return {"ok": False, "error": str(e), "model": model, "api_format": api_format}
+        api_format = entry.api_format if entry else llm_client.get_model_api_format(model)
+        return {
+            "ok": False,
+            "error": str(e),
+            "model": model,
+            "api_format": api_format,
+            "model_type": entry.model_type if entry else "chat",
+        }

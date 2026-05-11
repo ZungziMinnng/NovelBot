@@ -8,6 +8,8 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client: chromadb.ClientAPI | None = None
+_default_ef = embedding_functions.DefaultEmbeddingFunction()
+_novel_ef_cache: dict[int, chromadb.EmbeddingFunction] = {}
 
 
 def _get_client() -> chromadb.ClientAPI:
@@ -17,9 +19,65 @@ def _get_client() -> chromadb.ClientAPI:
     return _client
 
 
+def configure_embedding(
+    novel_id: int,
+    model_id: str,
+    api_key: str = "",
+    base_url: str = "",
+):
+    """注册小说的嵌入函数。空 model_id 使用本地默认模型。"""
+    if not model_id:
+        _novel_ef_cache.pop(novel_id, None)
+        return
+    _novel_ef_cache[novel_id] = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=api_key,
+        model_name=model_id,
+        api_base=base_url or "https://api.openai.com/v1",
+    )
+
+
+async def ensure_embedding_configured(novel_id: int, db) -> None:
+    """从 DB 加载小说的嵌入模型配置到缓存。已缓存则跳过。"""
+    if novel_id in _novel_ef_cache:
+        return
+    from app.models.novel import Novel
+    from app.models.model_library import ModelEntry
+    from app.models.api_provider import ApiProvider
+    from sqlalchemy import select
+
+    novel = await db.get(Novel, novel_id)
+    if not novel or not novel.embedding_model:
+        return
+
+    result = await db.execute(
+        select(ModelEntry)
+        .where(
+            ModelEntry.model_id == novel.embedding_model,
+            ModelEntry.model_type == "embedding",
+        )
+        .limit(1)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
+        raise ValueError(f"嵌入模型未在模型库中配置或未标记为 embedding: {novel.embedding_model}")
+
+    api_key = ""
+    base_url = ""
+    if entry.provider_id:
+        provider = await db.get(ApiProvider, entry.provider_id)
+        if provider:
+            api_key = provider.api_key
+            base_url = provider.base_url
+
+    if not api_key or not base_url:
+        raise ValueError(f"嵌入模型缺少供应商 API Key 或 Base URL: {novel.embedding_model}")
+
+    configure_embedding(novel_id, novel.embedding_model, api_key, base_url)
+
+
 def _get_collection(novel_id: int):
     client = _get_client()
-    ef = embedding_functions.DefaultEmbeddingFunction()
+    ef = _novel_ef_cache.get(novel_id, _default_ef)
     return client.get_or_create_collection(
         name=f"novel_{novel_id}",
         embedding_function=ef,
@@ -163,6 +221,7 @@ def delete_novel_collection(novel_id: int) -> None:
             novel_id,
             exc_info=True,
         )
+    _novel_ef_cache.pop(novel_id, None)
 
 
 # ─── 异步包装（避免阻塞事件循环）─────────────────────────────────────────────

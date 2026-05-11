@@ -25,6 +25,7 @@ class Novel(Base):
     # 模型配置（覆盖全局默认）
     writer_model: Mapped[str] = mapped_column(String(100), default="")
     fast_model: Mapped[str] = mapped_column(String(100), default="")
+    embedding_model: Mapped[str] = mapped_column(String(100), default="")
 
     # 自定义 Writer 系统提示词（追加到模板之后）
     writer_system_prompt: Mapped[str] = mapped_column(Text, default="")

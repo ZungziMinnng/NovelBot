@@ -1,18 +1,20 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, User, Loader2 } from 'lucide-react'
+import { Plus, Trash2, User, Loader2, ListPlus } from 'lucide-react'
 import { charactersApi, type Character } from '@/api/client'
 import toast from 'react-hot-toast'
+import BulkCharacterStateDrawer from './BulkCharacterStateDrawer'
 
 interface Props {
   novelId: number
   onOpenCharacter: (c: Character) => void
   activeCharacterId?: number | null
+  drawerOffsetLeft: number
 }
 
 import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
-export default function CharacterTab({ novelId, onOpenCharacter, activeCharacterId }: Props) {
+export default function CharacterTab({ novelId, onOpenCharacter, activeCharacterId, drawerOffsetLeft }: Props) {
   const qc = useQueryClient()
   const { data: characters = [] } = useQuery({
     queryKey: ['characters', novelId],
@@ -20,6 +22,7 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
   })
 
   const [adding, setAdding] = useState(false)
+  const [showBulkState, setShowBulkState] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ name: '', role: '配角', age: '', description: '' })
 
@@ -45,12 +48,20 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
   return (
     <div className="flex flex-col h-full">
       <div className="p-2">
-        <button
-          onClick={() => setAdding(true)}
-          className="w-full flex items-center justify-center gap-1 px-3 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted transition-colors"
-        >
-          <Plus className="w-3 h-3" /> 新建角色
-        </button>
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            onClick={() => setAdding(true)}
+            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+          >
+            <Plus className="w-3 h-3" /> 新建角色
+          </button>
+          <button
+            onClick={() => setShowBulkState(true)}
+            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs border rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+          >
+            <ListPlus className="w-3 h-3" /> 状态词条
+          </button>
+        </div>
       </div>
 
       <div className="overflow-y-auto flex-1 px-2 pb-2 space-y-1">
@@ -136,6 +147,9 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
             </div>
           </div>
         </div>
+      )}
+      {showBulkState && (
+        <BulkCharacterStateDrawer novelId={novelId} offsetLeft={drawerOffsetLeft} onClose={() => setShowBulkState(false)} />
       )}
     </div>
   )

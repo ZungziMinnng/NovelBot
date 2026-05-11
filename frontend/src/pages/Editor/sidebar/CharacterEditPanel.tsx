@@ -222,12 +222,14 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   }
 
   // ── Render helpers ──
-  const renderKVDisplay = (data: Record<string, unknown>, keys: string[]) => (
+  const renderKVDisplay = (data: Record<string, unknown>, keys: string[], showEmptyKeys = false) => (
     <div className="space-y-2">
-      {keys.filter(k => data[k] !== undefined && data[k] !== '').map(k => (
+      {keys.filter(k => showEmptyKeys || data[k] !== undefined).map(k => (
         <div key={k} className="border rounded-lg p-2.5">
           <p className="text-[10px] text-muted-foreground mb-1 uppercase">{k}</p>
-          <p className="text-xs whitespace-pre-wrap">{Array.isArray(data[k]) ? (data[k] as string[]).join('、') : String(data[k])}</p>
+          <p className="text-xs whitespace-pre-wrap">
+            {data[k] === undefined || data[k] === '' ? <span className="text-muted-foreground/50">（空）</span> : Array.isArray(data[k]) ? (data[k] as string[]).join('、') : String(data[k])}
+          </p>
         </div>
       ))}
     </div>
@@ -277,8 +279,9 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     keys: string[],
     sectionId: string,
     field: 'full_sheet' | 'current_state',
+    showEmptyKeys = false,
   ) => {
-    const hasData = keys.some(k => data[k] !== undefined && data[k] !== '')
+    const hasData = showEmptyKeys ? keys.length > 0 : keys.some(k => data[k] !== undefined)
     const isEditing = editingKV === sectionId
     if (!hasData && !isEditing) return null
     return (
@@ -286,7 +289,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <div className="flex items-center gap-2">
           <h4 className="text-xs font-medium">{title}</h4>
           {!isEditing ? (
-            <button onClick={() => openKVEdit(sectionId, data, keys)} className="p-0.5 text-muted-foreground hover:text-foreground">
+            <button onClick={() => openKVEdit(sectionId, data, keys, showEmptyKeys)} className="p-0.5 text-muted-foreground hover:text-foreground">
               <Pencil className="w-3 h-3" />
             </button>
           ) : (
@@ -299,7 +302,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             </div>
           )}
         </div>
-        {isEditing ? renderKVEditor() : renderKVDisplay(data, keys)}
+        {isEditing ? renderKVEditor() : renderKVDisplay(data, keys, showEmptyKeys)}
       </div>
     )
   }
@@ -333,8 +336,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           </div>
         )}
 
-        {/* Appearance & Personality */}
-        {renderKVSection('外貌与性格', sheet, APPEARANCE_KEYS, 'appearance', 'full_sheet')}
+        {/* Persona */}
+        {renderKVSection('人设', sheet, APPEARANCE_KEYS, 'appearance', 'full_sheet', true)}
         <button onClick={handleRefreshAppearance} disabled={refreshingAppearance}
           className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50">
           {refreshingAppearance ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
@@ -342,13 +345,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         </button>
 
         {/* Body traits */}
-        {renderKVSection('身体特质', sheet, allBodyKeys, 'body', 'full_sheet')}
-        {!allBodyKeys.some(k => sheet[k] !== undefined && sheet[k] !== '') && editingKV !== 'body' && (
-          <button onClick={() => openKVEdit('body', sheet, allBodyKeys, true)}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs border border-dashed rounded-lg text-muted-foreground hover:bg-muted">
-            <Plus className="w-3 h-3" /> 添加身体特质
-          </button>
-        )}
+        {renderKVSection('身体特质', sheet, allBodyKeys, 'body', 'full_sheet', true)}
       </div>
     )
   }

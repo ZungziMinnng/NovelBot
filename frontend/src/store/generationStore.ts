@@ -24,6 +24,7 @@ interface GenerationState {
   setError: (message: string) => void
   setWarning: (message: string) => void
   appendToken: (token: string) => void
+  clearStreamingText: () => void
   setOriginalDraft: (text: string) => void
   addLogEntry: (entry: AgentLogEntry) => void
   updateLogEntry: (id: string, updates: Partial<AgentLogEntry>) => void
@@ -102,6 +103,11 @@ export const useGenerationStore = create<GenerationState>()((set, get) => ({
     if (_rafId === null) {
       _rafId = requestAnimationFrame(_flushTokens)
     }
+  },
+
+  clearStreamingText: () => {
+    _clearTokenBuffer()
+    set({ streamingText: '' })
   },
 
   setOriginalDraft: (text) => set({ originalDraft: text }),

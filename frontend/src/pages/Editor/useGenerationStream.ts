@@ -157,7 +157,13 @@ export function useGenerationStream(
         const s = useGenerationStore.getState()
         switch (msg.event) {
           case 'stage':
-            s.setAgentStage(msg.data as string)
+            {
+              const stage = msg.data as string
+              s.setAgentStage(stage)
+              if (stage.startsWith('revising_')) {
+                s.clearStreamingText()
+              }
+            }
             break
           case 'token':
             s.appendToken(msg.data as string)
@@ -334,7 +340,13 @@ export function useGenerationStream(
         const s = useGenerationStore.getState()
         switch (msg.event) {
           case 'stage':
-            s.setAgentStage(msg.data as string)
+            {
+              const stage = msg.data as string
+              s.setAgentStage(stage)
+              if (stage.startsWith('revising_')) {
+                s.clearStreamingText()
+              }
+            }
             break
           case 'token':
             s.appendToken(msg.data as string)

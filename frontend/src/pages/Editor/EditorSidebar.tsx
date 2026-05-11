@@ -192,6 +192,7 @@ export default function EditorSidebar({
               novelId={novelId}
               onOpenCharacter={handleOpenCharacter}
               activeCharacterId={detailView?.type === 'character' ? detailView.characterId : null}
+              drawerOffsetLeft={sidebarWidth}
             />
           )}
           {activeTab === 'world' && (

@@ -3,6 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Self
 
+_BASE_DIR = Path(__file__).resolve().parents[1]
+_DATA_DIR = _BASE_DIR / "data"
+
 
 class Settings(BaseSettings):
     # ── API 密钥（每种格式独立的中转站 Key）─────────────────────────────────
@@ -35,9 +38,9 @@ class Settings(BaseSettings):
     http_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTP_PROXY")
 
     # ── 数据路径 ──────────────────────────────────────────────────────────────
-    data_dir: str = "./data"
-    database_url: str = "sqlite+aiosqlite:///./data/novelbot.db"
-    chroma_path: str = "./data/chroma"
+    data_dir: str = str(_DATA_DIR)
+    database_url: str = f"sqlite+aiosqlite:///{(_DATA_DIR / 'novelbot.db').as_posix()}"
+    chroma_path: str = str(_DATA_DIR / "chroma")
 
     # ── 应用 ──────────────────────────────────────────────────────────────────
     app_title: str = "NovelBot"

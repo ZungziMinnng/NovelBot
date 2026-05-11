@@ -162,7 +162,9 @@ export default function Editor() {
     ? editContent
     : streamingMode && gen.isCurrentlyGenerating
       ? (genStore.streamingText || currentChapter?.content || '')
-      : (recentlyFinishedHere ? genStore.streamingText : (currentChapter?.content || ''))
+      : currentChapter
+        ? currentChapter.content
+        : (recentlyFinishedHere ? genStore.streamingText : '')
 
   const isStreaming = gen.isCurrentlyGenerating && streamingMode && genStore.streamingText.length > 0
 
@@ -242,13 +244,17 @@ export default function Editor() {
   const handleSaveEdit = useCallback(async () => {
     if (!currentChapter) return
     try {
-      await chaptersApi.update(currentChapter.id, { content: editContent, title: currentChapter.title })
-      refetchChapters()
+      const updated = await chaptersApi.update(currentChapter.id, { content: editContent, title: currentChapter.title })
+      qc.setQueryData<Chapter[]>(['chapters', novelId], (old = []) =>
+        old.map(ch => ch.id === updated.id ? updated : ch),
+      )
+      setEditContent(updated.content)
+      await refetchChapters()
       setIsEditing(false)
     } catch {
       toast.error('保存章节失败')
     }
-  }, [currentChapter, editContent, refetchChapters])
+  }, [currentChapter, editContent, novelId, qc, refetchChapters])
 
   const handleNewChapter = useCallback(() => {
     setSelectedChapterNum(

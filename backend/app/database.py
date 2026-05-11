@@ -96,6 +96,10 @@ async def _run_migrations() -> None:
         # 全文上下文实验功能
         "ALTER TABLE novels ADD COLUMN enable_full_text_context INTEGER DEFAULT 0",
         "ALTER TABLE novels ADD COLUMN full_text_chapters INTEGER DEFAULT 20",
+        # 嵌入模型配置
+        "ALTER TABLE novels ADD COLUMN embedding_model TEXT DEFAULT ''",
+        "ALTER TABLE model_library ADD COLUMN model_type TEXT NOT NULL DEFAULT 'chat'",
+        "UPDATE model_library SET model_type = 'chat' WHERE model_type IS NULL OR model_type = ''",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

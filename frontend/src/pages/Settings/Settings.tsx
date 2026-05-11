@@ -83,6 +83,7 @@ export default function Settings() {
   const [formDisplayName, setFormDisplayName] = useState('')
   const [formModelId, setFormModelId] = useState('')
   const [formProviderId, setFormProviderId] = useState<number | null>(null)
+  const [formModelType, setFormModelType] = useState('chat')
   const [modelSaving, setModelSaving] = useState(false)
 
   useEffect(() => {
@@ -237,6 +238,7 @@ export default function Settings() {
     setFormDisplayName('')
     setFormModelId('')
     setFormProviderId(null)
+    setFormModelType('chat')
     setEditingId(null)
     setShowAddForm(false)
   }
@@ -246,6 +248,7 @@ export default function Settings() {
     setFormDisplayName(m.display_name)
     setFormModelId(m.model_id)
     setFormProviderId(m.provider_id)
+    setFormModelType(m.model_type || 'chat')
     setShowAddForm(true)
   }
 
@@ -258,12 +261,14 @@ export default function Settings() {
           display_name: formDisplayName,
           model_id: formModelId,
           provider_id: formProviderId,
+          model_type: formModelType,
         })
       } else {
         await modelLibraryApi.create({
           display_name: formDisplayName,
           model_id: formModelId,
           provider_id: formProviderId,
+          model_type: formModelType,
         })
       }
       qc.invalidateQueries({ queryKey: ['model-library'] })
@@ -278,6 +283,8 @@ export default function Settings() {
     await modelLibraryApi.delete(id)
     qc.invalidateQueries({ queryKey: ['model-library'] })
   }
+
+  const chatModels = models.filter(m => m.model_type !== 'embedding')
 
   const formatBadgeColor = (apiFormat: string) => {
     if (apiFormat === 'gemini') return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
@@ -505,21 +512,34 @@ export default function Settings() {
                   />
                 </div>
               </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">供应商 *</label>
-                <select
-                  value={formProviderId ?? ''}
-                  onChange={e => setFormProviderId(e.target.value ? Number(e.target.value) : null)}
-                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="">请选择供应商</option>
-                  {providers.map(p => (
-                    <option key={p.id} value={p.id}>{p.name} ({p.api_format})</option>
-                  ))}
-                </select>
-                {providers.length === 0 && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">请先在上方添加至少一个供应商</p>
-                )}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">供应商 *</label>
+                  <select
+                    value={formProviderId ?? ''}
+                    onChange={e => setFormProviderId(e.target.value ? Number(e.target.value) : null)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    <option value="">请选择供应商</option>
+                    {providers.map(p => (
+                      <option key={p.id} value={p.id}>{p.name} ({p.api_format})</option>
+                    ))}
+                  </select>
+                  {providers.length === 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">请先在上方添加至少一个供应商</p>
+                  )}
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">模型类型</label>
+                  <select
+                    value={formModelType}
+                    onChange={e => setFormModelType(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    <option value="chat">聊天模型</option>
+                    <option value="embedding">嵌入模型</option>
+                  </select>
+                </div>
               </div>
               <div className="flex gap-2 justify-end">
                 <button onClick={resetForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
@@ -552,6 +572,11 @@ export default function Settings() {
                       <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${formatBadgeColor(m.api_format)}`}>
                         {m.api_format}
                       </span>
+                      {m.model_type === 'embedding' && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                          嵌入
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="text-xs text-muted-foreground font-mono">{m.model_id}</span>
@@ -594,7 +619,7 @@ export default function Settings() {
                 value={writerModel}
                 onChange={setWriterModel}
                 placeholder="留空使用全局默认"
-                models={models}
+                models={chatModels}
               />
               <p className="text-xs text-muted-foreground mt-1">生成章节正文，建议高质量模型</p>
             </div>
@@ -604,7 +629,7 @@ export default function Settings() {
                 value={fastModel}
                 onChange={setFastModel}
                 placeholder="留空使用全局默认"
-                models={models}
+                models={chatModels}
               />
               <p className="text-xs text-muted-foreground mt-1">摘要/审查/规划，建议经济模型</p>
             </div>
@@ -620,37 +645,37 @@ export default function Settings() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-sm font-medium mb-1 block">Writer Agent</label>
-              <ModelSelect value={agentWriterModel} onChange={setAgentWriterModel} placeholder="留空使用默认 Writer 模型" models={models} />
+              <ModelSelect value={agentWriterModel} onChange={setAgentWriterModel} placeholder="留空使用默认 Writer 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责生成章节正文</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Critic Agent</label>
-              <ModelSelect value={agentCriticModel} onChange={setAgentCriticModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentCriticModel} onChange={setAgentCriticModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责审查章节质量</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Memory Agent</label>
-              <ModelSelect value={agentMemoryModel} onChange={setAgentMemoryModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentMemoryModel} onChange={setAgentMemoryModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责摘要和记忆更新</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Outline Agent</label>
-              <ModelSelect value={agentOutlineModel} onChange={setAgentOutlineModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentOutlineModel} onChange={setAgentOutlineModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责生成章节大纲</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Character Agent</label>
-              <ModelSelect value={agentCharacterModel} onChange={setAgentCharacterModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentCharacterModel} onChange={setAgentCharacterModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责生成角色卡</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Orchestrator / World Agent</label>
-              <ModelSelect value={agentOrchestratorModel} onChange={setAgentOrchestratorModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentOrchestratorModel} onChange={setAgentOrchestratorModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">负责世界观扩写</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">全文审查 (Review) Agent</label>
-              <ModelSelect value={agentReviewModel} onChange={setAgentReviewModel} placeholder="留空使用默认 Fast 模型" models={models} />
+              <ModelSelect value={agentReviewModel} onChange={setAgentReviewModel} placeholder="留空使用默认 Fast 模型" models={chatModels} />
               <p className="text-xs text-muted-foreground mt-1">百万上下文全文审查，推荐 DeepSeek V4 Pro</p>
             </div>
           </div>
@@ -764,7 +789,7 @@ export default function Settings() {
               <option value="">默认（{fastModel || 'fast model'}）</option>
               {models.map(m => (
                 <option key={m.id} value={m.model_id}>
-                  [{m.provider}] {m.display_name || m.model_id}
+                  [{m.provider}] {m.display_name || m.model_id}{m.model_type === 'embedding' ? '（嵌入）' : ''}
                 </option>
               ))}
             </select>

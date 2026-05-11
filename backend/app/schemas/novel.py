@@ -23,6 +23,7 @@ class NovelUpdate(BaseModel):
     book_summary: Optional[str] = None
     writer_model: Optional[str] = None
     fast_model: Optional[str] = None
+    embedding_model: Optional[str] = None
     writer_system_prompt: Optional[str] = None
     enable_critic: Optional[bool] = None
     critic_model: Optional[str] = None
@@ -54,6 +55,7 @@ class NovelOut(BaseModel):
     book_summary: str
     writer_model: str
     fast_model: str
+    embedding_model: str
     writer_system_prompt: str
     enable_critic: bool
     critic_model: str
