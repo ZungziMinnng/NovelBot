@@ -10,6 +10,7 @@ from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.models.novel import Novel
+from app.prompts.loader import render
 from app.services import llm_client, vector_store
 from app.config import settings
 
@@ -71,10 +72,76 @@ def _clean_summary(text: str) -> str:
     return cleaned
 
 
+_TIME_TAG_PATTERN = re.compile(r'^【([^】]+)】')
+_ABSOLUTE_DAY_PATTERN = re.compile(r'第(\d+)日')
+_RELATIVE_DAY_PATTERN = re.compile(r'^(当天|当日|本日|同日|当晚|当夜|次日|翌日|第二天)(?:[·・\s-]?(.+))?$')
+_RELATIVE_DAYS_LATER_PATTERN = re.compile(r'^(\d+)日后(?:[·・\s-]?(.+))?$')
+
+
+def _extract_day_number(time_tag: str) -> int | None:
+    match = _ABSOLUTE_DAY_PATTERN.search(time_tag or "")
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def normalize_timeline_tag(time_tag: str, previous_time_tag: str = "") -> str:
+    """Convert relative timeline tags into absolute 第X日 tags when possible."""
+    tag = (time_tag or "").strip().strip("【】")
+    if not tag:
+        return tag
+    if "→" in tag:
+        parts = [part.strip() for part in tag.split("→") if part.strip()]
+        normalized_parts: list[str] = []
+        prev = previous_time_tag
+        for part in parts:
+            normalized = normalize_timeline_tag(part, prev)
+            normalized_parts.append(normalized)
+            prev = normalized
+        return "→".join(normalized_parts)
+    if _ABSOLUTE_DAY_PATTERN.search(tag):
+        return tag
+
+    prev_day = _extract_day_number(previous_time_tag)
+    if prev_day is None:
+        return tag
+
+    match = _RELATIVE_DAY_PATTERN.match(tag)
+    if match:
+        rel, period = match.groups()
+        if rel in ("次日", "翌日", "第二天"):
+            day = prev_day + 1
+        else:
+            day = prev_day
+        if not period and rel in ("当晚", "当夜"):
+            period = "夜晚"
+        return f"第{day}日{f'·{period}' if period else ''}"
+
+    later_match = _RELATIVE_DAYS_LATER_PATTERN.match(tag)
+    if later_match:
+        days, period = later_match.groups()
+        day = prev_day + int(days)
+        return f"第{day}日{f'·{period}' if period else ''}"
+
+    return tag
+
+
+def normalize_summary_timeline_tag(summary: str, previous_time_tag: str = "") -> str:
+    match = _TIME_TAG_PATTERN.match((summary or "").strip())
+    if not match:
+        return summary
+    old_tag = match.group(1)
+    new_tag = normalize_timeline_tag(old_tag, previous_time_tag)
+    if new_tag == old_tag:
+        return summary
+    return summary.replace(f"【{old_tag}】", f"【{new_tag}】", 1)
+
+
 CHAPTER_SUMMARY_PROMPT_PREFIX = """你是一位小说编辑，需要将以下章节内容压缩为250字以内的剧情梗概。
 
 输出规范：
-- 梗概开头用【时间】标注本章覆盖的故事时间段（如：【三日后·白天】、【当天夜晚】）
+- 梗概开头用【第X日】标注本章覆盖的故事时间段（如：【第12日·白天】、【第13日·夜晚】）
+- 时间必须使用绝对日期计数，禁止使用“当天、当日、次日、翌日、第二天、三日后”等相对表达
 - 如果章节内发生了时间跳跃，必须明确标注
 - 如实记录章节中发生的所有重要事件，包括人物行为、决定、冲突、关系变化
 - 保留对后续剧情有影响的关键细节
@@ -83,9 +150,10 @@ CHAPTER_SUMMARY_PROMPT_PREFIX = """你是一位小说编辑，需要将以下章
 CHAPTER_SUMMARY_PROMPT_SUFFIX = (
     "请直接输出剧情梗概文本。\n"
     "⚠️ 格式要求（必须遵守）：\n"
-    "1. 第一行必须以【时间】开头（如【当天夜晚】、【三日后·清晨】）\n"
-    "2. 不要输出任何标题、前缀（如『章节剧情梗概：』）或 Markdown 格式符号（如 ** 或 ##）\n"
-    "3. 直接以【时间标注】开始正文"
+    "1. 第一行必须以【第X日】开头（如【第12日·夜晚】、【第13日·清晨】）\n"
+    "2. 禁止使用当天、当日、次日、翌日、第二天、三日后等相对时间词\n"
+    "3. 不要输出任何标题、前缀（如『章节剧情梗概：』）或 Markdown 格式符号（如 ** 或 ##）\n"
+    "4. 直接以【时间标注】开始正文"
 )
 
 
@@ -128,6 +196,7 @@ async def summarize_chapter(
 
     # 查询上一章摘要的时间标记，为当前章提供日期连续性上下文
     prev_time_hint = ""
+    prev_time_tag = ""
     if chapter.number > 1:
         prev_mem_result = await session.execute(
             select(Memory.content)
@@ -144,12 +213,17 @@ async def summarize_chapter(
             import re as _re
             m = _re.match(r'【(.+?)】', prev_summary)
             if m:
-                prev_time_hint = f"\n- 上一章（第{chapter.number - 1}章）的时间标记为【{m.group(1)}】，请根据本章内容推算本章的时间，保持日期连续性"
+                prev_time_tag = m.group(1)
+                prev_time_hint = (
+                    f"\n- 上一章（第{chapter.number - 1}章）的时间标记为【{prev_time_tag}】，"
+                    "请根据本章内容推算本章的绝对日期，保持日期连续性；"
+                    "如果本章写“当天/当日”，换算为上一章同一日；如果写“次日/翌日”，换算为上一章后一日"
+                )
 
-    prompt_prefix = CHAPTER_SUMMARY_PROMPT_PREFIX + prev_time_hint
+    prompt_prefix = render("chapter_summary_prefix.jinja2") + prev_time_hint
     messages = _build_analysis_messages(
         prompt_prefix, clean_content[:6000],
-        CHAPTER_SUMMARY_PROMPT_SUFFIX, api_format,
+        render("chapter_summary_suffix.jinja2"), api_format,
     )
     summary, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
         messages=messages,
@@ -173,9 +247,13 @@ async def summarize_chapter(
     if not _s or _truncated:
         # 截断重试：换用更简洁的提示，减少输出长度
         retry_messages = _build_analysis_messages(
-            "请为一部小说章节写一段200字的剧情梗概。\n如实记录所有重要事件，简洁概括即可。",
+            (
+                "请为一部小说章节写一段200字的剧情梗概。\n"
+                "第一行必须以【第X日】或【第X日·时段】开头，禁止使用当天、次日等相对时间词。\n"
+                f"上一章时间标记：{f'【{prev_time_tag}】' if prev_time_tag else '未知'}。"
+            ),
             clean_content[:4000],
-            "请基于以上内容输出剧情梗概：",
+            "请基于以上内容输出剧情梗概，直接以【第X日】时间标记开始：",
             api_format,
         )
         retry_summary, retry_in, retry_out = await llm_client.dispatch_chat_complete_with_usage(
@@ -203,6 +281,8 @@ async def summarize_chapter(
     # LLM 返回空字符串时（内容过滤等），跳过保存，避免创建空 Memory 行
     if not summary.strip():
         return "", in_tok, out_tok
+
+    summary = normalize_summary_timeline_tag(summary, prev_time_tag)
 
     # 保存摘要到章节
     chapter.summary = summary
@@ -336,13 +416,13 @@ async def update_character_states(
         indent=2,
     )
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = CHARACTER_UPDATE_PROMPT_PREFIX.format(character_states=states_text)
+    prompt_prefix = render("character_update_prefix.jinja2", character_states=states_text)
     chapter_content = strip_plot_suggestions(chapter.content)[:6000]
     if instruction:
         chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
     messages = _build_analysis_messages(
-        prompt_prefix, chapter_content, CHARACTER_UPDATE_PROMPT_SUFFIX, api_format,
+        prompt_prefix, chapter_content, render("character_update_suffix.jinja2"), api_format,
     )
 
     total_in, total_out = 0, 0
@@ -499,13 +579,13 @@ async def update_entity_states(
         indent=2,
     )
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = ENTITY_UPDATE_PROMPT_PREFIX.format(entity_states=states_text)
+    prompt_prefix = render("entity_update_prefix.jinja2", entity_states=states_text)
     chapter_content = strip_plot_suggestions(chapter.content)[:6000]
     if instruction:
         chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
     messages = _build_analysis_messages(
-        prompt_prefix, chapter_content, ENTITY_UPDATE_PROMPT_SUFFIX, api_format,
+        prompt_prefix, chapter_content, render("entity_update_suffix.jinja2"), api_format,
     )
 
     total_in, total_out = 0, 0
@@ -613,13 +693,13 @@ async def update_location_states(
         indent=2,
     )
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = LOCATION_UPDATE_PROMPT_PREFIX.format(location_states=states_text)
+    prompt_prefix = render("location_update_prefix.jinja2", location_states=states_text)
     chapter_content = strip_plot_suggestions(chapter.content)[:6000]
     if instruction:
         chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
     messages = _build_analysis_messages(
-        prompt_prefix, chapter_content, LOCATION_UPDATE_PROMPT_SUFFIX, api_format,
+        prompt_prefix, chapter_content, render("location_update_suffix.jinja2"), api_format,
     )
 
     total_in, total_out = 0, 0
@@ -732,7 +812,7 @@ async def generate_arc_summary(
     summaries_text = "\n".join(
         f"第{m.chapter_number}章：{m.content}" for m in memories
     )
-    prompt = ARC_SUMMARY_PROMPT.format(summaries=summaries_text)
+    prompt = render("arc_summary.jinja2", summaries=summaries_text)
     arc_summary = await llm_client.dispatch_chat_complete(
         messages=[{"role": "user", "content": prompt}],
         model=model,
@@ -800,10 +880,10 @@ async def _summarize_batch(
     summaries_text: str,
     model: str,
     api_format: str,
-    prompt_template: str = BOOK_SUMMARY_PROMPT,
+    prompt_template: str = "book_summary.jinja2",
 ) -> str:
     """用指定 prompt 模板对一段摘要文本做概要"""
-    prompt = prompt_template.format(summaries=summaries_text)
+    prompt = render(prompt_template, summaries=summaries_text)
     return await llm_client.dispatch_chat_complete(
         messages=[{"role": "user", "content": prompt}],
         model=model,
@@ -885,7 +965,7 @@ async def generate_book_summary(
         merged_text = "\n\n".join(batch_summaries)
         book_summary = await _summarize_batch(
             merged_text, model, api_format,
-            prompt_template=BOOK_SUMMARY_MERGE_PROMPT,
+            prompt_template="book_summary_merge.jinja2",
         )
 
     novel.book_summary = book_summary

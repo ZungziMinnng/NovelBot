@@ -1,17 +1,57 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Sun, Moon, Eye, Clock, Search, Loader2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
-import { novelsApi, chaptersApi, type ContextPreview, type Chapter, type SearchResult } from '@/api/client'
+import { ArrowLeft, Sun, Moon, Eye, Clock, Search, Loader2, ChevronDown, ChevronRight, RefreshCw, FileText, Save } from 'lucide-react'
+import { novelsApi, chaptersApi, promptsApi, type ContextPreview, type Chapter, type SearchResult, type PromptInfo } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 import toast from 'react-hot-toast'
 
-type Tab = 'context' | 'timeline' | 'search'
+type Tab = 'context' | 'timeline' | 'search' | 'prompts'
 
 function extractTime(chapter: Chapter): string | null {
   const text = chapter.summary || ''
   const m = text.match(/【(.+?)】/)
   return m ? m[1] : null
+}
+
+function extractDayNumber(time: string | null): number | null {
+  if (!time) return null
+  const m = time.match(/第(\d+)日/)
+  return m ? Number(m[1]) : null
+}
+
+function normalizeTimelineTime(time: string | null, previousTime: string | null): string | null {
+  if (!time) return null
+  if (time.includes('→')) {
+    let prev = previousTime
+    const parts = time.split('→').map(part => part.trim()).filter(Boolean)
+    const normalizedParts = parts.map((part) => {
+      const normalized = normalizeTimelineTime(part, prev)
+      if (normalized && /第\d+日/.test(normalized)) prev = normalized
+      return normalized || part
+    })
+    return normalizedParts.join('→')
+  }
+  if (/第\d+日/.test(time)) return time
+
+  const previousDay = extractDayNumber(previousTime)
+  if (previousDay == null) return time
+
+  const relative = time.match(/^(当天|当日|本日|同日|当晚|当夜|次日|翌日|第二天)(?:[·・\s-]?(.+))?$/)
+  if (relative) {
+    const [, rel, periodRaw] = relative
+    const day = ['次日', '翌日', '第二天'].includes(rel) ? previousDay + 1 : previousDay
+    const period = periodRaw || (['当晚', '当夜'].includes(rel) ? '夜晚' : '')
+    return `第${day}日${period ? `·${period}` : ''}`
+  }
+
+  const later = time.match(/^(\d+)日后(?:[·・\s-]?(.+))?$/)
+  if (later) {
+    const day = previousDay + Number(later[1])
+    return `第${day}日${later[2] ? `·${later[2]}` : ''}`
+  }
+
+  return time
 }
 
 export default function Outline() {
@@ -32,6 +72,14 @@ export default function Outline() {
     return cn ? Number(cn) : 0
   })
 
+  // Prompts tab state
+  const [selectedPrompt, setSelectedPrompt] = useState('')
+  const [promptContent, setPromptContent] = useState('')
+  const [promptOriginal, setPromptOriginal] = useState('')
+  const [promptSaving, setPromptSaving] = useState(false)
+  const [promptLoading, setPromptLoading] = useState(false)
+  const [activePromptCategory, setActivePromptCategory] = useState('')
+
   const { data: novel } = useQuery({
     queryKey: ['novel', novelId],
     queryFn: () => novelsApi.get(novelId),
@@ -51,11 +99,63 @@ export default function Outline() {
     enabled: activeTab === 'context',
   })
 
+  const { data: promptList = [] } = useQuery({
+    queryKey: ['prompts'],
+    queryFn: () => promptsApi.list(),
+    enabled: activeTab === 'prompts',
+  })
+
+  const promptGroups = useMemo(() => {
+    const groups: Array<{ category: string; prompts: PromptInfo[] }> = []
+    const groupMap = new Map<string, PromptInfo[]>()
+    for (const prompt of promptList) {
+      const category = prompt.category || '其他'
+      if (!groupMap.has(category)) {
+        groupMap.set(category, [])
+        groups.push({ category, prompts: groupMap.get(category)! })
+      }
+      groupMap.get(category)!.push(prompt)
+    }
+    return groups
+  }, [promptList])
+
+  const activePromptGroup = useMemo(() => {
+    return promptGroups.find(group => group.category === activePromptCategory) ?? promptGroups[0]
+  }, [promptGroups, activePromptCategory])
+
+  useEffect(() => {
+    if (activeTab !== 'prompts' || promptGroups.length === 0) return
+    if (!activePromptCategory || !promptGroups.some(group => group.category === activePromptCategory)) {
+      setActivePromptCategory(promptGroups[0].category)
+    }
+    if (!selectedPrompt && promptGroups[0].prompts[0]) {
+      setSelectedPrompt(promptGroups[0].prompts[0].name)
+    }
+  }, [activeTab, promptGroups, activePromptCategory, selectedPrompt])
+
+  useEffect(() => {
+    if (!selectedPrompt || activeTab !== 'prompts') return
+    setPromptLoading(true)
+    promptsApi.get(selectedPrompt)
+      .then(res => { setPromptContent(res.content); setPromptOriginal(res.content) })
+      .catch(() => toast.error('加载提示词失败'))
+      .finally(() => setPromptLoading(false))
+  }, [selectedPrompt, activeTab])
+
   // ── Timeline extraction ──────────────────────────────────────────────────
+  let previousTimelineTime: string | null = null
   const timelineEntries = [...chapters]
     .sort((a, b) => a.number - b.number)
     .filter(c => c.summary)
-    .map(c => ({ chapter: c.number, volume: c.volume, time: extractTime(c), summary: c.summary! }))
+    .map(c => {
+      const rawTime = extractTime(c)
+      const time = normalizeTimelineTime(rawTime, previousTimelineTime)
+      if (time && /第\d+日/.test(time)) previousTimelineTime = time
+      const summary = rawTime && time && rawTime !== time
+        ? c.summary!.replace(`【${rawTime}】`, `【${time}】`)
+        : c.summary!
+      return { chapter: c.number, volume: c.volume, time, summary }
+    })
 
   return (
     <div className="min-h-screen bg-background">
@@ -102,9 +202,18 @@ export default function Outline() {
           <Search className="w-3.5 h-3.5 inline-block mr-1.5" />
           搜索
         </button>
+        <button
+          onClick={() => setActiveTab('prompts')}
+          className={`py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'prompts' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <FileText className="w-3.5 h-3.5 inline-block mr-1.5" />
+          提示词
+        </button>
       </div>
 
-      <main className="max-w-3xl mx-auto px-6 py-8">
+      <main className={`mx-auto px-6 py-8 ${activeTab === 'prompts' ? 'max-w-5xl' : 'max-w-3xl'}`}>
         {/* ── Context Preview Tab ───────────────────────────────────────── */}
         {activeTab === 'context' && (
           <div className="space-y-6">
@@ -318,6 +427,123 @@ export default function Outline() {
                 <p className="text-sm">输入关键词搜索角色、道具、设定在剧情中的出现</p>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Prompts Tab ──────────────────────────────────────────────── */}
+        {activeTab === 'prompts' && (
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">查看和编辑各 Agent 的 Jinja2 提示词模板。修改后立即生效。</p>
+              {promptList.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  共 {promptList.length} 个模板
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {promptGroups.map(group => {
+                const active = activePromptGroup?.category === group.category
+                return (
+                  <button
+                    key={group.category}
+                    onClick={() => {
+                      setActivePromptCategory(group.category)
+                      const selectedInGroup = group.prompts.some(prompt => prompt.name === selectedPrompt)
+                      if (!selectedInGroup) {
+                        setSelectedPrompt(group.prompts[0]?.name ?? '')
+                      }
+                    }}
+                    className={`h-9 px-3 rounded-md text-sm transition-colors border ${
+                      active
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'bg-background hover:bg-muted border-border text-muted-foreground'
+                    }`}
+                  >
+                    {group.category}
+                    <span className={`ml-2 text-xs ${active ? 'text-primary-foreground/75' : 'text-muted-foreground'}`}>
+                      {group.prompts.length}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-[420px_minmax(0,1fr)] gap-5 items-start">
+              {/* Prompt picker */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold">{activePromptGroup?.category ?? '提示词'}</h3>
+                  <span className="text-xs text-muted-foreground">{activePromptGroup?.prompts.length ?? 0} 个模板</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-2">
+                  {(activePromptGroup?.prompts ?? []).map(p => (
+                    <button
+                      key={p.name}
+                      onClick={() => setSelectedPrompt(p.name)}
+                      className={`min-h-[78px] w-full text-left px-3 py-3 rounded-md border text-sm transition-colors ${
+                        selectedPrompt === p.name
+                          ? 'bg-primary/10 border-primary/40 text-primary'
+                          : 'bg-background hover:bg-muted border-border text-foreground'
+                      }`}
+                    >
+                      <div className="font-medium text-sm leading-5">{p.label}</div>
+                      <div className="text-xs text-muted-foreground mt-1 leading-5">{p.description}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Prompt editor */}
+              <div className="flex-1 min-w-0">
+                {!selectedPrompt ? (
+                  <div className="flex items-center justify-center h-[560px] border rounded-md text-muted-foreground text-sm">
+                    <FileText className="w-5 h-5 mr-2 opacity-30" />
+                    选择模板查看和编辑
+                  </div>
+                ) : promptLoading ? (
+                  <div className="flex items-center justify-center h-[560px] border rounded-md text-muted-foreground">
+                    <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                    加载中...
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">{selectedPrompt}</span>
+                      <button
+                        onClick={async () => {
+                          setPromptSaving(true)
+                          try {
+                            await promptsApi.update(selectedPrompt, promptContent)
+                            setPromptOriginal(promptContent)
+                            toast.success('提示词已保存')
+                          } catch {
+                            toast.error('保存失败')
+                          } finally {
+                            setPromptSaving(false)
+                          }
+                        }}
+                        disabled={promptSaving || promptContent === promptOriginal}
+                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+                      >
+                        {promptSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                        保存
+                      </button>
+                    </div>
+                    <textarea
+                      value={promptContent}
+                      onChange={e => setPromptContent(e.target.value)}
+                      className="w-full h-[560px] text-xs font-mono border rounded-md px-4 py-3 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y leading-relaxed"
+                      spellCheck={false}
+                    />
+                    {promptContent !== promptOriginal && (
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400">有未保存的修改</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 

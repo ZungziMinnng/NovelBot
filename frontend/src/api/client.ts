@@ -247,6 +247,10 @@ export interface ReviewResult {
   word_count: number
 }
 
+export interface CriticIssuesData {
+  issues_text: string
+}
+
 export interface SearchResult {
   chapters: Array<{ chapter_number: number; summary: string; score: number }>
   characters: Array<{ id: number; name: string; role: string; description: string }>
@@ -268,7 +272,15 @@ export const PROVIDER_PRESETS = [
 
 // ── Novel APIs ─────────────────────────────────────────────────────────────
 
+export interface DashboardStats {
+  total_novels: number
+  total_words: number
+  total_entities: number
+  novel_words: Record<string, number>
+}
+
 export const novelsApi = {
+  dashboard: () => api.get<DashboardStats>('/novels/dashboard').then(r => r.data),
   list: () => api.get<Novel[]>('/novels/').then(r => r.data),
   get: (id: number) => api.get<Novel>(`/novels/${id}`).then(r => r.data),
   create: (data: Partial<Novel>) => api.post<Novel>('/novels/', data).then(r => r.data),
@@ -499,6 +511,26 @@ export const techniquesApi = {
     api.post<WorldEntity>(`/techniques/${id}/convert-to-entity`, { type }).then(r => r.data),
 }
 
+// ── Prompt APIs ──────────────────────────────────────────────────────────
+
+export interface PromptInfo {
+  name: string
+  category: string
+  label: string
+  description: string
+}
+
+export interface PromptContent {
+  name: string
+  content: string
+}
+
+export const promptsApi = {
+  list: () => api.get<PromptInfo[]>('/prompts/').then(r => r.data),
+  get: (name: string) => api.get<PromptContent>(`/prompts/${encodeURIComponent(name)}`).then(r => r.data),
+  update: (name: string, content: string) => api.put<PromptContent>(`/prompts/${encodeURIComponent(name)}`, { content }).then(r => r.data),
+}
+
 // ── Volume APIs ───────────────────────────────────────────────────────────
 
 export const volumesApi = {
@@ -596,6 +628,7 @@ export type SSEMessage =
   | { event: 'new_locations'; data: NewLocationsData }
   | { event: 'new_techniques'; data: NewTechniquesData }
   | { event: 'context_step'; data: ContextStepData }
+  | { event: 'critic_issues'; data: CriticIssuesData }
 
 // ── SSE Chat ───────────────────────────────────────────────────────────────
 

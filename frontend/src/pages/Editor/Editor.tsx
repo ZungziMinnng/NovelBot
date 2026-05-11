@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
@@ -6,10 +6,12 @@ import {
   ArrowLeft, List, Zap, Check, Edit3, Trash2,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, MessageSquare,
-  Terminal, BookOpen, ClipboardCheck, Gauge, Search,
+  Terminal, BookOpen, ClipboardCheck, Gauge, Search, GitCompare,
 } from 'lucide-react'
 import {
-  novelsApi, chaptersApi, modelLibraryApi, type Chapter, type ReviewResult,
+  novelsApi, chaptersApi, modelLibraryApi, charactersApi, worldEntitiesApi,
+  locationsApi, factionsApi, techniquesApi,
+  type Chapter, type ReviewResult,
 } from '@/api/client'
 import AgentLog from '@/components/AgentLog/AgentLog'
 import ContextPanel from '@/components/ContextPanel/ContextPanel'
@@ -80,6 +82,7 @@ export default function Editor() {
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
   const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('novel_font_family') || '')
   const [fontWeight, setFontWeight] = useState(() => localStorage.getItem('novel_font_weight') || '')
+  const [fontColor, setFontColor] = useState(() => localStorage.getItem('novel_font_color') || '')
   const [rewriteModel, setRewriteModel] = useState('')
 
   // ── Novel Data ────────────────────────────────────────────────────────────
@@ -97,6 +100,37 @@ export default function Editor() {
     queryKey: ['model-library'],
     queryFn: () => modelLibraryApi.list(),
   })
+
+  const { data: characters = [] } = useQuery({
+    queryKey: ['characters', novelId],
+    queryFn: () => charactersApi.list(novelId),
+  })
+  const { data: worldEntities = [] } = useQuery({
+    queryKey: ['world-entities', novelId],
+    queryFn: () => worldEntitiesApi.list(novelId),
+  })
+  const { data: locations = [] } = useQuery({
+    queryKey: ['locations', novelId],
+    queryFn: () => locationsApi.list(novelId),
+  })
+  const { data: factions = [] } = useQuery({
+    queryKey: ['factions', novelId],
+    queryFn: () => factionsApi.list(novelId),
+  })
+  const { data: techniques = [] } = useQuery({
+    queryKey: ['techniques', novelId],
+    queryFn: () => techniquesApi.list(novelId),
+  })
+
+  const entityList = useMemo(() => {
+    const items: Array<{ name: string; type: string; typeLabel: string; description: string }> = []
+    for (const c of characters) items.push({ name: c.name, type: 'character', typeLabel: '角色', description: c.role || c.description || '' })
+    for (const e of worldEntities) items.push({ name: e.name, type: 'entity', typeLabel: e.type === 'system' ? '系统' : '道具', description: e.description || '' })
+    for (const l of locations) items.push({ name: l.name, type: 'location', typeLabel: '地点', description: l.description || '' })
+    for (const f of factions) items.push({ name: f.name, type: 'faction', typeLabel: '势力', description: f.description || '' })
+    for (const t of techniques) items.push({ name: t.name, type: 'technique', typeLabel: '功法', description: t.description || '' })
+    return items
+  }, [characters, worldEntities, locations, factions, techniques])
 
   const currentChapter = chapters.find((c: Chapter) => c.number === selectedChapterNum) || null
   const selectedVolume = currentChapter?.volume ?? novel?.current_volume ?? 1
@@ -128,7 +162,7 @@ export default function Editor() {
     ? editContent
     : streamingMode && gen.isCurrentlyGenerating
       ? (genStore.streamingText || currentChapter?.content || '')
-      : (currentChapter?.content || (recentlyFinishedHere ? genStore.streamingText : ''))
+      : (recentlyFinishedHere ? genStore.streamingText : (currentChapter?.content || ''))
 
   const isStreaming = gen.isCurrentlyGenerating && streamingMode && genStore.streamingText.length > 0
 
@@ -153,6 +187,11 @@ export default function Editor() {
   const agentLogEntries = hasGenDataHere ? genStore.agentLogEntries : []
   const totalInputTokens = hasGenDataHere ? genStore.totalInputTokens : 0
   const totalOutputTokens = hasGenDataHere ? genStore.totalOutputTokens : 0
+  const canShowReviewDiff =
+    hasGenDataHere &&
+    !gen.isCurrentlyGenerating &&
+    !!genStore.originalDraft &&
+    !!displayText
 
   useEffect(() => {
     if (agentLogEntries.length > 0 && gen.isCurrentlyGenerating) {
@@ -330,10 +369,13 @@ export default function Editor() {
                 className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                 title="字体大小"
               >
+                <option value={12}>12px</option>
                 <option value={14}>14px</option>
                 <option value={16}>16px</option>
                 <option value={18}>18px</option>
                 <option value={20}>20px</option>
+                <option value={22}>22px</option>
+                <option value={24}>24px</option>
               </select>
               <select
                 value={lineHeight}
@@ -341,11 +383,45 @@ export default function Editor() {
                 className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                 title="行间距"
               >
+                <option value={1.2}>1.2&#215;</option>
                 <option value={1.5}>1.5&#215;</option>
                 <option value={1.8}>1.8&#215;</option>
                 <option value={2.0}>2.0&#215;</option>
                 <option value={2.5}>2.5&#215;</option>
+                <option value={3.0}>3.0&#215;</option>
               </select>
+              <select
+                value={fontFamily}
+                onChange={e => { setFontFamily(e.target.value); localStorage.setItem('novel_font_family', e.target.value) }}
+                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring max-w-[90px]"
+                title="字体"
+              >
+                <option value="">默认</option>
+                <option value="SimSun, serif">宋体</option>
+                <option value="KaiTi, serif">楷体</option>
+                <option value="FangSong, serif">仿宋</option>
+                <option value="Microsoft YaHei, sans-serif">微软雅黑</option>
+                <option value="SimHei, sans-serif">黑体</option>
+                <option value="Source Han Serif SC, serif">思源宋体</option>
+                <option value="Noto Sans SC, sans-serif">Noto Sans</option>
+              </select>
+              <div className="flex items-center gap-0.5" title="字体颜色">
+                <input
+                  type="color"
+                  value={fontColor || '#000000'}
+                  onChange={e => { setFontColor(e.target.value); localStorage.setItem('novel_font_color', e.target.value) }}
+                  className="w-6 h-6 border rounded cursor-pointer bg-transparent p-0"
+                />
+                {fontColor && (
+                  <button
+                    onClick={() => { setFontColor(''); localStorage.removeItem('novel_font_color') }}
+                    className="text-[10px] text-muted-foreground hover:text-foreground px-0.5"
+                    title="重置为默认颜色"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
 
               <div className="flex items-center gap-2">
                 {currentChapter && !gen.isCurrentlyGenerating && (
@@ -355,6 +431,17 @@ export default function Editor() {
                     title="删除本章"
                   >
                     <Trash2 className="w-3 h-3" /> 删除
+                  </button>
+                )}
+                {canShowReviewDiff && (
+                  <button
+                    onClick={() => setShowDiff(true)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md transition-colors ${
+                      showDiff ? 'bg-primary/10 text-primary border-primary/40' : 'hover:bg-muted'
+                    }`}
+                    title="查看修订前后的剧情对比"
+                  >
+                    <GitCompare className="w-3 h-3" /> 修订对比
                   </button>
                 )}
                 {currentChapter?.content && !gen.isCurrentlyGenerating && (
@@ -440,6 +527,7 @@ export default function Editor() {
               lineHeight={lineHeight}
               fontFamily={fontFamily}
               fontWeight={fontWeight}
+              fontColor={fontColor}
               plotSuggestions={plotSuggestions}
               instruction={instruction}
               onEditContentChange={setEditContent}
@@ -516,6 +604,7 @@ export default function Editor() {
               onToggleTech={gen.toggleTechSelection}
               onAddTechs={gen.handleAddNewTechs}
               onDismissTechs={() => gen.setNewTechCandidates([])}
+              entities={entityList}
             />
           </>}
         </div>
@@ -554,6 +643,8 @@ export default function Editor() {
                     totalOutputTokens={totalOutputTokens}
                     showTokens={showTokens}
                     onToggleTokens={() => setShowTokens(v => !v)}
+                    canShowReviewDiff={canShowReviewDiff}
+                    onShowReviewDiff={() => setShowDiff(true)}
                     collapsed={logCollapsed}
                     onToggleCollapse={() => setLogCollapsed(v => !v)}
                   />

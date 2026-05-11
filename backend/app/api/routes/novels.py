@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from openai import AuthenticationError as OpenAIAuthError
 from app.database import get_db
 from app.models.novel import Novel
@@ -18,6 +18,30 @@ from app.models.novel_note import NovelNote
 from app.services import vector_store
 
 router = APIRouter()
+
+
+@router.get("/dashboard")
+async def dashboard(db: AsyncSession = Depends(get_db)):
+    novels = (await db.execute(select(Novel))).scalars().all()
+    total_novels = len(novels)
+
+    word_rows = (await db.execute(
+        select(Chapter.novel_id, func.coalesce(func.sum(Chapter.word_count), 0))
+        .group_by(Chapter.novel_id)
+    )).all()
+    novel_words = {row[0]: row[1] for row in word_rows}
+    total_words = sum(novel_words.values())
+
+    entity_count = (await db.execute(select(func.count(WorldEntity.id)))).scalar() or 0
+    technique_count = (await db.execute(select(func.count(Technique.id)))).scalar() or 0
+    total_entities = entity_count + technique_count
+
+    return {
+        "total_novels": total_novels,
+        "total_words": total_words,
+        "total_entities": total_entities,
+        "novel_words": novel_words,
+    }
 
 
 @router.get("/", response_model=list[NovelOut])
@@ -547,6 +571,7 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
                 "规则：\n"
                 "- 格式为：第X日 或 第X日·时段（清晨/上午/白天/午后/傍晚/晚上/深夜）\n"
                 "- 如果一章跨越多天：第X日·时段→第Y日·时段\n"
+                "- 禁止使用当天、当日、次日、翌日、第二天、三日后等相对时间词\n"
                 "- 日数必须单调递增，不能回退或重置\n"
                 "- 即使某章缺少时间标记，也必须根据上下文推算\n"
             )
@@ -582,14 +607,19 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
             if not batch_results and i == 0:
                 raise HTTPException(status_code=500, detail="LLM 返回空内容，可能被安全过滤器拦截，请尝试更换 fast 模型")
 
-            for item in batch_results:
+            previous_time = resolved_tail[-1][1] if resolved_tail else ""
+            normalized_results = []
+            for item in sorted(batch_results, key=lambda x: x.get("chapter", 0)):
                 ch_num = item.get("chapter")
                 ch_time = item.get("time")
                 if ch_num is not None and ch_time:
+                    ch_time = summarizer.normalize_timeline_tag(ch_time, previous_time)
                     time_map[ch_num] = ch_time
+                    previous_time = ch_time
+                    normalized_results.append({"chapter": ch_num, "time": ch_time})
 
             # 保留本批最后 OVERLAP 条结果作为下一批的参照
-            valid_results = [(item["chapter"], item["time"]) for item in batch_results if "chapter" in item and "time" in item]
+            valid_results = [(item["chapter"], item["time"]) for item in normalized_results if "chapter" in item and "time" in item]
             resolved_tail = valid_results[-OVERLAP:] if valid_results else resolved_tail
 
         updated = 0

@@ -243,10 +243,22 @@ export function useGenerationStream(
             if (d.suggestions?.length) setChapterSuggestions(novelId, selectedChapterNum, d.suggestions)
             break
           }
+          case 'critic_issues': {
+            const d = msg.data as { issues_text: string }
+            const criticEntryId = runningEntryIds.get('critic')
+            if (criticEntryId && d.issues_text) {
+              s.updateLogEntry(criticEntryId, { issues: d.issues_text })
+            }
+            break
+          }
           case 'review_result': {
-            const d = msg.data as { issues?: unknown[] }
+            const d = msg.data as { issues?: Array<{ type: string; severity: string; chapters: number[]; description: string }> }
             if (d.issues?.length) {
               s.setWarning(`剧情细节审查发现 ${d.issues.length} 个问题，正在尝试修订`)
+              const detailEntryId = runningEntryIds.get('detail_review')
+              if (detailEntryId) {
+                s.updateLogEntry(detailEntryId, { issues: d.issues })
+              }
             }
             break
           }
@@ -372,10 +384,22 @@ export function useGenerationStream(
             s.setOriginalDraft(d.text)
             break
           }
+          case 'critic_issues': {
+            const d = msg.data as { issues_text: string }
+            const criticEntryId = runningEntryIds.get('critic')
+            if (criticEntryId && d.issues_text) {
+              s.updateLogEntry(criticEntryId, { issues: d.issues_text })
+            }
+            break
+          }
           case 'review_result': {
-            const d = msg.data as { issues?: unknown[] }
+            const d = msg.data as { issues?: Array<{ type: string; severity: string; chapters: number[]; description: string }> }
             if (d.issues?.length) {
               s.setWarning(`剧情细节审查发现 ${d.issues.length} 个问题，正在尝试修订`)
+              const detailEntryId = runningEntryIds.get('detail_review')
+              if (detailEntryId) {
+                s.updateLogEntry(detailEntryId, { issues: d.issues })
+              }
             }
             break
           }

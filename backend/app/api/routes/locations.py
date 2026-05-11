@@ -46,7 +46,7 @@ async def update_location(location_id: int, data: LocationUpdate, db: AsyncSessi
     loc = await db.get(Location, location_id)
     if not loc:
         raise HTTPException(status_code=404, detail="地点不存在")
-    for k, v in data.model_dump(exclude_none=True).items():
+    for k, v in data.model_dump(exclude_unset=True).items():
         setattr(loc, k, v)
     await db.commit()
     await db.refresh(loc)

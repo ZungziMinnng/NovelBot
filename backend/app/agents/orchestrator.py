@@ -252,6 +252,7 @@ async def run_chapter_generation(
                 })
 
                 if not passed:
+                    yield _sse_json("critic_issues", {"issues_text": issues})
                     # 首次 Critic 失败时，先发出初稿内容，让前端展示对比视图
                     if state["revision_count"] == 0:
                         yield _sse_json("original_draft", {"text": state["generated_text"]})
@@ -375,6 +376,7 @@ async def run_chapter_generation(
         unmatched_locations: list[str] = []
 
         # ── 章节摘要 ──
+        yield _sse("stage", "updating_memory_summary")
         try:
             r0, dur_sum = await _timed(summarizer.summarize_chapter(session, chapter, novel))
             if isinstance(r0, BaseException):
@@ -393,6 +395,7 @@ async def run_chapter_generation(
         })
 
         # ── 角色状态更新 ──
+        yield _sse("stage", "updating_memory_characters")
         try:
             r1, dur_char = await _timed(summarizer.update_character_states(
                 session, chapter, novel, instruction=state["instruction"]
@@ -413,6 +416,7 @@ async def run_chapter_generation(
         })
 
         # ── 实体状态更新 ──
+        yield _sse("stage", "updating_memory_entities")
         try:
             r2, dur_ent = await _timed(summarizer.update_entity_states(
                 session, chapter, novel, instruction=state["instruction"]
@@ -433,6 +437,7 @@ async def run_chapter_generation(
         })
 
         # ── 地点状态更新 ──
+        yield _sse("stage", "updating_memory_locations")
         loc_in = loc_out = 0
         loc_ok = True
         loc_warning = ""
@@ -718,6 +723,7 @@ async def run_chapter_rewrite(
         mem_model, _ = llm_client.get_agent_client("memory", novel.fast_model)
         mem_in = mem_out = 0
 
+        yield _sse("stage", "updating_memory_summary")
         try:
             (_, s_in, s_out) = await summarizer.summarize_chapter(session, chapter, novel)
             mem_in += s_in; mem_out += s_out
@@ -726,6 +732,7 @@ async def run_chapter_rewrite(
             logger.warning("章节摘要更新失败: %s", e)
             await session.rollback()
 
+        yield _sse("stage", "updating_memory_characters")
         try:
             (_, _, c_in, c_out, _) = await summarizer.update_character_states(session, chapter, novel)
             mem_in += c_in; mem_out += c_out
@@ -734,6 +741,7 @@ async def run_chapter_rewrite(
             logger.warning("角色状态更新失败: %s", e)
             await session.rollback()
 
+        yield _sse("stage", "updating_memory_entities")
         try:
             (_, _, e_in, e_out, _) = await summarizer.update_entity_states(session, chapter, novel)
             mem_in += e_in; mem_out += e_out
@@ -742,6 +750,7 @@ async def run_chapter_rewrite(
             logger.warning("实体状态更新失败: %s", e)
             await session.rollback()
 
+        yield _sse("stage", "updating_memory_locations")
         try:
             (_, _, l_in, l_out, _) = await summarizer.update_location_states(session, chapter, novel)
             mem_in += l_in; mem_out += l_out

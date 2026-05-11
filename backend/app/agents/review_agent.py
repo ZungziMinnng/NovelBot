@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.models.novel import Novel
 from app.models.chapter import Chapter
 from app.models.character import Character
+from app.prompts.loader import render
 from app.services import llm_client
 
 logger = logging.getLogger(__name__)
@@ -137,18 +138,7 @@ async def review_generated_with_recent_chapters(
         )
     recent_text = "\n\n".join(recent_parts) or "（无前文，仅审查新章节内部文字连续性）"
 
-    system_prompt = (
-        "你是小说章节文字细节审查编辑。你的任务是在新章节保存前，"
-        "只基于前20章正文和新生成章节正文，检查新章节文字本身是否存在叙事连续性问题。"
-        "不要审查角色卡、势力库、系统库、道具库等设定库一致性；这些由 Critic Agent 负责。\n\n"
-        f"问题类型：\n{type_list}\n\n"
-        "要求：\n"
-        "1. 只报告新章节文字相对前文正文的具体矛盾、重复、断裂或时间线问题，不要提出泛泛的写作建议。\n"
-        "2. 每个问题必须说明新章节与哪一章正文冲突，或指出新章节内部哪段文字自相矛盾。\n"
-        "3. severity 只能是 high/medium/low。\n"
-        "4. 如果没有问题，返回空数组 []。\n"
-        "5. 严格返回 JSON 数组，不要输出 Markdown 或额外文字。"
-    )
+    system_prompt = render("detail_review.jinja2", type_list=type_list, window=window)
 
     user_prompt = (
         f"小说：《{novel.title}》\n"
@@ -210,18 +200,7 @@ async def _review_batch(
 
     other_summaries = _build_other_summaries(all_chapters, batch_chapters)
 
-    system_prompt = (
-        "你是一位专业的小说审稿编辑，擅长发现长篇小说中的全局性问题。"
-        "你需要仔细阅读重点章节的全文，并结合其余章节的摘要，检查以下类型的问题：\n"
-        f"{type_list}\n\n"
-        "要求：\n"
-        "1. 只报告确实存在的问题，不要捏造\n"
-        "2. 每个问题注明涉及的章节号\n"
-        "3. severity 分为 high/medium/low\n"
-        "4. 特别注意重点章节与其余章节摘要之间的矛盾和不一致\n"
-        "5. 如果没有发现问题，返回空数组 []\n"
-        "6. 严格以 JSON 数组格式返回，不要其他文字"
-    )
+    system_prompt = render("fulltext_review.jinja2", type_list=type_list)
 
     other_section = ""
     if other_summaries:

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
@@ -7,6 +7,20 @@ import { novelsApi, writerPresetsApi, type Novel, type WriterPreset } from '@/ap
 import { useSettingsStore } from '@/store/settingsStore'
 import NovelWizard from './NovelWizard'
 import PresetModal from './PresetModal'
+
+function getGreeting(): string {
+  const h = new Date().getHours()
+  if (h < 6) return '夜深了'
+  if (h < 12) return '早上好'
+  if (h < 14) return '中午好'
+  if (h < 18) return '下午好'
+  return '晚上好'
+}
+
+function formatWordCount(n: number): string {
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
+  return String(n)
+}
 
 type Tab = 'novels' | 'presets'
 
@@ -27,6 +41,13 @@ export default function Home() {
     queryKey: ['writer-presets'],
     queryFn: writerPresetsApi.list,
   })
+
+  const { data: dashboard } = useQuery({
+    queryKey: ['dashboard'],
+    queryFn: novelsApi.dashboard,
+  })
+
+  const greeting = useMemo(() => getGreeting(), [])
 
   const savePreset = useMutation({
     mutationFn: (data: { id?: number; name: string; prompt: string }) =>
@@ -92,6 +113,27 @@ export default function Home() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-10">
+        {/* Greeting + Stats */}
+        {dashboard && (
+          <div className="mb-8 p-6 rounded-xl bg-gradient-to-r from-primary/5 to-primary/10 border">
+            <h2 className="text-xl font-bold mb-3">{greeting}，创作者</h2>
+            <div className="flex flex-wrap gap-6 text-sm">
+              <div>
+                <span className="text-2xl font-bold text-primary">{dashboard.total_novels}</span>
+                <span className="text-muted-foreground ml-1.5">本小说</span>
+              </div>
+              <div>
+                <span className="text-2xl font-bold text-primary">{formatWordCount(dashboard.total_words)}</span>
+                <span className="text-muted-foreground ml-1.5">字</span>
+              </div>
+              <div>
+                <span className="text-2xl font-bold text-primary">{dashboard.total_entities}</span>
+                <span className="text-muted-foreground ml-1.5">个设定</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Tab header */}
         <div className="flex items-center justify-between mb-8">
           <div>
@@ -162,6 +204,9 @@ export default function Home() {
                         <p className="text-muted-foreground text-sm line-clamp-2">{novel.premise}</p>
                         <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
                           <span>第{novel.current_chapter}章</span>
+                          {dashboard?.novel_words[novel.id] != null && (
+                            <span>{formatWordCount(dashboard.novel_words[novel.id])}字</span>
+                          )}
                           <span>{novel.target_length}</span>
                           <span>{novel.writing_style}</span>
                         </div>

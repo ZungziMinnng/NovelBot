@@ -1,4 +1,12 @@
-import { Eye, EyeOff, ChevronDown, ChevronUp } from 'lucide-react'
+import { useState } from 'react'
+import { Eye, EyeOff, ChevronDown, ChevronUp, GitCompare } from 'lucide-react'
+
+export interface ReviewIssue {
+  type: string
+  severity: string
+  chapters: number[]
+  description: string
+}
 
 export interface AgentLogEntry {
   id: string
@@ -8,6 +16,7 @@ export interface AgentLogEntry {
   inputTokens: number
   outputTokens: number
   passed?: boolean
+  issues?: string | ReviewIssue[]
 }
 
 interface Props {
@@ -16,6 +25,8 @@ interface Props {
   totalOutputTokens: number
   showTokens: boolean
   onToggleTokens: () => void
+  canShowReviewDiff?: boolean
+  onShowReviewDiff?: () => void
   collapsed: boolean
   onToggleCollapse: () => void
 }
@@ -32,16 +43,34 @@ const STATUS_DOT: Record<AgentLogEntry['status'], string> = {
   failed: 'bg-red-500',
 }
 
+const SEVERITY_STYLE: Record<string, string> = {
+  high: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
+  medium: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+  low: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+}
+
 export default function AgentLog({
   entries,
   totalInputTokens,
   totalOutputTokens,
   showTokens,
   onToggleTokens,
+  canShowReviewDiff,
+  onShowReviewDiff,
   collapsed,
   onToggleCollapse,
 }: Props) {
+  const [expandedIssues, setExpandedIssues] = useState<Set<string>>(new Set())
+
   if (entries.length === 0) return null
+
+  const toggleIssues = (id: string) => {
+    setExpandedIssues((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
 
   return (
     <div className="bg-background">
@@ -54,6 +83,16 @@ export default function AgentLog({
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
+          {canShowReviewDiff && (
+            <button
+              onClick={e => { e.stopPropagation(); onShowReviewDiff?.() }}
+              className="flex items-center gap-1 text-[10px] px-1.5 py-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              title="查看修订前后的剧情对比"
+            >
+              <GitCompare className="w-3.5 h-3.5" />
+              对比
+            </button>
+          )}
           <button
             onClick={e => { e.stopPropagation(); onToggleTokens() }}
             className="p-1 rounded hover:bg-muted transition-colors"
@@ -67,34 +106,68 @@ export default function AgentLog({
 
       {!collapsed && (
         <div className="pb-3 space-y-1">
-          {entries.map(entry => (
-            <div key={entry.id} className="flex items-center gap-2 text-xs py-0.5">
-              {/* Status dot */}
-              <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[entry.status]}`} />
+          {entries.map(entry => {
+            const hasIssues = !entry.passed && entry.issues
+            const isExpanded = expandedIssues.has(entry.id)
+            return (
+              <div key={entry.id}>
+                <div className="flex items-center gap-2 text-xs py-0.5">
+                  {/* Status dot */}
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[entry.status]}`} />
 
-              {/* Agent badge */}
-              <span className={`px-1.5 py-0.5 rounded text-white text-[10px] shrink-0 ${AGENT_COLORS[entry.agent] || 'bg-gray-500'}`}>
-                {entry.agent}
-              </span>
+                  {/* Agent badge */}
+                  <span className={`px-1.5 py-0.5 rounded text-white text-[10px] shrink-0 ${AGENT_COLORS[entry.agent] || 'bg-gray-500'}`}>
+                    {entry.agent}
+                  </span>
 
-              {/* Label */}
-              <span className="text-muted-foreground flex-1 truncate">{entry.label}</span>
+                  {/* Label */}
+                  <span className="text-muted-foreground flex-1 truncate">{entry.label}</span>
 
-              {/* Token counts */}
-              {showTokens && entry.status === 'done' && (entry.inputTokens > 0 || entry.outputTokens > 0) && (
-                <span className="text-muted-foreground/60 shrink-0 font-mono">
-                  ↑{entry.inputTokens} ↓{entry.outputTokens}
-                </span>
-              )}
+                  {/* Token counts */}
+                  {showTokens && entry.status === 'done' && (entry.inputTokens > 0 || entry.outputTokens > 0) && (
+                    <span className="text-muted-foreground/60 shrink-0 font-mono">
+                      ↑{entry.inputTokens} ↓{entry.outputTokens}
+                    </span>
+                  )}
 
-              {/* Passed/failed indicator for review agents */}
-              {(entry.agent === 'critic' || entry.agent === 'detail_review') && entry.status === 'done' && (
-                <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full ${entry.passed ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}>
-                  {entry.passed ? '通过' : '修改'}
-                </span>
-              )}
-            </div>
-          ))}
+                  {/* Passed/failed indicator for review agents */}
+                  {(entry.agent === 'critic' || entry.agent === 'detail_review') && entry.status === 'done' && (
+                    <span
+                      className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full cursor-pointer ${entry.passed ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}
+                      onClick={hasIssues ? () => toggleIssues(entry.id) : undefined}
+                    >
+                      {entry.passed ? '通过' : '修改'}
+                      {hasIssues && (isExpanded ? ' ▲' : ' ▼')}
+                    </span>
+                  )}
+                </div>
+
+                {/* Expandable issue details */}
+                {hasIssues && isExpanded && (
+                  <div className="ml-6 mt-1 mb-2 text-xs space-y-1.5 border-l-2 border-orange-300 dark:border-orange-700 pl-2">
+                    {typeof entry.issues === 'string' ? (
+                      <p className="text-muted-foreground whitespace-pre-wrap">{entry.issues}</p>
+                    ) : (
+                      (entry.issues as ReviewIssue[]).map((issue, idx) => (
+                        <div key={idx} className="space-y-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] px-1 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.medium}`}>
+                              {issue.severity === 'high' ? '严重' : issue.severity === 'medium' ? '中等' : '轻微'}
+                            </span>
+                            <span className="text-muted-foreground/70">{issue.type}</span>
+                            {issue.chapters?.length > 0 && (
+                              <span className="text-muted-foreground/50">第{issue.chapters.join(',')}章</span>
+                            )}
+                          </div>
+                          <p className="text-muted-foreground">{issue.description}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
 
           {/* Total row */}
           {showTokens && totalInputTokens > 0 && (

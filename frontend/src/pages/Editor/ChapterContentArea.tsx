@@ -21,6 +21,7 @@ interface ChapterContentAreaProps {
   lineHeight: number
   fontFamily: string
   fontWeight: string
+  fontColor: string
   plotSuggestions: string[]
   instruction: string
   rewriteMode: boolean
@@ -46,6 +47,7 @@ export default function ChapterContentArea({
   lineHeight,
   fontFamily,
   fontWeight,
+  fontColor,
   plotSuggestions,
   instruction,
   rewriteMode,
@@ -65,7 +67,7 @@ export default function ChapterContentArea({
   const renderParagraphs = (text: string) => {
     const paragraphs = text.split('\n').filter(p => p.trim())
     return (
-      <div className="space-y-0" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+      <div className="space-y-0" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
         {paragraphs.map((p, i) => {
           const num = i < CIRCLED_NUMS.length ? CIRCLED_NUMS[i] : `(${i + 1})`
           return (
@@ -92,7 +94,7 @@ export default function ChapterContentArea({
       {showDiff && !isCurrentlyGenerating && originalDraft ? (
         <DiffView
           originalText={originalDraft}
-          revisedText={currentChapter?.content || ''}
+          revisedText={displayText}
           onClose={onCloseDiff}
         />
       ) : isEditing ? (
@@ -100,7 +102,7 @@ export default function ChapterContentArea({
           value={editContent}
           onChange={e => onEditContentChange(e.target.value)}
           className="w-full h-full p-8 resize-none bg-background focus:outline-none novel-content font-serif"
-          style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}
+          style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}
           placeholder="在此输入内容..."
         />
       ) : warningMessage && !isCurrentlyGenerating ? (
@@ -114,7 +116,7 @@ export default function ChapterContentArea({
               {renderParagraphs(displayText)}
             </div>
           ) : (
-            <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+            <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
               {displayText}
             </div>
           )}
@@ -151,7 +153,7 @@ export default function ChapterContentArea({
               {renderParagraphs(displayText)}
             </div>
           ) : (
-            <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any }}>
+            <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
               {displayText || (
                 <span className="text-muted-foreground/50">
                   {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}

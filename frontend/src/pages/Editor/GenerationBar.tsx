@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 import type { Annotation } from '@/store/editorStore'
@@ -8,6 +8,8 @@ interface NewCharCandidate { name: string; role: string; description: string }
 interface NewEntityCandidate { name: string; type: string; description: string }
 interface NewLocationCandidate { name: string; type: string; description: string; parent_name: string }
 interface NewTechCandidate { name: string; type: string; description: string }
+
+export interface EntityItem { name: string; type: string; typeLabel: string; description: string }
 
 export type BarMode = 'write' | 'rewrite'
 
@@ -76,6 +78,9 @@ interface GenerationBarProps {
   onToggleTech: (i: number) => void
   onAddTechs: () => void
   onDismissTechs: () => void
+
+  // Entity autocomplete
+  entities: EntityItem[]
 }
 
 const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
@@ -130,14 +135,93 @@ export default function GenerationBar({
   onToggleTech,
   onAddTechs,
   onDismissTechs,
+  entities,
 }: GenerationBarProps) {
   const [globalInput, setGlobalInput] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [acItems, setAcItems] = useState<EntityItem[]>([])
+  const [acIndex, setAcIndex] = useState(0)
+  const [acFragment, setAcFragment] = useState({ start: 0, end: 0 })
 
   const handleAddGlobal = () => {
     if (!globalInput.trim()) return
     onAddGlobalAnnotation(globalInput.trim())
     setGlobalInput('')
   }
+
+  const composingRef = useRef(false)
+
+  const refreshAutocomplete = useCallback((value: string, cursorPos: number) => {
+    if (entities.length === 0 || cursorPos === 0) {
+      setAcItems([])
+      return
+    }
+    const textBefore = value.slice(0, cursorPos)
+    const maxCheck = Math.min(20, textBefore.length)
+    for (let len = maxCheck; len >= 1; len--) {
+      const suffix = textBefore.slice(-len)
+      const matches = entities.filter(e => e.name.startsWith(suffix))
+      if (matches.length > 0) {
+        setAcItems(matches.slice(0, 8))
+        setAcIndex(0)
+        setAcFragment({ start: cursorPos - len, end: cursorPos })
+        return
+      }
+    }
+    setAcItems([])
+  }, [entities])
+
+  const handleInstructionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.currentTarget.value
+    onInstructionChange(value)
+    if (!composingRef.current) {
+      refreshAutocomplete(value, e.currentTarget.selectionStart)
+    }
+  }, [onInstructionChange, refreshAutocomplete])
+
+  const handleSelectionRefresh = useCallback((e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current) return
+    const target = e.currentTarget
+    refreshAutocomplete(target.value, target.selectionStart)
+  }, [refreshAutocomplete])
+
+  const handleInstructionKeyUp = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current) return
+    if (acItems.length > 0 && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) return
+    refreshAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart)
+  }, [acItems.length, refreshAutocomplete])
+
+  const insertEntity = useCallback((item: EntityItem) => {
+    const ta = textareaRef.current
+    if (!ta) return
+    const before = instruction.slice(0, acFragment.start)
+    const after = instruction.slice(acFragment.end)
+    const newValue = before + item.name + after
+    onInstructionChange(newValue)
+    setAcItems([])
+    requestAnimationFrame(() => {
+      const pos = acFragment.start + item.name.length
+      ta.selectionStart = pos
+      ta.selectionEnd = pos
+      ta.focus()
+    })
+  }, [instruction, acFragment, onInstructionChange])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current || acItems.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setAcIndex(i => (i + 1) % acItems.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setAcIndex(i => (i - 1 + acItems.length) % acItems.length)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      insertEntity(acItems[acIndex])
+    } else if (e.key === 'Escape') {
+      setAcItems([])
+    }
+  }, [acItems, acIndex, insertEntity])
 
   return (
     <div className="border-t px-4 py-3 shrink-0 space-y-2">
@@ -298,13 +382,40 @@ export default function GenerationBar({
 
           {/* Instruction + Generate */}
           <div className="flex flex-col gap-2">
-            <textarea
-              value={instruction}
-              onChange={e => onInstructionChange(e.target.value)}
-              placeholder="生成指令（可选）：重点描写心理活动..."
-              rows={3}
-              className="w-full text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[38px]"
-            />
+            <div className="relative">
+              <textarea
+                ref={textareaRef}
+                value={instruction}
+                onChange={handleInstructionChange}
+                onKeyDown={handleKeyDown}
+                onKeyUp={handleInstructionKeyUp}
+                onClick={handleSelectionRefresh}
+                onSelect={handleSelectionRefresh}
+                onCompositionStart={() => { composingRef.current = true; setAcItems([]) }}
+                onCompositionEnd={() => { composingRef.current = false }}
+                onBlur={() => setTimeout(() => setAcItems([]), 150)}
+                placeholder="生成指令（可选）：重点描写心理活动..."
+                rows={3}
+                className="w-full text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[38px]"
+              />
+              {acItems.length > 0 && (
+                <div className="absolute bottom-full left-0 right-0 mb-1 bg-background border border-border rounded-lg shadow-2xl overflow-hidden z-50 max-h-48 overflow-y-auto">
+                  {acItems.map((item, i) => (
+                    <div
+                      key={`${item.type}-${item.name}`}
+                      onMouseDown={e => { e.preventDefault(); insertEntity(item) }}
+                      className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer transition-colors ${
+                        i === acIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'
+                      }`}
+                    >
+                      <span className="shrink-0 text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground">{item.typeLabel}</span>
+                      <span className="font-medium">{item.name}</span>
+                      <span className="text-muted-foreground/60 truncate flex-1">{item.description}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <select
                 value={targetWords}

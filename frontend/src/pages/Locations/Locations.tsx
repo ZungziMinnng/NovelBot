@@ -58,17 +58,17 @@ export default function Locations() {
     if (!formName.trim()) return
     setSaving(true)
     try {
-      const data = {
+      const data: Record<string, unknown> = {
         novel_id: novelId,
         name: formName.trim(),
         type: formType,
         description: formDesc,
-        parent_id: formParentId ? Number(formParentId) : undefined,
+        parent_id: formParentId ? Number(formParentId) : null,
       }
       if (editingId) {
-        await locationsApi.update(editingId, data)
+        await locationsApi.update(editingId, data as Partial<Location>)
       } else {
-        await locationsApi.create(data)
+        await locationsApi.create(data as Partial<Location>)
       }
       qc.invalidateQueries({ queryKey: ['locations', novelId] })
       resetForm()
@@ -192,31 +192,49 @@ export default function Locations() {
                   <span className="opacity-50">({items.length})</span>
                 </div>
                 <div className="space-y-1.5">
-                  {items.map(loc => (
-                    <div key={loc.id} className="flex items-center gap-3 border rounded-lg px-4 py-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{loc.name}</span>
-                          {loc.parent_id && parentMap.has(loc.parent_id) && (
-                            <span className="text-xs text-muted-foreground">
-                              ← {parentMap.get(loc.parent_id)}
-                            </span>
+                  {items.map(loc => {
+                    const stateEntries = Object.entries(loc.current_state || {})
+                    return (
+                      <div key={loc.id} className="border rounded-lg px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium">{loc.name}</span>
+                              <span className="text-xs text-muted-foreground">
+                                ← {loc.parent_id && parentMap.has(loc.parent_id) ? parentMap.get(loc.parent_id) : '无上级地点'}
+                              </span>
+                            </div>
+                            {loc.description && (
+                              <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{loc.description}</p>
+                            )}
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <button onClick={() => startEdit(loc)} className="p-1.5 rounded hover:bg-muted" title="编辑">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => handleDelete(loc.id)} className="p-1.5 rounded hover:bg-red-50 hover:text-red-500" title="删除">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-2 pt-2 border-t border-dashed">
+                          <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">当前状态</span>
+                          {stateEntries.length > 0 ? (
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                              {stateEntries.map(([k, v]) => (
+                                <span key={k} className="text-xs">
+                                  <span className="text-muted-foreground/70">{k}：</span>
+                                  <span className="text-foreground">{typeof v === 'string' ? v : JSON.stringify(v)}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted-foreground/40 mt-0.5 italic">暂无状态数据</p>
                           )}
                         </div>
-                        {loc.description && (
-                          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{loc.description}</p>
-                        )}
                       </div>
-                      <div className="flex gap-1 shrink-0">
-                        <button onClick={() => startEdit(loc)} className="p-1.5 rounded hover:bg-muted" title="编辑">
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={() => handleDelete(loc.id)} className="p-1.5 rounded hover:bg-red-50 hover:text-red-500" title="删除">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             ))}
