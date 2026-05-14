@@ -27,6 +27,10 @@ export default function ChatPanel({ novelId, novel }: Props) {
     queryKey: ['model-library'],
     queryFn: modelLibraryApi.list,
   })
+  const chatModelLibrary = modelLibrary.filter(m => m.model_type !== 'embedding')
+  const selectedChatModel = modelLibrary.some(m => m.model_id === chatSettings.model && m.model_type === 'embedding')
+    ? ''
+    : chatSettings.model
   const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const streamingRef = useRef(false)
@@ -60,7 +64,7 @@ export default function ChatPanel({ novelId, novel }: Props) {
       {
         novel_id: novelId,
         messages: history,
-        model: chatSettings.model,
+        model: selectedChatModel,
         system_prompt: chatSettings.systemPrompt,
         temperature: chatSettings.temperature,
         max_tokens: chatSettings.maxTokens,
@@ -78,7 +82,7 @@ export default function ChatPanel({ novelId, novel }: Props) {
         streamingRef.current = false
       },
     )
-  }, [input, isStreaming, messages, novelId, chatSettings, appendMessage, updateLastAssistant])
+  }, [input, isStreaming, messages, novelId, chatSettings, selectedChatModel, appendMessage, updateLastAssistant])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -130,13 +134,13 @@ export default function ChatPanel({ novelId, novel }: Props) {
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">模型</label>
             <select
-              value={chatSettings.model}
+              value={selectedChatModel}
               onChange={e => updateSettings(novelId, { model: e.target.value })}
               disabled={isStreaming}
               className="w-full text-xs border rounded px-2 py-1.5 bg-background focus:outline-none"
             >
               <option value="">默认 Writer 模型</option>
-              {modelLibrary.map(m => (
+              {chatModelLibrary.map(m => (
                 <option key={m.id} value={m.model_id}>
                   [{m.provider}] {m.display_name || m.model_id}
                 </option>

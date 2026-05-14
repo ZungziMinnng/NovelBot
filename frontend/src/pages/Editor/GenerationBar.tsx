@@ -503,7 +503,7 @@ export default function GenerationBar({
                 className="flex-1 text-xs border rounded-lg px-2 py-1.5 bg-background truncate"
               >
                 <option value="">与 Writer 一致{writerModel ? ` (${writerModel})` : ''}</option>
-                {modelLibrary.map(m => (
+                {modelLibrary.filter(m => m.model_type !== 'embedding').map(m => (
                   <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
                 ))}
               </select>

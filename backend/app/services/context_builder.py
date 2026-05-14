@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.novel import Novel
@@ -18,6 +19,21 @@ from app.services.relevance_selector import (
     select_by_name_then_rag,
     select_notes_by_title_then_rag,
 )
+
+
+_SUMMARY_TIME_TAG_RE = re.compile(r"【\s*第\d+日(?:[^】]*)?】")
+_SUMMARY_INLINE_DAY_RE = re.compile(
+    r"(^|[：:\n]\s*)第\d+日(?:[·\s]*(?:清晨|上午|白天|午后|傍晚|晚上|深夜))?[，,、\s]*"
+)
+
+
+def _writer_reference_text(text: str) -> str:
+    """Remove timeline metadata tags before passing summaries to Writer."""
+    if not text:
+        return ""
+    text = _SUMMARY_TIME_TAG_RE.sub("", text)
+    text = _SUMMARY_INLINE_DAY_RE.sub(r"\1", text)
+    return text.strip()
 
 
 def _text_for_reference_scan(value) -> str:
@@ -579,18 +595,23 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
 
     # ── context_block（世界观、大纲、摘要、RAG）──
     parts = []
+    parts.append(
+        "=== 参考资料使用规则 ===\n"
+        "以下摘要中的绝对日期计数（如【第X日】、第X日、当日、次日等）只用于内部时间线排序，不属于正文文风。\n"
+        "生成正文时不得把这些时间标注显式写进叙事段落；除非用户指令明确要求日期标注，否则用自然的时间过渡承接剧情。"
+    )
     if _on("core_setting") and ctx.get("core_setting"):
         parts.append(f"=== 世界观设定 ===\n{ctx['core_setting']}")
     if _on("book_summary") and ctx.get("book_summary"):
-        parts.append(f"=== 全书概要 ===\n{ctx['book_summary']}")
+        parts.append(f"=== 全书概要 ===\n{_writer_reference_text(ctx['book_summary'])}")
     if _on("arc_summary") and ctx.get("arc_summary"):
-        parts.append(f"=== 近期故事弧概要 ===\n{ctx['arc_summary']}")
+        parts.append(f"=== 近期故事弧概要 ===\n{_writer_reference_text(ctx['arc_summary'])}")
     if _on("chapter_outline") and ctx.get("chapter_outline"):
         parts.append(f"=== 本章大纲 ===\n{ctx['chapter_outline']}")
     if _on("rolling_summary") and ctx.get("rolling_summary"):
-        parts.append(f"=== 近期剧情摘要 ===\n{ctx['rolling_summary']}")
+        parts.append(f"=== 近期剧情摘要 ===\n{_writer_reference_text(ctx['rolling_summary'])}")
     if _on("rag_context") and ctx.get("rag_context"):
-        parts.append(f"=== 相关历史场景（参考）===\n{ctx['rag_context']}")
+        parts.append(f"=== 相关历史场景（参考）===\n{_writer_reference_text(ctx['rag_context'])}")
 
     if ctx.get("full_text_context"):
         parts.append(f"=== 前文正文（全文）===\n{ctx['full_text_context']}")
@@ -614,6 +635,7 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         f"风格：{ctx.get('writing_style', '')}，"
         f"目标字数 {target_words} 字（不得低于 {int(target_words * 0.9)} 字，不得超过 {int(target_words * 1.15)} 字）。"
         f"{continuity_hint}\n"
+        f"正文中不要显式写出参考摘要里的第X日、当日、次日等时间线标注；需要表达时间推进时，用自然叙事过渡。\n"
         f"直接输出正文内容，不要输出章节标题或任何前缀。"
     )
 

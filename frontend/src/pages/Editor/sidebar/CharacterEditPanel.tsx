@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Loader2, Trash2, User, Pencil, X, Check, Plus,
-  RefreshCw, ImagePlus, Sparkles, ScrollText, Maximize2, Wand2,
+  RefreshCw, ImagePlus, Sparkles, ScrollText, Maximize2, Wand2, GripVertical,
 } from 'lucide-react'
 import { charactersApi, type Character } from '@/api/client'
 import RelationshipGraphView from './RelationshipGraphView'
@@ -66,6 +66,9 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const [kvDraft, setKvDraft] = useState<Record<string, string>>({})
   const [newKey, setNewKey] = useState('')
   const [savingKV, setSavingKV] = useState(false)
+  const [fieldOrders, setFieldOrders] = useState<Record<string, string[]>>({})
+  const [draggingField, setDraggingField] = useState<{ sectionId: string; key: string } | null>(null)
+  const [editingKeys, setEditingKeys] = useState<string[]>([])
 
 
   // AI enhance
@@ -90,6 +93,17 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const [editRelInit, setEditRelInit] = useState('')
   const [editRelCurr, setEditRelCurr] = useState('')
 
+  const fieldOrderStorageKey = `novelbot_character_field_order_${novelId}`
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(fieldOrderStorageKey)
+      setFieldOrders(raw ? JSON.parse(raw) : {})
+    } catch {
+      setFieldOrders({})
+    }
+  }, [fieldOrderStorageKey])
+
   useEffect(() => {
     if (character) {
       setBasicForm({ name: character.name, role: character.role, age: character.age, description: character.description })
@@ -104,6 +118,33 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const state = character.current_state || {}
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['characters', novelId] })
+
+  const orderedKeys = (sectionId: string, keys: string[]) => {
+    const order = fieldOrders[sectionId] || []
+    const keySet = new Set(keys)
+    return [
+      ...order.filter(k => keySet.has(k)),
+      ...keys.filter(k => !order.includes(k)),
+    ]
+  }
+
+  const saveFieldOrder = (sectionId: string, keys: string[]) => {
+    const next = { ...fieldOrders, [sectionId]: keys }
+    setFieldOrders(next)
+    localStorage.setItem(fieldOrderStorageKey, JSON.stringify(next))
+  }
+
+  const moveField = (sectionId: string, fromKey: string, toKey: string, keys: string[]) => {
+    if (fromKey === toKey) return
+    const next = orderedKeys(sectionId, keys)
+    const from = next.indexOf(fromKey)
+    const to = next.indexOf(toKey)
+    if (from < 0 || to < 0) return
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    saveFieldOrder(sectionId, next)
+    if (editingKV === sectionId) setEditingKeys(next)
+  }
 
   // ── Basic info ──
   const handleSaveBasic = async () => {
@@ -168,11 +209,10 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   }
 
   // ── KV editing ──
-  const [editingKeys, setEditingKeys] = useState<string[]>([])
-
   const openKVEdit = (sectionKey: string, data: Record<string, unknown>, keys: string[], prefill = false) => {
+    const displayKeys = orderedKeys(sectionKey, keys)
     const flat: Record<string, string> = {}
-    for (const k of keys) {
+    for (const k of displayKeys) {
       const v = data[k]
       if (v === undefined) {
         if (prefill) flat[k] = ''
@@ -181,7 +221,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       flat[k] = Array.isArray(v) ? v.join('、') : String(v ?? '')
     }
     setKvDraft(flat)
-    setEditingKeys(keys)
+    setEditingKeys(displayKeys)
     setEditingKV(sectionKey)
     setNewKey('')
   }
@@ -196,6 +236,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       Object.assign(base, kvDraft)
       await charactersApi.update(characterId, { [field]: base } as Partial<Character>)
       await invalidate()
+      if (editingKV) saveFieldOrder(editingKV, editingKeys.filter(k => k in kvDraft))
       setEditingKV(null)
       toast.success('已保存')
     } finally { setSavingKV(false) }
@@ -222,11 +263,36 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   }
 
   // ── Render helpers ──
-  const renderKVDisplay = (data: Record<string, unknown>, keys: string[], showEmptyKeys = false) => (
+  const renderKVDisplay = (data: Record<string, unknown>, keys: string[], sectionId: string, showEmptyKeys = false) => (
     <div className="space-y-2">
       {keys.filter(k => showEmptyKeys || data[k] !== undefined).map(k => (
-        <div key={k} className="border rounded-lg p-2.5">
-          <p className="text-[10px] text-muted-foreground mb-1 uppercase">{k}</p>
+        <div
+          key={k}
+          draggable
+          onDragStart={(e) => {
+            setDraggingField({ sectionId, key: k })
+            e.dataTransfer.effectAllowed = 'move'
+            e.dataTransfer.setData('text/plain', k)
+          }}
+          onDragOver={(e) => {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            const fromKey = e.dataTransfer.getData('text/plain') || draggingField?.key || ''
+            moveField(sectionId, fromKey, k, keys)
+            setDraggingField(null)
+          }}
+          onDragEnd={() => setDraggingField(null)}
+          className={`border rounded-lg p-2.5 transition-colors ${
+            draggingField?.sectionId === sectionId && draggingField.key === k ? 'opacity-50 ring-1 ring-primary/40' : ''
+          }`}
+        >
+          <div className="flex items-center gap-1 mb-1">
+            <GripVertical className="w-3 h-3 text-muted-foreground/40 cursor-grab" />
+            <p className="text-[10px] text-muted-foreground uppercase">{k}</p>
+          </div>
           <p className="text-xs whitespace-pre-wrap">
             {data[k] === undefined || data[k] === '' ? <span className="text-muted-foreground/50">（空）</span> : Array.isArray(data[k]) ? (data[k] as string[]).join('、') : String(data[k])}
           </p>
@@ -235,22 +301,59 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     </div>
   )
 
-  const renderKVEditor = () => (
+  const renderKVEditor = (sectionId: string) => {
+    const draftKeys = [
+      ...editingKeys.filter(k => k in kvDraft),
+      ...Object.keys(kvDraft).filter(k => !editingKeys.includes(k)),
+    ]
+    const addDraftKey = (key: string) => {
+      const trimmed = key.trim()
+      if (!trimmed) return
+      setKvDraft(prev => ({ ...prev, [trimmed]: prev[trimmed] ?? '' }))
+      setEditingKeys(prev => prev.includes(trimmed) ? prev : [...prev, trimmed])
+      setNewKey('')
+    }
+    return (
     <div className="space-y-2">
-      {Object.entries(kvDraft).map(([k, v]) => (
-        <div key={k} className="border rounded-lg p-2.5 group">
+      {draftKeys.map((k) => (
+        <div
+          key={k}
+          draggable
+          onDragStart={(e) => {
+            setDraggingField({ sectionId, key: k })
+            e.dataTransfer.effectAllowed = 'move'
+            e.dataTransfer.setData('text/plain', k)
+          }}
+          onDragOver={(e) => {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            const fromKey = e.dataTransfer.getData('text/plain') || draggingField?.key || ''
+            moveField(sectionId, fromKey, k, draftKeys)
+            setDraggingField(null)
+          }}
+          onDragEnd={() => setDraggingField(null)}
+          className={`border rounded-lg p-2.5 group transition-colors ${
+            draggingField?.sectionId === sectionId && draggingField.key === k ? 'opacity-50 ring-1 ring-primary/40' : ''
+          }`}
+        >
           <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] text-muted-foreground uppercase">{k}</p>
+            <div className="flex items-center gap-1">
+              <GripVertical className="w-3 h-3 text-muted-foreground/40 cursor-grab" />
+              <p className="text-[10px] text-muted-foreground uppercase">{k}</p>
+            </div>
             <button onClick={() => setKvDraft(prev => { const n = { ...prev }; delete n[k]; return n })}
               className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-destructive transition-all">
               <X className="w-3 h-3" />
             </button>
           </div>
           <textarea
-            value={v}
+            value={kvDraft[k] ?? ''}
             onChange={e => setKvDraft(prev => ({ ...prev, [k]: e.target.value }))}
             className="w-full text-sm border rounded p-2 bg-background resize-y min-h-[56px] focus:outline-none focus:ring-1 focus:ring-ring"
-            rows={Math.max(2, v.split('\n').length)}
+            rows={Math.max(2, (kvDraft[k] ?? '').split('\n').length)}
           />
         </div>
       ))}
@@ -258,12 +361,12 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <input
           value={newKey}
           onChange={e => setNewKey(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && newKey.trim()) { setKvDraft(prev => ({ ...prev, [newKey.trim()]: '' })); setNewKey('') } }}
+          onKeyDown={e => { if (e.key === 'Enter') addDraftKey(newKey) }}
           placeholder="新字段名..."
           className="flex-1 text-sm border rounded px-2 py-1.5 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
         />
         <button
-          onClick={() => { if (newKey.trim()) { setKvDraft(prev => ({ ...prev, [newKey.trim()]: '' })); setNewKey('') } }}
+          onClick={() => addDraftKey(newKey)}
           disabled={!newKey.trim()}
           className="text-[10px] px-2 py-1 border rounded hover:bg-muted disabled:opacity-40"
         >
@@ -271,7 +374,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         </button>
       </div>
     </div>
-  )
+  )}
 
   const renderKVSection = (
     title: string,
@@ -281,6 +384,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     field: 'full_sheet' | 'current_state',
     showEmptyKeys = false,
   ) => {
+    const displayKeys = orderedKeys(sectionId, keys)
     const hasData = showEmptyKeys ? keys.length > 0 : keys.some(k => data[k] !== undefined)
     const isEditing = editingKV === sectionId
     if (!hasData && !isEditing) return null
@@ -289,7 +393,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <div className="flex items-center gap-2">
           <h4 className="text-xs font-medium">{title}</h4>
           {!isEditing ? (
-            <button onClick={() => openKVEdit(sectionId, data, keys, showEmptyKeys)} className="p-0.5 text-muted-foreground hover:text-foreground">
+            <button onClick={() => openKVEdit(sectionId, data, displayKeys, showEmptyKeys)} className="p-0.5 text-muted-foreground hover:text-foreground">
               <Pencil className="w-3 h-3" />
             </button>
           ) : (
@@ -302,7 +406,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             </div>
           )}
         </div>
-        {isEditing ? renderKVEditor() : renderKVDisplay(data, keys, showEmptyKeys)}
+        {isEditing ? renderKVEditor(sectionId) : renderKVDisplay(data, displayKeys, sectionId, showEmptyKeys)}
       </div>
     )
   }

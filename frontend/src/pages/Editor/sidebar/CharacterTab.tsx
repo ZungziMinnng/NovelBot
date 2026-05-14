@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, User, Loader2, ListPlus } from 'lucide-react'
+import { GripVertical, Plus, Trash2, User, Loader2, ListPlus } from 'lucide-react'
 import { charactersApi, type Character } from '@/api/client'
 import toast from 'react-hot-toast'
 import BulkCharacterStateDrawer from './BulkCharacterStateDrawer'
@@ -21,10 +21,53 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
     queryFn: () => charactersApi.list(novelId),
   })
 
+  const orderStorageKey = `novelbot_character_order_${novelId}`
   const [adding, setAdding] = useState(false)
   const [showBulkState, setShowBulkState] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ name: '', role: '配角', age: '', description: '' })
+
+  const [characterOrder, setCharacterOrder] = useState<number[]>([])
+  const [draggingId, setDraggingId] = useState<number | null>(null)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(orderStorageKey)
+      setCharacterOrder(raw ? JSON.parse(raw) : [])
+    } catch {
+      setCharacterOrder([])
+    }
+  }, [orderStorageKey])
+
+  const orderedCharacters = useMemo(() => {
+    if (characterOrder.length === 0) return characters
+    const orderIndex = new Map(characterOrder.map((id, index) => [id, index]))
+    return [...characters].sort((a, b) => {
+      const ai = orderIndex.get(a.id)
+      const bi = orderIndex.get(b.id)
+      if (ai === undefined && bi === undefined) return 0
+      if (ai === undefined) return 1
+      if (bi === undefined) return -1
+      return ai - bi
+    })
+  }, [characters, characterOrder])
+
+  const saveCharacterOrder = (next: number[]) => {
+    setCharacterOrder(next)
+    localStorage.setItem(orderStorageKey, JSON.stringify(next))
+  }
+
+  const moveCharacter = (fromId: number, toId: number) => {
+    if (fromId === toId) return
+    const ids = orderedCharacters.map(c => c.id)
+    const from = ids.indexOf(fromId)
+    const to = ids.indexOf(toId)
+    if (from < 0 || to < 0) return
+    const next = [...ids]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    saveCharacterOrder(next)
+  }
 
   const handleAdd = async () => {
     if (!form.name.trim()) return
@@ -65,14 +108,32 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
       </div>
 
       <div className="overflow-y-auto flex-1 px-2 pb-2 space-y-1">
-        {characters.map((c) => (
+        {orderedCharacters.map((c) => (
           <div
             key={c.id}
+            draggable
+            onDragStart={(e) => {
+              setDraggingId(c.id)
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', String(c.id))
+            }}
+            onDragOver={(e) => {
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              const fromId = Number(e.dataTransfer.getData('text/plain')) || draggingId
+              if (fromId) moveCharacter(fromId, c.id)
+              setDraggingId(null)
+            }}
+            onDragEnd={() => setDraggingId(null)}
             onClick={() => onOpenCharacter(c)}
             className={`group flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-muted cursor-pointer transition-colors ${
               activeCharacterId === c.id ? 'bg-muted ring-1 ring-primary' : ''
-            }`}
+            } ${draggingId === c.id ? 'opacity-50 ring-1 ring-primary/40' : ''}`}
           >
+            <GripVertical className="w-3.5 h-3.5 text-muted-foreground/50 shrink-0 cursor-grab" />
             {c.avatar_url ? (
               <img src={c.avatar_url} alt={c.name} className="w-8 h-8 rounded-full object-cover shrink-0" />
             ) : (
