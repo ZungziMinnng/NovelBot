@@ -10,6 +10,10 @@ build/
 *.egg
 .eggs/
 
+# Keep the frontend Build page despite the generic Python build/ ignore.
+!frontend/src/pages/Build/
+!frontend/src/pages/Build/**
+
 # Virtual environments
 venv/
 .venv/

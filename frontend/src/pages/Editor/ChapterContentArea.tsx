@@ -22,12 +22,10 @@ interface ChapterContentAreaProps {
   fontFamily: string
   fontWeight: string
   fontColor: string
-  plotSuggestions: string[]
   instruction: string
   rewriteMode: boolean
   onEditContentChange: (v: string) => void
   onCloseDiff: () => void
-  onSelectSuggestion: (s: string) => void
   onAddParagraphAnnotation: (paragraph: number) => void
 }
 
@@ -48,12 +46,10 @@ export default function ChapterContentArea({
   fontFamily,
   fontWeight,
   fontColor,
-  plotSuggestions,
   instruction,
   rewriteMode,
   onEditContentChange,
   onCloseDiff,
-  onSelectSuggestion,
   onAddParagraphAnnotation,
 }: ChapterContentAreaProps) {
   const contentEndRef = useRef<HTMLDivElement>(null)
@@ -160,28 +156,6 @@ export default function ChapterContentArea({
                 </span>
               )}
               <div ref={contentEndRef} />
-            </div>
-          )}
-          {plotSuggestions.length > 0 && (
-            <div className="px-8 pt-1 pb-6 shrink-0">
-              <details open>
-                <summary className="text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors">
-                  ✨ 下章剧情建议（点击填入指令）
-                </summary>
-                <div className="mt-2 flex flex-col gap-1">
-                  {plotSuggestions.map((s, i) => (
-                    <button
-                      key={i}
-                      onClick={() => onSelectSuggestion(s)}
-                      className={`text-left text-xs px-3 py-1.5 rounded-lg border transition-colors hover:bg-muted ${
-                        instruction === s ? 'border-primary bg-primary/5 text-primary' : 'border-border'
-                      }`}
-                    >
-                      <span className="text-muted-foreground mr-1.5">{i + 1}.</span>{s}
-                    </button>
-                  ))}
-                </div>
-              </details>
             </div>
           )}
         </div>

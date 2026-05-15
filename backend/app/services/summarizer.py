@@ -399,24 +399,36 @@ async def update_character_states(
     chapter: Chapter,
     novel: Novel,
     instruction: str = "",
-) -> tuple[bool, str, int, int]:
+) -> tuple[bool, str, int, int, list[str]]:
     """根据章节内容更新角色状态卡。
-    返回 (success, warning_message, input_tokens, output_tokens)。
+    返回 (success, warning_message, input_tokens, output_tokens, unmatched_names)。
     """
     result = await session.execute(
         select(Character).where(Character.novel_id == novel.id)
     )
     characters = result.scalars().all()
     if not characters:
-        return True, "", 0, 0
+        return True, "", 0, 0, []
 
     states_text = json.dumps(
         {c.name: c.current_state for c in characters},
         ensure_ascii=False,
         indent=2,
     )
+    existing_fields = sorted({
+        str(key)
+        for c in characters
+        if isinstance(c.current_state, dict)
+        for key in c.current_state.keys()
+        if str(key).strip()
+    })
+    state_fields = "、".join(existing_fields) if existing_fields else "暂无，按本章明确变化创建必要字段"
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = render("character_update_prefix.jinja2", character_states=states_text)
+    prompt_prefix = render(
+        "character_update_prefix.jinja2",
+        character_states=states_text,
+        state_fields=state_fields,
+    )
     chapter_content = strip_plot_suggestions(chapter.content)[:6000]
     if instruction:
         chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
@@ -437,7 +449,7 @@ async def update_character_states(
         total_in += in_tok
         total_out += out_tok
     except Exception as e:
-        return False, f"角色状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0
+        return False, f"角色状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
 
     # 提取并修复 JSON（处理尾部逗号、截断、markdown 包裹等常见 LLM 问题）
     json_text = _repair_json(raw)
@@ -562,16 +574,16 @@ async def update_entity_states(
     chapter: Chapter,
     novel: Novel,
     instruction: str = "",
-) -> tuple[bool, str, int, int]:
+) -> tuple[bool, str, int, int, list[str]]:
     """根据章节内容更新世界实体状态。
-    返回 (success, warning_message, input_tokens, output_tokens)。
+    返回 (success, warning_message, input_tokens, output_tokens, unmatched_names)。
     """
     result = await session.execute(
         select(WorldEntity).where(WorldEntity.novel_id == novel.id)
     )
     entities = result.scalars().all()
     if not entities:
-        return True, "", 0, 0
+        return True, "", 0, 0, []
 
     states_text = json.dumps(
         {e.name: {"type": e.type, **(e.current_state or {})} for e in entities},
@@ -600,7 +612,7 @@ async def update_entity_states(
         total_in += in_tok
         total_out += out_tok
     except Exception as e:
-        return False, f"实体状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0
+        return False, f"实体状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
 
     json_text = _repair_json(raw)
     try:
@@ -679,13 +691,13 @@ async def update_location_states(
     chapter: Chapter,
     novel: Novel,
     instruction: str = "",
-) -> tuple[bool, str, int, int]:
+) -> tuple[bool, str, int, int, list[str]]:
     result = await session.execute(
         select(Location).where(Location.novel_id == novel.id)
     )
     locations = result.scalars().all()
     if not locations:
-        return True, "", 0, 0
+        return True, "", 0, 0, []
 
     states_text = json.dumps(
         {l.name: {"type": l.type, **(l.current_state or {})} for l in locations},
@@ -714,7 +726,7 @@ async def update_location_states(
         total_in += in_tok
         total_out += out_tok
     except Exception as e:
-        return False, f"地点状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0
+        return False, f"地点状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
 
     json_text = _repair_json(raw)
     try:

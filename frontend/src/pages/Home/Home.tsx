@@ -2,9 +2,9 @@ import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { BookOpen, Plus, Settings, Trash2, ChevronRight, Sun, Moon, PenTool, Edit3, Info } from 'lucide-react'
+import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info } from 'lucide-react'
 import { novelsApi, writerPresetsApi, type Novel, type WriterPreset } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import NovelWizard from './NovelWizard'
 import PresetModal from './PresetModal'
 
@@ -30,8 +30,6 @@ export default function Home() {
   const [wizardOpen, setWizardOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('novels')
   const [presetModal, setPresetModal] = useState<{ open: boolean; preset: WriterPreset | null }>({ open: false, preset: null })
-  const { theme, toggleTheme } = useSettingsStore()
-
   const { data: novels = [], isLoading } = useQuery({
     queryKey: ['novels'],
     queryFn: novelsApi.list,
@@ -89,13 +87,7 @@ export default function Home() {
           <h1 className="text-xl font-bold">NovelBot</h1>
         </div>
         <div className="flex items-center gap-1">
-          <button
-            onClick={toggleTheme}
-            className="p-2 rounded-md hover:bg-muted transition-colors"
-            title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          <ThemePicker />
           <button
             onClick={() => navigate('/about')}
             className="p-2 rounded-md hover:bg-muted transition-colors"
@@ -284,6 +276,11 @@ export default function Home() {
             setWizardOpen(false)
             qc.invalidateQueries({ queryKey: ['novels'] })
             navigate(`/novel/${id}`)
+          }}
+          onBuild={(id) => {
+            setWizardOpen(false)
+            qc.invalidateQueries({ queryKey: ['novels'] })
+            navigate(`/novel/${id}/build`)
           }}
         />
       )}

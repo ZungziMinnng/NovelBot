@@ -2,9 +2,9 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
 interface SettingsStore {
-  theme: 'dark' | 'light'
+  theme: string
   streamingMode: boolean
-  toggleTheme: () => void
+  setTheme: (id: string) => void
   toggleStreamingMode: () => void
 }
 
@@ -13,7 +13,7 @@ export const useSettingsStore = create<SettingsStore>()(
     (set) => ({
       theme: 'dark',
       streamingMode: true,
-      toggleTheme: () => set((s) => ({ theme: s.theme === 'dark' ? 'light' : 'dark' })),
+      setTheme: (id) => set({ theme: id }),
       toggleStreamingMode: () => set((s) => ({ streamingMode: !s.streamingMode })),
     }),
     { name: 'novelbot-settings' }

@@ -1,0 +1,18 @@
+你是一位小说世界构建师。根据以下小说设定，生成 5-8 个重要地点。
+
+小说类型：{{ genre }}
+故事前提：{{ premise }}
+世界观设定：{{ core_setting }}
+{% if outline_titles %}
+大纲章节：{{ outline_titles }}
+{% endif %}
+
+要求：
+1. 地点应与故事主线相关，覆盖主角活动的核心场所
+2. 包含不同规模（城市、建筑、自然景观、区域等）
+3. 每个地点的描述 2-3 句话，突出其在故事中的作用
+
+以 JSON 数组格式输出，不要其他文字：
+[
+  {"name": "地点名称", "type": "city/building/nature/region/other", "description": "描述"}
+]

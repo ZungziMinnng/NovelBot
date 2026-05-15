@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Sun, Moon, Plus, Pencil, Trash2, X, Loader2, Map as MapIcon, Globe, Building, Landmark } from 'lucide-react'
+import { ArrowLeft, Plus, Pencil, Trash2, X, Loader2, Map as MapIcon, Globe, Building, Landmark } from 'lucide-react'
 import { novelsApi, locationsApi, type Location } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 const LOCATION_TYPES = ['continent', 'region', 'city', 'building', 'landmark', 'other'] as const
 const TYPE_LABELS: Record<string, string> = {
@@ -18,8 +18,6 @@ export default function Locations() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
-
   const { data: novel } = useQuery({ queryKey: ['novel', novelId], queryFn: () => novelsApi.get(novelId) })
   const { data: locations = [], isLoading } = useQuery({
     queryKey: ['locations', novelId],
@@ -99,9 +97,9 @@ export default function Locations() {
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-bold text-lg">{novel?.title} · 地点</h1>
-        <button onClick={toggleTheme} className="ml-auto p-2 rounded-md hover:bg-muted" title="切换主题">
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <div className="ml-auto">
+          <ThemePicker />
+        </div>
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8 space-y-6">

@@ -18,7 +18,7 @@ from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.services.context_builder import build_generation_context
-from app.services import summarizer, llm_client
+from app.services import memory_item_writer, summarizer, llm_client
 from app.agents import writer, critic
 from app.config import settings
 
@@ -328,14 +328,19 @@ async def run_chapter_generation(
         await session.commit()
 
         # ── Node 4b: 保存状态快照（供重新生成时回滚）──────────────────────
+        before_character_states: dict[str, dict] = {}
         try:
             chars_r = await session.execute(select(Character).where(Character.novel_id == novel.id))
             ents_r = await session.execute(select(WorldEntity).where(WorldEntity.novel_id == novel.id))
             locs_r = await session.execute(select(Location).where(Location.novel_id == novel.id))
+            chars = chars_r.scalars().all()
+            ents = ents_r.scalars().all()
+            locs = locs_r.scalars().all()
+            before_character_states = {c.name: dict(c.current_state or {}) for c in chars}
             snap_content = json.dumps({
-                "characters": {str(c.id): c.current_state for c in chars_r.scalars().all()},
-                "entities": {str(e.id): e.current_state for e in ents_r.scalars().all()},
-                "locations": {str(l.id): l.current_state for l in locs_r.scalars().all()},
+                "characters": {str(c.id): c.current_state for c in chars},
+                "entities": {str(e.id): e.current_state for e in ents},
+                "locations": {str(l.id): l.current_state for l in locs},
             }, ensure_ascii=False)
             await session.execute(
                 sql_delete(Memory).where(
@@ -354,23 +359,24 @@ async def run_chapter_generation(
             logger.warning("状态快照保存失败", exc_info=True)
             await session.rollback()
 
-        # ── Node 5: Update Memory + Generate Suggestions ───────────────────
+        # ── Node 5: Update Memory ─────────────────────────────────────────
         # 记忆操作依次执行并立即 commit，避免 SQLite 写锁跨 LLM 调用长期持有。
-        # 剧情建议（纯 LLM，无 DB）在后台并行。
         yield _sse("stage", "updating_memory")
         yield _sse_json("agent_start", {"agent": "memory", "label": "更新记忆"})
-
-        from app.api.routes.generation import generate_plot_suggestions
-        suggestions_task = asyncio.create_task(generate_plot_suggestions(
-            novel, state["generated_text"], state["context"], state["chapter_number"],
-            writer_system_prompt=writer_system_prompt,
-        ))
 
         mem_model, _ = llm_client.get_agent_client("memory", novel.fast_model)
         mem_warnings: list[str] = []
         sum_in = sum_out = char_in = char_out = ent_in = ent_out = 0
         char_ok = ent_ok = True
         char_warning = ent_warning = ""
+        summary_text = ""
+        projection_status = {
+            "summary": "pending",
+            "character_state": "pending",
+            "entity_state": "pending",
+            "location_state": "pending",
+            "memory_items": "pending",
+        }
         unmatched_chars: list[str] = []
         unmatched_entities: list[str] = []
         unmatched_locations: list[str] = []
@@ -381,11 +387,13 @@ async def run_chapter_generation(
             r0, dur_sum = await _timed(summarizer.summarize_chapter(session, chapter, novel))
             if isinstance(r0, BaseException):
                 raise r0
-            (_, sum_in, sum_out) = r0
+            (summary_text, sum_in, sum_out) = r0
+            projection_status["summary"] = "done" if summary_text else "skipped"
             await session.commit()
         except Exception as e:
             logger.warning("章节摘要生成失败: %s", e)
             mem_warnings.append(f"摘要生成失败: {e}")
+            projection_status["summary"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_sum = 0
         yield _sse_json("llm_call", {
@@ -403,10 +411,12 @@ async def run_chapter_generation(
             if isinstance(r1, BaseException):
                 raise r1
             (char_ok, char_warning, char_in, char_out, unmatched_chars) = r1
+            projection_status["character_state"] = "done" if char_ok else f"failed:{char_warning or 'unknown'}"
             await session.commit()
         except Exception as e:
             logger.warning("角色状态更新失败: %s", e)
             mem_warnings.append(f"角色状态更新失败: {e}")
+            projection_status["character_state"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_char = 0
         yield _sse_json("llm_call", {
@@ -424,10 +434,12 @@ async def run_chapter_generation(
             if isinstance(r2, BaseException):
                 raise r2
             (ent_ok, ent_warning, ent_in, ent_out, unmatched_entities) = r2
+            projection_status["entity_state"] = "done" if ent_ok else f"failed:{ent_warning or 'unknown'}"
             await session.commit()
         except Exception as e:
             logger.warning("实体状态更新失败: %s", e)
             mem_warnings.append(f"实体状态更新失败: {e}")
+            projection_status["entity_state"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_ent = 0
         yield _sse_json("llm_call", {
@@ -448,10 +460,12 @@ async def run_chapter_generation(
             if isinstance(r3, BaseException):
                 raise r3
             (loc_ok, loc_warning, loc_in, loc_out, unmatched_locations) = r3
+            projection_status["location_state"] = "done" if loc_ok else f"failed:{loc_warning or 'unknown'}"
             await session.commit()
         except Exception as e:
             logger.warning("地点状态更新失败: %s", e)
             mem_warnings.append(f"地点状态更新失败: {e}")
+            projection_status["location_state"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_loc = 0
         yield _sse_json("llm_call", {
@@ -460,12 +474,27 @@ async def run_chapter_generation(
             "input_tokens": loc_in, "output_tokens": loc_out, "duration_ms": dur_loc,
         })
 
-        # ── 等待剧情建议 ──
+        # ── 结构化长期记忆 ──
         try:
-            suggestions = await suggestions_task
+            memory_item_stats = await memory_item_writer.write_basic_memory_items(
+                session,
+                novel,
+                chapter,
+                before_character_states=before_character_states,
+                summary=summary_text,
+            )
+            projection_status["memory_items"] = "done"
+            await session.commit()
+            yield _sse_json("projection_status", {
+                "status": projection_status,
+                "memory_item_stats": memory_item_stats,
+            })
         except Exception as e:
-            logger.warning("plot_suggestions 失败: %s", e)
-            suggestions = []
+            logger.warning("结构化记忆写入失败: %s", e)
+            mem_warnings.append(f"结构化记忆写入失败: {e}")
+            projection_status["memory_items"] = f"failed:{type(e).__name__}: {e}"
+            await session.rollback()
+            yield _sse_json("projection_status", {"status": projection_status})
 
         mem_in = sum_in + char_in + ent_in + loc_in
         mem_out = sum_out + char_out + ent_out + loc_out
@@ -481,8 +510,6 @@ async def run_chapter_generation(
         warnings = [w for w in (char_warning, ent_warning, loc_warning, *mem_warnings) if w]
         if warnings:
             yield _sse("warning", "; ".join(warnings))
-        if suggestions:
-            yield _sse_json("plot_suggestions", {"suggestions": suggestions})
 
         # 自动刷新故事弧概要（每 15 章生成一次，中间粒度摘要层）
         ch_num = state["chapter_number"]

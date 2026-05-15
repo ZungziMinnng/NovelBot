@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db, AsyncSessionLocal
 from app.api.routes import novels, chapters, characters, generation, app_settings, chat
-from app.api.routes import model_library, admin, writer_presets, world_entities, locations, api_providers, novel_notes, factions, techniques, volumes, outlines, prompts
+from app.api.routes import model_library, admin, writer_presets, world_entities, locations, api_providers, novel_notes, memory_items, factions, techniques, volumes, outlines, prompts
 
 
 async def _auto_migrate_providers(session):
@@ -83,6 +83,7 @@ app.include_router(world_entities.router, prefix="/api/world-entities", tags=["w
 app.include_router(locations.router,       prefix="/api/locations",      tags=["locations"])
 app.include_router(api_providers.router,   prefix="/api/providers",      tags=["providers"])
 app.include_router(novel_notes.router,     prefix="/api/notes",          tags=["notes"])
+app.include_router(memory_items.router,    prefix="/api/memory-items",   tags=["memory-items"])
 app.include_router(factions.router,        prefix="/api/factions",       tags=["factions"])
 app.include_router(techniques.router,     prefix="/api/techniques",     tags=["techniques"])
 app.include_router(volumes.router,        prefix="/api/volumes",        tags=["volumes"])

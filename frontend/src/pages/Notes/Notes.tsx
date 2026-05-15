@@ -1,17 +1,15 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Sun, Moon, Plus, Pencil, Trash2, X, Loader2, FileText } from 'lucide-react'
+import { ArrowLeft, Plus, Pencil, Trash2, X, Loader2, FileText } from 'lucide-react'
 import { novelsApi, novelNotesApi, type NovelNote } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 export default function Notes() {
   const { id } = useParams<{ id: string }>()
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
-
   const { data: novel } = useQuery({ queryKey: ['novel', novelId], queryFn: () => novelsApi.get(novelId) })
   const { data: notes = [], isLoading } = useQuery({
     queryKey: ['notes', novelId],
@@ -65,9 +63,9 @@ export default function Notes() {
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-bold text-lg">{novel?.title} · 补充设定</h1>
-        <button onClick={toggleTheme} className="ml-auto p-2 rounded-md hover:bg-muted" title="切换主题">
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <div className="ml-auto">
+          <ThemePicker />
+        </div>
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8 space-y-6">

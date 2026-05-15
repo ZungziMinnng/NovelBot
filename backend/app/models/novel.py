@@ -48,6 +48,7 @@ class Novel(Base):
     enable_full_text_context: Mapped[bool] = mapped_column(Boolean, default=False)
     full_text_chapters: Mapped[int] = mapped_column(Integer, default=20)
     context_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    tags: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -62,6 +63,9 @@ class Novel(Base):
     )
     memories: Mapped[list["Memory"]] = relationship(  # noqa: F821
         "Memory", back_populates="novel", cascade="all, delete-orphan"
+    )
+    memory_items: Mapped[list["MemoryItem"]] = relationship(  # noqa: F821
+        "MemoryItem", back_populates="novel", cascade="all, delete-orphan"
     )
     outlines: Mapped[list["Outline"]] = relationship(  # noqa: F821
         "Outline", back_populates="novel", cascade="all, delete-orphan"

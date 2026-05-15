@@ -23,11 +23,5 @@ class RewriteChapterRequest(BaseModel):
     rewrite_model: str = ""
 
 
-class PlotSuggestionsRequest(BaseModel):
-    novel_id: int
-    chapter_number: int
-    volume: int = 1
-
-
 class ReviewRequest(BaseModel):
     novel_id: int

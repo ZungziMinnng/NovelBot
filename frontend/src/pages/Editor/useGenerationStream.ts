@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import {
-  chaptersApi, charactersApi, generationApi, worldEntitiesApi, locationsApi, techniquesApi,
+  chaptersApi, charactersApi, worldEntitiesApi, locationsApi, techniquesApi,
   streamChapterGeneration, streamChapterRewrite,
 } from '@/api/client'
 import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, LlmCallData, ContextStepData } from '@/api/client'
@@ -24,14 +24,12 @@ export interface GenerationStreamState {
   addingEntities: boolean
   addingLocations: boolean
   addingTechs: boolean
-  isLoadingSuggestions: boolean
   isDiscovering: boolean
 }
 
 export interface GenerationStreamActions {
   handleGenerate: () => void
   handleAbortOrGenerate: () => void
-  handleFetchSuggestions: () => Promise<void>
   handleDiscover: (chapterId: number) => Promise<void>
   toggleCharSelection: (i: number) => void
   toggleEntitySelection: (i: number) => void
@@ -58,8 +56,6 @@ export function useGenerationStream(
   resetRewriteModel?: () => void,
 ) {
   const qc = useQueryClient()
-  const setChapterSuggestions = useEditorStore((s) => s.setChapterSuggestions)
-
   // ── Discovery state ──────────────────────────────────────────────────────
   const [newCharCandidates, setNewCharCandidates] = useState<Array<{ name: string; role: string; description: string }>>([])
   const [newEntityCandidates, setNewEntityCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
@@ -73,26 +69,11 @@ export function useGenerationStream(
   const [newTechCandidates, setNewTechCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
   const [selectedTechIndices, setSelectedTechIndices] = useState<Set<number>>(new Set())
   const [addingTechs, setAddingTechs] = useState(false)
-  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false)
   const [isDiscovering, setIsDiscovering] = useState(false)
 
   const isCurrentlyGenerating = useGenerationStore((s) =>
     s.isGenerating && s.novelId === novelId && s.chapterNum === selectedChapterNum,
   )
-
-  // ── Plot Suggestions ─────────────────────────────────────────────────────
-  const handleFetchSuggestions = useCallback(async () => {
-    setIsLoadingSuggestions(true)
-    setChapterSuggestions(novelId, selectedChapterNum, [])
-    try {
-      const suggestions = await generationApi.plotSuggestions(novelId, selectedChapterNum)
-      setChapterSuggestions(novelId, selectedChapterNum, suggestions)
-    } catch (e) {
-      console.error('Failed to fetch suggestions:', e)
-    } finally {
-      setIsLoadingSuggestions(false)
-    }
-  }, [novelId, selectedChapterNum, setChapterSuggestions])
 
   // ── Discover (manual re-discovery) ───────────────────────────────────────
   const handleDiscover = useCallback(async (chapterId: number) => {
@@ -136,7 +117,6 @@ export function useGenerationStream(
     if (gs.isGenerating) return
 
     gs.startGeneration(novelId, novelTitle, selectedChapterNum)
-    setChapterSuggestions(novelId, selectedChapterNum, [])
     setNewCharCandidates([])
     setNewEntityCandidates([])
     setNewLocationCandidates([])
@@ -244,11 +224,6 @@ export function useGenerationStream(
             }
             break
           }
-          case 'plot_suggestions': {
-            const d = msg.data as { suggestions: string[] }
-            if (d.suggestions?.length) setChapterSuggestions(novelId, selectedChapterNum, d.suggestions)
-            break
-          }
           case 'critic_issues': {
             const d = msg.data as { issues_text: string }
             const criticEntryId = runningEntryIds.get('critic')
@@ -303,7 +278,7 @@ export function useGenerationStream(
     )
 
     useGenerationStore.getState().setAbortController(ctrl)
-  }, [novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novelTitle, qc, setChapterSuggestions])
+  }, [novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novelTitle, qc])
 
   // ── Abort / Generate ─────────────────────────────────────────────────────
   const handleAbortOrGenerate = useCallback(() => {
@@ -598,7 +573,6 @@ export function useGenerationStream(
     addingEntities,
     addingLocations,
     addingTechs,
-    isLoadingSuggestions,
     isDiscovering,
     isCurrentlyGenerating,
     // actions
@@ -606,7 +580,6 @@ export function useGenerationStream(
     handleAbortOrGenerate,
     handleRewrite,
     handleRewriteOrAbort,
-    handleFetchSuggestions,
     handleDiscover,
     toggleCharSelection,
     toggleEntitySelection,

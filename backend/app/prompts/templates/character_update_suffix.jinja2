@@ -1,12 +1,20 @@
-以 JSON 格式输出，格式为：
+以 JSON 格式输出，只输出本章发生变化的角色和字段。未变化字段请省略，系统会保留旧值。
+
+字段规则：
+- 推荐字段：location、current_goal、titles、affiliation、known_secrets、relationship_changes
+- 可以继续使用“当前已跟踪的状态字段”中的任意字段
+- 可以新增有明确文本证据的新字段，如 realm、injury、artifact、identity、curse、cultivation、power_status
+- titles、known_secrets 等列表字段输出数组；relationship_changes 输出对象；其余字段通常输出简短字符串
+- 空字符串、空数组、空对象不要输出
+
+示例格式：
 {
   "角色名": {
-    "location": "当前位置",
-    "current_goal": "当前目标",
-    "titles": ["称谓/头衔列表，如：师姐、掌门、院长；本章无新称谓则为空数组"],
-    "affiliation": "所属门派/组织/学院，如：太渊宫；本章无变化则保持原值或留空字符串",
-    "known_secrets": ["仅限：阴谋、隐藏身份、未公开的关键情报；不要记录普通对话或公开信息"],
-    "relationship_changes": {"其他角色名": "当前最显著的关系变化（仅1-2条最重要的）"}
+    "location": "新的当前位置",
+    "realm": "新的境界/修为状态",
+    "injury": "新的伤势或身体状态",
+    "known_secrets": ["本章新增或确认的关键秘密"],
+    "relationship_changes": {"其他角色名": "本章关系变化"}
   }
 }
 

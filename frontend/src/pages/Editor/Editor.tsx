@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import {
   ArrowLeft, List, Zap, Check, Edit3, Trash2,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
-  Settings2, Sun, Moon, AlertTriangle, Radio, RadioTower, MessageSquare,
+  Settings2, AlertTriangle, Radio, RadioTower, MessageSquare,
   Terminal, BookOpen, ClipboardCheck, Gauge, Search, GitCompare,
 } from 'lucide-react'
 import {
@@ -27,6 +27,7 @@ import { useGenerationStream } from './useGenerationStream'
 import EditorSidebar from './EditorSidebar'
 import ChapterContentArea from './ChapterContentArea'
 import GenerationBar, { type BarMode } from './GenerationBar'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>()
@@ -34,7 +35,7 @@ export default function Editor() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
+  const { streamingMode, toggleStreamingMode } = useSettingsStore()
   const genStore = useGenerationStore()
 
   // ── Chapter Selection ────────────────────────────────────────────────────
@@ -57,7 +58,6 @@ export default function Editor() {
   const setTargetWords = useEditorStore((s) => s.setTargetWords)
   const instruction = editorDraft.instruction
   const targetWords = editorDraft.targetWords
-  const plotSuggestions = useEditorStore((s) => s.getChapterSuggestions(novelId, selectedChapterNum))
   const [barMode, setBarMode] = useState<BarMode>('write')
   const annotations = useEditorStore((s) => s.getAnnotations(novelId, selectedChapterNum))
   const addAnnotation = useEditorStore((s) => s.addAnnotation)
@@ -319,13 +319,7 @@ export default function Editor() {
           >
             {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
           </button>
-          <button
-            onClick={toggleTheme}
-            className="p-1.5 rounded-md hover:bg-muted transition-colors"
-            title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          <ThemePicker size="sm" />
           <button onClick={() => setShowContext(!showContext)}
             className="p-1.5 rounded-md hover:bg-muted transition-colors">
             {showContext ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
@@ -534,16 +528,11 @@ export default function Editor() {
               fontFamily={fontFamily}
               fontWeight={fontWeight}
               fontColor={fontColor}
-              plotSuggestions={plotSuggestions}
+
               instruction={instruction}
               onEditContentChange={setEditContent}
               onCloseDiff={() => setShowDiff(false)}
               rewriteMode={barMode === 'rewrite'}
-              onSelectSuggestion={(s) => {
-                setInstruction(novelId, s)
-                gen.setNewCharCandidates([])
-                gen.setNewEntityCandidates([])
-              }}
               onAddParagraphAnnotation={(paragraph) => {
                 const text = prompt(`段落${paragraph}的批注内容：`)
                 if (text?.trim()) {
@@ -583,9 +572,7 @@ export default function Editor() {
               onRewriteModelChange={setRewriteModel}
               writerModel={novel?.writer_model || ''}
               modelLibrary={modelLibrary}
-              plotSuggestions={plotSuggestions}
-              isLoadingSuggestions={gen.isLoadingSuggestions}
-              onFetchSuggestions={gen.handleFetchSuggestions}
+
               newCharCandidates={gen.newCharCandidates}
               selectedCharIndices={gen.selectedCharIndices}
               addingChars={gen.addingChars}

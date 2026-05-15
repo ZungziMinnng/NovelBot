@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
 from openai import AuthenticationError as OpenAIAuthError
@@ -7,7 +8,7 @@ from app.models.novel import Novel
 from app.models.memory import Outline, Memory
 from app.models.chapter import Chapter
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
-from app.agents import world_agent, outline_agent, character_agent
+from app.agents import world_agent, outline_agent, character_agent, build_agent
 from app.services import summarizer, context_builder, llm_client, entity_embeddings
 from app.models.character import Character
 from app.models.world_entity import WorldEntity
@@ -375,15 +376,28 @@ async def wizard_generate_outline(data: WizardStep4, db: AsyncSession = Depends(
             status_code=400,
             detail=f"API Key 或模型名无效，请前往「设置」页面检查配置。原始错误：{e}"
         )
+    except RuntimeError as e:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"大纲生成失败：{e}")
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
+
+    if not outlines:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail="大纲生成失败：模型没有返回任何大纲内容")
 
     await db.commit()
 
     return {
         "outlines": [
-            {"chapter_number": o.chapter_number, "title": o.title, "content": o.content}
+            {
+                "chapter_number": o.chapter_number,
+                "start_chapter": o.start_chapter,
+                "end_chapter": o.end_chapter,
+                "title": o.title,
+                "content": o.content,
+            }
             for o in outlines
         ]
     }
@@ -545,6 +559,17 @@ async def get_context_preview(
         ],
         "writer_model": novel.writer_model or "（使用全局默认 Writer 模型）",
     }
+
+
+@router.post("/{novel_id}/build")
+async def build_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    return StreamingResponse(
+        build_agent.run_novel_build(db, novel_id),
+        media_type="text/event-stream",
+    )
 
 
 @router.post("/{novel_id}/reindex-entities")

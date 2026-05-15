@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Plus, Trash2, User, Loader2, Sun, Moon, Pencil, X, Check, Package, Cog, RefreshCw, ImagePlus } from 'lucide-react'
+import { ArrowLeft, Plus, Trash2, User, Loader2, Pencil, X, Check, Package, Cog, RefreshCw, ImagePlus } from 'lucide-react'
 import { charactersApi, worldEntitiesApi, novelsApi, type Character, type WorldEntity } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
 type Tab = 'character' | 'item' | 'system'
@@ -19,8 +19,6 @@ export default function Characters() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
-
   const [searchParams] = useSearchParams()
   const initialTab = searchParams.get('tab')
   const [activeTab, setActiveTab] = useState<Tab>(
@@ -442,9 +440,7 @@ export default function Characters() {
         </button>
         <h1 className="font-bold text-lg">{novel?.title} · 世界设定</h1>
         <div className="ml-auto flex items-center gap-1">
-          <button onClick={toggleTheme} className="p-2 rounded-md hover:bg-muted transition-colors" title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}>
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          <ThemePicker size="sm" />
           <button onClick={() => setAdding(true)} className="flex items-center gap-1 bg-primary text-primary-foreground px-3 py-1.5 rounded-lg text-sm hover:opacity-90 transition-opacity">
             <Plus className="w-3.5 h-3.5" /> {TAB_CONFIG[activeTab].createLabel}
           </button>

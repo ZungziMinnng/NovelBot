@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Sun, Moon, Eye, Clock, Search, Loader2, ChevronDown, ChevronRight, RefreshCw, FileText, Save } from 'lucide-react'
+import { ArrowLeft, Eye, Clock, Search, Loader2, ChevronDown, ChevronRight, RefreshCw, FileText, Save } from 'lucide-react'
 import { novelsApi, chaptersApi, promptsApi, type ContextPreview, type Chapter, type SearchResult, type PromptInfo } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import toast from 'react-hot-toast'
 
 type Tab = 'context' | 'timeline' | 'search' | 'prompts'
@@ -60,7 +60,6 @@ export default function Outline() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
   const [activeTab, setActiveTab] = useState<Tab>('context')
   const [reindexing, setReindexing] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -164,13 +163,9 @@ export default function Outline() {
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-bold text-lg">{novel?.title} · 上下文 & 时间线</h1>
-        <button
-          onClick={toggleTheme}
-          className="ml-auto p-2 rounded-md hover:bg-muted transition-colors"
-          title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}
-        >
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <div className="ml-auto">
+          <ThemePicker />
+        </div>
       </header>
 
       {/* Tabs */}

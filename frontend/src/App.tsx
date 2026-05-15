@@ -10,15 +10,19 @@ import Notes from '@/pages/Notes/Notes'
 import Settings from '@/pages/Settings/Settings'
 import Admin from '@/pages/Admin/Admin'
 import About from '@/pages/About/About'
+import BuildMode from '@/pages/Build/BuildMode'
 import GenerationIndicator from '@/components/GenerationIndicator/GenerationIndicator'
 import { useSettingsStore } from '@/store/settingsStore'
+import { getThemeById } from '@/lib/themes'
 
 export default function App() {
   const theme = useSettingsStore((s) => s.theme)
 
   useEffect(() => {
     const root = document.documentElement
-    if (theme === 'dark') {
+    const def = getThemeById(theme)
+    root.setAttribute('data-theme', def.id)
+    if (def.base === 'dark') {
       root.classList.add('dark')
     } else {
       root.classList.remove('dark')
@@ -30,6 +34,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/novel/:id" element={<Editor />} />
+        <Route path="/novel/:id/build" element={<BuildMode />} />
         <Route path="/novel/:id/characters" element={<Characters />} />
         <Route path="/novel/:id/outline" element={<Outline />} />
         <Route path="/novel/:id/locations" element={<Locations />} />

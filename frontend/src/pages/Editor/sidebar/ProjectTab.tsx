@@ -63,7 +63,7 @@ export default function ProjectTab({
   const volumeNumSet = new Set(volumes.map(v => v.number))
   const volumeMap = new Map(volumes.map(v => [v.number, v]))
 
-  // Group chapters: only place a chapter under a volume if that volume record exists.
+  // Group chapters: all Volume records are shown, even before any chapters exist.
   // Chapters whose volume number has no matching Volume record go to "unassigned" (key = -1).
   const UNASSIGNED = -1
   const byVol = new Map<number, Chapter[]>()
@@ -75,9 +75,9 @@ export default function ProjectTab({
   }
 
   const groups: { volNum: number; vol: Volume | undefined; chapters: Chapter[] }[] = []
-  // Real volumes first, sorted by number
-  for (const volNum of [...byVol.keys()].filter(k => k !== UNASSIGNED).sort((a, b) => a - b)) {
-    groups.push({ volNum, vol: volumeMap.get(volNum), chapters: byVol.get(volNum)! })
+  // Real volumes first, sorted by number, including empty generated outline volumes.
+  for (const vol of [...volumes].sort((a, b) => a.number - b.number)) {
+    groups.push({ volNum: vol.number, vol, chapters: byVol.get(vol.number) || [] })
   }
   // Unassigned last
   if (byVol.has(UNASSIGNED)) {
@@ -289,7 +289,11 @@ export default function ProjectTab({
               {/* Chapters in this volume */}
               {!collapsed.has(volNum) && (
                 <div className="ml-2 space-y-0.5">
-                  {chs.map(renderChapter)}
+                  {chs.length > 0 ? chs.map(renderChapter) : (
+                    <div className="px-2.5 py-1.5 text-xs text-muted-foreground">
+                      暂无章节
+                    </div>
+                  )}
                 </div>
               )}
             </div>

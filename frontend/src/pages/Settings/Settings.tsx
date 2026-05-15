@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Sun, Moon, Radio, RadioTower, Plus, Pencil, Trash2, X } from 'lucide-react'
+import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Radio, RadioTower, Plus, Pencil, Trash2, X } from 'lucide-react'
 import { settingsApi, modelLibraryApi, providersApi, PROVIDER_PRESETS, type ModelEntry, type ApiProvider } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 // ── ModelSelect sub-component ─────────────────────────────────────────────
 
@@ -39,7 +40,7 @@ function ModelSelect({
 export default function Settings() {
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme, streamingMode, toggleStreamingMode } = useSettingsStore()
+  const { streamingMode, toggleStreamingMode } = useSettingsStore()
 
   // ── Settings state (model assignments + proxy) ─────────────────────────
   const [writerModel, setWriterModel] = useState('')
@@ -299,13 +300,9 @@ export default function Settings() {
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-bold text-lg">设置</h1>
-        <button
-          onClick={toggleTheme}
-          className="ml-auto p-2 rounded-md hover:bg-muted transition-colors"
-          title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}
-        >
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <div className="ml-auto">
+          <ThemePicker />
+        </div>
       </header>
 
       <main className="max-w-2xl mx-auto px-6 py-10 space-y-8">

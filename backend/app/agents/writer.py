@@ -58,8 +58,10 @@ async def stream_chapter(
         target_words=target_words,
     )
     custom = writer_system_prompt.strip()
-    # 有自定义提示词时完整替换，不填才使用默认模板
-    system_content = custom if custom else base_system
+    system_content = (
+        f"{base_system}\n\n=== 用户自定义 Writer 补充要求 ===\n{custom}"
+        if custom else base_system
+    )
 
     context_block, chars_block, task_instruction = format_context_for_writer(ctx, instruction, target_words)
     recent_text = ctx.get("recent_text", "")
@@ -236,7 +238,10 @@ async def stream_chapter_rewrite(
         target_words=target_words,
     )
     custom = writer_system_prompt.strip()
-    system_content = custom if custom else base_system
+    system_content = (
+        f"{base_system}\n\n=== 用户自定义 Writer 补充要求 ===\n{custom}"
+        if custom else base_system
+    )
 
     context_block, chars_block, _ = format_context_for_writer(ctx, "", target_words)
 

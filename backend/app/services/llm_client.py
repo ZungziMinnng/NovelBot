@@ -502,6 +502,20 @@ async def _gemini_complete(
         client=client,
     )
     text, _, _, _ = _parse_gemini_response(response)
+    if not text:
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(prompt_feedback, "block_reason", "") if prompt_feedback else ""
+        _, in_tok, out_tok, finish_reason = _parse_gemini_response(response)
+        logger.warning(
+            "Gemini 非流式空响应: model=%s, finish_reason=%s, block_reason=%s, in_tok=%d, out_tok=%d",
+            model, finish_reason, block_reason, in_tok, out_tok,
+        )
+        if block_reason:
+            raise RuntimeError(f"Gemini 在 prompt 级别拦截了请求（blockReason={block_reason}）。")
+        normal_reasons = {"", "STOP", "FINISH_REASON_UNSPECIFIED"}
+        if finish_reason not in normal_reasons:
+            raise RuntimeError(f"Gemini 未生成内容（finish_reason={finish_reason}），可能被安全过滤或被模型提前终止。")
+        raise RuntimeError("Gemini 未生成任何内容，请修改输入内容或更换大纲/快速模型。")
     return text
 
 

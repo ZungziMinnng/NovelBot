@@ -12,6 +12,7 @@ class NovelCreate(BaseModel):
     core_setting: str = ""
     writer_model: str = ""
     fast_model: str = ""
+    tags: dict = {}
 
 
 class NovelUpdate(BaseModel):
@@ -40,6 +41,7 @@ class NovelUpdate(BaseModel):
     enable_full_text_context: Optional[bool] = None
     full_text_chapters: Optional[int] = None
     context_config: Optional[dict] = None
+    tags: Optional[dict] = None
 
 
 class NovelOut(BaseModel):
@@ -72,6 +74,7 @@ class NovelOut(BaseModel):
     enable_full_text_context: bool
     full_text_chapters: int
     context_config: dict
+    tags: dict
     created_at: datetime
     updated_at: datetime
 

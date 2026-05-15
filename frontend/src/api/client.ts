@@ -39,6 +39,7 @@ export interface Novel {
   enable_full_text_context: boolean
   full_text_chapters: number
   context_config: Record<string, ContextConfigValue>
+  tags: Record<string, string[]>
   created_at: string
   updated_at: string
 }
@@ -99,6 +100,8 @@ export interface Location {
 
 export interface Outline {
   chapter_number: number
+  start_chapter?: number
+  end_chapter?: number
   title: string
   content: string
 }
@@ -297,7 +300,7 @@ export const novelsApi = {
   wizardCharacters: (novelId: number, characters: object[]) =>
     api.post('/novels/wizard/characters', { novel_id: novelId, characters }).then(r => r.data),
   wizardOutline: (novelId: number) =>
-    api.post('/novels/wizard/outline', { novel_id: novelId }).then(r => r.data),
+    api.post<{ outlines: Outline[] }>('/novels/wizard/outline', { novel_id: novelId }, { timeout: 120000 }).then(r => r.data),
   contextPreview: (novelId: number, chapterNumber?: number, instruction?: string, targetWords?: number) =>
     api.get<ContextPreview>(`/novels/${novelId}/context-preview`, {
       params: { chapter_number: chapterNumber, instruction, target_words: targetWords },
@@ -308,6 +311,27 @@ export const novelsApi = {
     api.post<Record<string, number>>(`/novels/${novelId}/reindex-entities`).then(r => r.data),
   search: (novelId: number, query: string) =>
     api.get<SearchResult>(`/novels/${novelId}/search`, { params: { q: query } }).then(r => r.data),
+  streamBuild: (
+    novelId: number,
+    onMessage: (msg: BuildSSEMessage) => void,
+    onClose: () => void,
+  ): AbortController => {
+    const controller = new AbortController()
+    fetch(`/api/novels/${novelId}/build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    }).then(async (response) => {
+      await readSseStream<BuildSSEMessage>(response, onMessage)
+      onClose()
+    }).catch((err) => {
+      if (err.name !== 'AbortError') {
+        onMessage({ event: 'error', data: String(err) })
+      }
+      onClose()
+    })
+    return controller
+  },
 }
 
 export interface WriterMessage {
@@ -462,12 +486,6 @@ export const writerPresetsApi = {
 // ── Generation APIs ─────────────────────────────────────────────────────────
 
 export const generationApi = {
-  plotSuggestions: (novelId: number, chapterNumber: number, volume = 1) =>
-    api.post<{ suggestions: string[] }>('/generation/plot-suggestions', {
-      novel_id: novelId,
-      chapter_number: chapterNumber,
-      volume,
-    }).then(r => r.data.suggestions),
   review: (novelId: number) =>
     api.post<ReviewResult>('/generation/review', { novel_id: novelId }, { timeout: 300000 }).then(r => r.data),
 }
@@ -597,10 +615,6 @@ export interface NewTechniquesData {
   candidates: Array<{ name: string; type: string; description: string }>
 }
 
-export interface PlotSuggestionsData {
-  suggestions: string[]
-}
-
 export interface LlmCallData {
   agent: string
   model: string
@@ -623,7 +637,6 @@ export type SSEMessage =
   | { event: 'original_draft'; data: OriginalDraftData }
   | { event: 'new_characters'; data: NewCharactersData }
   | { event: 'new_entities'; data: NewEntitiesData }
-  | { event: 'plot_suggestions'; data: PlotSuggestionsData }
   | { event: 'review_result'; data: ReviewResult }
   | { event: 'llm_request'; data: Record<string, unknown> }
   | { event: 'llm_call'; data: LlmCallData }
@@ -631,6 +644,22 @@ export type SSEMessage =
   | { event: 'new_techniques'; data: NewTechniquesData }
   | { event: 'context_step'; data: ContextStepData }
   | { event: 'critic_issues'; data: CriticIssuesData }
+
+// ── SSE Build ──────────────────────────────────────────────────────────────
+
+export interface BuildStepData {
+  step: number
+  key: string
+  label: string
+  status: 'running' | 'done' | 'skipped'
+}
+
+export type BuildSSEMessage =
+  | { event: 'build_step'; data: BuildStepData }
+  | { event: 'build_token'; data: string }
+  | { event: 'build_progress'; data: { percent: number; input_tokens: number; output_tokens: number } }
+  | { event: 'build_done'; data: { novel_id: number } }
+  | { event: 'error'; data: string }
 
 // ── SSE Chat ───────────────────────────────────────────────────────────────
 
@@ -675,6 +704,11 @@ async function readSseStream<T>(
         } catch {}
       }
     }
+  }
+  if (buffer.startsWith('data: ')) {
+    try {
+      onMessage(JSON.parse(buffer.slice(6)) as T)
+    } catch {}
   }
 }
 

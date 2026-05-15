@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
-import { Plus, Zap, Loader2, Square, Sparkles, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
+import { Plus, Zap, Loader2, Square, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 import type { Annotation } from '@/store/editorStore'
 import type { ModelEntry } from '@/api/client'
@@ -41,11 +41,6 @@ interface GenerationBarProps {
   onRewriteModelChange: (v: string) => void
   writerModel: string
   modelLibrary: ModelEntry[]
-
-  // Plot suggestions
-  plotSuggestions: string[]
-  isLoadingSuggestions: boolean
-  onFetchSuggestions: () => void
 
   // New character discovery
   newCharCandidates: NewCharCandidate[]
@@ -108,9 +103,6 @@ export default function GenerationBar({
   onRewriteModelChange,
   writerModel,
   modelLibrary,
-  plotSuggestions,
-  isLoadingSuggestions,
-  onFetchSuggestions,
   newCharCandidates,
   selectedCharIndices,
   addingChars,
@@ -252,22 +244,6 @@ export default function GenerationBar({
 
       {barMode === 'write' ? (
         <>
-          {/* Plot Suggestions — fetch button only */}
-          {justFinishedHere && plotSuggestions.length === 0 && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={onFetchSuggestions}
-                disabled={isLoadingSuggestions}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
-              >
-                {isLoadingSuggestions
-                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 生成建议中...</>
-                  : <><Sparkles className="w-3.5 h-3.5" /> 获取下章剧情建议</>
-                }
-              </button>
-            </div>
-          )}
-
           {/* New Character Discovery */}
           {newCharCandidates.length > 0 && (
             <div className="space-y-1.5 border rounded-lg p-3">

@@ -28,3 +28,6 @@ class Chapter(Base):
     )
 
     novel: Mapped["Novel"] = relationship("Novel", back_populates="chapters")  # noqa: F821
+    memory_items: Mapped[list["MemoryItem"]] = relationship(  # noqa: F821
+        "MemoryItem", back_populates="chapter", cascade="all, delete-orphan"
+    )

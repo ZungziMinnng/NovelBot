@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Sun, Moon, Save, Trash2, Loader2, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Save, Trash2, Loader2, RefreshCw } from 'lucide-react'
 import { novelsApi, chaptersApi, charactersApi, adminApi } from '@/api/client'
 import type { Character, Chapter, Memory, OutlineEntry } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
+import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 type TabKey = 'characters' | 'summaries' | 'memories' | 'outlines'
 
@@ -29,8 +29,6 @@ export default function Admin() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { theme, toggleTheme } = useSettingsStore()
-
   const [activeTab, setActiveTab] = useState<TabKey>('characters')
 
   const { data: novel } = useQuery({ queryKey: ['novel', novelId], queryFn: () => novelsApi.get(novelId) })
@@ -53,10 +51,7 @@ export default function Admin() {
         >
           <RefreshCw className="w-3.5 h-3.5" /> 刷新
         </button>
-        <button onClick={toggleTheme} className="p-2 rounded-md hover:bg-muted transition-colors"
-          title={theme === 'dark' ? '切换亮色模式' : '切换深色模式'}>
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <ThemePicker />
       </header>
 
       {/* Tab bar */}
