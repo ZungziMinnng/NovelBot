@@ -4,6 +4,7 @@ import { Send, Loader2, Bot, User, Settings, Trash2, RotateCcw } from 'lucide-re
 import { streamChat, modelLibraryApi, type ChatSSEMessage } from '@/api/client'
 import type { Novel } from '@/api/client'
 import { useChatStore, getChatSettings, getChatMessages } from '@/store/chatStore'
+import { useSettingsStore } from '@/store/settingsStore'
 
 interface Props {
   novelId: number
@@ -69,6 +70,7 @@ export default function ChatPanel({ novelId, novel }: Props) {
         temperature: chatSettings.temperature,
         max_tokens: chatSettings.maxTokens,
         context_rounds: chatSettings.contextRounds,
+        nsfw_mode: useSettingsStore.getState().nsfwMode,
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {

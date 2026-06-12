@@ -12,22 +12,25 @@ import Admin from '@/pages/Admin/Admin'
 import About from '@/pages/About/About'
 import BuildMode from '@/pages/Build/BuildMode'
 import GenerationIndicator from '@/components/GenerationIndicator/GenerationIndicator'
+import BuildIndicator from '@/components/BuildIndicator/BuildIndicator'
 import { useSettingsStore } from '@/store/settingsStore'
 import { getThemeById } from '@/lib/themes'
 
 export default function App() {
   const theme = useSettingsStore((s) => s.theme)
+  const nsfwMode = useSettingsStore((s) => s.nsfwMode)
 
   useEffect(() => {
     const root = document.documentElement
-    const def = getThemeById(theme)
+    const activeThemeId = nsfwMode ? 'nsfw' : theme
+    const def = getThemeById(activeThemeId)
     root.setAttribute('data-theme', def.id)
     if (def.base === 'dark') {
       root.classList.add('dark')
     } else {
       root.classList.remove('dark')
     }
-  }, [theme])
+  }, [theme, nsfwMode])
 
   return (
     <BrowserRouter>
@@ -44,8 +47,8 @@ export default function App() {
         <Route path="/about" element={<About />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      {/* Floating generation indicator shown on all pages except the active editor */}
       <GenerationIndicator />
+      <BuildIndicator />
       <Toaster position="top-right" toastOptions={{ duration: 4000 }} />
     </BrowserRouter>
   )

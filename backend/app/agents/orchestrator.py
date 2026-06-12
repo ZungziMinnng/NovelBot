@@ -66,6 +66,7 @@ async def run_chapter_generation(
     volume: int = 1,
     instruction: str = "",
     target_words: int = 800,
+    nsfw_mode: bool = False,
 ) -> AsyncIterator[str]:
     """
     章节生成主流程，yield SSE 格式字符串。
@@ -183,6 +184,7 @@ async def run_chapter_generation(
                 max_tokens=getattr(novel, "writer_max_tokens", 4096),
                 thinking_level=getattr(novel, "thinking_level", "medium"),
                 gemini_stream=getattr(novel, "gemini_stream", False),
+                nsfw_mode=nsfw_mode,
             ):
                 if isinstance(item, dict):
                     # 元信息（如重试 warning、LLM payload）
@@ -624,6 +626,7 @@ async def run_chapter_rewrite(
     annotations: list[dict],
     target_words: int = 0,
     rewrite_model: str = "",
+    nsfw_mode: bool = False,
 ) -> AsyncIterator[str]:
     try:
         result = await session.execute(
@@ -678,6 +681,7 @@ async def run_chapter_rewrite(
             max_tokens=max_tokens,
             thinking_level=thinking_level,
             gemini_stream=gemini_stream,
+            nsfw_mode=nsfw_mode,
         ):
             if isinstance(item, dict) and "llm_payload" in item:
                 yield _sse_json("llm_request", item["llm_payload"])

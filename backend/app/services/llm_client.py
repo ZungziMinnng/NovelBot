@@ -512,9 +512,16 @@ async def _gemini_complete(
         )
         if block_reason:
             raise RuntimeError(f"Gemini 在 prompt 级别拦截了请求（blockReason={block_reason}）。")
-        normal_reasons = {"", "STOP", "FINISH_REASON_UNSPECIFIED"}
-        if finish_reason not in normal_reasons:
-            raise RuntimeError(f"Gemini 未生成内容（finish_reason={finish_reason}），可能被安全过滤或被模型提前终止。")
+        if finish_reason == "MAX_TOKENS":
+            raise RuntimeError(
+                f"Gemini 输出 token 预算耗尽（finish_reason=MAX_TOKENS, max_tokens={max_tokens}），"
+                "请增大 max_tokens 或缩短输入内容。"
+            )
+        safety_reasons = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
+        if finish_reason in safety_reasons:
+            raise RuntimeError(f"Gemini 未生成内容（finish_reason={finish_reason}），内容被安全过滤。")
+        if finish_reason and finish_reason not in ("", "STOP", "FINISH_REASON_UNSPECIFIED"):
+            raise RuntimeError(f"Gemini 未生成内容（finish_reason={finish_reason}），模型提前终止。")
         raise RuntimeError("Gemini 未生成任何内容，请修改输入内容或更换大纲/快速模型。")
     return text
 
@@ -542,6 +549,11 @@ async def _gemini_complete_with_usage(
             "Gemini 非流式调用异常结束: finish_reason=%s, model=%s, out_tok=%d",
             finish_reason, model, out_tok,
         )
+        if not text and finish_reason == "MAX_TOKENS":
+            raise RuntimeError(
+                f"Gemini 输出 token 预算耗尽（finish_reason=MAX_TOKENS, max_tokens={max_tokens}），"
+                "请增大 max_tokens 或缩短输入内容。"
+            )
     return text, in_tok, out_tok
 
 
@@ -580,7 +592,6 @@ async def _gemini_stream_with_usage(
     if "MAX_TOKENS" in finish_reason_str:
         finish_reason = "length"
 
-    # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
     # ── 空响应时记录原始响应用于诊断 ──
     if not text:
         prompt_feedback = getattr(response, "prompt_feedback", None)

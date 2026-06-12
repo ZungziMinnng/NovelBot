@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Globe, MapPin, Sword, Cog, FileText, Clock, Shield, Zap, Network,
-  Plus, Trash2, Loader2, RefreshCw, ChevronRight,
+  Plus, Trash2, Loader2, RefreshCw, ChevronRight, ChevronDown, Sparkles, Save,
 } from 'lucide-react'
 import {
   novelsApi, locationsApi, worldEntitiesApi, novelNotesApi, chaptersApi,
@@ -54,20 +54,215 @@ export default function WorldTab({ onOpenDetail, activeDetailKey }: Props) {
 
 // ── Sub-views (rendered in detail panel) ──────────────────────────────────
 
+interface WorldSections {
+  background: string
+  rules: string
+  elements: string
+  notes: string
+}
+
+function parseWorldSections(text: string): WorldSections {
+  const sections: WorldSections = { background: '', rules: '', elements: '', notes: '' }
+  if (!text) return sections
+
+  const sectionMap: Record<string, keyof WorldSections> = {
+    '时代背景': 'background',
+    '核心规则': 'rules',
+    '特殊元素': 'elements',
+    '补充备注': 'notes',
+  }
+
+  const regex = /^##\s+(.+)$/gm
+  const matches = [...text.matchAll(regex)]
+
+  if (matches.length === 0) {
+    sections.background = text.trim()
+    return sections
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const heading = matches[i][1].trim()
+    const start = matches[i].index! + matches[i][0].length
+    const end = i + 1 < matches.length ? matches[i + 1].index! : text.length
+    const content = text.slice(start, end).trim()
+    const key = sectionMap[heading]
+    if (key) sections[key] = content
+  }
+
+  return sections
+}
+
+function mergeWorldSections(s: WorldSections): string {
+  const parts: string[] = []
+  if (s.background.trim()) parts.push(`## 时代背景\n${s.background.trim()}`)
+  if (s.rules.trim()) parts.push(`## 核心规则\n${s.rules.trim()}`)
+  if (s.elements.trim()) parts.push(`## 特殊元素\n${s.elements.trim()}`)
+  if (s.notes.trim()) parts.push(`## 补充备注\n${s.notes.trim()}`)
+  return parts.join('\n\n')
+}
+
 export function WorldSettingView({ novel, onEdit }: { novel: Novel | undefined; onEdit: () => void }) {
-  const text = novel?.core_setting || ''
+  const qc = useQueryClient()
+  const [sections, setSections] = useState<WorldSections>({ background: '', rules: '', elements: '', notes: '' })
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [optimizing, setOptimizing] = useState<string | null>(null)
+  const [notesExpanded, setNotesExpanded] = useState(false)
+
+  useEffect(() => {
+    if (novel?.core_setting != null) {
+      setSections(parseWorldSections(novel.core_setting))
+      setDirty(false)
+    }
+  }, [novel?.core_setting])
+
+  const updateSection = useCallback((key: keyof WorldSections, value: string) => {
+    setSections(prev => ({ ...prev, [key]: value }))
+    setDirty(true)
+  }, [])
+
+  const handleSave = async () => {
+    if (!novel) return
+    setSaving(true)
+    try {
+      await novelsApi.update(novel.id, { core_setting: mergeWorldSections(sections) })
+      qc.invalidateQueries({ queryKey: ['novel', novel.id] })
+      setDirty(false)
+      toast.success('世界观已保存')
+    } catch { toast.error('保存失败') }
+    finally { setSaving(false) }
+  }
+
+  const handleOptimize = async (sectionKey: keyof WorldSections) => {
+    if (!novel) return
+    const sectionText = sections[sectionKey]
+    if (!sectionText.trim()) {
+      toast.error('该区块没有内容，请先填写')
+      return
+    }
+    setOptimizing(sectionKey)
+    try {
+      const result = await novelsApi.optimizeWorld(novel.id, sectionText)
+      const optimized = result.core_setting
+      updateSection(sectionKey, optimized)
+      toast.success('AI 优化完成')
+    } catch { toast.error('AI 生成失败') }
+    finally { setOptimizing(null) }
+  }
+
+  if (!novel) return <p className="text-xs text-muted-foreground text-center py-6">加载中...</p>
+
+  const cardClass = "border rounded-lg p-3 space-y-2"
+
   return (
-    <div className="p-3 space-y-3">
-      <button onClick={onEdit} className="w-full text-xs px-3 py-1.5 border rounded-lg hover:bg-muted transition-colors">
-        编辑世界观设定
-      </button>
-      {text ? (
-        <pre className="text-xs whitespace-pre-wrap font-sans leading-relaxed text-muted-foreground max-h-[60vh] overflow-y-auto">
-          {text}
-        </pre>
-      ) : (
-        <p className="text-xs text-muted-foreground text-center py-6">暂无世界观设定</p>
-      )}
+    <div className="p-3 space-y-4 max-h-[70vh] overflow-y-auto">
+      {/* 时代背景 */}
+      <div className={cardClass}>
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-medium">时代背景</h4>
+          <button
+            onClick={() => handleOptimize('background')}
+            disabled={optimizing === 'background'}
+            className="flex items-center gap-1 text-xs px-2 py-1 rounded-md text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
+          >
+            {optimizing === 'background' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+            AI 生成
+          </button>
+        </div>
+        <textarea
+          value={sections.background}
+          onChange={e => updateSection('background', e.target.value)}
+          placeholder="描述时代与地理、政治格局、社会阶层..."
+          className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[80px] focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+
+      {/* 核心设定 */}
+      <div>
+        <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">核心设定</p>
+        <div className="space-y-3">
+          {/* 核心规则 */}
+          <div className={cardClass}>
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium">核心规则</h4>
+              <button
+                onClick={() => handleOptimize('rules')}
+                disabled={optimizing === 'rules'}
+                className="flex items-center gap-1 text-xs px-2 py-1 rounded-md text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
+              >
+                {optimizing === 'rules' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                AI 生成
+              </button>
+            </div>
+            <textarea
+              value={sections.rules}
+              onChange={e => updateSection('rules', e.target.value)}
+              placeholder="描述这个世界运行的核心法则、重要规则或禁忌..."
+              className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[70px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+
+          {/* 特殊元素 */}
+          <div className={cardClass}>
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium">特殊元素</h4>
+              <button
+                onClick={() => handleOptimize('elements')}
+                disabled={optimizing === 'elements'}
+                className="flex items-center gap-1 text-xs px-2 py-1 rounded-md text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
+              >
+                {optimizing === 'elements' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                AI 生成
+              </button>
+            </div>
+            <textarea
+              value={sections.elements}
+              onChange={e => updateSection('elements', e.target.value)}
+              placeholder="描述核心矛盾/张力、独特的文化或超自然元素..."
+              className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[70px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 补充备注 */}
+      <div className="border rounded-lg">
+        <button
+          onClick={() => setNotesExpanded(!notesExpanded)}
+          className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
+        >
+          <span className="font-medium text-sm">补充备注</span>
+          <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${notesExpanded ? 'rotate-180' : ''}`} />
+        </button>
+        {notesExpanded && (
+          <div className="px-3 pb-3">
+            <textarea
+              value={sections.notes}
+              onChange={e => updateSection('notes', e.target.value)}
+              placeholder="其他需要补充的设定信息..."
+              className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* 保存按钮 */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleSave}
+          disabled={!dirty || saving}
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity font-medium"
+        >
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          保存世界观
+        </button>
+        <button
+          onClick={onEdit}
+          className="px-3 py-2 text-sm border rounded-lg hover:bg-muted transition-colors"
+        >
+          源文本
+        </button>
+      </div>
     </div>
   )
 }

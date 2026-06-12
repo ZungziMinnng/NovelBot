@@ -1,4 +1,5 @@
 """Build Agent: 小说世界自动构建流水线（SSE 流式输出）"""
+import asyncio
 import json
 import logging
 import time
@@ -144,7 +145,7 @@ async def _clear_build_outputs(db: AsyncSession, novel_id: int) -> dict[str, int
     }
 
 
-async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str, None]:
+async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = False) -> AsyncGenerator[str, None]:
     t0 = time.time()
     total_in, total_out = 0, 0
 
@@ -178,7 +179,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
         raw_setting = "\n\n".join(raw_setting_parts)
         if novel.tags:
             raw_setting += "\n" + _format_tags(novel.tags)
-        core_setting = await world_agent.expand_world_setting(novel, raw_setting, "")
+        core_setting = await world_agent.expand_world_setting(novel, raw_setting, "", nsfw_mode=nsfw_mode)
         novel.core_setting = core_setting
 
         is_placeholder = _is_placeholder_title(novel.title)
@@ -191,8 +192,11 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
             )
             title_model, title_fmt = llm_client.get_agent_client("world", novel.fast_model)
             generated_title = await llm_client.dispatch_chat_complete(
-                messages=[{"role": "user", "content": title_prompt}],
-                model=title_model, api_format=title_fmt, temperature=0.9, max_tokens=30)
+                messages=[
+                    {"role": "system", "content": "你是小说标题编辑，只输出简洁、自然、具有吸引力的中文标题。"},
+                    {"role": "user", "content": title_prompt},
+                ],
+                model=title_model, api_format=title_fmt, temperature=0.9, max_tokens=60)
             clean_title = _clean_generated_title(generated_title)
             if clean_title:
                 novel.title = clean_title
@@ -204,15 +208,19 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
         yield _progress(20, total_in, total_out)
 
         # ── Step 3: Outline ──
-        yield _step_event(STEPS[2], "running")
-        outlines = await outline_agent.generate_chapter_outlines(db, novel)
-        outline_text = "\n\n".join(f"第{o.chapter_number}章：{o.title}\n{o.content}" for o in outlines)
-        yield _token(outline_text)
-        await db.commit()
-        yield _step_event(STEPS[2], "done")
-        yield _progress(40, total_in, total_out)
-
-        outline_titles = "、".join(f"第{o.chapter_number}章:{o.title}" for o in outlines[:20])
+        if novel.skip_outline:
+            yield _step_event(STEPS[2], "skipped")
+            outline_titles = ""
+            yield _progress(40, total_in, total_out)
+        else:
+            yield _step_event(STEPS[2], "running")
+            outlines = await outline_agent.generate_chapter_outlines(db, novel, nsfw_mode=nsfw_mode)
+            outline_text = "\n\n".join(f"第{o.chapter_number}章：{o.title}\n{o.content}" for o in outlines)
+            yield _token(outline_text)
+            await db.commit()
+            yield _step_event(STEPS[2], "done")
+            yield _progress(40, total_in, total_out)
+            outline_titles = "、".join(f"第{o.chapter_number}章:{o.title}" for o in outlines[:20])
 
         # ── Step 4: Locations ──
         yield _step_event(STEPS[3], "running")
@@ -222,7 +230,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
                             outline_titles=outline_titles)
         model, api_format = llm_client.get_agent_client("world", novel.fast_model)
         loc_raw = await llm_client.dispatch_chat_complete(
-            messages=[{"role": "user", "content": loc_prompt}],
+            messages=[
+                {"role": "system", "content": "你是世界观编辑，只输出结构化、克制、可解析的地点列表。"},
+                {"role": "user", "content": loc_prompt},
+            ],
             model=model, api_format=api_format, temperature=0.7, max_tokens=1200)
         loc_items = _parse_json_array(loc_raw)
         loc_lines = []
@@ -247,7 +258,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
                             genre=novel.genre, premise=novel.premise or "",
                             core_setting=novel.core_setting[:1000])
         fac_raw = await llm_client.dispatch_chat_complete(
-            messages=[{"role": "user", "content": fac_prompt}],
+            messages=[
+                {"role": "system", "content": "你是世界观编辑，只输出结构化、克制、可解析的势力列表。"},
+                {"role": "user", "content": fac_prompt},
+            ],
             model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
         fac_items = _parse_json_array(fac_raw)
         fac_lines = []
@@ -281,7 +295,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
                              outline_titles=outline_titles,
                              existing_characters=existing_characters)
         char_raw = await llm_client.dispatch_chat_complete(
-            messages=[{"role": "user", "content": char_prompt}],
+            messages=[
+                {"role": "system", "content": "你是角色策划编辑，只输出结构化角色列表。"},
+                {"role": "user", "content": char_prompt},
+            ],
             model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
         char_items = _parse_json_array(char_raw)
         existing_names = {c.name for c in existing_chars}
@@ -302,19 +319,54 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
             role_label = f"({char.role})" if char.role else ""
             char_lines.append(f"👤 {name}{role_label}: {char.description}")
         await db.commit()
-        for char in [*existing_chars, *chars_created]:
+        all_chars = [*existing_chars, *chars_created]
+        sheet_failures = []
+        sheet_warnings = []
+        chars_to_embed = list(chars_created)
+
+        def _needs_sheet(c: Character) -> bool:
+            sheet = c.full_sheet or {}
+            if not isinstance(sheet, dict):
+                return True
+            display_keys = ("appearance", "personality", "speech_style", "skills")
+            return not any(sheet.get(key) for key in display_keys)
+
+        async def _gen_sheet(c: Character) -> None:
+            changed = False
             try:
-                if not char.full_sheet:
-                    sheet = await character_agent.generate_character_sheet(novel, char)
-                    char.full_sheet = sheet
-            except Exception:
-                log.warning("角色卡生成失败: %s", char.name)
-            if not char.current_state:
-                char.current_state = character_agent.init_character_state(char)
+                if _needs_sheet(c):
+                    c.full_sheet = await character_agent.generate_character_sheet(novel, c, nsfw_mode=nsfw_mode)
+                    changed = True
+                    warning = (c.full_sheet or {}).get("_generation_warning")
+                    if warning:
+                        sheet_warnings.append(f"{c.name}: {warning}")
+            except Exception as exc:
+                log.warning("角色卡生成失败: %s", c.name, exc_info=True)
+                c.full_sheet = {
+                    "personality": c.description or f"{c.name}的性格尚未细化，需在后续剧情中补充。",
+                    "skills": [],
+                    "appearance": c.description or f"{c.name}的外貌尚未细化，需在后续剧情中补充。",
+                    "speech_style": "说话风格尚未细化，保持与角色定位一致。",
+                    "_generation_warning": f"角色卡生成失败，已使用保底人设：{exc}",
+                }
+                changed = True
+                sheet_failures.append(f"{c.name}: {exc}")
+            if not c.current_state:
+                c.current_state = character_agent.init_character_state(c)
+                changed = True
+            if changed and c not in chars_to_embed:
+                chars_to_embed.append(c)
+
+        await asyncio.gather(*[_gen_sheet(c) for c in all_chars])
         await db.commit()
-        for char in [*existing_chars, *chars_created]:
-            await entity_embeddings.embed_character(novel.id, char)
-        yield _token("\n".join(char_lines) if char_lines else "（无角色生成）")
+        if chars_to_embed:
+            await asyncio.gather(*[entity_embeddings.embed_character(novel.id, c) for c in chars_to_embed])
+        output = "\n".join(char_lines) if char_lines else "（无角色生成）"
+        if sheet_warnings:
+            output += "\n\n⚠ 角色卡已使用保底人设：\n" + "\n".join(f"- {w}" for w in sheet_warnings)
+        if sheet_failures:
+            output += "\n\n⚠ 角色卡生成失败：\n" + "\n".join(f"- {f}" for f in sheet_failures)
+        yield _token(output)
         yield _step_event(STEPS[5], "done")
         yield _progress(90, total_in, total_out)
 
@@ -327,7 +379,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int) -> AsyncGenerator[str
                                  core_setting=novel.core_setting[:1000],
                                  tags=_format_tags(novel.tags or {}))
             tech_raw = await llm_client.dispatch_chat_complete(
-                messages=[{"role": "user", "content": tech_prompt}],
+                messages=[
+                    {"role": "system", "content": "你是力量体系编辑，只输出结构化、克制、可解析的功法列表。"},
+                    {"role": "user", "content": tech_prompt},
+                ],
                 model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
             tech_items = _parse_json_array(tech_raw)
             tech_lines = []

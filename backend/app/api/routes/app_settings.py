@@ -167,7 +167,7 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
             messages=[{"role": "user", "content": "回复数字1"}],
             model=model,
             api_format=api_format,
-            max_tokens=5,
+            max_tokens=100,
         )
         return {
             "ok": True,

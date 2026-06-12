@@ -42,6 +42,9 @@ class NovelUpdate(BaseModel):
     full_text_chapters: Optional[int] = None
     context_config: Optional[dict] = None
     tags: Optional[dict] = None
+    estimated_chapters: Optional[int] = None
+    enable_volume_split: Optional[bool] = None
+    skip_outline: Optional[bool] = None
 
 
 class NovelOut(BaseModel):
@@ -75,6 +78,9 @@ class NovelOut(BaseModel):
     full_text_chapters: int
     context_config: dict
     tags: dict
+    estimated_chapters: int
+    enable_volume_split: bool
+    skip_outline: bool
     created_at: datetime
     updated_at: datetime
 

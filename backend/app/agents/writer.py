@@ -7,6 +7,22 @@ from app.prompts.loader import render
 CIRCLED_NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
+def _preview_text(text: str, max_len: int = 1200) -> str:
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + f"...({len(text)}字)"
+
+
+def _truncate_messages(msgs: list[dict], max_len: int = 2000) -> list[dict]:
+    result = []
+    for m in msgs:
+        content = m.get("content", "")
+        result.append({**m, "content": _preview_text(content, max_len)})
+    return result
+
+
 def _number_paragraphs(text: str) -> str:
     paragraphs = [p for p in text.split("\n") if p.strip()]
     lines = []
@@ -45,6 +61,7 @@ async def stream_chapter(
     max_tokens: int = 4096,
     thinking_level: str = "medium",
     gemini_stream: bool = False,
+    nsfw_mode: bool = False,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """
     流式生成章节内容。
@@ -58,51 +75,30 @@ async def stream_chapter(
         target_words=target_words,
     )
     custom = writer_system_prompt.strip()
-    system_content = (
-        f"{base_system}\n\n=== 用户自定义 Writer 补充要求 ===\n{custom}"
-        if custom else base_system
-    )
-
+    system_source = "custom" if custom else "template"
+    system_content = custom if custom else base_system
     context_block, chars_block, task_instruction = format_context_for_writer(ctx, instruction, target_words)
     recent_text = ctx.get("recent_text", "")
 
     # 先解析模型和格式，后续按 api_format 决定消息结构
     model, api_format = llm_client.get_agent_client("writer", writer_model)
 
-    # ── 组装 messages ──────────────────────────────────────────────────
-    #
-    # 核心差异：用户写作指令（instruction）在不同 API 格式中的放置策略
-    #
-    # Gemini 路径：
-    #   指令 → assistant(model) 角色，绕过输入侧 PROHIBITED_CONTENT 过滤
-    #   结构：user(背景) → assistant(角色+指令+上章) → user(任务)
-    #
-    # OpenAI / DeepSeek 路径：
-    #   指令 → 最后一条 user 消息，确保模型将其视为必须遵循的指令
-    #   assistant 角色 = "AI 之前说过的话"，模型不会把其中内容当指令执行
-    #   结构：user(背景+角色+上章) → assistant(确认) → user(指令+任务)
-
     messages: list[dict] = [
         {"role": "system", "content": system_content},
     ]
 
-    # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
     if api_format == "gemini":
-        # ── Gemini 消息结构 ──
-        messages.append({"role": "user", "content": context_block or "请根据角色设定和写作任务创作小说章节。"})
-        assistant_parts = []
+        user_parts = []
+        if context_block:
+            user_parts.append(context_block)
         if chars_block:
-            assistant_parts.append(chars_block)
-        if instruction:
-            assistant_parts.append(f"=== 写作方向备忘（严格遵守）===\n{instruction}")
+            user_parts.append(chars_block)
         if recent_text:
-            assistant_parts.append(f"=== 上章结尾 ===\n{recent_text}")
-        if assistant_parts:
-            messages.append({"role": "assistant", "content": "\n\n".join(assistant_parts)})
-        task_with_ref = task_instruction
+            user_parts.append(f"=== 上章结尾 ===\n{recent_text}")
         if instruction:
-            task_with_ref += "\n请严格按照「写作方向备忘」中的要求创作。"
-        messages.append({"role": "user", "content": task_with_ref})
+            user_parts.append(f"=== 写作方向 ===\n{instruction}")
+        user_parts.append(task_instruction)
+        messages.append({"role": "user", "content": "\n\n".join(user_parts) or "请根据角色设定和写作任务创作小说章节。"})
     else:
         # ── OpenAI / DeepSeek / Anthropic 消息结构 ──
         # 第一条 user：所有参考资料（世界观、角色、上章内容）
@@ -124,24 +120,16 @@ async def stream_chapter(
         messages.append({"role": "user", "content": "\n\n".join(directive_parts)})
 
     if issues_feedback:
-        # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
         if api_format == "gemini":
-            # Gemini: 指令放 assistant 角色绕过过滤
-            messages.append({
-                "role": "assistant",
-                "content": (
-                    f"[上一版本内容]\n\n"
-                    f"=== 写作方向备忘（严格遵守）===\n{instruction}"
-                ) if instruction else "[上一版本内容]"
-            })
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n"
-                    "⚠️ 请严格按照「写作方向备忘」中的要求创作（尤其是角色姓名不得更改）。\n\n"
-                    "请重新输出完整章节正文。"
-                )
-            })
+            revision_text = (
+                f"\n\n=== 修订要求 ===\n"
+                f"审稿编辑发现以下问题，请修正后重新创作：\n{issues_feedback}\n\n"
+                "请重新输出完整章节正文。"
+            )
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i]["role"] == "user":
+                    messages[i] = {**messages[i], "content": messages[i]["content"] + revision_text}
+                    break
         else:
             # OpenAI / DeepSeek: assistant 表示上一版草稿，user 给出修改指令+写作方向
             messages.append({"role": "assistant", "content": "[上一版本内容]"})
@@ -186,14 +174,28 @@ async def stream_chapter(
         max_tokens = min(max_tokens, content_tokens)
 
     # ── Dev: 将实际 LLM 请求 payload 发给前端 DevPanel ──
-    def _truncate_messages(msgs: list[dict], max_len: int = 500) -> list[dict]:
-        result = []
-        for m in msgs:
-            content = m.get("content", "")
-            if len(content) > max_len:
-                content = content[:max_len] + f"...({len(content)}字)"
-            result.append({**m, "content": content})
-        return result
+    payload_diagnostics = {
+        "system_chars": len(system_content),
+        "system_source": system_source,
+        "context_chars": len(context_block or ""),
+        "characters_chars": len(chars_block or ""),
+        "full_text_context_chars": len(ctx.get("full_text_context", "") or ""),
+        "recent_text_chars": len(recent_text or ""),
+        "instruction_chars": len(instruction or ""),
+        "task_chars": len(task_instruction or ""),
+        "issues_feedback_chars": len(issues_feedback or ""),
+        "message_roles": [m.get("role", "") for m in messages],
+        "message_chars": [len(m.get("content", "")) for m in messages],
+        "section_previews": {
+            "system": _preview_text(system_content),
+            "context": _preview_text(context_block or ""),
+            "characters": _preview_text(chars_block or ""),
+            "recent_text": _preview_text(recent_text or ""),
+            "instruction": _preview_text(instruction or ""),
+            "task": _preview_text(task_instruction or ""),
+            "issues_feedback": _preview_text(issues_feedback or ""),
+        },
+    }
 
     yield {"llm_payload": {
         "model": model,
@@ -201,6 +203,7 @@ async def stream_chapter(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "thinking_level": thinking_level,
+        "diagnostics": payload_diagnostics,
         "messages": _truncate_messages(messages),
     }}
 
@@ -227,6 +230,7 @@ async def stream_chapter_rewrite(
     max_tokens: int = 4096,
     thinking_level: str = "medium",
     gemini_stream: bool = False,
+    nsfw_mode: bool = False,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     if target_words <= 0:
         target_words = len(original_text)
@@ -238,11 +242,8 @@ async def stream_chapter_rewrite(
         target_words=target_words,
     )
     custom = writer_system_prompt.strip()
-    system_content = (
-        f"{base_system}\n\n=== 用户自定义 Writer 补充要求 ===\n{custom}"
-        if custom else base_system
-    )
-
+    system_source = "custom" if custom else "template"
+    system_content = custom if custom else base_system
     context_block, chars_block, _ = format_context_for_writer(ctx, "", target_words)
 
     numbered_text = _number_paragraphs(original_text)
@@ -259,15 +260,17 @@ async def stream_chapter_rewrite(
         ref_parts.append(context_block)
     if chars_block:
         ref_parts.append(chars_block)
-    messages.append({"role": "user", "content": "\n\n".join(ref_parts) or "以下是需要修改的章节。"})
-    messages.append({"role": "assistant", "content": "已了解背景资料，请提供需要修改的章节和批注。"})
-
     rewrite_parts = [
         f"以下是当前章节的内容（已标注段落编号）：\n\n{numbered_text}",
         f"请根据以下批注修改这一章，未提及的部分尽量保持原样：\n\n{annotations_text}",
         "请输出修改后的完整章节正文（不要段落编号，不要章节标题）。",
     ]
-    messages.append({"role": "user", "content": "\n\n".join(rewrite_parts)})
+    if api_format == "gemini":
+        messages.append({"role": "user", "content": "\n\n".join([*ref_parts, *rewrite_parts])})
+    else:
+        messages.append({"role": "user", "content": "\n\n".join(ref_parts) or "以下是需要修改的章节。"})
+        messages.append({"role": "assistant", "content": "已了解背景资料，请提供需要修改的章节和批注。"})
+        messages.append({"role": "user", "content": "\n\n".join(rewrite_parts)})
 
     if llm_client._is_deepseek_model(model):
         system_text = ""
@@ -291,14 +294,23 @@ async def stream_chapter_rewrite(
         content_tokens = int(target_words * 2.0)
         max_tokens = min(max_tokens, content_tokens)
 
-    def _truncate_messages(msgs: list[dict], max_len: int = 500) -> list[dict]:
-        result = []
-        for m in msgs:
-            content = m.get("content", "")
-            if len(content) > max_len:
-                content = content[:max_len] + f"...({len(content)}字)"
-            result.append({**m, "content": content})
-        return result
+    payload_diagnostics = {
+        "system_chars": len(system_content),
+        "system_source": system_source,
+        "context_chars": len(context_block or ""),
+        "characters_chars": len(chars_block or ""),
+        "original_text_chars": len(original_text or ""),
+        "annotations_chars": len(annotations_text or ""),
+        "message_roles": [m.get("role", "") for m in messages],
+        "message_chars": [len(m.get("content", "")) for m in messages],
+        "section_previews": {
+            "system": _preview_text(system_content),
+            "context": _preview_text(context_block or ""),
+            "characters": _preview_text(chars_block or ""),
+            "original_text": _preview_text(original_text or ""),
+            "annotations": _preview_text(annotations_text or ""),
+        },
+    }
 
     yield {"llm_payload": {
         "model": model,
@@ -306,6 +318,7 @@ async def stream_chapter_rewrite(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "thinking_level": thinking_level,
+        "diagnostics": payload_diagnostics,
         "messages": _truncate_messages(messages),
     }}
 

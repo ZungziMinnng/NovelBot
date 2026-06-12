@@ -25,15 +25,8 @@ def _build_analysis_messages(
 ) -> list[dict]:
     """组装「分析章节内容」类任务的消息列表。
 
-    Gemini:  章节原文放 assistant(model) 角色，绕过 PROHIBITED_CONTENT 过滤。
-    OpenAI / DeepSeek:  合并为单条 user 消息，确保模型将原文视为待分析素材。
+    Gemini / OpenAI / DeepSeek: 统一使用单条 user 消息，避免把正文放入 assistant/model 轮次。
     """
-    if api_format == "gemini":
-        return [
-            {"role": "user", "content": prompt_prefix},
-            {"role": "assistant", "content": f"--- 章节内容 ---\n{content}\n---"},
-            {"role": "user", "content": prompt_suffix},
-        ]
     return [
         {"role": "user", "content": f"{prompt_prefix}\n\n--- 章节内容 ---\n{content}\n---\n\n{prompt_suffix}"},
     ]

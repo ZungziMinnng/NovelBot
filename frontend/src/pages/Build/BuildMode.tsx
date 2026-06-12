@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Loader2, Circle, Ban, ChevronDown, ChevronRight, ArrowLeft, ArrowRight } from 'lucide-react'
-import { novelsApi, outlinesApi, type BuildSSEMessage, type BuildStepData } from '@/api/client'
+import { novelsApi, outlinesApi } from '@/api/client'
 import { charactersApi, locationsApi, factionsApi, techniquesApi } from '@/api/client'
+import { useBuildStore } from '@/store/buildStore'
+import { useSettingsStore } from '@/store/settingsStore'
 
 const STEP_DEFS = [
   { key: 'config', label: '分析配置参数' },
@@ -15,110 +17,45 @@ const STEP_DEFS = [
   { key: 'techniques', label: '力量/功法体系' },
 ]
 
-type StepStatus = 'pending' | 'running' | 'done' | 'skipped'
-
-interface StepOutput {
-  key: string
-  text: string
-}
-
 export default function BuildMode() {
   const { id } = useParams<{ id: string }>()
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
 
-  const [phase, setPhase] = useState<'building' | 'done' | 'error'>('building')
-  const [stepStatuses, setStepStatuses] = useState<Record<string, StepStatus>>(() => {
-    const init: Record<string, StepStatus> = {}
-    STEP_DEFS.forEach(s => { init[s.key] = 'pending' })
-    return init
+  const {
+    isBuilding, phase, stepStatuses, stepOutputs, currentStepKey,
+    percent, elapsed, totalTokens, errorMsg, novelId: storeNovelId,
+    startBuild, abortBuild, reset,
+  } = useBuildStore()
+
+  const { data: novel } = useQuery({
+    queryKey: ['novel', novelId],
+    queryFn: () => novelsApi.get(novelId),
   })
-  const [stepOutputs, setStepOutputs] = useState<StepOutput[]>([])
-  const [currentStepKey, setCurrentStepKey] = useState('')
-  const [percent, setPercent] = useState(0)
-  const [elapsed, setElapsed] = useState(0)
-  const [totalTokens, setTotalTokens] = useState(0)
-  const [errorMsg, setErrorMsg] = useState('')
-
-  const outputRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
-  const startTimeRef = useRef(Date.now())
-  const timerRef = useRef<ReturnType<typeof setInterval>>()
 
   useEffect(() => {
-    startTimeRef.current = Date.now()
-    timerRef.current = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
-    }, 1000)
-    return () => { if (timerRef.current) clearInterval(timerRef.current) }
-  }, [])
-
-  const handleMessage = useCallback((msg: BuildSSEMessage) => {
-    switch (msg.event) {
-      case 'build_step': {
-        const d = msg.data as BuildStepData
-        setStepStatuses(prev => ({ ...prev, [d.key]: d.status }))
-        if (d.status === 'running') {
-          setCurrentStepKey(d.key)
-          setStepOutputs(prev => [...prev, { key: d.key, text: '' }])
-        }
-        break
-      }
-      case 'build_token': {
-        setStepOutputs(prev => {
-          if (prev.length === 0) return prev
-          const updated = [...prev]
-          updated[updated.length - 1] = {
-            ...updated[updated.length - 1],
-            text: updated[updated.length - 1].text + (msg.data as string),
-          }
-          return updated
-        })
-        setTotalTokens(prev => prev + (msg.data as string).length)
-        break
-      }
-      case 'build_progress': {
-        const d = msg.data as { percent: number }
-        setPercent(d.percent)
-        break
-      }
-      case 'build_done':
-        setPhase('done')
-        if (timerRef.current) clearInterval(timerRef.current)
-        break
-      case 'error':
-        setErrorMsg(msg.data as string)
-        setPhase('error')
-        if (timerRef.current) clearInterval(timerRef.current)
-        break
+    if (storeNovelId !== novelId && !isBuilding && novel?.title) {
+      startBuild(novelId, novel.title, useSettingsStore.getState().nsfwMode)
     }
-  }, [])
-
-  useEffect(() => {
-    const ctrl = novelsApi.streamBuild(novelId, handleMessage, () => {})
-    abortRef.current = ctrl
-    return () => { ctrl.abort() }
-  }, [novelId, handleMessage])
-
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight
-    }
-  }, [stepOutputs])
+  }, [novelId, novel?.title, storeNovelId, isBuilding, startBuild])
 
   const handleCancel = () => {
-    abortRef.current?.abort()
+    abortBuild()
     navigate('/')
   }
 
   const handleEnterEditor = () => {
     qc.invalidateQueries({ queryKey: ['novels'] })
+    reset()
     navigate(`/novel/${novelId}`)
   }
 
-  if (phase === 'done') {
-    return <BuildSummary novelId={novelId} elapsed={elapsed} totalTokens={totalTokens} onEnter={handleEnterEditor} onRebuild={() => window.location.reload()} />
+  if (phase === 'done' && storeNovelId === novelId) {
+    return <BuildSummary novelId={novelId} elapsed={elapsed} totalTokens={totalTokens} onEnter={handleEnterEditor} onRebuild={() => {
+      reset()
+      startBuild(novelId, novel?.title || '', useSettingsStore.getState().nsfwMode)
+    }} nsfwMode={useSettingsStore.getState().nsfwMode} />
   }
 
   return (
@@ -146,7 +83,7 @@ export default function BuildMode() {
       <div className="flex flex-1 overflow-hidden">
         <div className="w-52 border-r p-4 space-y-1 shrink-0">
           {STEP_DEFS.map(s => {
-            const status = stepStatuses[s.key]
+            const status = stepStatuses[s.key] || 'pending'
             return (
               <div key={s.key} className={`flex items-center gap-2 px-2 py-1.5 rounded text-sm ${currentStepKey === s.key ? 'bg-primary/10' : ''}`}>
                 {status === 'done' && <Check className="w-4 h-4 text-green-500 shrink-0" />}
@@ -159,7 +96,7 @@ export default function BuildMode() {
           })}
         </div>
 
-        <div ref={outputRef} className="flex-1 overflow-y-auto p-6 font-mono text-sm leading-relaxed">
+        <div className="flex-1 overflow-y-auto p-6 font-mono text-sm leading-relaxed">
           {phase === 'error' && (
             <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 mb-4 text-destructive">
               {errorMsg}
@@ -194,12 +131,13 @@ export default function BuildMode() {
   )
 }
 
-function BuildSummary({ novelId, elapsed, totalTokens, onEnter, onRebuild }: {
+function BuildSummary({ novelId, elapsed, totalTokens, onEnter, onRebuild, nsfwMode }: {
   novelId: number
   elapsed: number
   totalTokens: number
   onEnter: () => void
   onRebuild: () => void
+  nsfwMode?: boolean
 }) {
   const { data: novel } = useQuery({ queryKey: ['novel', novelId], queryFn: () => novelsApi.get(novelId) })
   const { data: chars } = useQuery({ queryKey: ['characters', novelId], queryFn: () => charactersApi.list(novelId) })

@@ -49,6 +49,9 @@ class Novel(Base):
     full_text_chapters: Mapped[int] = mapped_column(Integer, default=20)
     context_config: Mapped[dict] = mapped_column(JSON, default=dict)
     tags: Mapped[dict] = mapped_column(JSON, default=dict)
+    estimated_chapters: Mapped[int] = mapped_column(Integer, default=0)
+    enable_volume_split: Mapped[bool] = mapped_column(Boolean, default=False)
+    skip_outline: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

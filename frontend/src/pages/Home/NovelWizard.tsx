@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { X, ChevronRight, ChevronLeft, ChevronDown, Loader2, BookOpen } from 'lucide-react'
-import toast from 'react-hot-toast'
+import { useState, useMemo } from 'react'
+import { X, ChevronRight, ChevronLeft, ChevronDown, Loader2 } from 'lucide-react'
 import { novelsApi } from '@/api/client'
+import { ROLE_OPTIONS } from '@/constants/roles'
+import { useSettingsStore } from '@/store/settingsStore'
 
 interface Props {
   onClose: () => void
@@ -18,6 +19,14 @@ const GENRES = [
 const STYLES = ['严肃厚重', '轻快幽默', '悬念紧张', '细腻文艺', '热血激昂']
 const LENGTHS = ['超短篇（< 10万字）', '短篇（10-50万字）', '中篇（50-150万字）', '长篇（> 150万字）']
 const LENGTH_VALUES = ['超短篇', '短篇', '中篇', '长篇']
+const WIZARD_ROLE_OPTIONS = ['主角', ...ROLE_OPTIONS.filter(role => role !== '主角')]
+
+const CHAPTER_RANGES: Record<string, { min: number; max: number; default: number }> = {
+  '超短篇': { min: 10, max: 100, default: 30 },
+  '短篇': { min: 30, max: 500, default: 100 },
+  '中篇': { min: 100, max: 1500, default: 300 },
+  '长篇': { min: 200, max: 5000, default: 500 },
+}
 
 const TAG_GROUPS: { key: string; label: string; options: string[] }[] = [
   {
@@ -42,31 +51,53 @@ const TAG_GROUPS: { key: string; label: string; options: string[] }[] = [
   },
 ]
 
+const NSFW_TAG_GROUPS: { key: string; label: string; options: string[] }[] = [
+  {
+    key: 'nsfw_genre', label: '成人类型',
+    options: ['纯爱', '后宫', '百合', '耽美', 'NTR', '调教', '人妻', '触手', '异种', '催眠', '女尊'],
+  },
+  {
+    key: 'nsfw_element', label: '情色元素',
+    options: ['女仆', '制服诱惑', '温泉', '校园禁忌', '师徒禁恋', '异世奴隶', '魅魔', '身体改造', '精神控制', '时间停止'],
+  },
+]
+
 export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
+  const nsfwMode = useSettingsStore((s) => s.nsfwMode)
+  const allTagGroups = useMemo(
+    () => nsfwMode ? [...TAG_GROUPS, ...NSFW_TAG_GROUPS] : TAG_GROUPS,
+    [nsfwMode],
+  )
   const [step, setStep] = useState(1)
   const [loading, setLoading] = useState(false)
   const [novelId, setNovelId] = useState<number | null>(null)
 
+  // Step 1 fields
   const [title, setTitle] = useState('')
   const [premise, setPremise] = useState('')
   const [genre, setGenre] = useState('玄幻')
-  const [length, setLength] = useState(1)
   const [style, setStyle] = useState('严肃厚重')
-
   const [tags, setTags] = useState<Record<string, string[]>>({
     tropes: [], situation: [], theme: [], pacing: [], cheat: [],
   })
   const [cheatCustom, setCheatCustom] = useState('')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-
   const [rawSetting, setRawSetting] = useState('')
   const [rawRules, setRawRules] = useState('')
-  const [worldSubmitted, setWorldSubmitted] = useState(false)
-  const [charactersSubmitted, setCharactersSubmitted] = useState(false)
 
+  // Step 2 fields
+  const [length, setLength] = useState(1)
+  const [estimatedChapters, setEstimatedChapters] = useState(30)
+  const [enableVolumeSplit, setEnableVolumeSplit] = useState(false)
+  const [skipOutline, setSkipOutline] = useState(false)
+
+  // Step 3 fields
   const [characters, setCharacters] = useState([
     { name: '', role: '主角', age: '', description: '' }
   ])
+
+  // Track submissions
+  const [charactersSubmitted, setCharactersSubmitted] = useState(false)
 
   const toggleTag = (groupKey: string, tag: string) => {
     setTags(prev => {
@@ -112,6 +143,8 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
     return novel.id
   }
 
+  const chapterRange = useMemo(() => CHAPTER_RANGES[LENGTH_VALUES[length]], [length])
+
   const handleStep1 = async () => {
     setLoading(true)
     try {
@@ -126,10 +159,12 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
     setLoading(true)
     try {
       const id = await ensureNovel()
-      if (rawSetting.trim() || rawRules.trim()) {
-        await novelsApi.wizardWorld(id, rawSetting, rawRules)
-        setWorldSubmitted(true)
-      }
+      await novelsApi.update(id, {
+        target_length: LENGTH_VALUES[length],
+        estimated_chapters: estimatedChapters,
+        enable_volume_split: enableVolumeSplit,
+        skip_outline: skipOutline,
+      })
       setStep(3)
     } finally {
       setLoading(false)
@@ -139,7 +174,7 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
   const handleStep3 = async () => {
     const validChars = characters.filter(c => c.name.trim())
     if (validChars.length === 0) {
-      setStep(4)
+      await handleBuild()
       return
     }
     setLoading(true)
@@ -147,44 +182,38 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
       const id = await ensureNovel()
       await novelsApi.wizardCharacters(id, validChars)
       setCharactersSubmitted(true)
-      setStep(4)
+      await handleBuildInner(id)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleStep4 = async () => {
-    setLoading(true)
-    try {
-      const id = await ensureNovel()
-      const result = await novelsApi.wizardOutline(id)
-      if (!result.outlines?.length) {
-        toast.error('大纲生成失败：模型没有返回大纲内容，请修改前提或更换快速模型后重试')
-        return
-      }
-      onComplete(id)
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.message || '未知错误'
-      toast.error(`大纲生成失败：${detail}`, { duration: 8000 })
-    } finally {
-      setLoading(false)
+  const handleBuildInner = async (id: number) => {
+    if (rawSetting.trim() || rawRules.trim()) {
+      const coreSetting = [rawSetting.trim(), rawRules.trim()].filter(Boolean).join('\n\n')
+      await novelsApi.update(id, { core_setting: coreSetting })
     }
+    onBuild(id)
   }
 
   const handleBuild = async () => {
     setLoading(true)
     try {
       const id = await ensureNovel()
-      if (!worldSubmitted && (rawSetting.trim() || rawRules.trim())) {
-        const coreSetting = [rawSetting.trim(), rawRules.trim()].filter(Boolean).join('\n\n')
-        await novelsApi.update(id, { core_setting: coreSetting })
+      if (step >= 2) {
+        await novelsApi.update(id, {
+          target_length: LENGTH_VALUES[length],
+          estimated_chapters: estimatedChapters,
+          enable_volume_split: enableVolumeSplit,
+          skip_outline: skipOutline,
+        })
       }
       const validChars = characters.filter(c => c.name.trim())
       if (!charactersSubmitted && validChars.length > 0) {
         await novelsApi.wizardCharacters(id, validChars)
         setCharactersSubmitted(true)
       }
-      onBuild(id)
+      await handleBuildInner(id)
     } finally {
       setLoading(false)
     }
@@ -194,6 +223,19 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
     setLoading(true)
     try {
       const id = await ensureNovel()
+      const updates: Record<string, unknown> = {}
+      if (step >= 1 && (rawSetting.trim() || rawRules.trim())) {
+        updates.core_setting = [rawSetting.trim(), rawRules.trim()].filter(Boolean).join('\n\n')
+      }
+      if (step >= 2) {
+        updates.target_length = LENGTH_VALUES[length]
+        updates.estimated_chapters = estimatedChapters
+        updates.enable_volume_split = enableVolumeSplit
+        updates.skip_outline = skipOutline
+      }
+      if (Object.keys(updates).length > 0) {
+        await novelsApi.update(id, updates)
+      }
       onComplete(id)
     } finally {
       setLoading(false)
@@ -215,14 +257,14 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
           <div>
             <h2 className="font-bold text-lg">新建小说</h2>
             <div className="flex items-center gap-1 mt-1">
-              {[1,2,3,4].map(s => (
+              {[1,2,3].map(s => (
                 <button
                   key={s}
-                  onClick={() => setStep(s)}
+                  onClick={() => s <= step && setStep(s)}
                   className={`h-1 w-8 rounded-full transition-colors ${s <= step ? 'bg-primary' : 'bg-border'}`}
                 />
               ))}
-              <span className="text-xs text-muted-foreground ml-2">{step}/4</span>
+              <span className="text-xs text-muted-foreground ml-2">{step}/3</span>
             </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-md hover:bg-muted">
@@ -277,18 +319,6 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
               </div>
 
               <div>
-                <label className="text-sm font-medium mb-2 block">目标长度</label>
-                <div className="flex gap-2">
-                  {LENGTHS.map((l, i) => (
-                    <button key={l} onClick={() => setLength(i)}
-                      className={`flex-1 px-3 py-1.5 rounded-full text-sm border transition-colors ${length === i ? 'bg-primary text-primary-foreground border-primary' : 'hover:border-primary'}`}>
-                      {l}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
                 <label className="text-sm font-medium mb-2 block">写作风格</label>
                 <div className="flex flex-wrap gap-2">
                   {STYLES.map(s => (
@@ -312,6 +342,32 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
                 )}
               </div>
 
+              {/* 世界观设定 */}
+              <div className="border-t pt-4">
+                <p className="text-sm text-muted-foreground mb-3">描述你的世界观，AI 将自动扩展为完整设定文档。</p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">时代背景 <span className="text-muted-foreground font-normal">（选填）</span></label>
+                    <textarea
+                      value={rawSetting}
+                      onChange={e => setRawSetting(e.target.value)}
+                      placeholder="例：架空古代，类似明朝中期，无魔法体系..."
+                      className="w-full border rounded-lg p-3 text-sm resize-none h-20 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">核心规则/特殊设定 <span className="text-muted-foreground font-normal">（选填）</span></label>
+                    <textarea
+                      value={rawRules}
+                      onChange={e => setRawRules(e.target.value)}
+                      placeholder="例：皇权衰弱，三大世家把持朝政..."
+                      className="w-full border rounded-lg p-3 text-sm resize-none h-16 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 标签 */}
               <div className="border-t pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <label className="text-sm font-medium">标签设定 <span className="text-muted-foreground font-normal">（选填）</span></label>
@@ -320,7 +376,7 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
                   )}
                 </div>
                 <div className="space-y-1">
-                  {TAG_GROUPS.map(group => {
+                  {allTagGroups.map(group => {
                     const expanded = expandedGroups.has(group.key)
                     const selected = tags[group.key] || []
                     return (
@@ -366,25 +422,69 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
           )}
 
           {step === 2 && (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">描述你的世界观，AI 将自动扩展为完整设定文档。</p>
+            <div className="space-y-6">
+              <p className="text-sm text-muted-foreground">设置小说规模，AI 将据此规划大纲结构。</p>
+
               <div>
-                <label className="text-sm font-medium mb-1 block">时代背景</label>
-                <textarea
-                  value={rawSetting}
-                  onChange={e => setRawSetting(e.target.value)}
-                  placeholder="例：架空古代，类似明朝中期，无魔法体系..."
-                  className="w-full border rounded-lg p-3 text-sm resize-none h-20 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                />
+                <label className="text-sm font-medium mb-2 block">目标长度</label>
+                <div className="flex gap-2">
+                  {LENGTHS.map((l, i) => (
+                    <button key={l} onClick={() => {
+                      setLength(i)
+                      setEstimatedChapters(CHAPTER_RANGES[LENGTH_VALUES[i]].default)
+                    }}
+                      className={`flex-1 px-3 py-1.5 rounded-full text-sm border transition-colors ${length === i ? 'bg-primary text-primary-foreground border-primary' : 'hover:border-primary'}`}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
               </div>
+
               <div>
-                <label className="text-sm font-medium mb-1 block">核心规则/特殊设定（可选）</label>
-                <textarea
-                  value={rawRules}
-                  onChange={e => setRawRules(e.target.value)}
-                  placeholder="例：皇权衰弱，三大世家把持朝政..."
-                  className="w-full border rounded-lg p-3 text-sm resize-none h-16 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-sm font-medium">预估章节数</label>
+                  <span className="text-sm font-bold text-primary">{estimatedChapters} 章</span>
+                </div>
+                <input
+                  type="range"
+                  min={chapterRange.min}
+                  max={chapterRange.max}
+                  step={chapterRange.max <= 50 ? 1 : 5}
+                  value={estimatedChapters}
+                  onChange={e => setEstimatedChapters(Number(e.target.value))}
+                  className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
                 />
+                <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                  <span>{chapterRange.min} 章</span>
+                  <span>{chapterRange.max} 章</span>
+                </div>
+              </div>
+
+              <div className="border-t pt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium block">自动分卷</label>
+                    <p className="text-xs text-muted-foreground mt-0.5">开启后系统将根据大纲和设定自动分卷</p>
+                  </div>
+                  <button
+                    onClick={() => setEnableVolumeSplit(!enableVolumeSplit)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${enableVolumeSplit ? 'bg-primary' : 'bg-muted'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${enableVolumeSplit ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between mt-4">
+                  <div>
+                    <label className="text-sm font-medium block">跳过大纲生成</label>
+                    <p className="text-xs text-muted-foreground mt-0.5">开启后 AI 构建仅生成世界观设定，不生成章节大纲</p>
+                  </div>
+                  <button
+                    onClick={() => setSkipOutline(!skipOutline)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${skipOutline ? 'bg-primary' : 'bg-muted'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${skipOutline ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -402,11 +502,24 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">定位</label>
-                      <input list={`role-options-wizard-${i}`} value={c.role} onChange={e => updateChar(i, 'role', e.target.value)}
-                        className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
-                      <datalist id={`role-options-wizard-${i}`}>
-                        {['男主', '女主', '主角', '配角', '反派', '朋友'].map(r => <option key={r} value={r} />)}
-                      </datalist>
+                      <select
+                        value={WIZARD_ROLE_OPTIONS.includes(c.role) ? c.role : '__custom__'}
+                        onChange={e => {
+                          updateChar(i, 'role', e.target.value === '__custom__' ? '' : e.target.value)
+                        }}
+                        className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        {WIZARD_ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                        <option value="__custom__">自定义...</option>
+                      </select>
+                      {!WIZARD_ROLE_OPTIONS.includes(c.role) && (
+                        <input
+                          value={c.role}
+                          onChange={e => updateChar(i, 'role', e.target.value)}
+                          className="mt-2 w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                          placeholder="输入角色定位"
+                        />
+                      )}
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">年龄</label>
@@ -427,20 +540,6 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
               </button>
             </div>
           )}
-
-          {step === 4 && (
-            <div className="space-y-4">
-              <div className="text-center py-4">
-                <div className="w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <BookOpen className="w-8 h-8 text-primary" />
-                </div>
-                <h3 className="font-semibold text-lg mb-2">准备生成大纲</h3>
-                <p className="text-muted-foreground text-sm">
-                  AI 将根据你的设定生成完整的章节大纲，这将作为后续创作的骨架。
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="flex items-center justify-between p-6 border-t shrink-0">
@@ -459,7 +558,7 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
             >
               跳过，快速创建
             </button>
-            {step === 1 && (
+            {step === 2 && (
               <button
                 onClick={handleBuild}
                 disabled={loading}
@@ -469,20 +568,30 @@ export default function NovelWizard({ onClose, onComplete, onBuild }: Props) {
                 AI 自动构建
               </button>
             )}
-            <button
-              onClick={() => {
-                if (step === 1) handleStep1()
-                else if (step === 2) handleStep2()
-                else if (step === 3) handleStep3()
-                else handleBuild()
-              }}
-              disabled={loading}
-              className="flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity font-medium text-sm"
-            >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {step === 4 ? 'AI 自动构建' : '下一步'}
-              {!loading && step < 4 && <ChevronRight className="w-4 h-4" />}
-            </button>
+            {step < 3 && (
+              <button
+                onClick={() => {
+                  if (step === 1) handleStep1()
+                  else if (step === 2) handleStep2()
+                }}
+                disabled={loading}
+                className="flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity font-medium text-sm"
+              >
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                下一步
+                {!loading && <ChevronRight className="w-4 h-4" />}
+              </button>
+            )}
+            {step === 3 && (
+              <button
+                onClick={handleStep3}
+                disabled={loading}
+                className="flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity font-medium text-sm"
+              >
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                AI 自动构建
+              </button>
+            )}
           </div>
         </div>
       </div>

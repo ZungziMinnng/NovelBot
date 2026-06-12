@@ -14,3 +14,4 @@ class ChatRequest(BaseModel):
     temperature: float = 0.85
     max_tokens: int = 4096
     context_rounds: int = 0      # 对话轮次限制，0 = 使用小说默认设置
+    nsfw_mode: bool = False

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
@@ -561,13 +562,17 @@ async def get_context_preview(
     }
 
 
+class _BuildBody(BaseModel):
+    nsfw_mode: bool = False
+
+
 @router.post("/{novel_id}/build")
-async def build_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def build_novel(novel_id: int, body: _BuildBody, db: AsyncSession = Depends(get_db)):
     novel = await db.get(Novel, novel_id)
     if not novel:
         raise HTTPException(status_code=404, detail="小说不存在")
     return StreamingResponse(
-        build_agent.run_novel_build(db, novel_id),
+        build_agent.run_novel_build(db, novel_id, nsfw_mode=body.nsfw_mode),
         media_type="text/event-stream",
     )
 
@@ -653,7 +658,6 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
             summaries_text = "\n".join(f"第{c.number}章：{c.summary}" for c in batch)
             instruction += f"\n需要标注的章节：\n{summaries_text}"
 
-            # ⚠ 重要：Gemini 安全过滤规避措施，请勿修改此处逻辑，除非用户明确要求。
             if api_format == "gemini":
                 messages = [
                     {"role": "user", "content": instruction},

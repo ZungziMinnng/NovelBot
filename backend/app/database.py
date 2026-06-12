@@ -106,6 +106,9 @@ async def _run_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS idx_memory_items_novel_chapter ON memory_items(novel_id, chapter_number)",
         "CREATE INDEX IF NOT EXISTS idx_memory_items_due ON memory_items(novel_id, category, status, due_chapter)",
         "ALTER TABLE novels ADD COLUMN tags JSON DEFAULT '{}'",
+        "ALTER TABLE novels ADD COLUMN estimated_chapters INTEGER DEFAULT 0",
+        "ALTER TABLE novels ADD COLUMN enable_volume_split INTEGER DEFAULT 0",
+        "ALTER TABLE novels ADD COLUMN skip_outline INTEGER DEFAULT 0",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

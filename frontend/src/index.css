@@ -344,6 +344,26 @@
     --ring: 220 25% 45%;
   }
 
+  [data-theme="nsfw"] {
+    --background: 280 50% 4%;
+    --foreground: 280 15% 92%;
+    --card: 280 40% 7%;
+    --card-foreground: 280 15% 92%;
+    --primary: 290 80% 60%;
+    --primary-foreground: 280 50% 4%;
+    --secondary: 280 30% 12%;
+    --secondary-foreground: 280 15% 92%;
+    --muted: 280 30% 12%;
+    --muted-foreground: 280 15% 50%;
+    --accent: 330 80% 55%;
+    --accent-foreground: 280 15% 92%;
+    --destructive: 0 65% 40%;
+    --destructive-foreground: 280 15% 92%;
+    --border: 280 25% 16%;
+    --input: 280 25% 16%;
+    --ring: 290 80% 60%;
+  }
+
   * {
     @apply border-border;
   }

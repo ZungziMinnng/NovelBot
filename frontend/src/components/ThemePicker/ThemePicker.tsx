@@ -34,7 +34,7 @@ export default function ThemePicker({ size = 'md' }: { size?: 'sm' | 'md' }) {
         <div className="absolute right-0 top-full mt-1 z-50 bg-card border rounded-xl shadow-lg p-3 w-[280px]">
           <p className="text-xs text-muted-foreground mb-2 px-1">选择主题</p>
           <div className="grid grid-cols-2 gap-0.5 max-h-[400px] overflow-y-auto">
-            {THEMES.map(t => (
+            {THEMES.filter(t => t.id !== 'nsfw').map(t => (
               <button
                 key={t.id}
                 onClick={() => { setTheme(t.id); setOpen(false) }}

@@ -16,9 +16,35 @@ logger = logging.getLogger(__name__)
 HISTORY_BATCH_SIZE = 20
 
 
+def _fallback_character_sheet(character: Character, warning: str = "") -> dict:
+    description = (character.description or "").strip()
+    sheet = {
+        "personality": description or f"{character.name}的性格尚未细化，需在后续剧情中补充。",
+        "skills": [],
+        "appearance": description or f"{character.name}的外貌尚未细化，需在后续剧情中补充。",
+        "speech_style": "说话风格尚未细化，保持与角色定位一致。",
+    }
+    if warning:
+        sheet["_generation_warning"] = warning
+    return sheet
+
+
+def _normalize_character_sheet(sheet: dict, character: Character) -> dict:
+    normalized = dict(sheet) if isinstance(sheet, dict) else {}
+    fallback = _fallback_character_sheet(character)
+    for key, value in fallback.items():
+        if key.startswith("_"):
+            continue
+        current = normalized.get(key)
+        if current is None or current == "" or current == []:
+            normalized[key] = value
+    return normalized
+
+
 async def generate_character_sheet(
     novel: Novel,
     character: Character,
+    nsfw_mode: bool = False,
 ) -> dict:
     """使用 LLM 生成完整角色卡"""
     prompt = render(
@@ -35,7 +61,10 @@ async def generate_character_sheet(
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)
     raw = await llm_client.dispatch_chat_complete(
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "你是角色设定编辑，只输出可解析的 JSON 角色卡。"},
+            {"role": "user", "content": prompt},
+        ],
         model=model,
         api_format=api_format,
         temperature=0.7,
@@ -46,11 +75,16 @@ async def generate_character_sheet(
         # 提取 JSON
         start = raw.find("{")
         end = raw.rfind("}") + 1
+        if start < 0 or end <= start:
+            raise ValueError("LLM response does not contain a JSON object")
         sheet = json.loads(raw[start:end])
-    except Exception:
-        sheet = {"raw": raw}
+        if not isinstance(sheet, dict):
+            raise ValueError("LLM response JSON is not an object")
+    except Exception as exc:
+        logger.warning("角色卡 JSON 解析失败: %s; raw=%s", exc, raw[:500])
+        return _fallback_character_sheet(character, "角色卡 JSON 解析失败，已使用角色简介生成保底人设。")
 
-    return sheet
+    return _normalize_character_sheet(sheet, character)
 
 
 def init_character_state(character: Character) -> dict:

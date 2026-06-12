@@ -13,7 +13,25 @@
 主要角色：
 {{ characters_summary }}
 
-请生成“分卷 + 章级”大纲，共 {{ volume_count }} 卷、{{ chapter_count }} 章，平均每卷约 {{ chapters_per_volume }} 章。
+{% if volume_mode %}
+请生成“分卷大纲”，全书预估 {{ total_chapters }} 章，共 {{ volume_count }} 卷。
+每卷只写一个大致大纲，不要逐章列出。
+每卷必须包含明确章节范围，章节范围之间必须连续且覆盖第1章到第{{ total_chapters }}章。
+
+格式如下（严格按格式输出，方便解析）：
+
+第1卷：[卷标题]
+覆盖章节：第1章-第{{ chapters_per_volume }}章
+[本卷主线、主要冲突、阶段目标和结尾钩子，3-5句话]
+
+第2卷：[卷标题]
+覆盖章节：第{{ chapters_per_volume + 1 }}章-第{{ chapters_per_volume * 2 }}章
+[本卷主线、主要冲突、阶段目标和结尾钩子，3-5句话]
+
+... 以此类推，生成 {{ volume_count }} 卷。
+{% else %}
+请生成“分卷 + 章级”大纲。全书预估 {{ total_chapters }} 章，本次只生成前 {{ chapter_count }} 章的详细章纲，共 {{ volume_count }} 卷，平均每卷约 {{ chapters_per_volume }} 章。
+如果全书预估章数大于本次详细章纲数量，请让最后一卷标题体现后续主线方向，不要试图列出全部章节。
 章节号必须使用全书连续编号，不能每卷都从第1章重新开始。
 格式如下（严格按格式输出，方便解析）：
 
@@ -28,6 +46,7 @@
 第{{ chapters_per_volume + 1 }}章：[章节标题]
 [本章核心事件和目标，2-3句话]
 
-... 以此类推，生成 {{ volume_count }} 卷 {{ chapter_count }} 章大纲。
+... 以此类推，生成 {{ volume_count }} 卷、前 {{ chapter_count }} 章大纲。
+{% endif %}
 
 只输出大纲内容，不要任何前言或说明。

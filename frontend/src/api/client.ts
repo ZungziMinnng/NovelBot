@@ -40,6 +40,9 @@ export interface Novel {
   full_text_chapters: number
   context_config: Record<string, ContextConfigValue>
   tags: Record<string, string[]>
+  estimated_chapters: number
+  enable_volume_split: boolean
+  skip_outline: boolean
   created_at: string
   updated_at: string
 }
@@ -298,7 +301,7 @@ export const novelsApi = {
   wizardWorld: (novelId: number, rawSetting: string, rawRules: string) =>
     api.post('/novels/wizard/world', { novel_id: novelId, raw_world_setting: rawSetting, raw_world_rules: rawRules }).then(r => r.data),
   wizardCharacters: (novelId: number, characters: object[]) =>
-    api.post('/novels/wizard/characters', { novel_id: novelId, characters }).then(r => r.data),
+    api.post('/novels/wizard/characters', { novel_id: novelId, characters }, { timeout: 120000 }).then(r => r.data),
   wizardOutline: (novelId: number) =>
     api.post<{ outlines: Outline[] }>('/novels/wizard/outline', { novel_id: novelId }, { timeout: 120000 }).then(r => r.data),
   contextPreview: (novelId: number, chapterNumber?: number, instruction?: string, targetWords?: number) =>
@@ -313,6 +316,7 @@ export const novelsApi = {
     api.get<SearchResult>(`/novels/${novelId}/search`, { params: { q: query } }).then(r => r.data),
   streamBuild: (
     novelId: number,
+    nsfw_mode: boolean,
     onMessage: (msg: BuildSSEMessage) => void,
     onClose: () => void,
   ): AbortController => {
@@ -320,6 +324,7 @@ export const novelsApi = {
     fetch(`/api/novels/${novelId}/build`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nsfw_mode }),
       signal: controller.signal,
     }).then(async (response) => {
       await readSseStream<BuildSSEMessage>(response, onMessage)
@@ -721,6 +726,7 @@ export function streamChat(
     temperature?: number
     max_tokens?: number
     context_rounds?: number
+    nsfw_mode?: boolean
   },
   onMessage: (msg: ChatSSEMessage) => void,
   onClose: () => void,
@@ -759,6 +765,7 @@ export function streamChapterRewrite(
     annotations: AnnotationItem[]
     target_words: number
     rewrite_model?: string
+    nsfw_mode?: boolean
   },
   onMessage: (msg: SSEMessage) => void,
   onClose: () => void,
@@ -792,6 +799,7 @@ export function streamChapterGeneration(
     volume: number
     instruction: string
     target_words: number
+    nsfw_mode?: boolean
   },
   onMessage: (msg: SSEMessage) => void,
   onClose: () => void,

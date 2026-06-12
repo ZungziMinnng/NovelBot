@@ -24,6 +24,7 @@ env/
 backend/data/
 backend/.env
 tmp_*
+data/
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/

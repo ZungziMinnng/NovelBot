@@ -23,6 +23,7 @@ export const THEMES: ThemeDefinition[] = [
   { id: 'sky-blue',        label: '天际蓝',    base: 'light', accentColor: '#38BDF8' },
   { id: 'dream-purple',    label: '梦幻紫',    base: 'light', accentColor: '#A78BFA' },
   { id: 'elegant-gray',    label: '淡雅灰',    base: 'light', accentColor: '#9CA3AF' },
+  { id: 'nsfw',            label: '创作自由',  base: 'dark',  accentColor: '#C026D3' },
 ]
 
 export function getThemeById(id: string): ThemeDefinition {

@@ -9,6 +9,7 @@ import { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
 import { useDevLogStore } from '@/store/devLogStore'
+import { useSettingsStore } from '@/store/settingsStore'
 import { useQueryClient } from '@tanstack/react-query'
 
 export interface GenerationStreamState {
@@ -132,6 +133,7 @@ export function useGenerationStream(
         volume: selectedVolume,
         instruction,
         target_words: targetWords,
+        nsfw_mode: useSettingsStore.getState().nsfwMode,
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
@@ -257,6 +259,20 @@ export function useGenerationStream(
             })
             break
           }
+          case 'llm_request': {
+            const payload = msg.data as Record<string, unknown>
+            useDevLogStore.getState().addEntry({
+              type: 'llm_call',
+              agent: 'writer',
+              model: String(payload.model || ''),
+              llmStatus: 'ok',
+              inputTokens: 0,
+              outputTokens: 0,
+              durationMs: 0,
+              payload,
+            })
+            break
+          }
           case 'context_step': {
             const d = msg.data as ContextStepData
             s.addContextStep(d)
@@ -310,6 +326,7 @@ export function useGenerationStream(
         annotations: annotations.map(a => ({ paragraph: a.paragraph, text: a.text })),
         target_words: targetWords,
         rewrite_model: rewriteModel || undefined,
+        nsfw_mode: useSettingsStore.getState().nsfwMode,
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
@@ -401,6 +418,20 @@ export function useGenerationStream(
               outputTokens: d.output_tokens,
               durationMs: d.duration_ms,
               payload: d.payload,
+            })
+            break
+          }
+          case 'llm_request': {
+            const payload = msg.data as Record<string, unknown>
+            useDevLogStore.getState().addEntry({
+              type: 'llm_call',
+              agent: 'writer',
+              model: String(payload.model || ''),
+              llmStatus: 'ok',
+              inputTokens: 0,
+              outputTokens: 0,
+              durationMs: 0,
+              payload,
             })
             break
           }

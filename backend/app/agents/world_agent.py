@@ -8,6 +8,7 @@ async def expand_world_setting(
     novel: Novel,
     raw_setting: str,
     raw_rules: str = "",
+    nsfw_mode: bool = False,
 ) -> str:
     """将用户输入的世界观简述扩写为结构化设定文档"""
     prompt = render(
@@ -19,8 +20,14 @@ async def expand_world_setting(
     )
 
     model, api_format = llm_client.get_agent_client("world", novel.fast_model)
+    user_content = prompt
+    if nsfw_mode:
+        user_content += "\n\n请保持语言克制、结构清晰。"
     result = await llm_client.dispatch_chat_complete(
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "你是一位专业的世界观设定编辑，输出结构化、克制、可执行的中文设定文档。"},
+            {"role": "user", "content": user_content},
+        ],
         model=model,
         api_format=api_format,
         temperature=0.7,

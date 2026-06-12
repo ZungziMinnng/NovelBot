@@ -43,6 +43,12 @@ function fmtDuration(ms?: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 }
 
+function formatParamValue(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'object') return JSON.stringify(v, null, 2)
+  return String(v)
+}
+
 function LlmCallRow({ entry }: { entry: DevLogEntry }) {
   const [open, setOpen] = useState(false)
   const agent = entry.agent || ''
@@ -88,9 +94,22 @@ function PayloadView({ payload }: { payload: Record<string, unknown> }) {
     <div className="space-y-2">
       {Object.keys(params).length > 0 && (
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-          {Object.entries(params).map(([k, v]) => (
-            <span key={k}><span className="font-medium text-foreground/70">{k}:</span> {String(v)}</span>
-          ))}
+          {Object.entries(params).map(([k, v]) => {
+            const isObject = v !== null && typeof v === 'object'
+            if (isObject) {
+              return (
+                <div key={k} className="w-full">
+                  <span className="font-medium text-foreground/70">{k}:</span>
+                  <pre className="mt-1 bg-muted rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed text-[10px]">
+                    {formatParamValue(v)}
+                  </pre>
+                </div>
+              )
+            }
+            return (
+              <span key={k}><span className="font-medium text-foreground/70">{k}:</span> {formatParamValue(v)}</span>
+            )
+          })}
         </div>
       )}
       {messages && (

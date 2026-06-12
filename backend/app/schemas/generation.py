@@ -8,6 +8,7 @@ class GenerateChapterRequest(BaseModel):
     volume: int = 1
     instruction: str = ""  # 用户额外指令，如"重点描写战斗场景"
     target_words: int = 800
+    nsfw_mode: bool = False
 
 
 class AnnotationItem(BaseModel):
@@ -21,6 +22,7 @@ class RewriteChapterRequest(BaseModel):
     annotations: list[AnnotationItem]
     target_words: int = 0
     rewrite_model: str = ""
+    nsfw_mode: bool = False
 
 
 class ReviewRequest(BaseModel):

@@ -1,10 +1,14 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info } from 'lucide-react'
 import { novelsApi, writerPresetsApi, type Novel, type WriterPreset } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import Silk from '@/components/Silk/Silk'
+import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
+import { useBuildStore } from '@/store/buildStore'
+import { useSettingsStore } from '@/store/settingsStore'
 import NovelWizard from './NovelWizard'
 import PresetModal from './PresetModal'
 
@@ -45,7 +49,21 @@ export default function Home() {
     queryFn: novelsApi.dashboard,
   })
 
+  const nsfwMode = useSettingsStore((s) => s.nsfwMode)
   const greeting = useMemo(() => getGreeting(), [])
+
+  const clickTimesRef = useRef<number[]>([])
+  const handleLogoClick = useCallback(() => {
+    const now = Date.now()
+    clickTimesRef.current.push(now)
+    if (clickTimesRef.current.length > 3) clickTimesRef.current.shift()
+    if (clickTimesRef.current.length === 3 && now - clickTimesRef.current[0] < 600) {
+      clickTimesRef.current = []
+      useSettingsStore.getState().toggleNsfwMode()
+      const enabled = useSettingsStore.getState().nsfwMode
+      toast(enabled ? '已开启创作自由模式' : '已关闭创作自由模式', { icon: enabled ? '🔓' : '🔒', duration: 2000 })
+    }
+  }, [])
 
   const savePreset = useMutation({
     mutationFn: (data: { id?: number; name: string; prompt: string }) =>
@@ -78,11 +96,28 @@ export default function Home() {
     deletePreset.mutate(id)
   }
 
+  const silkColor = useMemo(() => {
+    if (nsfwMode) return '#4A1942'
+    const root = document.documentElement
+    const style = getComputedStyle(root)
+    const h = style.getPropertyValue('--primary').trim().split(' ')[0] || '220'
+    const hue = parseFloat(h)
+    const r = Math.round(128 + 40 * Math.cos((hue * Math.PI) / 180))
+    const g = Math.round(128 + 40 * Math.cos(((hue - 120) * Math.PI) / 180))
+    const b = Math.round(128 + 40 * Math.cos(((hue - 240) * Math.PI) / 180))
+    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`
+  }, [nsfwMode])
+
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background relative">
+      {/* Silk Background */}
+      <div className="fixed inset-0 z-0 opacity-20 pointer-events-none">
+        <Silk speed={3} scale={1} color={silkColor} noiseIntensity={1.2} rotation={0} className="w-full h-full" />
+      </div>
+
       {/* Header */}
-      <header className="border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-2 cursor-pointer select-none" onClick={handleLogoClick}>
           <BookOpen className="w-6 h-6 text-primary" />
           <h1 className="text-xl font-bold">NovelBot</h1>
         </div>
@@ -104,11 +139,13 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-6 py-10">
+      <main className="relative z-10 max-w-4xl mx-auto px-6 py-10">
         {/* Greeting + Stats */}
         {dashboard && (
-          <div className="mb-8 p-6 rounded-xl bg-gradient-to-r from-primary/5 to-primary/10 border">
-            <h2 className="text-xl font-bold mb-3">{greeting}，创作者</h2>
+          <div className={`mb-8 p-6 rounded-xl border bg-gradient-to-r ${nsfwMode ? 'from-purple-500/10 to-pink-500/10' : 'from-primary/5 to-primary/10'}`}>
+            <h2 className="text-xl font-bold mb-1">{nsfwMode ? '欢迎回来，造物主' : `${greeting}，创作者`}</h2>
+            {nsfwMode && <p className="text-sm text-muted-foreground mb-3">尽情释放你的创作欲望</p>}
+            {!nsfwMode && <div className="mb-3" />}
             <div className="flex flex-wrap gap-6 text-sm">
               <div>
                 <span className="text-2xl font-bold text-primary">{dashboard.total_novels}</span>
@@ -144,7 +181,9 @@ export default function Home() {
               </button>
             </div>
             <p className="text-muted-foreground mt-1">
-              {activeTab === 'novels' ? 'AI 驱动的小说创作工具' : '管理可复用的 Writer 系统提示词'}
+              {activeTab === 'novels'
+                ? (nsfwMode ? '无限制的成人内容创作平台' : 'AI 驱动的小说创作工具')
+                : '管理可复用的 Writer 系统提示词'}
             </p>
           </div>
           {activeTab === 'novels' ? (
@@ -180,40 +219,45 @@ export default function Home() {
             ) : (
               <div className="grid gap-4">
                 {novels.map((novel: Novel) => (
-                  <div
+                  <SpotlightCard
                     key={novel.id}
-                    onClick={() => navigate(`/novel/${novel.id}`)}
-                    className="group p-5 border rounded-xl hover:border-primary hover:shadow-sm transition-all cursor-pointer bg-card"
+                    className="rounded-xl border border-border/60 bg-card/80 backdrop-blur-sm cursor-pointer"
+                    spotlightColor={nsfwMode ? 'rgba(192, 38, 211, 0.08)' : 'rgba(255, 255, 255, 0.06)'}
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <h3 className="font-semibold text-lg truncate">{novel.title}</h3>
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground shrink-0">
-                            {novel.genre || '未分类'}
-                          </span>
+                    <div
+                      onClick={() => navigate(`/novel/${novel.id}`)}
+                      className="group p-5"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-semibold text-lg truncate">{novel.title}</h3>
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground shrink-0">
+                              {novel.genre || '未分类'}
+                            </span>
+                          </div>
+                          <p className="text-muted-foreground text-sm line-clamp-2">{novel.premise}</p>
+                          <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
+                            <span>第{novel.current_chapter}章</span>
+                            {dashboard?.novel_words[novel.id] != null && (
+                              <span>{formatWordCount(dashboard.novel_words[novel.id])}字</span>
+                            )}
+                            <span>{novel.target_length}</span>
+                            <span>{novel.writing_style}</span>
+                          </div>
                         </div>
-                        <p className="text-muted-foreground text-sm line-clamp-2">{novel.premise}</p>
-                        <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
-                          <span>第{novel.current_chapter}章</span>
-                          {dashboard?.novel_words[novel.id] != null && (
-                            <span>{formatWordCount(dashboard.novel_words[novel.id])}字</span>
-                          )}
-                          <span>{novel.target_length}</span>
-                          <span>{novel.writing_style}</span>
+                        <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => handleDelete(e, novel.id)}
+                            className="p-2 rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground" />
                         </div>
-                      </div>
-                      <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => handleDelete(e, novel.id)}
-                          className="p-2 rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                        <ChevronRight className="w-4 h-4 text-muted-foreground" />
                       </div>
                     </div>
-                  </div>
+                  </SpotlightCard>
                 ))}
               </div>
             )}
@@ -234,34 +278,39 @@ export default function Home() {
             ) : (
               <div className="grid gap-4">
                 {presets.map((preset: WriterPreset) => (
-                  <div
+                  <SpotlightCard
                     key={preset.id}
-                    onClick={() => setPresetModal({ open: true, preset })}
-                    className="group p-5 border rounded-xl hover:border-primary hover:shadow-sm transition-all cursor-pointer bg-card"
+                    className="rounded-xl border border-border/60 bg-card/80 backdrop-blur-sm cursor-pointer"
+                    spotlightColor={nsfwMode ? 'rgba(192, 38, 211, 0.08)' : 'rgba(255, 255, 255, 0.06)'}
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-lg truncate mb-1">{preset.name}</h3>
-                        <p className="text-muted-foreground text-sm line-clamp-3 whitespace-pre-wrap">
-                          {preset.prompt || '(空提示词)'}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setPresetModal({ open: true, preset }) }}
-                          className="p-2 rounded-md hover:bg-muted transition-colors"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={(e) => handleDeletePreset(e, preset.id)}
-                          className="p-2 rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                    <div
+                      onClick={() => setPresetModal({ open: true, preset })}
+                      className="group p-5"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <h3 className="font-semibold text-lg truncate mb-1">{preset.name}</h3>
+                          <p className="text-muted-foreground text-sm line-clamp-3 whitespace-pre-wrap">
+                            {preset.prompt || '(空提示词)'}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPresetModal({ open: true, preset }) }}
+                            className="p-2 rounded-md hover:bg-muted transition-colors"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={(e) => handleDeletePreset(e, preset.id)}
+                            className="p-2 rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </SpotlightCard>
                 ))}
               </div>
             )}
@@ -277,9 +326,11 @@ export default function Home() {
             qc.invalidateQueries({ queryKey: ['novels'] })
             navigate(`/novel/${id}`)
           }}
-          onBuild={(id) => {
+          onBuild={async (id) => {
             setWizardOpen(false)
             qc.invalidateQueries({ queryKey: ['novels'] })
+            const novel = await novelsApi.get(id)
+            useBuildStore.getState().startBuild(id, novel.title, useSettingsStore.getState().nsfwMode)
             navigate(`/novel/${id}/build`)
           }}
         />
