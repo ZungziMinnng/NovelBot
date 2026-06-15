@@ -48,6 +48,7 @@ async def generate_chapter(
             instruction=req.instruction,
             target_words=req.target_words,
             nsfw_mode=req.nsfw_mode,
+            pov=req.pov or "",
         ):
             yield chunk
 
@@ -82,6 +83,7 @@ async def rewrite_chapter(
             target_words=req.target_words,
             rewrite_model=req.rewrite_model,
             nsfw_mode=req.nsfw_mode,
+            pov=req.pov or "",
         ):
             yield chunk
 

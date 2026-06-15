@@ -14,7 +14,7 @@ from app.models.technique import Technique
 from app.models.memory import Memory
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
 from app.agents import character_agent
-from app.services import memory_item_writer, summarizer, vector_store
+from app.services import summarizer, vector_store
 
 router = APIRouter()
 
@@ -80,10 +80,7 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
         "character_state": "pending",
         "entity_state": "pending",
         "location_state": "pending",
-        "memory_items": "pending",
     }
-    memory_item_stats = {}
-    before_character_states = await memory_item_writer.snapshot_character_states(db, novel.id)
 
     try:
         summary, _, _ = await summarizer.summarize_chapter(db, chapter, novel)
@@ -130,21 +127,6 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
         projection_status["location_state"] = f"failed:{type(e).__name__}: {e}"
         await db.rollback()
 
-    try:
-        memory_item_stats = await memory_item_writer.write_basic_memory_items(
-            db,
-            novel,
-            chapter,
-            before_character_states=before_character_states,
-            summary=summary,
-        )
-        projection_status["memory_items"] = "done"
-        await db.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning("确认章节时结构化记忆写入失败: %s", e)
-        projection_status["memory_items"] = f"failed:{type(e).__name__}: {e}"
-        await db.rollback()
-
     # 更新小说当前进度
     chapter.status = "confirmed"
     novel.current_chapter = max(novel.current_chapter, chapter.number)
@@ -182,7 +164,6 @@ async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends
         "status": "confirmed",
         "char_warning": "; ".join(warnings) if warnings else None,
         "projection_status": projection_status,
-        "memory_item_stats": memory_item_stats,
         "book_summary_refreshed": book_summary_refreshed,
     }
 

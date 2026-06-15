@@ -18,7 +18,7 @@ from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.services.context_builder import build_generation_context
-from app.services import memory_item_writer, summarizer, llm_client
+from app.services import summarizer, llm_client
 from app.agents import writer, critic
 from app.config import settings
 
@@ -33,6 +33,7 @@ class NovelState(TypedDict):
     target_words: int
     context: dict
     generated_text: str
+    model_used: str
     critic_issues: str
     revision_count: int
     passed: bool
@@ -59,6 +60,92 @@ async def _timed(coro):
     return result, int((time.monotonic() - t0) * 1000)
 
 
+async def _create_state_snapshot(
+    session: AsyncSession, novel: Novel, chapter_number: int, volume: int,
+) -> None:
+    """捕获本章生成前的状态快照：角色/实体/地点 current_state。"""
+    chars = (await session.execute(
+        select(Character).where(Character.novel_id == novel.id)
+    )).scalars().all()
+    ents = (await session.execute(
+        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
+    )).scalars().all()
+    locs = (await session.execute(
+        select(Location).where(Location.novel_id == novel.id)
+    )).scalars().all()
+    snap_content = json.dumps({
+        "characters": {str(c.id): c.current_state for c in chars},
+        "entities": {str(e.id): e.current_state for e in ents},
+        "locations": {str(l.id): l.current_state for l in locs},
+    }, ensure_ascii=False)
+    session.add(Memory(
+        novel_id=novel.id, chapter_number=chapter_number, volume=volume,
+        memory_type="state_snapshot", content=snap_content,
+    ))
+
+
+async def _restore_state_snapshot(
+    session: AsyncSession, novel: Novel, snapshot: Memory,
+) -> None:
+    """从快照恢复角色/实体/地点的 current_state。"""
+    try:
+        snap_data = json.loads(snapshot.content)
+    except Exception:
+        logger.warning("状态快照解析失败", exc_info=True)
+        return
+
+    for cid_str, cstate in snap_data.get("characters", {}).items():
+        char = await session.get(Character, int(cid_str))
+        if char:
+            char.current_state = cstate
+            flag_modified(char, "current_state")
+    for eid_str, estate in snap_data.get("entities", {}).items():
+        ent = await session.get(WorldEntity, int(eid_str))
+        if ent:
+            ent.current_state = estate
+            flag_modified(ent, "current_state")
+    for lid_str, lstate in snap_data.get("locations", {}).items():
+        loc = await session.get(Location, int(lid_str))
+        if loc:
+            loc.current_state = lstate
+            flag_modified(loc, "current_state")
+
+    logger.info("已从快照回滚章节 %s 的状态", snapshot.chapter_number)
+
+
+async def _prepare_regen_rollback(
+    session: AsyncSession, novel: Novel, chapter_number: int, volume: int,
+) -> None:
+    """生成/重写前回滚：删除旧章节摘要，恢复已有快照或首次创建快照。
+
+    快照「不存在才创建、存在只恢复不覆盖」，确保它始终代表本章第一次生成之前的干净状态，
+    从而根除「批注重写把已污染状态写进快照」「快照保存失败导致零回滚」等问题。
+    """
+    await session.execute(
+        sql_delete(Memory).where(
+            Memory.novel_id == novel.id,
+            Memory.chapter_number == chapter_number,
+            Memory.volume == volume,
+            Memory.memory_type == "chapter_summary",
+        )
+    )
+    snapshot = (await session.execute(
+        select(Memory)
+        .where(
+            Memory.novel_id == novel.id,
+            Memory.chapter_number == chapter_number,
+            Memory.volume == volume,
+            Memory.memory_type == "state_snapshot",
+        )
+        .order_by(Memory.id.desc())
+    )).scalars().first()
+    if snapshot:
+        await _restore_state_snapshot(session, novel, snapshot)
+    else:
+        await _create_state_snapshot(session, novel, chapter_number, volume)
+    await session.commit()
+
+
 async def run_chapter_generation(
     session: AsyncSession,
     novel: Novel,
@@ -67,6 +154,7 @@ async def run_chapter_generation(
     instruction: str = "",
     target_words: int = 800,
     nsfw_mode: bool = False,
+    pov: str = "",
 ) -> AsyncIterator[str]:
     """
     章节生成主流程，yield SSE 格式字符串。
@@ -88,6 +176,7 @@ async def run_chapter_generation(
         "target_words": target_words,
         "context": {},
         "generated_text": "",
+        "model_used": "",
         "critic_issues": "",
         "revision_count": 0,
         "passed": False,
@@ -98,48 +187,10 @@ async def run_chapter_generation(
     writer_system_prompt = getattr(novel, "writer_system_prompt", "") or ""
 
     try:
-        # ── 预清理：删除旧摘要 + 回滚状态快照 ─────────────────────────────
-        await session.execute(
-            sql_delete(Memory).where(
-                Memory.novel_id == novel.id,
-                Memory.chapter_number == chapter_number,
-                Memory.volume == volume,
-                Memory.memory_type == "chapter_summary",
-            )
+        # ── 预清理：删除旧摘要 + 回滚状态快照（current_state）──
+        await _prepare_regen_rollback(
+            session, novel, chapter_number, volume
         )
-        # 如果存在状态快照（说明是重新生成），恢复角色/实体/地点状态
-        snap_result = await session.execute(
-            select(Memory).where(
-                Memory.novel_id == novel.id,
-                Memory.chapter_number == chapter_number,
-                Memory.volume == volume,
-                Memory.memory_type == "state_snapshot",
-            )
-        )
-        snapshot = snap_result.scalar_one_or_none()
-        if snapshot:
-            try:
-                snap_data = json.loads(snapshot.content)
-                for cid_str, cstate in snap_data.get("characters", {}).items():
-                    char = await session.get(Character, int(cid_str))
-                    if char:
-                        char.current_state = cstate
-                        flag_modified(char, "current_state")
-                for eid_str, estate in snap_data.get("entities", {}).items():
-                    ent = await session.get(WorldEntity, int(eid_str))
-                    if ent:
-                        ent.current_state = estate
-                        flag_modified(ent, "current_state")
-                for lid_str, lstate in snap_data.get("locations", {}).items():
-                    loc = await session.get(Location, int(lid_str))
-                    if loc:
-                        loc.current_state = lstate
-                        flag_modified(loc, "current_state")
-                await session.delete(snapshot)
-                logger.info("已从快照恢复章节 %d 的状态", chapter_number)
-            except Exception:
-                logger.warning("状态快照恢复失败", exc_info=True)
-        await session.commit()
 
         # ── Node 1: Build Context ──────────────────────────────────────────
         yield _sse("stage", "building_context")
@@ -149,6 +200,7 @@ async def run_chapter_generation(
             chapter_number=chapter_number,
             volume=volume,
             scene_hint=instruction,
+            pov=pov,
         )
         for step in state["context"].pop("_meta", []):
             yield _sse_json("context_step", step)
@@ -202,6 +254,8 @@ async def run_chapter_generation(
                     yield _sse("token", item)
 
             state["generated_text"] = full_text
+            if writer_payload and writer_payload.get("model"):
+                state["model_used"] = writer_payload["model"]
             state["total_input_tokens"] += writer_in_tok
             state["total_output_tokens"] += writer_out_tok
             writer_duration = int((time.monotonic() - writer_start) * 1000)
@@ -329,38 +383,6 @@ async def run_chapter_generation(
         chapter = await _save_chapter(session, state, novel)
         await session.commit()
 
-        # ── Node 4b: 保存状态快照（供重新生成时回滚）──────────────────────
-        before_character_states: dict[str, dict] = {}
-        try:
-            chars_r = await session.execute(select(Character).where(Character.novel_id == novel.id))
-            ents_r = await session.execute(select(WorldEntity).where(WorldEntity.novel_id == novel.id))
-            locs_r = await session.execute(select(Location).where(Location.novel_id == novel.id))
-            chars = chars_r.scalars().all()
-            ents = ents_r.scalars().all()
-            locs = locs_r.scalars().all()
-            before_character_states = {c.name: dict(c.current_state or {}) for c in chars}
-            snap_content = json.dumps({
-                "characters": {str(c.id): c.current_state for c in chars},
-                "entities": {str(e.id): e.current_state for e in ents},
-                "locations": {str(l.id): l.current_state for l in locs},
-            }, ensure_ascii=False)
-            await session.execute(
-                sql_delete(Memory).where(
-                    Memory.novel_id == novel.id,
-                    Memory.chapter_number == chapter_number,
-                    Memory.volume == volume,
-                    Memory.memory_type == "state_snapshot",
-                )
-            )
-            session.add(Memory(
-                novel_id=novel.id, chapter_number=chapter_number, volume=volume,
-                memory_type="state_snapshot", content=snap_content,
-            ))
-            await session.commit()
-        except Exception:
-            logger.warning("状态快照保存失败", exc_info=True)
-            await session.rollback()
-
         # ── Node 5: Update Memory ─────────────────────────────────────────
         # 记忆操作依次执行并立即 commit，避免 SQLite 写锁跨 LLM 调用长期持有。
         yield _sse("stage", "updating_memory")
@@ -377,7 +399,6 @@ async def run_chapter_generation(
             "character_state": "pending",
             "entity_state": "pending",
             "location_state": "pending",
-            "memory_items": "pending",
         }
         unmatched_chars: list[str] = []
         unmatched_entities: list[str] = []
@@ -476,27 +497,7 @@ async def run_chapter_generation(
             "input_tokens": loc_in, "output_tokens": loc_out, "duration_ms": dur_loc,
         })
 
-        # ── 结构化长期记忆 ──
-        try:
-            memory_item_stats = await memory_item_writer.write_basic_memory_items(
-                session,
-                novel,
-                chapter,
-                before_character_states=before_character_states,
-                summary=summary_text,
-            )
-            projection_status["memory_items"] = "done"
-            await session.commit()
-            yield _sse_json("projection_status", {
-                "status": projection_status,
-                "memory_item_stats": memory_item_stats,
-            })
-        except Exception as e:
-            logger.warning("结构化记忆写入失败: %s", e)
-            mem_warnings.append(f"结构化记忆写入失败: {e}")
-            projection_status["memory_items"] = f"failed:{type(e).__name__}: {e}"
-            await session.rollback()
-            yield _sse_json("projection_status", {"status": projection_status})
+        yield _sse_json("projection_status", {"status": projection_status})
 
         mem_in = sum_in + char_in + ent_in + loc_in
         mem_out = sum_out + char_out + ent_out + loc_out
@@ -627,6 +628,7 @@ async def run_chapter_rewrite(
     target_words: int = 0,
     rewrite_model: str = "",
     nsfw_mode: bool = False,
+    pov: str = "",
 ) -> AsyncIterator[str]:
     try:
         result = await session.execute(
@@ -644,11 +646,15 @@ async def run_chapter_rewrite(
         if target_words <= 0:
             target_words = len(original_text)
 
+        # 预清理：回滚到本章生成前状态，避免在已污染状态上叠加重写记忆
+        await _prepare_regen_rollback(session, novel, chapter_number, chapter.volume or 1)
+
         # ── Build context ──
         yield _sse("stage", "building_context")
         ctx = await build_generation_context(
             session, novel, chapter_number,
             volume=chapter.volume or 1,
+            pov=pov,
         )
         for step in ctx.pop("_meta", []):
             yield _sse_json("context_step", step)
@@ -716,36 +722,10 @@ async def run_chapter_rewrite(
         chapter.content = generated_text
         chapter.word_count = len(generated_text)
         chapter.status = "draft"
+        if model:
+            chapter.model_used = model
         await session.flush()
         await session.commit()
-
-        # ── State snapshot ──
-        try:
-            chars_r = await session.execute(select(Character).where(Character.novel_id == novel.id))
-            ents_r = await session.execute(select(WorldEntity).where(WorldEntity.novel_id == novel.id))
-            locs_r = await session.execute(select(Location).where(Location.novel_id == novel.id))
-            snap_content = json.dumps({
-                "characters": {str(c.id): c.current_state for c in chars_r.scalars().all()},
-                "entities": {str(e.id): e.current_state for e in ents_r.scalars().all()},
-                "locations": {str(l.id): l.current_state for l in locs_r.scalars().all()},
-            }, ensure_ascii=False)
-            await session.execute(
-                sql_delete(Memory).where(
-                    Memory.novel_id == novel.id,
-                    Memory.chapter_number == chapter_number,
-                    Memory.volume == (chapter.volume or 1),
-                    Memory.memory_type == "state_snapshot",
-                )
-            )
-            session.add(Memory(
-                novel_id=novel.id, chapter_number=chapter_number,
-                volume=chapter.volume or 1,
-                memory_type="state_snapshot", content=snap_content,
-            ))
-            await session.commit()
-        except Exception:
-            logger.warning("状态快照保存失败", exc_info=True)
-            await session.rollback()
 
         # ── Update memory ──
         yield _sse("stage", "updating_memory")
@@ -822,11 +802,14 @@ async def _save_chapter(
     )
     chapter = result.scalar_one_or_none()
 
+    model_used = state.get("model_used") or ""
     if chapter:
         chapter.content = state["generated_text"]
         chapter.instruction = state.get("instruction") or None
         chapter.status = "draft"
         chapter.word_count = len(state["generated_text"])
+        if model_used:
+            chapter.model_used = model_used
     else:
         chapter = Chapter(
             novel_id=state["novel_id"],
@@ -837,6 +820,7 @@ async def _save_chapter(
             instruction=state.get("instruction") or None,
             status="draft",
             word_count=len(state["generated_text"]),
+            model_used=model_used,
         )
         session.add(chapter)
 

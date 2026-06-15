@@ -1,17 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, SlidersHorizontal, FlaskConical, AlertTriangle } from 'lucide-react'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, FlaskConical, AlertTriangle } from 'lucide-react'
 import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
 
-type CreationSection = 'prompt' | 'models' | 'review' | 'params' | 'fulltext' | null
+type CreationSection = 'prompt' | 'models' | 'review' | 'fulltext' | null
 
 const CREATION_SECTIONS: { key: CreationSection & string; label: string; desc: string; icon: typeof FileText }[] = [
   { key: 'prompt', label: '提示词与概要', desc: '全书概要、Writer 自定义提示词', icon: FileText },
-  { key: 'models', label: '模型选择', desc: 'Writer / Fast / Critic 模型覆盖', icon: Cpu },
+  { key: 'models', label: '模型与生成参数', desc: '模型覆盖、温度、Token、摘要、RAG、Thinking', icon: Cpu },
   { key: 'review', label: '审查设置', desc: 'Critic 审查、剧情细节审查', icon: Shield },
-  { key: 'params', label: '生成参数', desc: '温度、Token、摘要、RAG、Thinking', icon: SlidersHorizontal },
   { key: 'fulltext', label: '全文上下文（实验）', desc: '将前 N 章正文全量传入上下文', icon: FlaskConical },
 ]
 
@@ -666,6 +665,105 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                       用于 RAG 向量检索，中文小说推荐使用中文优化的嵌入模型。更换后将自动重建向量库
                     </p>
                   </div>
+
+                  <div className="border-t pt-5 space-y-5">
+                    <p className="text-sm font-semibold">生成参数</p>
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 mr-4">
+                        <p className="text-sm font-medium">Thinking 深度思考</p>
+                        <p className="text-xs text-muted-foreground mt-1">控制模型深度思考强度（Gemini / DeepSeek / o 系列），关闭可减少空响应</p>
+                      </div>
+                      <select
+                        value={thinkingLevel}
+                        onChange={e => setThinkingLevel(e.target.value)}
+                        className="text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        <option value="off">关闭</option>
+                        <option value="low">低</option>
+                        <option value="medium">中（默认）</option>
+                        <option value="high">高</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 mr-4">
+                        <p className="text-sm font-medium">Gemini 真实流式</p>
+                        <p className="text-xs text-muted-foreground mt-1">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
+                      </div>
+                      <button
+                        onClick={() => setGeminiStream(!geminiStream)}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${geminiStream ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow ${geminiStream ? 'translate-x-5' : ''}`} />
+                      </button>
+                    </div>
+
+                    <div className="border-t pt-5">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium">生成温度</label>
+                        <span className="text-sm font-mono text-muted-foreground">{writerTemperature.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1.5}
+                        step={0.05}
+                        value={writerTemperature}
+                        onChange={e => setWriterTemperature(Number(e.target.value))}
+                        className="w-full accent-primary"
+                      />
+                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                        <span>保守 0.1</span>
+                        <span>1.5 发散</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-medium mb-1.5 block">最大输出 Token</label>
+                      <select
+                        value={writerMaxTokens}
+                        onChange={e => setWriterMaxTokens(Number(e.target.value))}
+                        className="w-full border rounded-lg px-3 py-2.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        <option value={2048}>2048（约 1500 字）</option>
+                        <option value={4096}>4096（约 3000 字，默认）</option>
+                        <option value={8192}>8192（约 6000 字）</option>
+                        <option value={16384}>16384（约 12000 字）</option>
+                      </select>
+                    </div>
+
+                    <div className="border-t pt-5 space-y-5">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">滚动摘要章数</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={rollingSummaryCount}
+                            onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                            className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">RAG 检索条数</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={10}
+                            value={ragTopK}
+                            onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                            className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -704,107 +802,6 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
                       </div>
                     )}
-                  </div>
-                </div>
-              )}
-
-              {/* ── 生成参数 ── */}
-              {activeSection === 'params' && (
-                <div className="space-y-5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1 mr-4">
-                      <p className="text-sm font-medium">Thinking 深度思考</p>
-                      <p className="text-xs text-muted-foreground mt-1">控制模型深度思考强度（Gemini / DeepSeek / o 系列），关闭可减少空响应</p>
-                    </div>
-                    <select
-                      value={thinkingLevel}
-                      onChange={e => setThinkingLevel(e.target.value)}
-                      className="text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value="off">关闭</option>
-                      <option value="low">低</option>
-                      <option value="medium">中（默认）</option>
-                      <option value="high">高</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1 mr-4">
-                      <p className="text-sm font-medium">Gemini 真实流式</p>
-                      <p className="text-xs text-muted-foreground mt-1">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
-                    </div>
-                    <button
-                      onClick={() => setGeminiStream(!geminiStream)}
-                      className={`relative w-10 h-5 rounded-full transition-colors ${geminiStream ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-                    >
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow ${geminiStream ? 'translate-x-5' : ''}`} />
-                    </button>
-                  </div>
-
-                  <div className="border-t pt-5">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium">生成温度</label>
-                      <span className="text-sm font-mono text-muted-foreground">{writerTemperature.toFixed(2)}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0.1}
-                      max={1.5}
-                      step={0.05}
-                      value={writerTemperature}
-                      onChange={e => setWriterTemperature(Number(e.target.value))}
-                      className="w-full accent-primary"
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                      <span>保守 0.1</span>
-                      <span>1.5 发散</span>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-sm font-medium mb-1.5 block">最大输出 Token</label>
-                    <select
-                      value={writerMaxTokens}
-                      onChange={e => setWriterMaxTokens(Number(e.target.value))}
-                      className="w-full border rounded-lg px-3 py-2.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value={2048}>2048（约 1500 字）</option>
-                      <option value={4096}>4096（约 3000 字，默认）</option>
-                      <option value={8192}>8192（约 6000 字）</option>
-                      <option value={16384}>16384（约 12000 字）</option>
-                    </select>
-                  </div>
-
-                  <div className="border-t pt-5 space-y-5">
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <label className="text-sm font-medium">滚动摘要章数</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={20}
-                          value={rollingSummaryCount}
-                          onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-                          className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <label className="text-sm font-medium">RAG 检索条数</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={10}
-                          value={ragTopK}
-                          onChange={e => setRagTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-                          className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
-                    </div>
                   </div>
                 </div>
               )}

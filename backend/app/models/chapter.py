@@ -21,6 +21,8 @@ class Chapter(Base):
     # draft = 草稿, confirmed = 已确认（触发记忆更新）
     status: Mapped[str] = mapped_column(String(20), default="draft")
     word_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 本章生成使用的模型（Writer / 重写模型）
+    model_used: Mapped[str] = mapped_column(String(120), default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -28,6 +30,3 @@ class Chapter(Base):
     )
 
     novel: Mapped["Novel"] = relationship("Novel", back_populates="chapters")  # noqa: F821
-    memory_items: Mapped[list["MemoryItem"]] = relationship(  # noqa: F821
-        "MemoryItem", back_populates="chapter", cascade="all, delete-orphan"
-    )

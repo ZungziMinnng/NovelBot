@@ -4,7 +4,7 @@ import {
   Loader2, Trash2, User, Pencil, X, Check, Plus,
   RefreshCw, ImagePlus, Sparkles, ScrollText, Maximize2, Wand2, GripVertical,
 } from 'lucide-react'
-import { charactersApi, type Character } from '@/api/client'
+import { charactersApi, type Character, type CharacterSecret } from '@/api/client'
 import RelationshipGraphView from './RelationshipGraphView'
 import CharacterPromptDrawer from './CharacterPromptDrawer'
 import toast from 'react-hot-toast'
@@ -92,6 +92,12 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const [editingRelName, setEditingRelName] = useState<string | null>(null)
   const [editRelInit, setEditRelInit] = useState('')
   const [editRelCurr, setEditRelCurr] = useState('')
+
+  // Secret (信息不对称) editing
+  const [editingSecretIdx, setEditingSecretIdx] = useState<number | null>(null) // -1 = 新增
+  const [secretFact, setSecretFact] = useState('')
+  const [secretKnownBy, setSecretKnownBy] = useState<string[]>([])
+  const [savingSecret, setSavingSecret] = useState(false)
 
   const fieldOrderStorageKey = `novelbot_character_field_order_${novelId}`
 
@@ -239,6 +245,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       if (editingKV) saveFieldOrder(editingKV, editingKeys.filter(k => k in kvDraft))
       setEditingKV(null)
       toast.success('已保存')
+    } catch {
+      toast.error('保存失败')
     } finally { setSavingKV(false) }
   }
 
@@ -352,8 +360,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           <textarea
             value={kvDraft[k] ?? ''}
             onChange={e => setKvDraft(prev => ({ ...prev, [k]: e.target.value }))}
-            className="w-full text-sm border rounded p-2 bg-background resize-y min-h-[56px] focus:outline-none focus:ring-1 focus:ring-ring"
-            rows={Math.max(2, (kvDraft[k] ?? '').split('\n').length)}
+            className="w-full text-sm border rounded p-2 bg-background resize-y min-h-[96px] focus:outline-none focus:ring-1 focus:ring-ring"
+            rows={Math.max(4, (kvDraft[k] ?? '').split('\n').length)}
           />
         </div>
       ))}
@@ -537,6 +545,126 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     finally { setSavingRel(false) }
   }
 
+  // ── 秘密 / 信息不对称 ──
+  const secrets = (Array.isArray(state.secrets) ? state.secrets : []) as CharacterSecret[]
+
+  const persistSecrets = async (next: CharacterSecret[]) => {
+    setSavingSecret(true)
+    try {
+      await charactersApi.update(characterId, {
+        current_state: { ...state, secrets: next },
+      } as Partial<Character>)
+      invalidate()
+      setEditingSecretIdx(null)
+      toast.success('已保存')
+    } catch { toast.error('保存失败') }
+    finally { setSavingSecret(false) }
+  }
+
+  const handleSaveSecret = async () => {
+    if (!secretFact.trim()) return
+    const entry: CharacterSecret = { fact: secretFact.trim(), known_by: secretKnownBy }
+    const next = [...secrets]
+    if (editingSecretIdx === null || editingSecretIdx < 0) next.push(entry)
+    else next[editingSecretIdx] = entry
+    await persistSecrets(next)
+  }
+
+  const handleDeleteSecret = async (idx: number) => {
+    await persistSecrets(secrets.filter((_, i) => i !== idx))
+  }
+
+  const startEditSecret = (idx: number) => {
+    setEditingSecretIdx(idx)
+    if (idx < 0) { setSecretFact(''); setSecretKnownBy([]) }
+    else { setSecretFact(secrets[idx].fact); setSecretKnownBy(secrets[idx].known_by || []) }
+  }
+
+  const toggleKnownBy = (name: string) => {
+    setSecretKnownBy((prev) => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name])
+  }
+
+  const renderSecretsSection = () => {
+    const others = characters.filter((c) => c.id !== characterId)
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-muted-foreground">秘密 / 信息不对称</span>
+          {editingSecretIdx === null && (
+            <button onClick={() => startEditSecret(-1)}
+              className="flex items-center gap-1 text-xs text-primary hover:underline">
+              <Plus className="w-3 h-3" /> 添加
+            </button>
+          )}
+        </div>
+        <p className="text-[10px] text-muted-foreground leading-relaxed">
+          仅「知情者」名单中的角色知道此秘密。当本章视角角色不在名单内时，写作模型会收到"上帝视角真相·禁止表现知晓"指令。
+        </p>
+
+        {secrets.map((sec, idx) => (
+          editingSecretIdx === idx ? (
+            <div key={idx} className="border rounded-lg p-2.5 space-y-2 bg-muted/30">
+              <textarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
+                rows={2} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
+                className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
+              <div className="flex flex-wrap gap-1">
+                {others.map((c) => (
+                  <button key={c.id} onClick={() => toggleKnownBy(c.name)}
+                    className={`text-[11px] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <button onClick={() => setEditingSecretIdx(null)} className="text-xs text-muted-foreground hover:underline">取消</button>
+                <button onClick={handleSaveSecret} disabled={savingSecret || !secretFact.trim()}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50">
+                  {savingSecret ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} 保存
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div key={idx} className="border rounded-lg p-2.5 space-y-1 group">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs leading-relaxed flex-1">{sec.fact}</p>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 shrink-0">
+                  <button onClick={() => startEditSecret(idx)} className="text-muted-foreground hover:text-foreground"><Pencil className="w-3 h-3" /></button>
+                  <button onClick={() => handleDeleteSecret(idx)} className="text-muted-foreground hover:text-destructive"><Trash2 className="w-3 h-3" /></button>
+                </div>
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                知情者：{sec.known_by && sec.known_by.length ? sec.known_by.join('、') : '无（除自己外无人知晓）'}
+              </p>
+            </div>
+          )
+        ))}
+
+        {editingSecretIdx === -1 && (
+          <div className="border rounded-lg p-2.5 space-y-2 bg-muted/30">
+            <textarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
+              rows={2} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
+              className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
+            <div className="flex flex-wrap gap-1">
+              {others.map((c) => (
+                <button key={c.id} onClick={() => toggleKnownBy(c.name)}
+                  className={`text-[11px] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
+                  {c.name}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setEditingSecretIdx(null)} className="text-xs text-muted-foreground hover:underline">取消</button>
+              <button onClick={handleSaveSecret} disabled={savingSecret || !secretFact.trim()}
+                className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50">
+                {savingSecret ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} 保存
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const renderRelationshipsTab = () => {
     const myInitial = (state.initial_relationships || {}) as Record<string, string>
     const myCurrent = (state.relationship_changes || {}) as Record<string, string>
@@ -677,13 +805,16 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   }
 
   const renderStateTab = () => {
-    const stateKeys = Object.keys(state).filter(k => k !== 'relationship_changes' && k !== 'initial_relationships')
+    const stateKeys = Object.keys(state).filter(k => k !== 'relationship_changes' && k !== 'initial_relationships' && k !== 'secrets')
     return (
       <div className="space-y-4">
         {renderKVSection('当前状态', state, stateKeys, 'state', 'current_state')}
         {stateKeys.length === 0 && (
           <p className="text-xs text-muted-foreground text-center py-4">暂无状态信息</p>
         )}
+        <div className="border-t pt-3">
+          {renderSecretsSection()}
+        </div>
       </div>
     )
   }
@@ -794,8 +925,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             value={enhancePrompt}
             onChange={e => setEnhancePrompt(e.target.value)}
             placeholder="输入完善指令，例如：让性格更鲜明，补充童年经历..."
-            className="w-full text-sm border rounded-lg p-2 bg-background resize-y min-h-[56px]"
-            rows={3}
+            className="w-full text-sm border rounded-lg p-2 bg-background resize-y min-h-[80px]"
+            rows={4}
           />
           <div>
             <p className="text-[10px] text-muted-foreground mb-1">完善范围</p>
@@ -868,7 +999,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       {/* Edit basic info modal */}
       {editingBasic && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setEditingBasic(false)}>
-          <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={e => e.stopPropagation()}>
+          <div className="bg-background rounded-xl p-5 w-[32rem] max-w-[90vw] space-y-3 shadow-lg" onClick={e => e.stopPropagation()}>
             <h3 className="font-medium text-sm">编辑基本信息</h3>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">角色名</label>
@@ -926,8 +1057,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
               <textarea
                 value={basicForm.description}
                 onChange={e => setBasicForm({ ...basicForm, description: e.target.value })}
-                rows={4}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                rows={6}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y min-h-[120px]"
                 placeholder="输入角色描述"
               />
             </div>

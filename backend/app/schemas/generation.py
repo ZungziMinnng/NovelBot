@@ -9,6 +9,7 @@ class GenerateChapterRequest(BaseModel):
     instruction: str = ""  # 用户额外指令，如"重点描写战斗场景"
     target_words: int = 800
     nsfw_mode: bool = False
+    pov: Optional[str] = None  # 本章视角角色名；空则回退到男主
 
 
 class AnnotationItem(BaseModel):
@@ -23,6 +24,7 @@ class RewriteChapterRequest(BaseModel):
     target_words: int = 0
     rewrite_model: str = ""
     nsfw_mode: bool = False
+    pov: Optional[str] = None  # 本章视角角色名；空则回退到男主
 
 
 class ReviewRequest(BaseModel):

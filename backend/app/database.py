@@ -100,15 +100,14 @@ async def _run_migrations() -> None:
         "ALTER TABLE novels ADD COLUMN embedding_model TEXT DEFAULT ''",
         "ALTER TABLE model_library ADD COLUMN model_type TEXT NOT NULL DEFAULT 'chat'",
         "UPDATE model_library SET model_type = 'chat' WHERE model_type IS NULL OR model_type = ''",
-        # 结构化长期记忆索引
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_novel_category_status ON memory_items(novel_id, category, status)",
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_novel_subject_field ON memory_items(novel_id, category, subject, field)",
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_novel_chapter ON memory_items(novel_id, chapter_number)",
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_due ON memory_items(novel_id, category, status, due_chapter)",
         "ALTER TABLE novels ADD COLUMN tags JSON DEFAULT '{}'",
         "ALTER TABLE novels ADD COLUMN estimated_chapters INTEGER DEFAULT 0",
         "ALTER TABLE novels ADD COLUMN enable_volume_split INTEGER DEFAULT 0",
         "ALTER TABLE novels ADD COLUMN skip_outline INTEGER DEFAULT 0",
+        # 章节生成使用的模型标记
+        "ALTER TABLE chapters ADD COLUMN model_used TEXT DEFAULT ''",
+        # 移除已废弃的结构化长期记忆表（设计存档见 docs/memory_item_design.md）
+        "DROP TABLE IF EXISTS memory_items",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -122,7 +121,7 @@ async def _run_migrations() -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, memory_item, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_migrations()

@@ -28,6 +28,9 @@ interface GenerationBarProps {
   targetWords: number
   onInstructionChange: (v: string) => void
   onTargetWordsChange: (v: number) => void
+  pov: string
+  onPovChange: (v: string) => void
+  povOptions: string[]
   onGenerate: () => void
   onAbortOrGenerate: () => void
 
@@ -40,6 +43,7 @@ interface GenerationBarProps {
   rewriteModel: string
   onRewriteModelChange: (v: string) => void
   writerModel: string
+  onWriterModelChange: (v: string) => void
   modelLibrary: ModelEntry[]
 
   // New character discovery
@@ -92,6 +96,9 @@ export default function GenerationBar({
   targetWords,
   onInstructionChange,
   onTargetWordsChange,
+  pov,
+  onPovChange,
+  povOptions,
   onGenerate,
   onAbortOrGenerate,
   annotations,
@@ -102,6 +109,7 @@ export default function GenerationBar({
   rewriteModel,
   onRewriteModelChange,
   writerModel,
+  onWriterModelChange,
   modelLibrary,
   newCharCandidates,
   selectedCharIndices,
@@ -404,6 +412,30 @@ export default function GenerationBar({
                 <option value={3000}>3000字</option>
                 <option value={4000}>4000字</option>
                 <option value={5000}>5000字</option>
+              </select>
+              <select
+                value={pov}
+                onChange={e => onPovChange(e.target.value)}
+                disabled={isCurrentlyGenerating}
+                title="本章视角角色（留空＝默认男主，其不知道的秘密将进入上帝视角隔离区）"
+                className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none max-w-[140px] truncate disabled:opacity-50"
+              >
+                <option value="">视角·默认男主</option>
+                {povOptions.map(name => (
+                  <option key={name} value={name}>视角·{name}</option>
+                ))}
+              </select>
+              <select
+                value={writerModel}
+                onChange={e => onWriterModelChange(e.target.value)}
+                disabled={isCurrentlyGenerating}
+                title="Writer 模型（切换即保存为本小说默认）"
+                className="text-sm border rounded-lg px-2 py-2 bg-background focus:outline-none max-w-[160px] truncate disabled:opacity-50"
+              >
+                <option value="">跟随全局默认</option>
+                {modelLibrary.filter(m => m.model_type !== 'embedding').map(m => (
+                  <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                ))}
               </select>
               <div className="flex-1" />
               <button

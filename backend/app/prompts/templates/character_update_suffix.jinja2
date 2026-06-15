@@ -1,7 +1,7 @@
 以 JSON 格式输出，只输出本章发生变化的角色和字段。未变化字段请省略，系统会保留旧值。
 
 字段规则：
-- 推荐字段：location、current_goal、titles、affiliation、known_secrets、relationship_changes
+- 推荐字段：location、current_goal、titles、affiliation、known_secrets、relationship_changes、personality
 - 可以继续使用“当前已跟踪的状态字段”中的任意字段
 - 可以新增有明确文本证据的新字段，如 realm、injury、artifact、identity、curse、cultivation、power_status
 - titles、known_secrets 等列表字段输出数组；relationship_changes 输出对象；其余字段通常输出简短字符串
@@ -13,6 +13,7 @@
     "location": "新的当前位置",
     "realm": "新的境界/修为状态",
     "injury": "新的伤势或身体状态",
+    "personality": "当前性格倾向，如：由骄横转为对核心伙伴柔软",
     "known_secrets": ["本章新增或确认的关键秘密"],
     "relationship_changes": {"其他角色名": "本章关系变化"}
   }

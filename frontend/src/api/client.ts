@@ -58,8 +58,14 @@ export interface Chapter {
   instruction?: string
   status: string
   word_count: number
+  model_used: string
   created_at: string
   updated_at: string
+}
+
+export interface CharacterSecret {
+  fact: string
+  known_by: string[]
 }
 
 export interface Character {
@@ -449,6 +455,30 @@ export const adminApi = {
   updateOutline: (id: number, data: { title?: string; content?: string }) => api.patch<OutlineEntry>(`/admin/outlines/${id}`, data).then(r => r.data),
 }
 
+// ── Corrections APIs（统一搜索 + 修正）─────────────────────────────────────
+
+export type CorrectionSource = 'character' | 'location' | 'chapter' | 'memory' | 'outline'
+
+export interface CorrectionHit {
+  source: CorrectionSource
+  id: number
+  field: string
+  title: string
+  context: string
+  value: string
+  match: 'keyword' | 'semantic'
+  score: number | null
+}
+
+export const correctionsApi = {
+  search: (novelId: number, q: string) =>
+    api.get<CorrectionHit[]>(`/corrections/novel/${novelId}/search`, { params: { q } }).then(r => r.data),
+  apply: (novelId: number, body: { source: CorrectionSource; id: number; field: string; value: string }) =>
+    api.post<{ source: string; id: number; field: string; value: string; ok: boolean }>(
+      `/corrections/novel/${novelId}/apply`, body,
+    ).then(r => r.data),
+}
+
 // ── Settings APIs ──────────────────────────────────────────────────────────
 
 export const settingsApi = {
@@ -800,6 +830,7 @@ export function streamChapterGeneration(
     instruction: string
     target_words: number
     nsfw_mode?: boolean
+    pov?: string
   },
   onMessage: (msg: SSEMessage) => void,
   onClose: () => void,

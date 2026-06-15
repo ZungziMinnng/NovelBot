@@ -67,9 +67,6 @@ class Novel(Base):
     memories: Mapped[list["Memory"]] = relationship(  # noqa: F821
         "Memory", back_populates="novel", cascade="all, delete-orphan"
     )
-    memory_items: Mapped[list["MemoryItem"]] = relationship(  # noqa: F821
-        "MemoryItem", back_populates="novel", cascade="all, delete-orphan"
-    )
     outlines: Mapped[list["Outline"]] = relationship(  # noqa: F821
         "Outline", back_populates="novel", cascade="all, delete-orphan"
     )

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
@@ -77,13 +77,16 @@ export default function Editor() {
   const [showReviewModal, setShowReviewModal] = useState(false)
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
   const [showOutlineModal, setShowOutlineModal] = useState(false)
-  const [isConfirming, setIsConfirming] = useState(false)
+  const [confirmQueue, setConfirmQueue] = useState<number[]>([])
+  const [confirmingId, setConfirmingId] = useState<number | null>(null)
+  const confirmWorkerBusy = useRef(false)
   const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('novel_font_size') || 16))
   const [lineHeight, setLineHeight] = useState(() => Number(localStorage.getItem('novel_line_height') || 2.0))
   const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('novel_font_family') || '')
   const [fontWeight, setFontWeight] = useState(() => localStorage.getItem('novel_font_weight') || '')
   const [fontColor, setFontColor] = useState(() => localStorage.getItem('novel_font_color') || '')
   const [rewriteModel, setRewriteModel] = useState('')
+  const [pov, setPov] = useState('')
 
   // ── Novel Data ────────────────────────────────────────────────────────────
   const { data: novel } = useQuery({
@@ -142,7 +145,7 @@ export default function Editor() {
 
   // ── Generation Stream ─────────────────────────────────────────────────────
   const resetRewriteModel = useCallback(() => setRewriteModel(''), [])
-  const gen = useGenerationStream(novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novel?.title || '', rewriteModel, resetRewriteModel)
+  const gen = useGenerationStream(novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novel?.title || '', rewriteModel, resetRewriteModel, pov)
 
   // Derived state after generation completes for this chapter
   const justFinishedHere =
@@ -202,25 +205,40 @@ export default function Editor() {
   }, [agentLogEntries.length > 0 && gen.isCurrentlyGenerating])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
-  const handleConfirm = useCallback(async () => {
-    if (!currentChapter || isConfirming) return
-    setIsConfirming(true)
-    try {
-      const result = await chaptersApi.confirm(currentChapter.id)
-      refetchChapters()
-      qc.invalidateQueries({ queryKey: ['characters', novelId] })
-      if (result.book_summary_refreshed) {
-        qc.invalidateQueries({ queryKey: ['novel', novelId] })
-        toast.success('章节已确认，摘要和角色状态已更新，全书概要已自动刷新')
-      } else {
-        toast.success('章节已确认，摘要和角色状态已更新')
+  const handleConfirm = useCallback(() => {
+    if (!currentChapter) return
+    const id = currentChapter.id
+    setConfirmQueue(prev => (prev.includes(id) ? prev : [...prev, id]))
+  }, [currentChapter])
+
+  // 按章号从小到大依次确认排队中的章节（单 worker，保证累积状态顺序正确）
+  useEffect(() => {
+    if (confirmWorkerBusy.current || confirmingId !== null || confirmQueue.length === 0) return
+    const numById = new Map(chapters.map(c => [c.id, c.number]))
+    const nextId = [...confirmQueue].sort((a, b) => (numById.get(a) ?? 0) - (numById.get(b) ?? 0))[0]
+    const chapterNum = numById.get(nextId) ?? 0
+    confirmWorkerBusy.current = true
+    setConfirmingId(nextId)
+    ;(async () => {
+      try {
+        const result = await chaptersApi.confirm(nextId)
+        refetchChapters()
+        qc.invalidateQueries({ queryKey: ['characters', novelId] })
+        if (result.book_summary_refreshed) {
+          qc.invalidateQueries({ queryKey: ['novel', novelId] })
+          toast.success(`第${chapterNum}章已确认，摘要和角色状态已更新，全书概要已自动刷新`)
+        } else {
+          toast.success(`第${chapterNum}章已确认，摘要和角色状态已更新`)
+        }
+      } catch {
+        toast.error(`第${chapterNum}章确认失败`)
+      } finally {
+        setConfirmQueue(prev => prev.filter(x => x !== nextId))
+        setConfirmingId(null)
+        confirmWorkerBusy.current = false
       }
-    } catch {
-      toast.error('确认章节失败')
-    } finally {
-      setIsConfirming(false)
-    }
-  }, [currentChapter, isConfirming, novelId, qc, refetchChapters])
+    })()
+  }, [confirmQueue, confirmingId, chapters, novelId, qc, refetchChapters])
 
   const handleDelete = useCallback(async () => {
     if (!currentChapter) return
@@ -261,6 +279,16 @@ export default function Editor() {
       chapters.length > 0 ? Math.max(...chapters.map((c: Chapter) => c.number)) + 1 : 1,
     )
   }, [chapters])
+
+  const handleWriterModelChange = useCallback(async (modelId: string) => {
+    try {
+      await novelsApi.update(novelId, { writer_model: modelId })
+      qc.invalidateQueries({ queryKey: ['novel', novelId] })
+      toast.success(modelId ? `Writer 模型已切换为 ${modelId}` : 'Writer 模型已恢复全局默认')
+    } catch {
+      toast.error('切换模型失败')
+    }
+  }, [novelId, qc])
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -361,6 +389,9 @@ export default function Editor() {
             {currentChapter?.word_count ? (
               <span className="text-xs text-muted-foreground">{currentChapter.word_count}字</span>
             ) : null}
+            {currentChapter?.model_used ? (
+              <span className="text-xs text-muted-foreground" title="本章生成模型">· {currentChapter.model_used}</span>
+            ) : null}
 
             <div className="flex items-center gap-1.5 ml-auto">
               <select
@@ -370,12 +401,19 @@ export default function Editor() {
                 title="字体大小"
               >
                 <option value={12}>12px</option>
+                <option value={13}>13px</option>
                 <option value={14}>14px</option>
+                <option value={15}>15px</option>
                 <option value={16}>16px</option>
+                <option value={17}>17px</option>
                 <option value={18}>18px</option>
+                <option value={19}>19px</option>
                 <option value={20}>20px</option>
                 <option value={22}>22px</option>
                 <option value={24}>24px</option>
+                <option value={26}>26px</option>
+                <option value={28}>28px</option>
+                <option value={32}>32px</option>
               </select>
               <select
                 value={lineHeight}
@@ -404,6 +442,18 @@ export default function Editor() {
                 <option value="SimHei, sans-serif">黑体</option>
                 <option value="Source Han Serif SC, serif">思源宋体</option>
                 <option value="Noto Sans SC, sans-serif">Noto Sans</option>
+              </select>
+              <select
+                value={fontWeight}
+                onChange={e => { setFontWeight(e.target.value); if (e.target.value) localStorage.setItem('novel_font_weight', e.target.value); else localStorage.removeItem('novel_font_weight') }}
+                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                title="字体粗细"
+              >
+                <option value="">常规</option>
+                <option value="300">细体</option>
+                <option value="500">中等</option>
+                <option value="600">半粗</option>
+                <option value="700">加粗</option>
               </select>
               <div className="flex items-center gap-0.5" title="字体颜色">
                 <input
@@ -458,10 +508,10 @@ export default function Editor() {
                       </button>
                     )}
                     <button onClick={handleConfirm}
-                      disabled={isConfirming}
+                      disabled={confirmQueue.includes(currentChapter.id)}
                       className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                      {isConfirming ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                      {isConfirming ? '确认中...' : currentChapter.status === 'confirmed' ? '重新确认' : '确认章节'}
+                      {confirmQueue.includes(currentChapter.id) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      {confirmingId === currentChapter.id ? '确认中...' : confirmQueue.includes(currentChapter.id) ? '排队中...' : currentChapter.status === 'confirmed' ? '重新确认' : '确认章节'}
                     </button>
                     <button
                       onClick={() => currentChapter?.id && gen.handleDiscover(currentChapter.id)}
@@ -558,6 +608,9 @@ export default function Editor() {
               targetWords={targetWords}
               onInstructionChange={(v) => setInstruction(novelId, v)}
               onTargetWordsChange={(v) => setTargetWords(novelId, v)}
+              pov={pov}
+              onPovChange={setPov}
+              povOptions={characters.map((c) => c.name)}
               onGenerate={gen.handleGenerate}
               onAbortOrGenerate={barMode === 'rewrite' ? gen.handleRewriteOrAbort : gen.handleAbortOrGenerate}
               annotations={annotations}
@@ -571,6 +624,7 @@ export default function Editor() {
               rewriteModel={rewriteModel}
               onRewriteModelChange={setRewriteModel}
               writerModel={novel?.writer_model || ''}
+              onWriterModelChange={handleWriterModelChange}
               modelLibrary={modelLibrary}
 
               newCharCandidates={gen.newCharCandidates}

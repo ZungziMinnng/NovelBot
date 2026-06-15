@@ -30,6 +30,7 @@ class ChapterOut(BaseModel):
     instruction: Optional[str] = None
     status: str
     word_count: int
+    model_used: str = ""
     created_at: datetime
     updated_at: datetime
 

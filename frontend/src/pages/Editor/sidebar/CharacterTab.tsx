@@ -25,7 +25,8 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
   const [adding, setAdding] = useState(false)
   const [showBulkState, setShowBulkState] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [form, setForm] = useState({ name: '', role: '配角', age: '', description: '' })
+  const emptyForm = { name: '', role: '配角', age: '', description: '', gender: '', appearance: '', personality: '', background: '' }
+  const [form, setForm] = useState(emptyForm)
 
   const [characterOrder, setCharacterOrder] = useState<number[]>([])
   const [draggingId, setDraggingId] = useState<number | null>(null)
@@ -73,10 +74,22 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
     if (!form.name.trim()) return
     setSaving(true)
     try {
-      await charactersApi.create({ ...form, novel_id: novelId })
+      const full_sheet: Record<string, string> = {}
+      if (form.gender.trim()) full_sheet.gender = form.gender.trim()
+      if (form.appearance.trim()) full_sheet.appearance = form.appearance.trim()
+      if (form.personality.trim()) full_sheet.personality = form.personality.trim()
+      if (form.background.trim()) full_sheet.background = form.background.trim()
+      await charactersApi.create({
+        novel_id: novelId,
+        name: form.name,
+        role: form.role,
+        age: form.age,
+        description: form.description,
+        ...(Object.keys(full_sheet).length ? { full_sheet } : {}),
+      })
       qc.invalidateQueries({ queryKey: ['characters', novelId] })
       setAdding(false)
-      setForm({ name: '', role: '配角', age: '', description: '' })
+      setForm(emptyForm)
     } finally { setSaving(false) }
   }
 
@@ -168,38 +181,100 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
       {/* Add Modal */}
       {adding && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setAdding(false)}>
-          <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-background rounded-xl p-5 w-[32rem] max-w-[90vw] max-h-[85vh] overflow-y-auto space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-medium">新建角色</h3>
-            <input
-              placeholder="角色名"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-              autoFocus
-            />
-            <input
-              list="role-options-new"
-              value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-              placeholder="角色定位"
-            />
-            <datalist id="role-options-new">
-              {ROLE_OPTIONS.map(r => <option key={r} value={r} />)}
-            </datalist>
-            <input
-              placeholder="年龄"
-              value={form.age}
-              onChange={(e) => setForm({ ...form, age: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
-            />
-            <textarea
-              placeholder="描述"
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              rows={3}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
-            />
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <label className="text-xs text-muted-foreground mb-1 block">角色名 *</label>
+                <input
+                  placeholder="角色名"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">年龄</label>
+                <input
+                  placeholder="年龄"
+                  value={form.age}
+                  onChange={(e) => setForm({ ...form, age: e.target.value })}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">角色定位</label>
+                <select
+                  value={ROLE_OPTIONS.includes(form.role) ? form.role : '__custom__'}
+                  onChange={(e) => setForm({ ...form, role: e.target.value === '__custom__' ? '' : e.target.value })}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                >
+                  {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                  <option value="__custom__">自定义...</option>
+                </select>
+                {!ROLE_OPTIONS.includes(form.role) && (
+                  <input
+                    value={form.role}
+                    onChange={(e) => setForm({ ...form, role: e.target.value })}
+                    placeholder="输入自定义定位"
+                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background mt-1"
+                    autoFocus
+                  />
+                )}
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">性别</label>
+                <input
+                  placeholder="性别"
+                  value={form.gender}
+                  onChange={(e) => setForm({ ...form, gender: e.target.value })}
+                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">描述</label>
+              <textarea
+                placeholder="一句话简介"
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                rows={2}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">外貌</label>
+              <textarea
+                placeholder="外貌特征"
+                value={form.appearance}
+                onChange={(e) => setForm({ ...form, appearance: e.target.value })}
+                rows={2}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">性格（初始底色）</label>
+              <textarea
+                placeholder="初始性格倾向"
+                value={form.personality}
+                onChange={(e) => setForm({ ...form, personality: e.target.value })}
+                rows={2}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">背景故事</label>
+              <textarea
+                placeholder="角色来历、经历"
+                value={form.background}
+                onChange={(e) => setForm({ ...form, background: e.target.value })}
+                rows={3}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              />
+            </div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleAdd} disabled={saving} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-50">

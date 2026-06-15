@@ -62,11 +62,22 @@ def _technique_text(t: Technique) -> str:
 
 # ── 单条嵌入 / 删除 ──────────────────────────────────────────────────────
 
+async def _safe_embed(novel_id: int, doc_id: str, text: str, meta: dict) -> None:
+    """实体向量写入是 CRUD 的附带同步，失败不应影响已提交的数据库写入。"""
+    try:
+        await vector_store.astore_text(novel_id, doc_id, text, meta)
+    except Exception:
+        log.warning(
+            "实体向量写入失败（已忽略，不影响数据保存）: novel=%s doc=%s",
+            novel_id, doc_id, exc_info=True,
+        )
+
+
 async def embed_character(novel_id: int, char: Character) -> None:
     doc_id = f"character_{char.id}"
     text = _char_text(char)
     meta = {"type": "character", "entity_id": char.id, "name": char.name}
-    await vector_store.astore_text(novel_id, doc_id, text, meta)
+    await _safe_embed(novel_id, doc_id, text, meta)
 
 
 async def embed_world_entity(novel_id: int, entity: WorldEntity) -> None:
@@ -74,28 +85,28 @@ async def embed_world_entity(novel_id: int, entity: WorldEntity) -> None:
     doc_id = f"{type_key}_{entity.id}"
     text = _entity_text(entity)
     meta = {"type": type_key, "entity_id": entity.id, "name": entity.name}
-    await vector_store.astore_text(novel_id, doc_id, text, meta)
+    await _safe_embed(novel_id, doc_id, text, meta)
 
 
 async def embed_location(novel_id: int, loc: Location, parent_name: str = "") -> None:
     doc_id = f"location_{loc.id}"
     text = _location_text(loc, parent_name)
     meta = {"type": "location", "entity_id": loc.id, "name": loc.name}
-    await vector_store.astore_text(novel_id, doc_id, text, meta)
+    await _safe_embed(novel_id, doc_id, text, meta)
 
 
 async def embed_faction(novel_id: int, fac: Faction) -> None:
     doc_id = f"faction_{fac.id}"
     text = _faction_text(fac)
     meta = {"type": "faction", "entity_id": fac.id, "name": fac.name}
-    await vector_store.astore_text(novel_id, doc_id, text, meta)
+    await _safe_embed(novel_id, doc_id, text, meta)
 
 
 async def embed_technique(novel_id: int, tech: Technique) -> None:
     doc_id = f"technique_{tech.id}"
     text = _technique_text(tech)
     meta = {"type": "technique", "entity_id": tech.id, "name": tech.name}
-    await vector_store.astore_text(novel_id, doc_id, text, meta)
+    await _safe_embed(novel_id, doc_id, text, meta)
 
 
 async def remove_entity_embedding(novel_id: int, type_key: str, db_id: int) -> None:

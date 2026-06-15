@@ -1,19 +1,36 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Save, Trash2, Loader2, RefreshCw } from 'lucide-react'
-import { novelsApi, chaptersApi, charactersApi, adminApi } from '@/api/client'
-import type { Character, Chapter, Memory, OutlineEntry } from '@/api/client'
+import { ArrowLeft, Save, Trash2, Loader2, RefreshCw, Search } from 'lucide-react'
+import { novelsApi, chaptersApi, charactersApi, adminApi, correctionsApi } from '@/api/client'
+import type { Character, Chapter, Memory, OutlineEntry, CorrectionHit } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
-type TabKey = 'characters' | 'summaries' | 'memories' | 'outlines'
+type TabKey = 'search' | 'characters' | 'summaries' | 'memories' | 'outlines'
 
 const TABS: { key: TabKey; label: string }[] = [
+  { key: 'search', label: '搜索修正' },
   { key: 'characters', label: '角色状态' },
   { key: 'summaries', label: '章节摘要' },
   { key: 'memories', label: '记忆条目' },
   { key: 'outlines', label: '大纲' },
 ]
+
+const SOURCE_LABEL: Record<string, string> = {
+  character: '角色',
+  location: '地点',
+  chapter: '章节摘要',
+  memory: '记忆条目',
+  outline: '大纲',
+}
+
+const SOURCE_COLOR: Record<string, string> = {
+  character: 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300',
+  location: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+  chapter: 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300',
+  memory: 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300',
+  outline: 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300',
+}
 
 const STATE_FIELDS = ['location', 'current_goal', 'titles', 'affiliation', 'known_secrets'] as const
 
@@ -29,7 +46,7 @@ export default function Admin() {
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [activeTab, setActiveTab] = useState<TabKey>('characters')
+  const [activeTab, setActiveTab] = useState<TabKey>('search')
 
   const { data: novel } = useQuery({ queryKey: ['novel', novelId], queryFn: () => novelsApi.get(novelId) })
   const { data: characters = [] } = useQuery({ queryKey: ['characters', novelId], queryFn: () => charactersApi.list(novelId) })
@@ -78,6 +95,7 @@ export default function Admin() {
       </div>
 
       <main className="max-w-6xl mx-auto px-6 py-6">
+        {activeTab === 'search' && <SearchFixTab novelId={novelId} qc={qc} />}
         {activeTab === 'characters' && <CharacterStatesTab characters={characters} qc={qc} novelId={novelId} />}
         {activeTab === 'summaries' && <ChapterSummariesTab chapters={chapters} qc={qc} novelId={novelId} />}
         {activeTab === 'memories' && <MemoriesTab memories={memories} loading={memoriesLoading} qc={qc} novelId={novelId} />}
@@ -418,6 +436,136 @@ function OutlinesTab({ outlines, loading, qc, novelId }: { outlines: OutlineEntr
           )}
         </div>
       ))}
+    </div>
+  )
+}
+
+
+// ── Tab 0: Search & Fix ──────────────────────────────────────────────────
+
+function SearchFixTab({ novelId, qc }: { novelId: number; qc: ReturnType<typeof useQueryClient> }) {
+  const [input, setInput] = useState('')
+  const [query, setQuery] = useState('')
+  const [editKey, setEditKey] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const { data: hits = [], isFetching, refetch } = useQuery({
+    queryKey: ['corrections-search', novelId, query],
+    queryFn: () => correctionsApi.search(novelId, query),
+    enabled: query.length > 0,
+  })
+
+  const runSearch = () => setQuery(input.trim())
+
+  const keyOf = (h: CorrectionHit) => `${h.source}:${h.id}:${h.field}`
+
+  const startEdit = (h: CorrectionHit) => {
+    setEditValue(h.value)
+    setEditKey(keyOf(h))
+  }
+
+  const saveEdit = async (h: CorrectionHit) => {
+    setSaving(true)
+    try {
+      await correctionsApi.apply(novelId, { source: h.source, id: h.id, field: h.field, value: editValue })
+      // 修改可能影响角色/章节/记忆等缓存，统一失效
+      qc.invalidateQueries({ queryKey: ['characters', novelId] })
+      qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+      qc.invalidateQueries({ queryKey: ['memories', novelId] })
+      qc.invalidateQueries({ queryKey: ['outlines', novelId] })
+      setEditKey(null)
+      await refetch()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
+            placeholder="搜索一个事实关键词（如 皇城、北方），跨记忆/摘要/角色/地点查找并修正"
+            className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            autoFocus
+          />
+        </div>
+        <button
+          onClick={runSearch}
+          disabled={!input.trim()}
+          className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50"
+        >
+          搜索
+        </button>
+      </div>
+
+      {isFetching && (
+        <div className="flex justify-center py-12"><Loader2 className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+      )}
+
+      {!isFetching && query && hits.length === 0 && (
+        <div className="text-sm text-muted-foreground text-center py-12 border rounded-lg border-dashed">
+          未找到包含「{query}」的内容
+        </div>
+      )}
+
+      {!isFetching && hits.length > 0 && (
+        <>
+          <div className="text-xs text-muted-foreground">共 {hits.length} 条命中</div>
+          <div className="space-y-2">
+            {hits.map(h => {
+              const isEditing = editKey === keyOf(h)
+              return (
+                <div key={keyOf(h)} className="border rounded-lg p-4 hover:border-primary/30 transition-colors">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${SOURCE_COLOR[h.source] || 'bg-muted'}`}>
+                      {SOURCE_LABEL[h.source] || h.source}
+                    </span>
+                    <span className="font-medium text-sm">{h.title}</span>
+                    <span className="text-xs text-muted-foreground">{h.context}</span>
+                    <span className="text-xs font-mono text-muted-foreground/70">{h.field}</span>
+                    <span className={`ml-auto text-xs px-1.5 py-0.5 rounded-full ${
+                      h.match === 'semantic'
+                        ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                    }`}>
+                      {h.match === 'semantic' ? `语义${h.score != null ? ` ${h.score}` : ''}` : '关键词'}
+                    </span>
+                  </div>
+                  {isEditing ? (
+                    <div className="flex gap-2">
+                      <textarea
+                        value={editValue}
+                        onChange={e => setEditValue(e.target.value)}
+                        className="flex-1 border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring min-h-[80px]"
+                        autoFocus
+                        onKeyDown={e => { if (e.key === 'Escape') setEditKey(null) }}
+                      />
+                      <div className="flex flex-col gap-1">
+                        <button onClick={() => saveEdit(h)} disabled={saving}
+                          className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50">
+                          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '保存'}
+                        </button>
+                        <button onClick={() => setEditKey(null)} className="px-3 py-1.5 text-xs border rounded-lg hover:bg-muted">取消</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p onClick={() => startEdit(h)}
+                      className="text-xs text-muted-foreground cursor-pointer hover:bg-muted/50 rounded p-1.5 transition-colors whitespace-pre-wrap">
+                      {h.value || <span className="italic">（空，点击编辑）</span>}
+                    </p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
     </div>
   )
 }

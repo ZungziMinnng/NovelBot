@@ -55,6 +55,7 @@ export function useGenerationStream(
   novelTitle: string,
   rewriteModel: string = '',
   resetRewriteModel?: () => void,
+  pov: string = '',
 ) {
   const qc = useQueryClient()
   // ── Discovery state ──────────────────────────────────────────────────────
@@ -134,6 +135,7 @@ export function useGenerationStream(
         instruction,
         target_words: targetWords,
         nsfw_mode: useSettingsStore.getState().nsfwMode,
+        pov: pov || undefined,
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
@@ -294,7 +296,7 @@ export function useGenerationStream(
     )
 
     useGenerationStore.getState().setAbortController(ctrl)
-  }, [novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novelTitle, qc])
+  }, [novelId, selectedChapterNum, selectedVolume, instruction, targetWords, novelTitle, pov, qc])
 
   // ── Abort / Generate ─────────────────────────────────────────────────────
   const handleAbortOrGenerate = useCallback(() => {

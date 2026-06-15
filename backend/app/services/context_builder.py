@@ -95,6 +95,7 @@ async def build_generation_context(
     chapter_number: int,
     volume: int = 1,
     scene_hint: str = "",
+    pov: str = "",
 ) -> dict:
     """
     组装生成章节所需的全部上下文，返回结构化 dict。
@@ -243,6 +244,13 @@ async def build_generation_context(
         for c in characters
     ]
     ctx["_all_character_names"] = [c.name for c in all_characters]
+
+    # 本章视角角色（POV）：显式指定 > 男主 > 空（空时所有秘密都视为未知情）
+    pov_name = pov.strip()
+    if not pov_name:
+        lead = next((c for c in all_characters if (c.role or "") in ("男主", "主角")), None)
+        pov_name = lead.name if lead else ""
+    ctx["pov"] = pov_name
     if not _on("characters"):
         meta.append({"key": "characters", "label": "角色状态", "detail": "已跳过", "source": char_source, "items": [], "content": ""})
     elif characters:
@@ -483,11 +491,13 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         return cfg.get(key, True)
 
     _SHEET_LABELS = {
-        "personality": "性格", "skills": "技能",
+        "personality": "初始性格", "skills": "技能",
         "appearance": "外貌", "speech_style": "说话风格",
     }
 
     # ── 角色状态 ──
+    pov_name = ctx.get("pov", "")
+    hidden_facts: list[tuple[str, str, list]] = []  # (角色名, 秘密, 知情者) —— POV 不知情，进上帝视角隔离区
     chars_text = ""
     if _on("characters"):
         for c in ctx.get("characters", []):
@@ -507,10 +517,25 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
                 else:
                     chars_text += f"  {label}：{val}\n"
             if state:
+                current_personality = state.get("personality")
+                if current_personality:
+                    chars_text += f"  当前性格：{current_personality}\n"
                 filtered_state = {k: v for k, v in state.items()
-                                  if k not in ("known_secrets", "initial_relationships", "relationship_changes")}
+                                  if k not in ("personality", "known_secrets", "secrets", "initial_relationships", "relationship_changes")}
                 if filtered_state:
                     chars_text += f"  当前状态：{json.dumps(filtered_state, ensure_ascii=False)}\n"
+                # 信息不对称：按 POV 是否在知情者名单内分流
+                for sec in state.get("secrets", []) or []:
+                    if not isinstance(sec, dict):
+                        continue
+                    fact = sec.get("fact")
+                    if not fact:
+                        continue
+                    known_by = sec.get("known_by") or []
+                    if pov_name and pov_name in known_by:
+                        chars_text += f"  已知秘密：{fact}\n"
+                    else:
+                        hidden_facts.append((c["name"], str(fact), list(known_by)))
                 initial_rels = state.get("initial_relationships", {})
                 ongoing_rels = state.get("relationship_changes", {})
                 rels: dict = {}
@@ -521,6 +546,20 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
                 if rels:
                     chars_text += f"  人物关系：{json.dumps(rels, ensure_ascii=False)}\n"
     chars_block = f"=== 角色状态 ===\n{chars_text.strip()}" if chars_text.strip() else ""
+
+    # ── 上帝视角真相（POV 角色尚不知情，严禁表现知晓）──
+    if hidden_facts:
+        lines = ["=== 上帝视角真相（以下角色尚不知情）==="]
+        pov_label = pov_name or "本章视角角色"
+        lines.append(
+            f"以下设定为剧情真相，仅供你保持设定一致与铺垫。严禁让未列入「知情者」的角色"
+            f"（尤其是{pov_label}）在本章通过言行、心理或旁白表现出知晓："
+        )
+        for name, fact, known_by in hidden_facts:
+            who = "、".join(known_by) if known_by else "无"
+            lines.append(f"- 【{name}】{fact}（知情者：{who}）")
+        godview_block = "\n".join(lines)
+        chars_block = f"{chars_block}\n\n{godview_block}" if chars_block else godview_block
 
     # ── 世界实体（道具/系统，分别受 items / systems 开关控制）──
     _TYPE_LABELS = {"item": "道具", "system": "系统"}
@@ -638,5 +677,10 @@ def format_context_for_writer(ctx: dict, instruction: str = "", target_words: in
         f"正文中不要显式写出参考摘要里的第X日、当日、次日等时间线标注；需要表达时间推进时，用自然叙事过渡。\n"
         f"直接输出正文内容，不要输出章节标题或任何前缀。"
     )
+    if hidden_facts:
+        task_instruction += (
+            "\n严格遵守「上帝视角真相」区块：未列入知情者的角色，本章不得通过言行、心理或旁白"
+            "流露出对这些真相的知晓，可用于制造伏笔与戏剧反差。"
+        )
 
     return context_block, chars_block, task_instruction
