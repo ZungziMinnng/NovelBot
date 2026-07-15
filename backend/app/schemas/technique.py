@@ -10,6 +10,7 @@ class TechniqueCreate(BaseModel):
     description: str = ""
     practitioners: str = ""
     power_level: str = ""
+    importance: int = 3
 
 
 class TechniqueUpdate(BaseModel):
@@ -18,6 +19,7 @@ class TechniqueUpdate(BaseModel):
     description: Optional[str] = None
     practitioners: Optional[str] = None
     power_level: Optional[str] = None
+    importance: Optional[int] = None
 
 
 class TechniqueOut(BaseModel):
@@ -28,6 +30,7 @@ class TechniqueOut(BaseModel):
     description: str
     practitioners: str
     power_level: str
+    importance: int
     created_at: datetime
     updated_at: datetime
 

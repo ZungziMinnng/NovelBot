@@ -8,6 +8,7 @@ class ApiProviderCreate(BaseModel):
     base_url: str = ""
     api_key: str = ""
     api_format: str = "openai"
+    use_proxy: bool = True
 
 
 class ApiProviderUpdate(BaseModel):
@@ -15,6 +16,7 @@ class ApiProviderUpdate(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     api_format: Optional[str] = None
+    use_proxy: Optional[bool] = None
 
 
 class ApiProviderOut(BaseModel):
@@ -24,6 +26,7 @@ class ApiProviderOut(BaseModel):
     api_key_set: bool
     api_key_masked: str
     api_format: str
+    use_proxy: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}

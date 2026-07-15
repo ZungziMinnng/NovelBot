@@ -18,6 +18,9 @@ from app.models.memory import Outline
 from app.models.volume import Volume
 from app.agents import world_agent, outline_agent, character_agent
 from app.services import llm_client, entity_embeddings, vector_store
+from app.services.llm_json import repair_json
+from app.services.sse import sse_event as _sse
+from app.services.world_rules_sync import seed_or_sync
 from app.prompts.loader import render
 
 log = logging.getLogger(__name__)
@@ -35,11 +38,6 @@ STEPS = [
 TECHNIQUE_GENRES = {"玄幻", "仙侠", "武侠", "奇幻", "末世", "游戏", "科幻"}
 
 
-def _sse(event: str, data) -> str:
-    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
-    return f"data: {payload}\n\n"
-
-
 def _step_event(step: dict, status: str) -> str:
     return _sse("build_step", {**step, "status": status})
 
@@ -50,6 +48,14 @@ def _token(text: str) -> str:
 
 def _progress(percent: int, inp: int, out: int) -> str:
     return _sse("build_progress", {"percent": percent, "input_tokens": inp, "output_tokens": out})
+
+
+def _imp(item: dict) -> int:
+    """从 LLM 输出项中取 importance（1-5），缺失或非法回退为 3（中性）。"""
+    try:
+        return max(1, min(5, int(round(float(item.get("importance", 3))))))
+    except (TypeError, ValueError):
+        return 3
 
 
 def _format_tags(tags: dict) -> str:
@@ -65,12 +71,9 @@ def _format_tags(tags: dict) -> str:
 
 
 def _parse_json_array(raw: str) -> list[dict]:
-    start = raw.find("[")
-    end = raw.rfind("]") + 1
-    if start < 0 or end <= start:
-        return []
     try:
-        return json.loads(raw[start:end])
+        parsed = json.loads(repair_json(raw, expect="array"))
+        return parsed if isinstance(parsed, list) else []
     except json.JSONDecodeError:
         return []
 
@@ -201,9 +204,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
             if clean_title:
                 novel.title = clean_title
 
+        await seed_or_sync(db, novel)
         await db.commit()
-        await world_agent.embed_world_setting(novel.id, core_setting)
-        yield _token(core_setting)
+        await world_agent.embed_world_setting(novel.id, novel.core_setting)
+        yield _token(novel.core_setting)
         yield _step_event(STEPS[1], "done")
         yield _progress(20, total_in, total_out)
 
@@ -214,7 +218,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
             yield _progress(40, total_in, total_out)
         else:
             yield _step_event(STEPS[2], "running")
-            outlines = await outline_agent.generate_chapter_outlines(db, novel, nsfw_mode=nsfw_mode)
+            outlines = await outline_agent.generate_chapter_outlines(db, novel)
             outline_text = "\n\n".join(f"第{o.chapter_number}章：{o.title}\n{o.content}" for o in outlines)
             yield _token(outline_text)
             await db.commit()
@@ -242,7 +246,8 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
             if not name:
                 continue
             loc = Location(novel_id=novel.id, name=name,
-                           type=item.get("type", "city"), description=item.get("description", ""))
+                           type=item.get("type", "city"), description=item.get("description", ""),
+                           importance=_imp(item))
             db.add(loc)
             loc_lines.append((loc, f"📍 {name}（{loc.type}）: {loc.description}"))
         await db.commit()
@@ -271,7 +276,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                 continue
             fac = Faction(novel_id=novel.id, name=name,
                           type=item.get("type", ""), description=item.get("description", ""),
-                          goals=item.get("goals", ""))
+                          goals=item.get("goals", ""), importance=_imp(item))
             db.add(fac)
             fac_lines.append((fac, f"⚔ {name}（{fac.type}）: {fac.description}"))
         await db.commit()
@@ -335,7 +340,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
             changed = False
             try:
                 if _needs_sheet(c):
-                    c.full_sheet = await character_agent.generate_character_sheet(novel, c, nsfw_mode=nsfw_mode)
+                    c.full_sheet = await character_agent.generate_character_sheet(novel, c)
                     changed = True
                     warning = (c.full_sheet or {}).get("_generation_warning")
                     if warning:
@@ -392,7 +397,8 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                 if not name:
                     continue
                 tech = Technique(novel_id=novel.id, name=name,
-                                 type=item.get("type", "功法"), description=item.get("description", ""))
+                                 type=item.get("type", "功法"), description=item.get("description", ""),
+                                 importance=_imp(item))
                 db.add(tech)
                 techs_created.append(tech)
                 tech_lines.append(f"🔮 {name}（{tech.type}）: {tech.description}")

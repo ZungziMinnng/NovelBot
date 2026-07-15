@@ -1,13 +1,15 @@
 import { useState, useRef, useCallback } from 'react'
-import { Plus, Zap, Loader2, Square, Users, Database, MapPin, Swords, RotateCcw, X, MessageSquareQuote, PenLine } from 'lucide-react'
+import { Plus, Zap, Loader2, Square, Users, Database, MapPin, Swords, Flag, RotateCcw, X, MessageSquareQuote, PenLine, Shield, FileSearch } from 'lucide-react'
 import AgentStatus from '@/components/AgentStatus/AgentStatus'
 import type { Annotation } from '@/store/editorStore'
 import type { ModelEntry } from '@/api/client'
+import { modelSelectValue, findModelEntry } from '@/api/client'
 
 interface NewCharCandidate { name: string; role: string; description: string }
 interface NewEntityCandidate { name: string; type: string; description: string }
 interface NewLocationCandidate { name: string; type: string; description: string; parent_name: string }
 interface NewTechCandidate { name: string; type: string; description: string }
+interface NewFactionCandidate { name: string; type: string; description: string }
 
 export interface EntityItem { name: string; type: string; typeLabel: string; description: string }
 
@@ -78,8 +80,22 @@ interface GenerationBarProps {
   onAddTechs: () => void
   onDismissTechs: () => void
 
+  // New faction discovery
+  newFactionCandidates: NewFactionCandidate[]
+  selectedFactionIndices: Set<number>
+  addingFactions: boolean
+  onToggleFaction: (i: number) => void
+  onAddFactions: () => void
+  onDismissFactions: () => void
+
   // Entity autocomplete
   entities: EntityItem[]
+
+  // Review toggles (inline next to generate button)
+  enableCritic: boolean
+  enableDetailReview: boolean
+  onToggleCritic: () => void
+  onToggleDetailReview: () => void
 }
 
 const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
@@ -135,7 +151,17 @@ export default function GenerationBar({
   onToggleTech,
   onAddTechs,
   onDismissTechs,
+  newFactionCandidates,
+  selectedFactionIndices,
+  addingFactions,
+  onToggleFaction,
+  onAddFactions,
+  onDismissFactions,
   entities,
+  enableCritic,
+  enableDetailReview,
+  onToggleCritic,
+  onToggleDetailReview,
 }: GenerationBarProps) {
   const [globalInput, setGlobalInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -364,6 +390,34 @@ export default function GenerationBar({
             </div>
           )}
 
+          {/* New Faction Discovery */}
+          {newFactionCandidates.length > 0 && (
+            <div className="space-y-1.5 border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Flag className="w-3 h-3" /> 发现新势力（本章首次出现）
+                </span>
+                <button onClick={onDismissFactions} className="text-xs text-muted-foreground hover:text-foreground px-1">×</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {newFactionCandidates.map((f, i) => (
+                  <button key={i} onClick={() => onToggleFaction(i)}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                      selectedFactionIndices.has(i) ? 'border-primary bg-primary/10 text-primary' : 'border-transparent bg-muted text-muted-foreground'
+                    }`}>
+                    <span className="font-medium">{f.name}</span>
+                    {f.type && <span className="opacity-60">·{f.type}</span>}
+                  </button>
+                ))}
+              </div>
+              <button onClick={onAddFactions} disabled={addingFactions || selectedFactionIndices.size === 0}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {addingFactions ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                添加选中势力（{selectedFactionIndices.size}/{newFactionCandidates.length}）
+              </button>
+            </div>
+          )}
+
           {/* Instruction + Generate */}
           <div className="flex flex-col gap-2">
             <div className="relative">
@@ -410,8 +464,12 @@ export default function GenerationBar({
                 <option value={1200}>1200字</option>
                 <option value={2000}>2000字</option>
                 <option value={3000}>3000字</option>
+                <option value={3500}>3500字</option>
                 <option value={4000}>4000字</option>
                 <option value={5000}>5000字</option>
+                <option value={6000}>6000字</option>
+                <option value={7000}>7000字</option>
+                <option value={8000}>8000字</option>
               </select>
               <select
                 value={pov}
@@ -426,7 +484,7 @@ export default function GenerationBar({
                 ))}
               </select>
               <select
-                value={writerModel}
+                value={modelSelectValue(modelLibrary, writerModel)}
                 onChange={e => onWriterModelChange(e.target.value)}
                 disabled={isCurrentlyGenerating}
                 title="Writer 模型（切换即保存为本小说默认）"
@@ -434,9 +492,38 @@ export default function GenerationBar({
               >
                 <option value="">跟随全局默认</option>
                 {modelLibrary.filter(m => m.model_type !== 'embedding').map(m => (
-                  <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                  <option key={m.id} value={String(m.id)}>
+                    {m.provider ? `[${m.provider}] ` : ''}{m.display_name || m.model_id}
+                  </option>
                 ))}
               </select>
+              {/* Review toggles */}
+              <button
+                onClick={onToggleCritic}
+                disabled={isCurrentlyGenerating}
+                title={`Critic 审查（${enableCritic ? '已开启' : '已关闭'}）\n\n开启后，章节生成完毕将自动调用审查模型检查以下内容：\n• 角色性格、能力、关系、状态是否与角色卡一致\n• 势力立场、目标、阵营、行动边界是否与势力设定冲突\n• 系统/道具/功法是否前后矛盾或擅自变更\n• 本章是否偏离大纲目标\n• 是否出现逻辑漏洞、人名替换、无根据新增设定\n\n审查不通过将自动进入修订循环（最多重试 2 次）。\n点击切换开关状态。`}
+                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-50 ${
+                  enableCritic
+                    ? 'text-amber-600 bg-amber-50 hover:bg-amber-100 border border-amber-200'
+                    : 'text-muted-foreground hover:bg-muted border border-transparent'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span className="font-medium">审查{enableCritic ? '开' : '关'}</span>
+              </button>
+              <button
+                onClick={onToggleDetailReview}
+                disabled={isCurrentlyGenerating}
+                title={`剧情细节审查（${enableDetailReview ? '已开启' : '已关闭'}）\n\n专注章节正文文字层面，检查以下问题：\n• 前后章节之间的连续性断裂\n• 场景、动作、对话的文字重复\n• 人物位置、持有物品的事实矛盾\n• 时间线标注与实际剧情顺序的冲突\n\n基于前 20 章内容进行扫描，发现问题后自动进入修订循环。\n点击切换开关状态。`}
+                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-50 ${
+                  enableDetailReview
+                    ? 'text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200'
+                    : 'text-muted-foreground hover:bg-muted border border-transparent'
+                }`}
+              >
+                <FileSearch className="w-3.5 h-3.5" />
+                <span className="font-medium">细节{enableDetailReview ? '开' : '关'}</span>
+              </button>
               <div className="flex-1" />
               <button
                 onClick={onAbortOrGenerate}
@@ -506,13 +593,15 @@ export default function GenerationBar({
             <div className="flex items-center gap-2">
               <label className="text-xs text-muted-foreground shrink-0">重写模型</label>
               <select
-                value={rewriteModel}
+                value={modelSelectValue(modelLibrary, rewriteModel)}
                 onChange={e => onRewriteModelChange(e.target.value)}
                 className="flex-1 text-xs border rounded-lg px-2 py-1.5 bg-background truncate"
               >
-                <option value="">与 Writer 一致{writerModel ? ` (${writerModel})` : ''}</option>
+                <option value="">与 Writer 一致{writerModel ? ` (${findModelEntry(modelLibrary, writerModel)?.display_name || writerModel})` : ''}</option>
                 {modelLibrary.filter(m => m.model_type !== 'embedding').map(m => (
-                  <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                  <option key={m.id} value={String(m.id)}>
+                    {m.provider ? `[${m.provider}] ` : ''}{m.display_name || m.model_id}
+                  </option>
                 ))}
               </select>
             </div>

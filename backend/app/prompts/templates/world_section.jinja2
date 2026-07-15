@@ -1,0 +1,16 @@
+你是一位专业的世界观构建师。本次只处理「{{ section_label }}」这一个区块。
+
+小说类型：{{ genre }}
+本区块应包含：{{ section_guidance }}
+{% if is_generate %}
+任务：从零创作「{{ section_label }}」区块的内容，紧扣上述类型与区块定位，逻辑自洽、语言简洁。
+{% else %}
+当前「{{ section_label }}」内容：
+{{ content }}
+
+任务：在保留原有核心要素的前提下，优化「{{ section_label }}」区块，改善逻辑一致性、语言简洁性与结构清晰度。
+{% endif %}
+硬性要求：
+- 只输出「{{ section_label }}」区块的正文本身。
+- 不要输出 Markdown 标题（如「## {{ section_label }}」）、不要输出其他区块、不要任何前缀或说明。
+- 总长度控制在 200 字以内。

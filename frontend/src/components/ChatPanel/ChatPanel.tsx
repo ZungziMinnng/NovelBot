@@ -1,10 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Send, Loader2, Bot, User, Settings, Trash2, RotateCcw } from 'lucide-react'
-import { streamChat, modelLibraryApi, type ChatSSEMessage } from '@/api/client'
+import { streamChat, modelLibraryApi, findModelEntry, type ChatSSEMessage } from '@/api/client'
 import type { Novel } from '@/api/client'
 import { useChatStore, getChatSettings, getChatMessages } from '@/store/chatStore'
-import { useSettingsStore } from '@/store/settingsStore'
 
 interface Props {
   novelId: number
@@ -29,9 +28,9 @@ export default function ChatPanel({ novelId, novel }: Props) {
     queryFn: modelLibraryApi.list,
   })
   const chatModelLibrary = modelLibrary.filter(m => m.model_type !== 'embedding')
-  const selectedChatModel = modelLibrary.some(m => m.model_id === chatSettings.model && m.model_type === 'embedding')
-    ? ''
-    : chatSettings.model
+  // chatSettings.model 可能是 ModelEntry.id（新）或旧 model_id；解析到条目后用 id 作 select value
+  const chatEntry = findModelEntry(modelLibrary, chatSettings.model)
+  const selectedChatModel = chatEntry && chatEntry.model_type !== 'embedding' ? String(chatEntry.id) : ''
   const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const streamingRef = useRef(false)
@@ -70,7 +69,6 @@ export default function ChatPanel({ novelId, novel }: Props) {
         temperature: chatSettings.temperature,
         max_tokens: chatSettings.maxTokens,
         context_rounds: chatSettings.contextRounds,
-        nsfw_mode: useSettingsStore.getState().nsfwMode,
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {
@@ -143,7 +141,7 @@ export default function ChatPanel({ novelId, novel }: Props) {
             >
               <option value="">默认 Writer 模型</option>
               {chatModelLibrary.map(m => (
-                <option key={m.id} value={m.model_id}>
+                <option key={m.id} value={String(m.id)}>
                   [{m.provider}] {m.display_name || m.model_id}
                 </option>
               ))}

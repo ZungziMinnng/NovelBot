@@ -7,6 +7,7 @@ from app.models.memory import Outline
 from app.models.novel import Novel
 from app.schemas.outline import OutlineCreate, OutlineUpdate, OutlineOut
 from app.services import llm_client
+from app.services.llm_json import repair_json
 
 router = APIRouter()
 
@@ -104,12 +105,10 @@ async def expand_outline(outline_id: int, db: AsyncSession = Depends(get_db)):
     raw = await llm_client.dispatch_chat_complete(messages, model, api_format, temperature=0.7, max_tokens=4096)
 
     # Parse JSON from LLM response
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        raw = raw.rsplit("```", 1)[0]
     try:
-        items = json.loads(raw)
+        items = json.loads(repair_json(raw, expect="array"))
+        if not isinstance(items, list):
+            raise json.JSONDecodeError("top-level is not array", raw, 0)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="LLM 返回格式异常，请重试")
 

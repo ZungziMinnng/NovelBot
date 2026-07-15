@@ -8,7 +8,8 @@ from app.models.novel import Novel
 from app.models.chapter import Chapter
 from app.models.character import Character
 from app.services import llm_client
-from app.services.summarizer import _build_analysis_messages
+from app.services.llm_json import JsonCallError, call_json, repair_json
+from app.services.summarizer import _build_analysis_messages, strip_plot_suggestions
 from app.prompts.loader import render
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,6 @@ def _normalize_character_sheet(sheet: dict, character: Character) -> dict:
 async def generate_character_sheet(
     novel: Novel,
     character: Character,
-    nsfw_mode: bool = False,
 ) -> dict:
     """使用 LLM 生成完整角色卡"""
     prompt = render(
@@ -96,49 +96,6 @@ def init_character_state(character: Character) -> dict:
         "initial_relationships": {},
         "relationship_changes": {},
     }
-
-
-async def discover_new_characters(
-    novel: Novel,
-    chapter_content: str,
-    existing_names: list[str],
-) -> list[dict]:
-    """从章节内容中提取未录入的新角色，返回 [{name, role, description}]"""
-    if not chapter_content.strip():
-        return []
-
-    names_str = "、".join(existing_names) if existing_names else "（暂无）"
-    prompt = (
-        f"已知角色：{names_str}\n\n"
-        f"请从以下章节内容中，找出所有有名有姓的新角色（不在已知列表中的）。"
-        f"只提取实际出现在章节中的角色，不要凭空捏造。\n\n"
-        f"以 JSON 数组输出，格式：\n"
-        f'[{{"name": "姓名", "role": "配角", "description": "一句话简介"}}]\n'
-        f"role 只能是：男主、女主、主角、配角、反派、朋友 之一。\n"
-        f"如果没有新角色，直接输出 []。只输出 JSON，不要任何说明。"
-    )
-
-    model, api_format = llm_client.get_agent_client("character", novel.fast_model)
-    messages = _build_analysis_messages(
-        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
-    )
-    try:
-        raw = await llm_client.dispatch_chat_complete(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.3,
-            max_tokens=600,
-        )
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start == -1 or end <= 0:
-            return []
-        candidates = json.loads(raw[start:end])
-        existing_set = {n.strip() for n in existing_names}
-        return [c for c in candidates if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set]
-    except Exception:
-        return []
 
 
 async def refresh_appearance(
@@ -209,98 +166,6 @@ async def enhance_character(
         return sheet
 
 
-async def discover_new_locations(
-    novel: Novel,
-    chapter_content: str,
-    existing_locations: list[dict],
-) -> list[dict]:
-    """从章节内容中提取未录入的新地点，返回 [{name, type, description, parent_name}]"""
-    if not chapter_content.strip():
-        return []
-
-    loc_str = "、".join(f"{l['name']}({l['type']})" for l in existing_locations) if existing_locations else "（暂无）"
-    prompt = (
-        f"已知地点：{loc_str}\n\n"
-        f"请从以下章节内容中，找出所有首次出现的、有明确名称的重要地点（不在已知列表中的）。\n"
-        f"只提取章节中实际描述过的地点，不要凭空捏造。忽略模糊的无名地点。\n\n"
-        f"以 JSON 数组输出，格式：\n"
-        f'[{{"name": "地点名", "type": "类型", "description": "一句话简介", "parent_name": "所属上级地点名或空字符串"}}]\n'
-        f'type 例如：城市、山脉、宗门、秘境、建筑 等。\n'
-        f"如果没有新地点，直接输出 []。只输出 JSON，不要任何说明。"
-    )
-
-    model, api_format = llm_client.get_agent_client("character", novel.fast_model)
-    messages = _build_analysis_messages(
-        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
-    )
-    try:
-        raw = await llm_client.dispatch_chat_complete(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.3,
-            max_tokens=600,
-        )
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start == -1 or end <= 0:
-            return []
-        candidates = json.loads(raw[start:end])
-        existing_set = {l["name"].strip() for l in existing_locations}
-        return [
-            {**c, "parent_name": c.get("parent_name", "")}
-            for c in candidates
-            if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set
-        ]
-    except Exception:
-        return []
-
-
-async def discover_new_techniques(
-    novel: Novel,
-    chapter_content: str,
-    existing_names: list[str],
-) -> list[dict]:
-    """从章节内容中提取未录入的功法/武技，返回 [{name, type, description}]"""
-    if not chapter_content.strip():
-        return []
-
-    names_str = "、".join(existing_names) if existing_names else "（暂无）"
-    prompt = (
-        f"已知功法/武技：{names_str}\n\n"
-        f"请从以下章节内容中，找出所有首次出现的、有明确名称的功法或武技"
-        f"（不在已知列表中的）。\n"
-        f"功法：修炼心法、运气法门等\n"
-        f"武技：招式、术法、技能等\n\n"
-        f"只提取章节中实际描述过的，不要凭空捏造。忽略没有明确名称的普通攻击。\n\n"
-        f"以 JSON 数组输出，格式：\n"
-        f'[{{"name": "名称", "type": "功法或武技", "description": "一句话简介"}}]\n'
-        f"如果没有新功法/武技，直接输出 []。只输出 JSON，不要任何说明。"
-    )
-
-    model, api_format = llm_client.get_agent_client("character", novel.fast_model)
-    messages = _build_analysis_messages(
-        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
-    )
-    try:
-        raw = await llm_client.dispatch_chat_complete(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.3,
-            max_tokens=600,
-        )
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start == -1 or end <= 0:
-            return []
-        candidates = json.loads(raw[start:end])
-        existing_set = {n.strip() for n in existing_names}
-        return [c for c in candidates if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set]
-    except Exception:
-        return []
-
-
 async def generate_character_history(
     session: AsyncSession,
     novel: Novel,
@@ -350,7 +215,7 @@ async def _history_batch(
     """处理单批章节，提取角色经历。"""
     text_parts = []
     for ch in batch_chapters:
-        text_parts.append(f"[第{ch.number}章]\n{ch.content}")
+        text_parts.append(f"[第{ch.number}章]\n{strip_plot_suggestions(ch.content or '')}")
     full_text = "\n\n".join(text_parts)
 
     system_prompt = (
@@ -382,13 +247,8 @@ async def _history_batch(
         max_tokens=4096,
     )
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        raw = raw.rsplit("```", 1)[0]
-
     try:
-        entries = json.loads(raw)
+        entries = json.loads(repair_json(raw, expect="array"))
         if not isinstance(entries, list):
             entries = []
         return [e for e in entries if isinstance(e, dict) and "chapter" in e and "content" in e], in_tok, out_tok
@@ -434,54 +294,147 @@ async def generate_image_prompt(novel: Novel, char: Character, style: str) -> st
     return result.strip()
 
 
-async def discover_new_entities(
+async def discover_all_new(
     novel: Novel,
     chapter_content: str,
-    existing_names: list[str],
-) -> list[dict]:
-    """从章节内容中提取未录入的道具/系统，返回 [{name, type, description}]"""
-    if not chapter_content.strip():
-        return []
+    existing_char_names: list[str],
+    existing_entity_names: list[str],
+    existing_locations: list[dict],
+    existing_tech_names: list[str],
+    existing_faction_names: list[str],
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
+    """单次 LLM 调用完成五类新设定发现（角色/道具系统/地点/功法/势力）。
 
-    names_str = "、".join(existing_names) if existing_names else "（暂无）"
+    返回 (characters, entities, locations, techniques, factions)。
+    确定性后过滤剔除已知名称；同名候选只保留优先级最高的类别：
+    角色 > 功法 > 势力 > 地点 > 道具。
+    """
+    empty: tuple[list[dict], list[dict], list[dict], list[dict], list[dict]] = ([], [], [], [], [])
+    if not chapter_content.strip():
+        return empty
+
+    def _fmt(names: list[str]) -> str:
+        return "、".join(names) if names else "（暂无）"
+
+    loc_str = (
+        "、".join(f"{l['name']}({l['type']})" for l in existing_locations)
+        if existing_locations else "（暂无）"
+    )
     prompt = (
-        f"已知道具/系统：{names_str}\n\n"
-        f"请从以下章节内容中，找出所有首次出现的、有明确名称的重要道具或系统"
-        f"（不在已知列表中的）。\n"
-        f"道具(item)：武器、法宝、丹药、装备等有名称的具体物品\n"
-        f"系统(system)：修炼体系、功法系统、游戏面板、等级系统等机制\n\n"
-        f"只提取章节中实际描述过的，不要凭空捏造。忽略普通无名物品（如'一把剑'）。\n\n"
-        f"以 JSON 数组输出，格式：\n"
-        f'[{{"name": "名称", "type": "item", "description": "一句话简介"}}]\n'
-        f'type 只能是 "item" 或 "system"。\n'
-        f"如果没有新道具/系统，直接输出 []。只输出 JSON，不要任何说明。"
+        f"请从以下章节内容中，找出所有首次出现的新设定条目，按五个类别分类提取。\n\n"
+        f"已知角色：{_fmt(existing_char_names)}\n"
+        f"已知道具/系统：{_fmt(existing_entity_names)}\n"
+        f"已知地点：{loc_str}\n"
+        f"已知功法/武技：{_fmt(existing_tech_names)}\n"
+        f"已知势力/组织：{_fmt(existing_faction_names)}\n\n"
+        f"提取规则：\n"
+        f"- 只提取章节正文中实际出现且有明确名称的条目，不要凭空捏造，不要根据常识或设定推测\n"
+        f"- 已知列表中的名称一律不要输出；同一名称只能归入一个类别\n"
+        f"- characters（角色）：有名有姓的人物。role 只能根据文中实际表现判断，"
+        f"取 男主、女主、主角、配角、反派、朋友 之一；路人级角色（仅被提及、没台词、没行为）设为「配角」。"
+        f"description 只写章节中实际出现的内容（做了什么、说了什么、与谁互动），"
+        f"不要添加文中未明确的门派、身份、修为、人际关系，也不要根据姓名推测性别年龄\n"
+        f'- entities（道具/系统）：type 只能是 "item"（武器、法宝、丹药、装备等有名称的具体物品）'
+        f'或 "system"（修炼体系、游戏面板、等级系统等机制）。忽略普通无名物品（如\'一把剑\'）\n'
+        f"- locations（地点）：type 例如 城市、山脉、秘境、建筑、区域 等；"
+        f"parent_name 填所属上级地点名，没有则填空字符串。忽略模糊的无名地点\n"
+        f"- techniques（功法/武技）：type 为「功法」（修炼心法、运气法门）或「武技」（招式、术法、技能）。"
+        f"忽略没有明确名称的普通攻击\n"
+        f"- factions（势力/组织）：宗门、门派、家族、帝国、王国、教派、商会、军队、联盟 等有组织的群体，"
+        f"type 填组织类型\n"
+        f"- 类别界定：宗门/门派/家族/帝国/商会等组织属于势力而非地点；"
+        f"有形的武器、法宝、丹药属于道具而非功法；人物姓名、地点名、组织名不要归入道具或功法\n\n"
+        f"以 JSON 对象输出，格式：\n"
+        f"{{\n"
+        f'  "characters": [{{"name": "姓名", "role": "配角", "description": "一句话简介"}}],\n'
+        f'  "entities": [{{"name": "名称", "type": "item", "description": "一句话简介"}}],\n'
+        f'  "locations": [{{"name": "地点名", "type": "类型", "description": "一句话简介", "parent_name": ""}}],\n'
+        f'  "techniques": [{{"name": "名称", "type": "功法", "description": "一句话简介"}}],\n'
+        f'  "factions": [{{"name": "名称", "type": "类型", "description": "一句话简介"}}]\n'
+        f"}}\n"
+        f"某个类别没有新条目就输出空数组。只输出 JSON，不要任何说明。"
     )
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)
     messages = _build_analysis_messages(
-        prompt, chapter_content[:3000], "请输出 JSON 数组：", api_format,
+        prompt, chapter_content[:12000], "请输出 JSON 对象：", api_format,
     )
+
     try:
-        raw = await llm_client.dispatch_chat_complete(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.3,
-            max_tokens=600,
+        data, _, _ = await call_json(
+            messages, model, api_format,
+            temperatures=(0.3, 0.1), max_tokens=2000,
         )
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start == -1 or end <= 0:
+    except JsonCallError as exc:
+        logger.warning("统一素材发现解析失败: %s", exc)
+        return empty
+
+    return filter_discovered(
+        data,
+        existing_char_names, existing_entity_names, existing_locations,
+        existing_tech_names, existing_faction_names,
+    )
+
+
+def filter_discovered(
+    data: dict,
+    existing_char_names: list[str],
+    existing_entity_names: list[str],
+    existing_locations: list[dict],
+    existing_tech_names: list[str],
+    existing_faction_names: list[str],
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
+    """对 LLM 输出的五类发现候选做确定性后过滤：剔除已知名称、规整类型、
+    同名候选只保留优先级最高的类别（角色 > 功法 > 势力 > 地点 > 道具）。
+
+    返回 (characters, entities, locations, techniques, factions)。
+    """
+    known = {
+        n.strip()
+        for n in (
+            existing_char_names + existing_entity_names
+            + [l["name"] for l in existing_locations]
+            + existing_tech_names + existing_faction_names
+        )
+    }
+
+    def _clean(key: str) -> list[dict]:
+        items = data.get(key)
+        if not isinstance(items, list):
             return []
-        candidates = json.loads(raw[start:end])
-        valid_types = {"item", "system"}
-        existing_set = {n.strip() for n in existing_names}
         return [
-            {**c, "type": c.get("type", "item") if c.get("type") in valid_types else "item"}
-            for c in candidates
-            if isinstance(c, dict) and "name" in c and c["name"].strip() not in existing_set
+            c for c in items
+            if isinstance(c, dict) and isinstance(c.get("name"), str)
+            and c["name"].strip() and c["name"].strip() not in known
         ]
-    except Exception:
-        return []
+
+    characters = _clean("characters")
+    techniques = _clean("techniques")
+    factions = _clean("factions")
+    locations = [{**c, "parent_name": c.get("parent_name") or ""} for c in _clean("locations")]
+    valid_entity_types = {"item", "system"}
+    entities = [
+        {**c, "type": c.get("type") if c.get("type") in valid_entity_types else "item"}
+        for c in _clean("entities")
+    ]
+
+    seen: set[str] = set()
+
+    def _dedup(cands: list[dict]) -> list[dict]:
+        out = []
+        for c in cands:
+            name = c["name"].strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append(c)
+        return out
+
+    characters = _dedup(characters)
+    techniques = _dedup(techniques)
+    factions = _dedup(factions)
+    locations = _dedup(locations)
+    entities = _dedup(entities)
+    return characters, entities, locations, techniques, factions
 
 

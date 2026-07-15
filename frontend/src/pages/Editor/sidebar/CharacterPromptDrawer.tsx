@@ -53,8 +53,8 @@ export default function CharacterPromptDrawer({ character, novelId, onClose }: P
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 h-full w-[400px] bg-background border-l shadow-2xl z-50 flex flex-col">
+      <div className="fixed inset-0 bg-black/40 z-40" />
+      <div className="fixed right-0 top-0 h-full w-[520px] bg-background border-l shadow-2xl z-50 flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b shrink-0">
           <h2 className="text-sm font-semibold truncate">生成提示词 — {character.name}</h2>
           <button onClick={onClose} className="p-1 rounded hover:bg-muted">

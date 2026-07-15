@@ -35,12 +35,20 @@ async def list_models(db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=ModelEntryOut)
 async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db)):
+    price_currency = data.price_currency.strip().upper()
+    if not price_currency:
+        raise HTTPException(status_code=422, detail="价格货币单位不能为空")
     entry = ModelEntry(
         display_name=data.display_name,
         model_id=data.model_id,
         provider=data.provider,
         api_format=data.api_format,
         model_type=data.model_type,
+        context_window=data.context_window,
+        input_price=data.input_price,
+        output_price=data.output_price,
+        price_currency=price_currency,
+        currency_to_cny_rate=1.0 if price_currency == "CNY" else data.currency_to_cny_rate,
     )
     await _fill_from_provider(entry, data.provider_id, db)
     db.add(entry)
@@ -61,6 +69,21 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
         entry.model_id = data.model_id
     if data.model_type is not None:
         entry.model_type = data.model_type
+    if data.context_window is not None:
+        entry.context_window = data.context_window
+    if data.input_price is not None:
+        entry.input_price = data.input_price
+    if data.output_price is not None:
+        entry.output_price = data.output_price
+    if data.price_currency is not None:
+        price_currency = data.price_currency.strip().upper()
+        if not price_currency:
+            raise HTTPException(status_code=422, detail="价格货币单位不能为空")
+        entry.price_currency = price_currency
+    if data.currency_to_cny_rate is not None:
+        entry.currency_to_cny_rate = data.currency_to_cny_rate
+    if entry.price_currency == "CNY":
+        entry.currency_to_cny_rate = 1.0
     if data.provider_id is not None:
         await _fill_from_provider(entry, data.provider_id, db)
     else:

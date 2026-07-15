@@ -14,6 +14,7 @@ const SOURCE_BADGE: Record<string, { text: string; cls: string }> = {
   rag:   { text: 'RAG', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
   full:  { text: '全量', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
   field: { text: '字段', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400' },
+  mixed: { text: '混合', cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' },
 }
 
 export default function ContextPanel({ novelId, rollingStage, contextSteps }: Props) {

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pencil, Plus, X, Check, Loader2, Trash2, ArrowRightLeft } from 'lucide-react'
 import { worldEntitiesApi, novelNotesApi, locationsApi, type WorldEntity } from '@/api/client'
+import ImportanceSelect from '@/components/ImportanceSelect'
 import toast from 'react-hot-toast'
 
 // ── KV helpers (adapted from Characters.tsx pattern) ────────────────────────
@@ -170,13 +171,13 @@ export default function EntityDetailPanel({ entityId, novelId, entityType, onClo
   const entity = entities.find(e => e.id === entityId)
 
   const [editingBasic, setEditingBasic] = useState(false)
-  const [basicForm, setBasicForm] = useState({ name: '', description: '' })
+  const [basicForm, setBasicForm] = useState({ name: '', description: '', function: '', importance: 3 })
   const [savingBasic, setSavingBasic] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
 
   useEffect(() => {
     if (entity) {
-      setBasicForm({ name: entity.name, description: entity.description })
+      setBasicForm({ name: entity.name, description: entity.description, function: entity.function ?? '', importance: entity.importance ?? 3 })
       setEditingBasic(false)
     }
   }, [entityId])
@@ -240,8 +241,17 @@ export default function EntityDetailPanel({ entityId, novelId, entityType, onClo
               value={basicForm.description}
               onChange={e => setBasicForm(prev => ({ ...prev, description: e.target.value }))}
               rows={4}
+              placeholder="描述"
               className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y"
             />
+            <textarea
+              value={basicForm.function}
+              onChange={e => setBasicForm(prev => ({ ...prev, function: e.target.value }))}
+              rows={4}
+              placeholder="功能（具体能力和作用，固定内容，不会被章节更新覆盖）"
+              className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y"
+            />
+            <ImportanceSelect value={basicForm.importance} onChange={v => setBasicForm(prev => ({ ...prev, importance: v }))} />
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditingBasic(false)} className="text-xs px-2 py-1 border rounded hover:bg-muted">取消</button>
               <button onClick={handleSaveBasic} disabled={savingBasic} className="flex items-center gap-1 text-xs px-2 py-1 bg-primary text-primary-foreground rounded disabled:opacity-50">
@@ -259,6 +269,12 @@ export default function EntityDetailPanel({ entityId, novelId, entityType, onClo
             </div>
             {entity.description && (
               <p className="text-xs text-muted-foreground whitespace-pre-wrap">{entity.description}</p>
+            )}
+            {entity.function && (
+              <div className="border rounded-lg p-3">
+                <p className="text-xs text-muted-foreground mb-1 uppercase">功能</p>
+                <p className="text-sm whitespace-pre-wrap">{entity.function}</p>
+              </div>
             )}
           </>
         )}
@@ -320,28 +336,33 @@ interface NoteDetailProps {
   noteId: number
   novelId: number
   onClose: () => void
+  onCreated?: (id: number) => void
 }
 
-export function NoteDetailPanel({ noteId, novelId, onClose }: NoteDetailProps) {
+export function NoteDetailPanel({ noteId, novelId, onClose, onCreated }: NoteDetailProps) {
   const qc = useQueryClient()
+  const isNew = noteId === 0
   const { data: notes = [] } = useQuery({
     queryKey: ['notes', novelId],
     queryFn: () => novelNotesApi.list(novelId),
   })
   const note = notes.find(n => n.id === noteId)
 
-  const [form, setForm] = useState({ title: '', content: '' })
+  const [form, setForm] = useState({ title: '', content: '', importance: 3 })
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
-    if (note) {
-      setForm({ title: note.title, content: note.content })
+    if (isNew) {
+      setForm({ title: '', content: '', importance: 3 })
+      setDirty(false)
+    } else if (note) {
+      setForm({ title: note.title, content: note.content, importance: note.importance ?? 3 })
       setDirty(false)
     }
   }, [noteId])
 
-  if (!note) {
+  if (!isNew && !note) {
     return <div className="p-4 text-sm text-muted-foreground text-center">笔记不存在或已删除</div>
   }
 
@@ -349,10 +370,17 @@ export function NoteDetailPanel({ noteId, novelId, onClose }: NoteDetailProps) {
     if (!form.title.trim()) return
     setSaving(true)
     try {
-      await novelNotesApi.update(noteId, form)
-      qc.invalidateQueries({ queryKey: ['notes', novelId] })
-      setDirty(false)
-      toast.success('已保存')
+      if (isNew) {
+        const created = await novelNotesApi.create({ novel_id: novelId, ...form })
+        qc.invalidateQueries({ queryKey: ['notes', novelId] })
+        toast.success('已创建')
+        onCreated?.(created.id)
+      } else {
+        await novelNotesApi.update(noteId, form)
+        qc.invalidateQueries({ queryKey: ['notes', novelId] })
+        setDirty(false)
+        toast.success('已保存')
+      }
     } finally { setSaving(false) }
   }
 
@@ -383,17 +411,24 @@ export function NoteDetailPanel({ noteId, novelId, onClose }: NoteDetailProps) {
         placeholder="内容..."
         className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background resize-none min-h-[200px]"
       />
+      <ImportanceSelect
+        value={form.importance}
+        onChange={v => { setForm(prev => ({ ...prev, importance: v })); setDirty(true) }}
+        className="shrink-0"
+      />
       <div className="flex items-center gap-2 shrink-0">
         <button
           onClick={handleSave}
           disabled={saving || !dirty}
           className="flex items-center gap-1 text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
         >
-          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} 保存
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} {isNew ? '创建' : '保存'}
         </button>
-        <button onClick={handleDelete} className="flex items-center gap-1 text-xs px-2 py-1.5 border rounded text-destructive hover:bg-destructive/10 transition-colors ml-auto">
-          <Trash2 className="w-3 h-3" /> 删除
-        </button>
+        {!isNew && (
+          <button onClick={handleDelete} className="flex items-center gap-1 text-xs px-2 py-1.5 border rounded text-destructive hover:bg-destructive/10 transition-colors ml-auto">
+            <Trash2 className="w-3 h-3" /> 删除
+          </button>
+        )}
       </div>
     </div>
   )
@@ -421,7 +456,7 @@ export function LocationDetailPanel({ locationId, novelId, onClose }: LocationDe
   const location = locations.find(l => l.id === locationId)
 
   const [editingBasic, setEditingBasic] = useState(false)
-  const [basicForm, setBasicForm] = useState({ name: '', type: 'city', description: '', parent_id: null as number | null })
+  const [basicForm, setBasicForm] = useState({ name: '', type: 'city', description: '', parent_id: null as number | null, importance: 3 })
   const [savingBasic, setSavingBasic] = useState(false)
 
   const [editingProps, setEditingProps] = useState(false)
@@ -436,7 +471,7 @@ export function LocationDetailPanel({ locationId, novelId, onClose }: LocationDe
 
   useEffect(() => {
     if (location) {
-      setBasicForm({ name: location.name, type: location.type, description: location.description, parent_id: location.parent_id })
+      setBasicForm({ name: location.name, type: location.type, description: location.description, parent_id: location.parent_id, importance: location.importance ?? 3 })
       setEditingBasic(false)
       setEditingProps(false)
       setEditingLocState(false)
@@ -547,6 +582,7 @@ export function LocationDetailPanel({ locationId, novelId, onClose }: LocationDe
             </div>
             <textarea value={basicForm.description} onChange={e => setBasicForm(prev => ({ ...prev, description: e.target.value }))}
               placeholder="描述" rows={4} className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y" />
+            <ImportanceSelect value={basicForm.importance} onChange={v => setBasicForm(prev => ({ ...prev, importance: v }))} />
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditingBasic(false)} className="text-xs px-2 py-1 border rounded hover:bg-muted">取消</button>
               <button onClick={handleSaveBasic} disabled={savingBasic} className="flex items-center gap-1 text-xs px-2 py-1 bg-primary text-primary-foreground rounded disabled:opacity-50">

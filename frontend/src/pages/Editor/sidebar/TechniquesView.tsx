@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Loader2, Search, ArrowRightLeft } from 'lucide-react'
 import { techniquesApi, type Technique } from '@/api/client'
+import ImportanceSelect from '@/components/ImportanceSelect'
 import toast from 'react-hot-toast'
 
 interface Props {
@@ -204,6 +205,7 @@ export function TechniqueDetail({ technique, novelId, onClose }: {
   }
 
   const set = (key: string, val: string) => setForm({ ...form, [key]: val })
+  const setImportance = (v: number) => setForm({ ...form, importance: v })
 
   return (
     <div className="px-3 py-3 space-y-2.5 overflow-y-auto">
@@ -249,6 +251,7 @@ export function TechniqueDetail({ technique, novelId, onClose }: {
         <SelectField label="威力等级" value={form.power_level} onChange={(v) => set('power_level', v)} options={POWER_LEVELS as unknown as string[]} />
         <Field label="使用者" value={form.practitioners} onChange={(v) => set('practitioners', v)} />
       </div>
+      <ImportanceSelect value={form.importance} onChange={setImportance} />
 
       <TextareaField label="描述" value={form.description} onChange={(v) => set('description', v)} />
 
@@ -308,6 +311,7 @@ function toForm(t: Technique) {
   return {
     name: t.name, type: t.type, description: t.description,
     practitioners: t.practitioners, power_level: t.power_level,
+    importance: t.importance ?? 3,
   }
 }
 

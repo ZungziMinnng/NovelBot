@@ -6,11 +6,14 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator, TypedDict
+from typing import AsyncIterator, TypedDict, Callable, Awaitable
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete as sql_delete
+from sqlalchemy import select, or_, delete as sql_delete
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm.attributes import flag_modified
 from app.models.memory import Memory
+from app.models.llm_usage import LlmUsage
+from app.database import AsyncSessionLocal
 
 from app.models.novel import Novel
 from app.models.chapter import Chapter
@@ -18,7 +21,8 @@ from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.services.context_builder import build_generation_context
-from app.services import summarizer, llm_client
+from app.services.sse import sse_event
+from app.services import summarizer, llm_client, entity_embeddings
 from app.agents import writer, critic
 from app.config import settings
 
@@ -41,14 +45,29 @@ class NovelState(TypedDict):
     total_output_tokens: int
 
 
-def _sse(event: str, data: str) -> str:
-    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
-    return f"data: {payload}\n\n"
+_sse = sse_event
+_sse_json = sse_event
 
 
-def _sse_json(event: str, data: dict) -> str:
-    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
-    return f"data: {payload}\n\n"
+async def _emit_llm_call(novel_id: int, chapter_number: int, data: dict) -> str:
+    """把一次 LLM 调用记入 llm_usage 账本（独立短会话，失败仅警告），
+    并返回原样的 llm_call SSE 事件。"""
+    try:
+        async with AsyncSessionLocal() as s:
+            s.add(LlmUsage(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                agent=data.get("agent") or "",
+                model=data.get("model") or "",
+                status=data.get("status") or "ok",
+                input_tokens=int(data.get("input_tokens") or 0),
+                output_tokens=int(data.get("output_tokens") or 0),
+                duration_ms=int(data.get("duration_ms") or 0),
+            ))
+            await s.commit()
+    except Exception:
+        logger.warning("LLM 用量记账失败（已忽略）", exc_info=True)
+    return _sse_json("llm_call", data)
 
 
 async def _timed(coro):
@@ -113,6 +132,21 @@ async def _restore_state_snapshot(
     logger.info("已从快照回滚章节 %s 的状态", snapshot.chapter_number)
 
 
+async def _retry_on_lock(fn: Callable[[], Awaitable[None]], label: str = "", max_retries: int = 5, base_delay: float = 0.5) -> None:
+    """SQLite 并发写入遇到 database is locked 时自动重试，指数退避。"""
+    for i in range(max_retries):
+        try:
+            return await fn()
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            if i == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** i)
+            logger.warning("数据库锁定，%s秒后重试(%d/%d): %s", delay, i + 1, max_retries, label)
+            await asyncio.sleep(delay)
+
+
 async def _prepare_regen_rollback(
     session: AsyncSession, novel: Novel, chapter_number: int, volume: int,
 ) -> None:
@@ -143,7 +177,7 @@ async def _prepare_regen_rollback(
         await _restore_state_snapshot(session, novel, snapshot)
     else:
         await _create_state_snapshot(session, novel, chapter_number, volume)
-    await session.commit()
+    await _retry_on_lock(lambda: session.commit(), "pregen_rollback")
 
 
 async def run_chapter_generation(
@@ -152,8 +186,7 @@ async def run_chapter_generation(
     chapter_number: int,
     volume: int = 1,
     instruction: str = "",
-    target_words: int = 800,
-    nsfw_mode: bool = False,
+    target_words: int = 5000,
     pov: str = "",
 ) -> AsyncIterator[str]:
     """
@@ -185,12 +218,59 @@ async def run_chapter_generation(
     }
 
     writer_system_prompt = getattr(novel, "writer_system_prompt", "") or ""
+    writer_examples = getattr(novel, "writer_examples", []) or []
 
     try:
         # ── 预清理：删除旧摘要 + 回滚状态快照（current_state）──
         await _prepare_regen_rollback(
             session, novel, chapter_number, volume
         )
+
+        # ── 自愈：补齐旧章缺失的摘要（摘要生成失败会静默丢失，导致记忆链条出现空洞；
+        # 每次最多补 2 章，避免拖慢生成）──
+        backfill_result = await session.execute(
+            select(Chapter).where(
+                Chapter.novel_id == novel.id,
+                Chapter.number < chapter_number,
+                Chapter.content != "",
+                or_(Chapter.summary.is_(None), Chapter.summary == ""),
+            ).order_by(Chapter.number.desc()).limit(2)
+        )
+        backfill_chapters = list(reversed(backfill_result.scalars().all()))
+        if backfill_chapters:
+            bf_nums = "、".join(str(c.number) for c in backfill_chapters)
+            yield _sse_json("agent_start", {
+                "agent": "summarizer_backfill",
+                "label": f"补齐缺失摘要（第{bf_nums}章）",
+            })
+            bf_in = bf_out = 0
+            bf_start = time.monotonic()
+            for bch in backfill_chapters:
+                try:
+                    _, i_tok, o_tok = await summarizer.summarize_chapter(session, bch, novel)
+                    bf_in += i_tok
+                    bf_out += o_tok
+                    await session.commit()
+                except Exception:
+                    logger.warning("补摘要失败：第%s章", bch.number, exc_info=True)
+                    await session.rollback()
+            state["total_input_tokens"] += bf_in
+            state["total_output_tokens"] += bf_out
+            yield await _emit_llm_call(novel.id, chapter_number, {
+                "agent": "summarizer_backfill",
+                "model": "",
+                "status": "ok",
+                "input_tokens": bf_in,
+                "output_tokens": bf_out,
+                "duration_ms": int((time.monotonic() - bf_start) * 1000),
+            })
+            yield _sse_json("agent_done", {
+                "agent": "summarizer_backfill",
+                "label": f"补齐缺失摘要（第{bf_nums}章）",
+                "input_tokens": bf_in,
+                "output_tokens": bf_out,
+                "passed": True,
+            })
 
         # ── Node 1: Build Context ──────────────────────────────────────────
         yield _sse("stage", "building_context")
@@ -201,6 +281,7 @@ async def run_chapter_generation(
             volume=volume,
             scene_hint=instruction,
             pov=pov,
+            target_words=target_words,
         )
         for step in state["context"].pop("_meta", []):
             yield _sse_json("context_step", step)
@@ -225,19 +306,40 @@ async def run_chapter_generation(
             writer_truncated = False
             writer_payload = None
             writer_start = time.monotonic()
-            async for item in writer.stream_chapter(
-                ctx=state["context"],
-                instruction=state["instruction"],
-                target_words=state["target_words"],
-                writer_model=novel.writer_model,
-                issues_feedback=state["critic_issues"],
-                writer_system_prompt=writer_system_prompt,
-                temperature=getattr(novel, "writer_temperature", 0.85),
-                max_tokens=getattr(novel, "writer_max_tokens", 4096),
-                thinking_level=getattr(novel, "thinking_level", "medium"),
-                gemini_stream=getattr(novel, "gemini_stream", False),
-                nsfw_mode=nsfw_mode,
-            ):
+            if revision > 0 and state["generated_text"].strip():
+                # 增量修订：回传上一版全文+审稿意见，只修正被指出的问题（省去完整上下文）
+                writer_stream = writer.stream_chapter_revision(
+                    ctx=state["context"],
+                    previous_text=state["generated_text"],
+                    issues_feedback=state["critic_issues"],
+                    instruction=state["instruction"],
+                    target_words=state["target_words"],
+                    writer_model=novel.writer_model,
+                    writer_system_prompt=writer_system_prompt,
+                    temperature=getattr(novel, "writer_temperature", 0.85),
+                    use_custom_temperature=getattr(novel, "writer_use_custom_temperature", True),
+                    max_tokens=getattr(novel, "writer_max_tokens", 16384),
+                    gemini_thinking_level=getattr(novel, "gemini_thinking_level", "medium"),
+                    deepseek_thinking_level=getattr(novel, "deepseek_thinking_level", "high"),
+                    gemini_stream=getattr(novel, "gemini_stream", False),
+                )
+            else:
+                writer_stream = writer.stream_chapter(
+                    ctx=state["context"],
+                    instruction=state["instruction"],
+                    target_words=state["target_words"],
+                    writer_model=novel.writer_model,
+                    issues_feedback=state["critic_issues"],
+                    writer_system_prompt=writer_system_prompt,
+                    writer_examples=writer_examples,
+                    temperature=getattr(novel, "writer_temperature", 0.85),
+                    use_custom_temperature=getattr(novel, "writer_use_custom_temperature", True),
+                    max_tokens=getattr(novel, "writer_max_tokens", 16384),
+                    gemini_thinking_level=getattr(novel, "gemini_thinking_level", "medium"),
+                    deepseek_thinking_level=getattr(novel, "deepseek_thinking_level", "high"),
+                    gemini_stream=getattr(novel, "gemini_stream", False),
+                )
+            async for item in writer_stream:
                 if isinstance(item, dict):
                     # 元信息（如重试 warning、LLM payload）
                     if "warning" in item:
@@ -253,13 +355,17 @@ async def run_chapter_generation(
                     full_text += item
                     yield _sse("token", item)
 
-            state["generated_text"] = full_text
+            if full_text.strip() or revision == 0:
+                state["generated_text"] = full_text
+            else:
+                # 修订输出为空时保留上一版正文，避免丢稿
+                yield _sse("warning", "本次修订未返回内容，已保留上一版正文")
             if writer_payload and writer_payload.get("model"):
                 state["model_used"] = writer_payload["model"]
             state["total_input_tokens"] += writer_in_tok
             state["total_output_tokens"] += writer_out_tok
             writer_duration = int((time.monotonic() - writer_start) * 1000)
-            yield _sse_json("llm_call", {
+            yield await _emit_llm_call(novel.id, chapter_number, {
                 "agent": "writer",
                 "model": writer_payload.get("model", "") if writer_payload else "",
                 "status": "truncated" if writer_truncated else "ok",
@@ -285,13 +391,14 @@ async def run_chapter_generation(
                     generated_text=state["generated_text"],
                     ctx=state["context"],
                     fast_model=getattr(novel, "critic_model", "") or novel.fast_model,
+                    target_words=state["target_words"],
                 )
                 critic_duration = int((time.monotonic() - critic_start) * 1000)
                 state["passed"] = passed
                 state["critic_issues"] = issues
                 state["total_input_tokens"] += critic_in_tok
                 state["total_output_tokens"] += critic_out_tok
-                yield _sse_json("llm_call", {
+                yield await _emit_llm_call(novel.id, chapter_number, {
                     "agent": "critic",
                     "model": critic_model,
                     "status": "ok",
@@ -325,20 +432,92 @@ async def run_chapter_generation(
                 yield _sse("stage", "detail_reviewing")
                 yield _sse_json("agent_start", {"agent": "detail_review", "label": "剧情细节审查"})
                 detail_start = time.monotonic()
-                detail_passed, detail_issues, detail_in_tok, detail_out_tok, detail_model = (
-                    await review_agent.review_generated_with_recent_chapters(
-                        session=session,
-                        novel=novel,
-                        generated_text=state["generated_text"],
-                        chapter_number=chapter_number,
-                        volume=volume,
-                        model_override=getattr(novel, "detail_review_model", "") or "",
+                detail_model_override = getattr(novel, "detail_review_model", "") or ""
+                detail_ref, _ = llm_client.get_agent_client("review", detail_model_override)
+                detail_model = llm_client.resolve_model_ref(detail_ref)[0]
+                try:
+                    detail_passed, detail_issues, detail_in_tok, detail_out_tok, detail_model = (
+                        await asyncio.wait_for(
+                            review_agent.review_generated_with_recent_chapters(
+                                session=session,
+                                novel=novel,
+                                generated_text=state["generated_text"],
+                                chapter_number=chapter_number,
+                                volume=volume,
+                                model_override=detail_model_override,
+                            ),
+                            timeout=settings.detail_review_timeout,
+                        )
                     )
-                )
+                except asyncio.TimeoutError:
+                    detail_duration = int((time.monotonic() - detail_start) * 1000)
+                    logger.warning(
+                        "剧情细节审查超时，跳过并保留当前修订稿: novel_id=%s chapter=%s "
+                        "revision=%s model=%s timeout=%ss",
+                        novel.id,
+                        chapter_number,
+                        state["revision_count"],
+                        detail_model,
+                        settings.detail_review_timeout,
+                    )
+                    yield await _emit_llm_call(novel.id, chapter_number, {
+                        "agent": "detail_review",
+                        "model": detail_model,
+                        "status": "timeout",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "duration_ms": detail_duration,
+                    })
+                    yield _sse_json("agent_done", {
+                        "agent": "detail_review",
+                        "label": "剧情细节审查（超时跳过）",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "passed": False,
+                    })
+                    yield _sse(
+                        "warning",
+                        f"剧情细节审查超过 {int(settings.detail_review_timeout)} 秒未响应，"
+                        "已跳过审查并保留当前修订稿。",
+                    )
+                    break
+                except Exception as exc:
+                    detail_duration = int((time.monotonic() - detail_start) * 1000)
+                    logger.warning(
+                        "剧情细节审查调用失败，跳过并保留当前修订稿: novel_id=%s chapter=%s "
+                        "revision=%s model=%s error=%s",
+                        novel.id,
+                        chapter_number,
+                        state["revision_count"],
+                        detail_model,
+                        exc,
+                        exc_info=True,
+                    )
+                    yield await _emit_llm_call(novel.id, chapter_number, {
+                        "agent": "detail_review",
+                        "model": detail_model,
+                        "status": "error",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "duration_ms": detail_duration,
+                    })
+                    yield _sse_json("agent_done", {
+                        "agent": "detail_review",
+                        "label": "剧情细节审查（连接失败，已跳过）",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "passed": False,
+                    })
+                    yield _sse(
+                        "warning",
+                        f"剧情细节审查模型 {detail_model} 连接失败，"
+                        "已跳过审查并保留当前修订稿。请检查该模型的供应商及代理设置。",
+                    )
+                    break
                 detail_duration = int((time.monotonic() - detail_start) * 1000)
                 state["total_input_tokens"] += detail_in_tok
                 state["total_output_tokens"] += detail_out_tok
-                yield _sse_json("llm_call", {
+                yield await _emit_llm_call(novel.id, chapter_number, {
                     "agent": "detail_review",
                     "model": detail_model,
                     "status": "ok",
@@ -378,7 +557,7 @@ async def run_chapter_generation(
         if not state["generated_text"].strip():
             raise ValueError("Writer 未生成任何内容，已中止保存。请检查模型配置或 API Key 是否正确。")
         if writer_truncated:
-            yield _sse("warning", f"内容已达 Token 上限（{getattr(novel, 'writer_max_tokens', 4096)} tokens）被截断，建议在小说设置中增大「最大输出 Token」")
+            yield _sse("warning", f"内容已达 Token 上限（{getattr(novel, 'writer_max_tokens', 16384)} tokens）被截断，建议在小说设置中增大「最大输出 Token」")
         yield _sse("stage", "saving")
         chapter = await _save_chapter(session, state, novel)
         await session.commit()
@@ -388,7 +567,8 @@ async def run_chapter_generation(
         yield _sse("stage", "updating_memory")
         yield _sse_json("agent_start", {"agent": "memory", "label": "更新记忆"})
 
-        mem_model, _ = llm_client.get_agent_client("memory", novel.fast_model)
+        mem_ref, _ = llm_client.get_agent_client("memory", novel.fast_model)
+        mem_model = llm_client.resolve_model_ref(mem_ref)[0]  # 展示用真实模型名
         mem_warnings: list[str] = []
         sum_in = sum_out = char_in = char_out = ent_in = ent_out = 0
         char_ok = ent_ok = True
@@ -403,23 +583,48 @@ async def run_chapter_generation(
         unmatched_chars: list[str] = []
         unmatched_entities: list[str] = []
         unmatched_locations: list[str] = []
+        updated_char_ids: list[int] = []
+        updated_entity_ids: list[int] = []
+        updated_location_ids: list[int] = []
 
-        # ── 章节摘要 ──
+        # 已知名单（供合并调用里的新设定发现剔除已知条目，Node 6 复用做后过滤）
+        existing_names = state["context"].get("_all_character_names", [c["name"] for c in state["context"].get("characters", [])])
+        existing_entity_names = state["context"].get(
+            "_all_system_names",
+            [e["name"] for e in state["context"].get("items", []) + state["context"].get("systems", [])]
+        )
+        existing_locations = state["context"].get(
+            "_all_location_info",
+            [{"name": loc["name"], "type": loc["type"], "parent_name": loc.get("parent_name", "")}
+             for loc in state["context"].get("locations", [])]
+        )
+        existing_tech_names = state["context"].get("_all_technique_names", [t["name"] for t in state["context"].get("techniques", [])])
+        existing_faction_names = state["context"].get("_all_faction_names", [f["name"] for f in state["context"].get("factions", [])])
+
+        # ── 章节摘要 + 新设定发现（单次 LLM 调用） ──
+        discovered_raw: dict | None = None
         yield _sse("stage", "updating_memory_summary")
         try:
-            r0, dur_sum = await _timed(summarizer.summarize_chapter(session, chapter, novel))
+            r0, dur_sum = await _timed(summarizer.summarize_and_discover(
+                session, chapter, novel,
+                known_char_names=existing_names,
+                known_entity_names=existing_entity_names,
+                known_locations=existing_locations,
+                known_tech_names=existing_tech_names,
+                known_faction_names=existing_faction_names,
+            ))
             if isinstance(r0, BaseException):
                 raise r0
-            (summary_text, sum_in, sum_out) = r0
+            (summary_text, discovered_raw, sum_in, sum_out) = r0
             projection_status["summary"] = "done" if summary_text else "skipped"
-            await session.commit()
+            await _retry_on_lock(lambda: session.commit(), "summary_commit")
         except Exception as e:
             logger.warning("章节摘要生成失败: %s", e)
             mem_warnings.append(f"摘要生成失败: {e}")
             projection_status["summary"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_sum = 0
-        yield _sse_json("llm_call", {
+        yield await _emit_llm_call(novel.id, chapter_number, {
             "agent": "summarizer", "model": mem_model,
             "status": "error" if mem_warnings else "ok",
             "input_tokens": sum_in, "output_tokens": sum_out, "duration_ms": dur_sum,
@@ -433,74 +638,69 @@ async def run_chapter_generation(
             ))
             if isinstance(r1, BaseException):
                 raise r1
-            (char_ok, char_warning, char_in, char_out, unmatched_chars) = r1
+            (char_ok, char_warning, char_in, char_out, unmatched_chars, updated_char_ids) = r1
             projection_status["character_state"] = "done" if char_ok else f"failed:{char_warning or 'unknown'}"
-            await session.commit()
+            await _retry_on_lock(lambda: session.commit(), "char_state_commit")
         except Exception as e:
             logger.warning("角色状态更新失败: %s", e)
             mem_warnings.append(f"角色状态更新失败: {e}")
             projection_status["character_state"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_char = 0
-        yield _sse_json("llm_call", {
+        yield await _emit_llm_call(novel.id, chapter_number, {
             "agent": "char_update", "model": mem_model,
             "status": "error" if isinstance(locals().get('r1'), BaseException) else "ok",
             "input_tokens": char_in, "output_tokens": char_out, "duration_ms": dur_char,
         })
 
-        # ── 实体状态更新 ──
+        # ── 实体+地点状态更新（单次 LLM 调用） ──
         yield _sse("stage", "updating_memory_entities")
+        loc_ok = True
+        loc_warning = ""
         try:
-            r2, dur_ent = await _timed(summarizer.update_entity_states(
+            r2, dur_ent = await _timed(summarizer.update_entity_location_states(
                 session, chapter, novel, instruction=state["instruction"]
             ))
             if isinstance(r2, BaseException):
                 raise r2
-            (ent_ok, ent_warning, ent_in, ent_out, unmatched_entities) = r2
+            ent_ok = r2["entity"]["ok"]
+            ent_warning = r2["entity"]["warning"]
+            unmatched_entities = r2["entity"]["unmatched"]
+            updated_entity_ids = r2["entity"]["updated_ids"]
+            loc_ok = r2["location"]["ok"]
+            loc_warning = r2["location"]["warning"]
+            unmatched_locations = r2["location"]["unmatched"]
+            updated_location_ids = r2["location"]["updated_ids"]
+            ent_in = r2["input_tokens"]
+            ent_out = r2["output_tokens"]
             projection_status["entity_state"] = "done" if ent_ok else f"failed:{ent_warning or 'unknown'}"
-            await session.commit()
+            projection_status["location_state"] = "done" if loc_ok else f"failed:{loc_warning or 'unknown'}"
+            await _retry_on_lock(lambda: session.commit(), "entity_location_state_commit")
         except Exception as e:
-            logger.warning("实体状态更新失败: %s", e)
-            mem_warnings.append(f"实体状态更新失败: {e}")
+            logger.warning("实体/地点状态更新失败: %s", e)
+            mem_warnings.append(f"实体/地点状态更新失败: {e}")
             projection_status["entity_state"] = f"failed:{type(e).__name__}: {e}"
+            projection_status["location_state"] = f"failed:{type(e).__name__}: {e}"
             await session.rollback()
             dur_ent = 0
-        yield _sse_json("llm_call", {
+        yield await _emit_llm_call(novel.id, chapter_number, {
             "agent": "entity_update", "model": mem_model,
             "status": "error" if isinstance(locals().get('r2'), BaseException) else "ok",
             "input_tokens": ent_in, "output_tokens": ent_out, "duration_ms": dur_ent,
         })
 
-        # ── 地点状态更新 ──
-        yield _sse("stage", "updating_memory_locations")
-        loc_in = loc_out = 0
-        loc_ok = True
-        loc_warning = ""
-        try:
-            r3, dur_loc = await _timed(summarizer.update_location_states(
-                session, chapter, novel, instruction=state["instruction"]
-            ))
-            if isinstance(r3, BaseException):
-                raise r3
-            (loc_ok, loc_warning, loc_in, loc_out, unmatched_locations) = r3
-            projection_status["location_state"] = "done" if loc_ok else f"failed:{loc_warning or 'unknown'}"
-            await session.commit()
-        except Exception as e:
-            logger.warning("地点状态更新失败: %s", e)
-            mem_warnings.append(f"地点状态更新失败: {e}")
-            projection_status["location_state"] = f"failed:{type(e).__name__}: {e}"
-            await session.rollback()
-            dur_loc = 0
-        yield _sse_json("llm_call", {
-            "agent": "location_update", "model": mem_model,
-            "status": "error" if isinstance(locals().get('r3'), BaseException) else "ok",
-            "input_tokens": loc_in, "output_tokens": loc_out, "duration_ms": dur_loc,
-        })
+        # 状态变更后重嵌向量，让检索能命中角色/实体的最新状态（失败仅警告）
+        await entity_embeddings.reembed_updated(
+            session, novel.id,
+            char_ids=updated_char_ids,
+            entity_ids=updated_entity_ids,
+            location_ids=updated_location_ids,
+        )
 
         yield _sse_json("projection_status", {"status": projection_status})
 
-        mem_in = sum_in + char_in + ent_in + loc_in
-        mem_out = sum_out + char_out + ent_out + loc_out
+        mem_in = sum_in + char_in + ent_in
+        mem_out = sum_out + char_out + ent_out
         state["total_input_tokens"] += mem_in
         state["total_output_tokens"] += mem_out
         yield _sse_json("agent_done", {
@@ -528,13 +728,29 @@ async def run_chapter_generation(
             except Exception:
                 logger.warning("自动刷新故事弧概要失败", exc_info=True)
 
-        # 自动刷新全书概要（每 5 章刷新一次）
+        # 自动刷新全书概要（每 5 章增量更新，每 20 章全量重建防止增量跑偏）
         if ch_num >= 5 and ch_num % 5 == 0:
             try:
-                await summarizer.generate_book_summary(session, novel)
+                if ch_num % 20 == 0:
+                    await summarizer.generate_book_summary(session, novel)
+                else:
+                    await summarizer.generate_book_summary(
+                        session, novel, window=(ch_num - 4, ch_num),
+                    )
                 await session.commit()
             except Exception:
                 logger.warning("自动刷新全书概要失败", exc_info=True)
+
+        # 世界观漂移检测（每 10 章弱提醒，只产 pending 供用户确认，绝不自动注入）
+        if ch_num >= 10 and ch_num % 10 == 0:
+            try:
+                drifts = await summarizer.detect_worldview_drift(session, novel, recent=10)
+                new_rows = await summarizer.persist_pending_drifts(session, novel.id, drifts)
+                await session.commit()
+                if new_rows:
+                    yield _sse_json("worldview_drift", {"count": len(new_rows)})
+            except Exception:
+                logger.warning("世界观漂移检测失败", exc_info=True)
 
         # 全文审查（按全局间隔自动触发）
         from app.config import settings as app_settings
@@ -554,46 +770,36 @@ async def run_chapter_generation(
                 except Exception:
                     logger.warning("自动全文审查失败", exc_info=True)
 
-        # ── Node 6: Discover New Characters + Entities + Locations (parallel) ─
+        # ── Node 6: 新设定候选后过滤（发现调用已合并进章节摘要，无独立 LLM 调用）─
         from app.agents import character_agent
-        existing_names = state["context"].get("_all_character_names", [c["name"] for c in state["context"].get("characters", [])])
-        existing_entity_names = state["context"].get(
-            "_all_system_names",
-            [e["name"] for e in state["context"].get("items", []) + state["context"].get("systems", [])]
-        )
-        existing_locations = state["context"].get(
-            "_all_location_info",
-            [{"name": loc["name"], "type": loc["type"], "parent_name": loc.get("parent_name", "")}
-             for loc in state["context"].get("locations", [])]
-        )
-        existing_tech_names = state["context"].get("_all_technique_names", [t["name"] for t in state["context"].get("techniques", [])])
         try:
-            candidates, entity_candidates, location_candidates, technique_candidates = await asyncio.gather(
-                character_agent.discover_new_characters(
-                    novel, state["generated_text"], existing_names
-                ),
-                character_agent.discover_new_entities(
-                    novel, state["generated_text"], existing_entity_names
-                ),
-                character_agent.discover_new_locations(
-                    novel, state["generated_text"], existing_locations
-                ),
-                character_agent.discover_new_techniques(
-                    novel, state["generated_text"], existing_tech_names
-                ),
-            )
+            if discovered_raw:
+                candidates, entity_candidates, location_candidates, technique_candidates, faction_candidates = character_agent.filter_discovered(
+                    discovered_raw,
+                    existing_names, existing_entity_names, existing_locations,
+                    existing_tech_names, existing_faction_names,
+                )
+            else:
+                # 合并调用降级为纯摘要时无发现结果；unmatched 补入逻辑仍生效
+                candidates, entity_candidates, location_candidates, technique_candidates, faction_candidates = [], [], [], [], []
             # 将状态更新中未匹配的名字补入发现结果（发现 LLM 可能遗漏）
-            discovered_char_names = {c["name"] for c in candidates}
+            all_discovered = {
+                c["name"] for lst in (candidates, entity_candidates, location_candidates, technique_candidates, faction_candidates)
+                for c in lst
+            }
+            _known_non_char = {n.strip() for n in existing_entity_names + existing_tech_names + existing_faction_names} | {l["name"].strip() for l in existing_locations}
             for name in unmatched_chars:
-                if name not in discovered_char_names:
+                if name not in all_discovered and name.strip() not in _known_non_char:
                     candidates.append({"name": name, "role": "配角", "description": "（状态更新中发现，未录入角色库）"})
-            discovered_entity_names = {e["name"] for e in entity_candidates}
+                    all_discovered.add(name)
+            _known_non_entity = {n.strip() for n in existing_names + existing_tech_names + existing_faction_names} | {l["name"].strip() for l in existing_locations}
             for name in unmatched_entities:
-                if name not in discovered_entity_names:
+                if name not in all_discovered and name.strip() not in _known_non_entity:
                     entity_candidates.append({"name": name, "type": "item", "description": "（状态更新中发现，未录入实体库）"})
-            discovered_loc_names = {l["name"] for l in location_candidates}
+                    all_discovered.add(name)
+            _known_non_loc = {n.strip() for n in existing_names + existing_entity_names + existing_tech_names + existing_faction_names}
             for name in unmatched_locations:
-                if name not in discovered_loc_names:
+                if name not in all_discovered and name.strip() not in _known_non_loc:
                     location_candidates.append({"name": name, "type": "", "description": "（状态更新中发现，未录入地点库）", "parent_name": ""})
 
             if candidates:
@@ -604,6 +810,8 @@ async def run_chapter_generation(
                 yield _sse_json("new_locations", {"candidates": location_candidates})
             if technique_candidates:
                 yield _sse_json("new_techniques", {"candidates": technique_candidates})
+            if faction_candidates:
+                yield _sse_json("new_factions", {"candidates": faction_candidates})
         except Exception:
             pass
 
@@ -627,7 +835,6 @@ async def run_chapter_rewrite(
     annotations: list[dict],
     target_words: int = 0,
     rewrite_model: str = "",
-    nsfw_mode: bool = False,
     pov: str = "",
 ) -> AsyncIterator[str]:
     try:
@@ -655,6 +862,7 @@ async def run_chapter_rewrite(
             session, novel, chapter_number,
             volume=chapter.volume or 1,
             pov=pov,
+            target_words=target_words,
         )
         for step in ctx.pop("_meta", []):
             yield _sse_json("context_step", step)
@@ -665,11 +873,14 @@ async def run_chapter_rewrite(
 
         writer_model = rewrite_model or novel.writer_model or ""
         writer_system_prompt = novel.writer_system_prompt or ""
+        writer_examples = novel.writer_examples or []
         temperature = getattr(novel, "writer_temperature", None)
         if temperature is None:
             temperature = 0.7
-        max_tokens = novel.writer_max_tokens or 4096
-        thinking_level = getattr(novel, "thinking_level", "medium") or "medium"
+        use_custom_temperature = getattr(novel, "writer_use_custom_temperature", True)
+        max_tokens = novel.writer_max_tokens or 16384
+        gemini_thinking_level = getattr(novel, "gemini_thinking_level", "medium") or "medium"
+        deepseek_thinking_level = getattr(novel, "deepseek_thinking_level", "high") or "high"
         gemini_stream = getattr(novel, "gemini_stream", False) or False
 
         generated_text = ""
@@ -683,11 +894,13 @@ async def run_chapter_rewrite(
             target_words=target_words,
             writer_model=writer_model,
             writer_system_prompt=writer_system_prompt,
+            writer_examples=writer_examples,
             temperature=temperature,
+            use_custom_temperature=use_custom_temperature,
             max_tokens=max_tokens,
-            thinking_level=thinking_level,
+            gemini_thinking_level=gemini_thinking_level,
+            deepseek_thinking_level=deepseek_thinking_level,
             gemini_stream=gemini_stream,
-            nsfw_mode=nsfw_mode,
         ):
             if isinstance(item, dict) and "llm_payload" in item:
                 yield _sse_json("llm_request", item["llm_payload"])
@@ -701,8 +914,9 @@ async def run_chapter_rewrite(
                 yield _sse("token", item)
 
         writer_duration = int((time.monotonic() - t0) * 1000)
-        model, _ = llm_client.get_agent_client("writer", writer_model)
-        yield _sse_json("llm_call", {
+        writer_ref, _ = llm_client.get_agent_client("writer", writer_model)
+        model = llm_client.resolve_model_ref(writer_ref)[0]  # 展示用真实模型名
+        yield await _emit_llm_call(novel.id, chapter_number, {
             "agent": "writer", "model": model, "status": "ok",
             "input_tokens": writer_in_tok, "output_tokens": writer_out_tok,
             "duration_ms": writer_duration,
@@ -744,8 +958,11 @@ async def run_chapter_rewrite(
             await session.rollback()
 
         yield _sse("stage", "updating_memory_characters")
+        upd_char_ids: list[int] = []
+        upd_entity_ids: list[int] = []
+        upd_location_ids: list[int] = []
         try:
-            (_, _, c_in, c_out, _) = await summarizer.update_character_states(session, chapter, novel)
+            (_, _, c_in, c_out, _, upd_char_ids) = await summarizer.update_character_states(session, chapter, novel)
             mem_in += c_in; mem_out += c_out
             await session.commit()
         except Exception as e:
@@ -754,21 +971,19 @@ async def run_chapter_rewrite(
 
         yield _sse("stage", "updating_memory_entities")
         try:
-            (_, _, e_in, e_out, _) = await summarizer.update_entity_states(session, chapter, novel)
-            mem_in += e_in; mem_out += e_out
+            r = await summarizer.update_entity_location_states(session, chapter, novel)
+            mem_in += r["input_tokens"]; mem_out += r["output_tokens"]
+            upd_entity_ids = r["entity"]["updated_ids"]
+            upd_location_ids = r["location"]["updated_ids"]
             await session.commit()
         except Exception as e:
-            logger.warning("实体状态更新失败: %s", e)
+            logger.warning("实体/地点状态更新失败: %s", e)
             await session.rollback()
 
-        yield _sse("stage", "updating_memory_locations")
-        try:
-            (_, _, l_in, l_out, _) = await summarizer.update_location_states(session, chapter, novel)
-            mem_in += l_in; mem_out += l_out
-            await session.commit()
-        except Exception as e:
-            logger.warning("地点状态更新失败: %s", e)
-            await session.rollback()
+        await entity_embeddings.reembed_updated(
+            session, novel.id,
+            char_ids=upd_char_ids, entity_ids=upd_entity_ids, location_ids=upd_location_ids,
+        )
 
         total_in = writer_in_tok + mem_in
         total_out = writer_out_tok + mem_out

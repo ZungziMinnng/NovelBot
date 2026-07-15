@@ -154,6 +154,25 @@ export default function ProjectTab({
     toast.success('章节已移动')
   }
 
+  const handleBatchDelete = async () => {
+    if (selected.size === 0) return
+    if (!confirm(`确认删除选中的 ${selected.size} 章？此操作不可撤销，对应摘要与记忆也会一并删除。`)) return
+    setSaving(true)
+    try {
+      // 若当前选中的章节将被删除，先算好回退到哪一章
+      const deletedNums = new Set(chapters.filter(c => selected.has(c.id)).map(c => c.number))
+      if (deletedNums.has(selectedChapterNum)) {
+        const remaining = chapters.filter(c => !selected.has(c.id))
+        const prev = [...remaining].reverse().find(c => c.number < selectedChapterNum)
+        onSelectChapter(prev ? prev.number : (remaining[0]?.number ?? 1))
+      }
+      await chaptersApi.batchDelete([...selected])
+      qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+      exitSelectMode()
+      toast.success('章节已删除')
+    } finally { setSaving(false) }
+  }
+
   const handleEditVolume = async () => {
     if (!editingVol || !editForm.title.trim()) return
     setSaving(true)
@@ -349,6 +368,13 @@ export default function ProjectTab({
               </div>
             )}
           </div>
+          <button
+            onClick={handleBatchDelete}
+            disabled={selected.size === 0 || saving}
+            className="w-full flex items-center justify-center gap-1 py-1.5 text-[11px] border border-destructive/40 text-destructive rounded-md hover:bg-destructive/10 disabled:opacity-50"
+          >
+            <Trash2 className="w-3 h-3" /> 删除选中章节
+          </button>
         </div>
       )}
 

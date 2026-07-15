@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
@@ -26,17 +26,20 @@ class NovelUpdate(BaseModel):
     fast_model: Optional[str] = None
     embedding_model: Optional[str] = None
     writer_system_prompt: Optional[str] = None
+    writer_examples: Optional[list[dict]] = None
     enable_critic: Optional[bool] = None
     critic_model: Optional[str] = None
     enable_detail_review: Optional[bool] = None
     detail_review_model: Optional[str] = None
     writer_temperature: Optional[float] = None
+    writer_use_custom_temperature: Optional[bool] = None
     writer_max_tokens: Optional[int] = None
-    rolling_summary_count: Optional[int] = None
-    rag_top_k: Optional[int] = None
+    rolling_summary_count: Optional[int] = Field(default=None, ge=3, le=12)
+    rag_top_k: Optional[int] = Field(default=None, ge=0, le=10)
     chat_context_rounds: Optional[int] = None
     enable_thinking: Optional[bool] = None
-    thinking_level: Optional[str] = None  # "off" | "low" | "medium" | "high"
+    deepseek_thinking_level: Optional[str] = None  # "off" | "high" | "max"
+    gemini_thinking_level: Optional[str] = None    # "off" | "low" | "medium" | "high"
     gemini_stream: Optional[bool] = None
     enable_full_text_context: Optional[bool] = None
     full_text_chapters: Optional[int] = None
@@ -62,17 +65,20 @@ class NovelOut(BaseModel):
     fast_model: str
     embedding_model: str
     writer_system_prompt: str
+    writer_examples: list[dict]
     enable_critic: bool
     critic_model: str
     enable_detail_review: bool
     detail_review_model: str
     writer_temperature: float
+    writer_use_custom_temperature: bool
     writer_max_tokens: int
     rolling_summary_count: int
     rag_top_k: int
     chat_context_rounds: int
     enable_thinking: bool
-    thinking_level: str
+    deepseek_thinking_level: str
+    gemini_thinking_level: str
     gemini_stream: bool
     enable_full_text_context: bool
     full_text_chapters: int
@@ -106,3 +112,4 @@ class WizardStep4(BaseModel):
 
 class WorldOptimizeRequest(BaseModel):
     core_setting: str
+    section: Optional[str] = None

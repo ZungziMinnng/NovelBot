@@ -1,16 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, Shield, FlaskConical, AlertTriangle } from 'lucide-react'
-import { novelsApi, modelLibraryApi, writerPresetsApi, type Novel, type ModelEntry } from '@/api/client'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, FlaskConical, AlertTriangle } from 'lucide-react'
+import { novelsApi, modelLibraryApi, writerPresetsApi, modelSelectValue, type Novel, type ModelEntry, type ExampleTurn } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
+import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
 
 type CreationSection = 'prompt' | 'models' | 'review' | 'fulltext' | null
 
 const CREATION_SECTIONS: { key: CreationSection & string; label: string; desc: string; icon: typeof FileText }[] = [
-  { key: 'prompt', label: '提示词与概要', desc: '全书概要、Writer 自定义提示词', icon: FileText },
+  { key: 'prompt', label: '提示词与示例', desc: 'Writer 自定义提示词、示例轮', icon: FileText },
   { key: 'models', label: '模型与生成参数', desc: '模型覆盖、温度、Token、摘要、RAG、Thinking', icon: Cpu },
-  { key: 'review', label: '审查设置', desc: 'Critic 审查、剧情细节审查', icon: Shield },
   { key: 'fulltext', label: '全文上下文（实验）', desc: '将前 N 章正文全量传入上下文', icon: FlaskConical },
 ]
 
@@ -40,13 +40,13 @@ function ModelSelect({
 }) {
   return (
     <select
-      value={value}
+      value={modelSelectValue(models, value)}
       onChange={e => onChange(e.target.value)}
       className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
     >
       <option value="">{placeholder}</option>
       {models.map(m => (
-        <option key={m.id} value={m.model_id}>
+        <option key={m.id} value={String(m.id)}>
           [{m.provider}] {m.display_name || m.model_id}
         </option>
       ))}
@@ -138,6 +138,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   // ── Creation settings fields ──
   const [bookSummary, setBookSummary] = useState(novel.book_summary || '')
   const [writerSystemPrompt, setWriterSystemPrompt] = useState(novel.writer_system_prompt || '')
+  const [writerExamples, setWriterExamples] = useState<ExampleTurn[]>(novel.writer_examples || [])
   const [writerModel, setWriterModel] = useState(novel.writer_model || '')
   const [fastModel, setFastModel] = useState(novel.fast_model || '')
   const [criticModel, setCriticModel] = useState(novel.critic_model || '')
@@ -146,11 +147,13 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [enableDetailReview, setEnableDetailReview] = useState(novel.enable_detail_review ?? false)
   const [detailReviewModel, setDetailReviewModel] = useState(novel.detail_review_model || '')
   const [writerTemperature, setWriterTemperature] = useState(novel.writer_temperature ?? 0.85)
-  const [writerMaxTokens, setWriterMaxTokens] = useState(novel.writer_max_tokens ?? 4096)
-  const [rollingSummaryCount, setRollingSummaryCount] = useState(novel.rolling_summary_count ?? 5)
-  const [ragTopK, setRagTopK] = useState(novel.rag_top_k ?? 3)
+  const [writerUseCustomTemperature, setWriterUseCustomTemperature] = useState(novel.writer_use_custom_temperature ?? true)
+  const [writerMaxTokens, setWriterMaxTokens] = useState(novel.writer_max_tokens ?? 16384)
+  const [rollingSummaryCount, setRollingSummaryCount] = useState(novel.rolling_summary_count ?? 8)
+  const [ragTopK, setRagTopK] = useState(novel.rag_top_k ?? 6)
   const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
-  const [thinkingLevel, setThinkingLevel] = useState(novel.thinking_level || 'medium')
+  const [deepseekThinking, setDeepseekThinking] = useState(novel.deepseek_thinking_level || 'high')
+  const [geminiThinking, setGeminiThinking] = useState(novel.gemini_thinking_level || 'medium')
   const [geminiStream, setGeminiStream] = useState(novel.gemini_stream ?? false)
   const [enableFullTextContext, setEnableFullTextContext] = useState(novel.enable_full_text_context ?? false)
   const [fullTextChapters, setFullTextChapters] = useState(novel.full_text_chapters ?? 20)
@@ -175,6 +178,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setRankSetting(s.rank)
     setBookSummary(novel.book_summary || '')
     setWriterSystemPrompt(novel.writer_system_prompt || '')
+    setWriterExamples(novel.writer_examples || [])
     setWriterModel(novel.writer_model || '')
     setFastModel(novel.fast_model || '')
     setCriticModel(novel.critic_model || '')
@@ -183,11 +187,13 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setEnableDetailReview(novel.enable_detail_review ?? false)
     setDetailReviewModel(novel.detail_review_model || '')
     setWriterTemperature(novel.writer_temperature ?? 0.85)
-    setWriterMaxTokens(novel.writer_max_tokens ?? 4096)
-    setRollingSummaryCount(novel.rolling_summary_count ?? 5)
-    setRagTopK(novel.rag_top_k ?? 3)
+    setWriterUseCustomTemperature(novel.writer_use_custom_temperature ?? true)
+    setWriterMaxTokens(novel.writer_max_tokens ?? 16384)
+    setRollingSummaryCount(novel.rolling_summary_count ?? 8)
+    setRagTopK(novel.rag_top_k ?? 6)
     setChatContextRounds(novel.chat_context_rounds ?? 20)
-    setThinkingLevel(novel.thinking_level || 'medium')
+    setDeepseekThinking(novel.deepseek_thinking_level || 'high')
+    setGeminiThinking(novel.gemini_thinking_level || 'medium')
     setGeminiStream(novel.gemini_stream ?? false)
     setEnableFullTextContext(novel.enable_full_text_context ?? false)
     setFullTextChapters(novel.full_text_chapters ?? 20)
@@ -259,6 +265,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         core_setting: getFinalCoreSetting(),
         book_summary: bookSummary,
         writer_system_prompt: writerSystemPrompt,
+        writer_examples: writerExamples,
         writer_model: writerModel,
         fast_model: fastModel,
         critic_model: criticModel,
@@ -267,11 +274,13 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         enable_detail_review: enableDetailReview,
         detail_review_model: detailReviewModel,
         writer_temperature: writerTemperature,
+        writer_use_custom_temperature: writerUseCustomTemperature,
         writer_max_tokens: writerMaxTokens,
         rolling_summary_count: rollingSummaryCount,
         rag_top_k: ragTopK,
         chat_context_rounds: chatContextRounds,
-        thinking_level: thinkingLevel,
+        deepseek_thinking_level: deepseekThinking,
+        gemini_thinking_level: geminiThinking,
         gemini_stream: geminiStream,
         enable_full_text_context: enableFullTextContext,
         full_text_chapters: fullTextChapters,
@@ -479,6 +488,30 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                   {optimizing ? '正在优化...' : splitWorld ? 'AI 优化背景设定' : 'AI 优化世界观'}
                 </button>
               </div>
+
+              {/* 全书概要（长程记忆） */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">全书概要（长程记忆）</label>
+                  <button
+                    onClick={handleGenerateBookSummary}
+                    disabled={generatingBookSummary}
+                    className={`flex items-center gap-1.5 text-xs transition-opacity ${
+                      generatingBookSummary ? 'text-muted-foreground cursor-not-allowed' : 'text-primary hover:opacity-75'
+                    }`}
+                  >
+                    {generatingBookSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookOpen className="w-3.5 h-3.5" />}
+                    {generatingBookSummary ? '生成中...' : '重新整理'}
+                  </button>
+                </div>
+                <textarea
+                  value={bookSummary}
+                  onChange={e => setBookSummary(e.target.value)}
+                  placeholder="写了一定章节后，点击「重新整理」让 AI 从所有章节摘要生成全书概要..."
+                  className="w-full border rounded-lg px-4 py-3 text-sm bg-background resize-y min-h-[10rem] focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                <p className="text-xs text-muted-foreground mt-1.5">覆盖 rolling_summary 无法触及的早期剧情，保存时同步入库。</p>
+              </div>
             </>
           )}
 
@@ -542,40 +575,20 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-5">
-              {/* ── 提示词与概要 ── */}
+              {/* ── 提示词与示例 ── */}
               {activeSection === 'prompt' && (
                 <>
                   <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium">全书概要（长程记忆）</label>
-                      <button
-                        onClick={handleGenerateBookSummary}
-                        disabled={generatingBookSummary}
-                        className={`flex items-center gap-1.5 text-xs transition-opacity ${
-                          generatingBookSummary ? 'text-muted-foreground cursor-not-allowed' : 'text-primary hover:opacity-75'
-                        }`}
-                      >
-                        {generatingBookSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookOpen className="w-3.5 h-3.5" />}
-                        {generatingBookSummary ? '生成中...' : '重新整理'}
-                      </button>
-                    </div>
-                    <textarea
-                      value={bookSummary}
-                      onChange={e => setBookSummary(e.target.value)}
-                      placeholder="写了一定章节后，点击「重新整理」让 AI 从所有章节摘要生成全书概要..."
-                      className="w-full border rounded-lg px-4 py-3 text-sm bg-background resize-y min-h-[10rem] focus:outline-none focus:ring-1 focus:ring-ring"
-                    />
-                    <p className="text-xs text-muted-foreground mt-1.5">覆盖 rolling_summary 无法触及的早期剧情，保存时同步入库。</p>
-                  </div>
-
-                  <div className="border-t pt-5">
                     <label className="text-sm font-medium mb-2 block">自定义 Writer 提示词</label>
                     {writerPresets.length > 0 && (
                       <select
                         defaultValue=""
                         onChange={e => {
                           const preset = writerPresets.find(p => p.id === Number(e.target.value))
-                          if (preset) setWriterSystemPrompt(preset.prompt)
+                          if (preset) {
+                            setWriterSystemPrompt(preset.prompt)
+                            setWriterExamples(preset.examples || [])
+                          }
                           e.target.value = ''
                         }}
                         className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring mb-2"
@@ -619,6 +632,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         </pre>
                       )}
                     </div>
+
+                    <ExampleTurnsEditor value={writerExamples} onChange={setWriterExamples} />
                   </div>
                 </>
               )}
@@ -648,15 +663,20 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                     <p className="text-xs text-muted-foreground mt-1.5">用于章节审查和评分</p>
                   </div>
                   <div>
+                    <label className="text-sm font-medium mb-1.5 block">细节审查模型</label>
+                    <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
+                    <p className="text-xs text-muted-foreground mt-1.5">用于剧情细节审查，检查连续性、重复、矛盾和时间线问题</p>
+                  </div>
+                  <div>
                     <label className="text-sm font-medium mb-1.5 block">嵌入模型</label>
                     <select
-                      value={embeddingModel}
+                      value={modelSelectValue(modelLibrary, embeddingModel)}
                       onChange={e => setEmbeddingModel(e.target.value)}
                       className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                     >
                       <option value="">默认 (all-MiniLM-L6-v2, 本地)</option>
                       {modelLibrary.filter(m => m.model_type === 'embedding').map(m => (
-                        <option key={m.id} value={m.model_id}>
+                        <option key={m.id} value={String(m.id)}>
                           [{m.provider}] {m.display_name || m.model_id}
                         </option>
                       ))}
@@ -670,12 +690,28 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                     <p className="text-sm font-semibold">生成参数</p>
                     <div className="flex items-center justify-between">
                       <div className="flex-1 mr-4">
-                        <p className="text-sm font-medium">Thinking 深度思考</p>
-                        <p className="text-xs text-muted-foreground mt-1">控制模型深度思考强度（Gemini / DeepSeek / o 系列），关闭可减少空响应</p>
+                        <p className="text-sm font-medium">DeepSeek 深度思考</p>
+                        <p className="text-xs text-muted-foreground mt-1">DeepSeek 模型的 reasoning_effort，关闭可减少空响应并约束输出长度</p>
                       </div>
                       <select
-                        value={thinkingLevel}
-                        onChange={e => setThinkingLevel(e.target.value)}
+                        value={deepseekThinking}
+                        onChange={e => setDeepseekThinking(e.target.value)}
+                        className="text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        <option value="off">关闭</option>
+                        <option value="high">高（默认）</option>
+                        <option value="max">最高</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 mr-4">
+                        <p className="text-sm font-medium">Gemini 深度思考</p>
+                        <p className="text-xs text-muted-foreground mt-1">Gemini 模型的 thinking_level，关闭可减少空响应</p>
+                      </div>
+                      <select
+                        value={geminiThinking}
+                        onChange={e => setGeminiThinking(e.target.value)}
                         className="text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                       >
                         <option value="off">关闭</option>
@@ -710,11 +746,23 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         step={0.05}
                         value={writerTemperature}
                         onChange={e => setWriterTemperature(Number(e.target.value))}
-                        className="w-full accent-primary"
+                        disabled={!writerUseCustomTemperature}
+                        className={`w-full accent-primary ${!writerUseCustomTemperature ? 'opacity-30' : ''}`}
                       />
                       <div className="flex justify-between text-xs text-muted-foreground mt-1">
                         <span>保守 0.1</span>
                         <span>1.5 发散</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button
+                          onClick={() => setWriterUseCustomTemperature(v => !v)}
+                          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${writerUseCustomTemperature ? 'bg-primary' : 'bg-muted'}`}
+                        >
+                          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${writerUseCustomTemperature ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </button>
+                        <span className="text-xs text-muted-foreground">
+                          {writerUseCustomTemperature ? '发送温度参数（关闭以兼容不支持温度的模型）' : '不发送温度参数（使用模型默认值）'}
+                        </span>
                       </div>
                     </div>
 
@@ -726,31 +774,31 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         className="w-full border rounded-lg px-3 py-2.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                       >
                         <option value={2048}>2048（约 1500 字）</option>
-                        <option value={4096}>4096（约 3000 字，默认）</option>
+                        <option value={4096}>4096（约 3000 字）</option>
                         <option value={8192}>8192（约 6000 字）</option>
-                        <option value={16384}>16384（约 12000 字）</option>
+                        <option value={16384}>16384（约 12000 字，默认）</option>
                       </select>
                     </div>
 
                     <div className="border-t pt-5 space-y-5">
                       <div>
                         <div className="flex items-center justify-between mb-2">
-                          <label className="text-sm font-medium">滚动摘要章数</label>
+                          <label className="text-sm font-medium">滚动摘要最大章数</label>
                           <input
                             type="number"
-                            min={1}
-                            max={20}
+                            min={3}
+                            max={12}
                             value={rollingSummaryCount}
-                            onChange={e => setRollingSummaryCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                            onChange={e => setRollingSummaryCount(Math.max(3, Math.min(12, Number(e.target.value) || 3)))}
                             className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                           />
                         </div>
-                        <p className="text-xs text-muted-foreground">生成章节时携带最近 N 章的摘要作为中程记忆</p>
+                        <p className="text-xs text-muted-foreground">动态预算内从近到远装填，至少保障 3 章；该值仅作为上限</p>
                       </div>
 
                       <div>
                         <div className="flex items-center justify-between mb-2">
-                          <label className="text-sm font-medium">RAG 检索条数</label>
+                          <label className="text-sm font-medium">RAG 最大检索条数</label>
                           <input
                             type="number"
                             min={0}
@@ -760,48 +808,9 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                             className="w-20 text-center border rounded-lg px-2 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                           />
                         </div>
-                        <p className="text-xs text-muted-foreground">生成章节时从历史章节中检索最相关的 N 条摘要，0 表示关闭</p>
+                        <p className="text-xs text-muted-foreground">在动态预算和相关性约束内选取历史摘要；该值仅作为上限，0 表示关闭</p>
                       </div>
                     </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ── 审查设置 ── */}
-              {activeSection === 'review' && (
-                <div className="space-y-5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1 mr-4">
-                      <p className="text-sm font-medium">Critic 审查</p>
-                      <p className="text-xs text-muted-foreground mt-1">检查角色、势力、系统、实体、道具等设定一致性和本章任务完成度</p>
-                    </div>
-                    <button
-                      onClick={() => setEnableCritic(v => !v)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableCritic ? 'bg-primary' : 'bg-muted'}`}
-                    >
-                      <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableCritic ? 'translate-x-5' : 'translate-x-0'}`} />
-                    </button>
-                  </div>
-
-                  <div className="border-t pt-5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 mr-4">
-                        <p className="text-sm font-medium">剧情细节审查</p>
-                        <p className="text-xs text-muted-foreground mt-1">专注章节正文文字，基于前 20 章检查连续性、重复、矛盾和时间线问题</p>
-                      </div>
-                      <button
-                        onClick={() => setEnableDetailReview(v => !v)}
-                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${enableDetailReview ? 'bg-primary' : 'bg-muted'}`}
-                      >
-                        <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${enableDetailReview ? 'translate-x-5' : 'translate-x-0'}`} />
-                      </button>
-                    </div>
-                    {enableDetailReview && (
-                      <div className="mt-3">
-                        <label className="text-sm font-medium mb-1.5 block">细节审查模型</label>
-                        <ModelSelect value={detailReviewModel} onChange={setDetailReviewModel} placeholder="留空使用全局设置" models={modelLibrary.filter(m => m.model_type !== 'embedding')} />
-                      </div>
-                    )}
                   </div>
                 </div>
               )}

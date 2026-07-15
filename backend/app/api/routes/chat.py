@@ -6,13 +6,9 @@ from app.database import get_db
 from app.models.novel import Novel
 from app.schemas.chat import ChatRequest
 from app.services import context_builder, llm_client
+from app.services.sse import sse_event as _sse
 
 router = APIRouter()
-
-
-def _sse(event: str, data) -> str:
-    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
-    return f"data: {payload}\n\n"
 
 
 def _build_chat_system_prompt(ctx: dict, user_messages: list[str] | None = None) -> str:

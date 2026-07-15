@@ -1,6 +1,6 @@
 import logging
 
-from sqlalchemy import event, text
+from sqlalchemy import event, text, inspect
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -56,7 +56,7 @@ async def _run_migrations() -> None:
         "ALTER TABLE novels ADD COLUMN writer_system_prompt TEXT DEFAULT ''",
         "ALTER TABLE novels ADD COLUMN enable_critic INTEGER DEFAULT 1",
         "ALTER TABLE novels ADD COLUMN writer_temperature REAL DEFAULT 0.85",
-        "ALTER TABLE novels ADD COLUMN writer_max_tokens INTEGER DEFAULT 4096",
+        "ALTER TABLE novels ADD COLUMN writer_max_tokens INTEGER DEFAULT 16384",
         # 修复存量 NULL 值，防止 or "" 静默吃掉用户设置
         "UPDATE novels SET writer_system_prompt = '' WHERE writer_system_prompt IS NULL",
         # 章节生成指令（构思备忘）
@@ -84,6 +84,9 @@ async def _run_migrations() -> None:
         "ALTER TABLE characters ADD COLUMN avatar_url TEXT DEFAULT ''",
         "ALTER TABLE novels ADD COLUMN context_config TEXT DEFAULT '{}'",
         "ALTER TABLE novels ADD COLUMN gemini_stream INTEGER DEFAULT 0",
+        # 思考档位拆分为 DeepSeek / Gemini 两套
+        "ALTER TABLE novels ADD COLUMN deepseek_thinking_level TEXT DEFAULT 'high'",
+        "ALTER TABLE novels ADD COLUMN gemini_thinking_level TEXT DEFAULT 'medium'",
         # 大纲范围支持
         "ALTER TABLE outlines ADD COLUMN start_chapter INTEGER DEFAULT 0",
         "ALTER TABLE outlines ADD COLUMN end_chapter INTEGER DEFAULT 0",
@@ -99,6 +102,11 @@ async def _run_migrations() -> None:
         # 嵌入模型配置
         "ALTER TABLE novels ADD COLUMN embedding_model TEXT DEFAULT ''",
         "ALTER TABLE model_library ADD COLUMN model_type TEXT NOT NULL DEFAULT 'chat'",
+        "ALTER TABLE model_library ADD COLUMN context_window INTEGER DEFAULT 65536",
+        "ALTER TABLE model_library ADD COLUMN input_price REAL DEFAULT 0",
+        "ALTER TABLE model_library ADD COLUMN output_price REAL DEFAULT 0",
+        "ALTER TABLE model_library ADD COLUMN price_currency TEXT DEFAULT 'CNY'",
+        "ALTER TABLE model_library ADD COLUMN currency_to_cny_rate REAL DEFAULT 1",
         "UPDATE model_library SET model_type = 'chat' WHERE model_type IS NULL OR model_type = ''",
         "ALTER TABLE novels ADD COLUMN tags JSON DEFAULT '{}'",
         "ALTER TABLE novels ADD COLUMN estimated_chapters INTEGER DEFAULT 0",
@@ -108,6 +116,23 @@ async def _run_migrations() -> None:
         "ALTER TABLE chapters ADD COLUMN model_used TEXT DEFAULT ''",
         # 移除已废弃的结构化长期记忆表（设计存档见 docs/memory_item_design.md）
         "DROP TABLE IF EXISTS memory_items",
+        # 世界观变更日志
+        "CREATE INDEX IF NOT EXISTS idx_worldview_changes_novel ON worldview_changes(novel_id, status, effective_chapter)",
+        # 记忆重要性权重（1-5，默认3）
+        "ALTER TABLE memories ADD COLUMN importance INTEGER DEFAULT 3",
+        "ALTER TABLE world_entities ADD COLUMN importance INTEGER DEFAULT 3",
+        "ALTER TABLE locations ADD COLUMN importance INTEGER DEFAULT 3",
+        "ALTER TABLE factions ADD COLUMN importance INTEGER DEFAULT 3",
+        "ALTER TABLE techniques ADD COLUMN importance INTEGER DEFAULT 3",
+        "ALTER TABLE novel_notes ADD COLUMN importance INTEGER DEFAULT 3",
+        # 写手 few-shot 示例轮
+        "ALTER TABLE writer_presets ADD COLUMN examples JSON DEFAULT '[]'",
+        "ALTER TABLE novels ADD COLUMN writer_examples JSON DEFAULT '[]'",
+        "ALTER TABLE novels ADD COLUMN writer_use_custom_temperature INTEGER DEFAULT 1",
+        # 供应商级代理开关（默认 1 = 沿用旧的全局代理行为，可直连的供应商手动关）
+        "ALTER TABLE api_providers ADD COLUMN use_proxy BOOLEAN DEFAULT 1",
+        # 实体固有功能字段（能力与作用，LLM 每章更新不写入）
+        "ALTER TABLE world_entities ADD COLUMN function TEXT DEFAULT ''",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -120,8 +145,30 @@ async def _run_migrations() -> None:
                 raise
 
 
+async def _migrate_world_rules() -> None:
+    """一次性：把老 core_setting 的 核心规则/特殊元素 段落拆分进 world_rules 表。
+
+    仅在引入该表的那次启动运行（由 init_db 的 table_existed 守卫触发）。
+    """
+    from sqlalchemy import select
+    from app.models.novel import Novel
+    from app.services.world_rules_sync import split_core_setting_into_rules
+
+    async with AsyncSessionLocal() as session:
+        novels = (await session.execute(select(Novel))).scalars().all()
+        for novel in novels:
+            if novel.core_setting:
+                await split_core_setting_into_rules(session, novel)
+        await session.commit()
+
+
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage  # noqa: F401
     async with engine.begin() as conn:
+        existing = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).has_table("world_rules")
+        )
         await conn.run_sync(Base.metadata.create_all)
     await _run_migrations()
+    if not existing:
+        await _migrate_world_rules()

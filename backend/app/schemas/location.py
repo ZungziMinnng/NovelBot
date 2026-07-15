@@ -11,6 +11,7 @@ class LocationCreate(BaseModel):
     parent_id: Optional[int] = None
     properties: dict = {}
     current_state: dict = {}
+    importance: int = 3
 
 
 class LocationUpdate(BaseModel):
@@ -20,6 +21,7 @@ class LocationUpdate(BaseModel):
     parent_id: Optional[int] = None
     properties: Optional[dict] = None
     current_state: Optional[dict] = None
+    importance: Optional[int] = None
 
 
 class LocationOut(BaseModel):
@@ -31,6 +33,7 @@ class LocationOut(BaseModel):
     parent_id: Optional[int] = None
     properties: dict
     current_state: dict
+    importance: int
     created_at: datetime
     updated_at: datetime
 

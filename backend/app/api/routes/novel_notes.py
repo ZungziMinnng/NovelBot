@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -8,9 +9,29 @@ from app.services import vector_store
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 
 def _vec_doc_id(note_id: int) -> str:
     return f"note_{note_id}"
+
+
+async def _embed_note(note: NovelNote, db: AsyncSession) -> None:
+    """写入笔记向量。先按小说配置装载嵌入模型（避免冷缓存回退到默认维度导致维度不匹配）；
+    向量写入失败不应让笔记保存失败（与摘要/实体同步策略一致，可重建向量库修复）。"""
+    try:
+        await vector_store.ensure_embedding_configured(note.novel_id, db)
+        await vector_store.astore_text(
+            novel_id=note.novel_id,
+            doc_id=_vec_doc_id(note.id),
+            text=f"{note.title}\n{note.content}",
+            metadata={"type": "novel_note", "note_id": note.id, "importance": note.importance},
+        )
+    except Exception:
+        logger.warning(
+            "笔记向量同步失败（文本已保存，可重建向量库修复）: novel=%s note=%s",
+            note.novel_id, note.id, exc_info=True,
+        )
 
 
 @router.get("/novel/{novel_id}", response_model=list[NoteOut])
@@ -28,12 +49,7 @@ async def create_note(data: NoteCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(note)
     if note.content.strip():
-        await vector_store.astore_text(
-            novel_id=note.novel_id,
-            doc_id=_vec_doc_id(note.id),
-            text=f"{note.title}\n{note.content}",
-            metadata={"type": "novel_note", "note_id": note.id},
-        )
+        await _embed_note(note, db)
     return note
 
 
@@ -47,12 +63,7 @@ async def update_note(note_id: int, data: NoteUpdate, db: AsyncSession = Depends
     await db.commit()
     await db.refresh(note)
     if note.content.strip():
-        await vector_store.astore_text(
-            novel_id=note.novel_id,
-            doc_id=_vec_doc_id(note.id),
-            text=f"{note.title}\n{note.content}",
-            metadata={"type": "novel_note", "note_id": note.id},
-        )
+        await _embed_note(note, db)
     else:
         await vector_store.adelete_docs(note.novel_id, [_vec_doc_id(note.id)])
     return note

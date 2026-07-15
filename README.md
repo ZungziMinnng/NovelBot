@@ -385,7 +385,7 @@ NovelBot/
 
 - `chapter_summary_prefix.jinja2` / `chapter_summary_suffix.jinja2` — 章节摘要的长度、时间线标注规范
 - `character_update_prefix.jinja2` / `character_update_suffix.jinja2` — 角色状态更新关注的维度与输出 JSON 结构
-- `entity_update_*` / `location_update_*` — 实体、地点状态更新
+- `entity_location_update_*` — 实体与地点状态更新（单次调用二合一）
 - `arc_summary.jinja2` / `book_summary.jinja2` / `book_summary_merge.jinja2` — 故事弧/全书概要
 
 记忆体系的完整说明见 **[docs/memory.md](docs/memory.md)**。

@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import {
   novelsApi, chaptersApi, modelLibraryApi, charactersApi, worldEntitiesApi,
-  locationsApi, factionsApi, techniquesApi,
+  locationsApi, factionsApi, techniquesApi, findModelEntry,
   type Chapter, type ReviewResult,
 } from '@/api/client'
 import AgentLog from '@/components/AgentLog/AgentLog'
@@ -20,6 +20,7 @@ import ChatPanel from '@/components/ChatPanel/ChatPanel'
 import DevPanel from '@/components/DevPanel/DevPanel'
 import ReviewModal from '@/components/ReviewModal/ReviewModal'
 import OutlineModal from '@/components/OutlineModal/OutlineModal'
+import CharacterCardModal from '@/components/CharacterCardModal/CharacterCardModal'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
@@ -284,11 +285,35 @@ export default function Editor() {
     try {
       await novelsApi.update(novelId, { writer_model: modelId })
       qc.invalidateQueries({ queryKey: ['novel', novelId] })
-      toast.success(modelId ? `Writer 模型已切换为 ${modelId}` : 'Writer 模型已恢复全局默认')
+      const model = findModelEntry(modelLibrary, modelId)
+      const modelName = model?.display_name || model?.model_id || modelId
+      toast.success(modelId ? `Writer 模型已切换为 ${modelName}` : 'Writer 模型已恢复全局默认')
     } catch {
       toast.error('切换模型失败')
     }
-  }, [novelId, qc])
+  }, [modelLibrary, novelId, qc])
+
+  const handleToggleCritic = useCallback(async () => {
+    const next = !novel?.enable_critic
+    try {
+      await novelsApi.update(novelId, { enable_critic: next })
+      qc.invalidateQueries({ queryKey: ['novel', novelId] })
+      toast.success(next ? 'Critic 审查已开启' : 'Critic 审查已关闭')
+    } catch {
+      toast.error('切换 Critic 审查失败')
+    }
+  }, [novelId, novel?.enable_critic, qc])
+
+  const handleToggleDetailReview = useCallback(async () => {
+    const next = !novel?.enable_detail_review
+    try {
+      await novelsApi.update(novelId, { enable_detail_review: next })
+      qc.invalidateQueries({ queryKey: ['novel', novelId] })
+      toast.success(next ? '细节审查已开启' : '细节审查已关闭')
+    } catch {
+      toast.error('切换细节审查失败')
+    }
+  }, [novelId, novel?.enable_detail_review, qc])
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -600,7 +625,7 @@ export default function Editor() {
               barMode={barMode}
               onBarModeChange={setBarMode}
               hasChapterContent={!!currentChapter?.content}
-              agentStage={genStore.agentStage}
+              agentStage={hasGenDataHere ? genStore.agentStage : ''}
               isCurrentlyGenerating={gen.isCurrentlyGenerating}
               isOtherGenerating={genStore.isGenerating && !gen.isCurrentlyGenerating}
               justFinishedHere={justFinishedHere}
@@ -626,6 +651,10 @@ export default function Editor() {
               writerModel={novel?.writer_model || ''}
               onWriterModelChange={handleWriterModelChange}
               modelLibrary={modelLibrary}
+              enableCritic={novel?.enable_critic ?? true}
+              enableDetailReview={novel?.enable_detail_review ?? false}
+              onToggleCritic={handleToggleCritic}
+              onToggleDetailReview={handleToggleDetailReview}
 
               newCharCandidates={gen.newCharCandidates}
               selectedCharIndices={gen.selectedCharIndices}
@@ -651,6 +680,12 @@ export default function Editor() {
               onToggleTech={gen.toggleTechSelection}
               onAddTechs={gen.handleAddNewTechs}
               onDismissTechs={() => gen.setNewTechCandidates([])}
+              newFactionCandidates={gen.newFactionCandidates}
+              selectedFactionIndices={gen.selectedFactionIndices}
+              addingFactions={gen.addingFactions}
+              onToggleFaction={gen.toggleFactionSelection}
+              onAddFactions={gen.handleAddNewFactions}
+              onDismissFactions={() => gen.setNewFactionCandidates([])}
               entities={entityList}
             />
           </>}
@@ -680,7 +715,7 @@ export default function Editor() {
             <div className="flex-1 overflow-hidden">
               {rightTab === 'context' ? (
                 <div className="p-3 h-full overflow-auto">
-                  <ContextPanel novelId={novelId} rollingStage={genStore.agentStage} contextSteps={genStore.contextSteps} />
+                  <ContextPanel novelId={novelId} rollingStage={hasGenDataHere ? genStore.agentStage : ''} contextSteps={hasGenDataHere ? genStore.contextSteps : []} />
                 </div>
               ) : (
                 <div className="p-3 h-full overflow-auto">
@@ -732,6 +767,30 @@ export default function Editor() {
           novelId={novelId}
           currentChapter={selectedChapterNum}
           onClose={() => setShowOutlineModal(false)}
+        />
+      )}
+
+      {/* Character Card Review Modal (after confirming discovered characters) */}
+      {gen.reviewCharacters.length > 0 && (
+        <CharacterCardModal
+          character={gen.reviewCharacters[gen.reviewCharacters.length - 1]}
+          onClose={() => {
+            const remaining = gen.reviewCharacters.slice(0, -1)
+            gen.setReviewCharacters(remaining)
+            if (remaining.length === 0) {
+              qc.invalidateQueries({ queryKey: ['characters', novelId] })
+            }
+          }}
+          onUpdated={(updated) => {
+            gen.setReviewCharacters(prev =>
+              prev.map(c => c.id === updated.id ? updated : c)
+            )
+            qc.invalidateQueries({ queryKey: ['characters', novelId] })
+          }}
+          onDeleted={(charId) => {
+            gen.setReviewCharacters(prev => prev.filter(c => c.id !== charId))
+            qc.invalidateQueries({ queryKey: ['characters', novelId] })
+          }}
         />
       )}
 

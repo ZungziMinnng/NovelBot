@@ -2,8 +2,8 @@ import { useState, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info } from 'lucide-react'
-import { novelsApi, writerPresetsApi, type Novel, type WriterPreset } from '@/api/client'
+import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info, Eye, EyeOff, Copy } from 'lucide-react'
+import { novelsApi, writerPresetsApi, type Novel, type WriterPreset, type ExampleTurn } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
@@ -34,6 +34,7 @@ export default function Home() {
   const [wizardOpen, setWizardOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('novels')
   const [presetModal, setPresetModal] = useState<{ open: boolean; preset: WriterPreset | null }>({ open: false, preset: null })
+  const [copyModal, setCopyModal] = useState<{ open: boolean; novel: Novel | null }>({ open: false, novel: null })
   const { data: novels = [], isLoading } = useQuery({
     queryKey: ['novels'],
     queryFn: novelsApi.list,
@@ -50,7 +51,30 @@ export default function Home() {
   })
 
   const nsfwMode = useSettingsStore((s) => s.nsfwMode)
+  const hiddenNovelIds = useSettingsStore((s) => s.hiddenNovelIds)
+  const toggleNovelHidden = useSettingsStore((s) => s.toggleNovelHidden)
+  const [showHidden, setShowHidden] = useState(false)
   const greeting = useMemo(() => getGreeting(), [])
+
+  // 三击「x 本小说」数字：切换隐藏小说的显隐（复用 logo 三击彩蛋模式）
+  const countClickRef = useRef<number[]>([])
+  const handleCountClick = useCallback(() => {
+    const now = Date.now()
+    const arr = countClickRef.current
+    arr.push(now)
+    if (arr.length > 3) arr.shift()
+    if (arr.length === 3 && now - arr[0] < 800) {
+      countClickRef.current = []
+      setShowHidden((v) => {
+        const next = !v
+        const cnt = useSettingsStore.getState().hiddenNovelIds.length
+        if (cnt > 0) toast(next ? `已显示 ${cnt} 本隐藏小说` : '已隐藏', { icon: next ? '👁️' : '🙈', duration: 1500 })
+        return next
+      })
+    }
+  }, [])
+
+  const visibleNovels = showHidden ? novels : novels.filter((n) => !hiddenNovelIds.includes(n.id))
 
   const clickTimesRef = useRef<number[]>([])
   const handleLogoClick = useCallback(() => {
@@ -66,8 +90,10 @@ export default function Home() {
   }, [])
 
   const savePreset = useMutation({
-    mutationFn: (data: { id?: number; name: string; prompt: string }) =>
-      data.id ? writerPresetsApi.update(data.id, { name: data.name, prompt: data.prompt }) : writerPresetsApi.create(data),
+    mutationFn: (data: { id?: number; name: string; prompt: string; examples: ExampleTurn[] }) =>
+      data.id
+        ? writerPresetsApi.update(data.id, { name: data.name, prompt: data.prompt, examples: data.examples })
+        : writerPresetsApi.create({ name: data.name, prompt: data.prompt, examples: data.examples }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['writer-presets'] })
       setPresetModal({ open: false, preset: null })
@@ -77,6 +103,17 @@ export default function Home() {
   const deletePreset = useMutation({
     mutationFn: writerPresetsApi.delete,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['writer-presets'] }),
+  })
+
+  const duplicateNovel = useMutation({
+    mutationFn: ({ id, mode }: { id: number; mode: 'full' | 'settings' }) => novelsApi.duplicate(id, mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['novels'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      setCopyModal({ open: false, novel: null })
+      toast.success('已复制小说')
+    },
+    onError: () => toast.error('复制失败'),
   })
 
   const handleDelete = async (e: React.MouseEvent, id: number) => {
@@ -147,7 +184,7 @@ export default function Home() {
             {nsfwMode && <p className="text-sm text-muted-foreground mb-3">尽情释放你的创作欲望</p>}
             {!nsfwMode && <div className="mb-3" />}
             <div className="flex flex-wrap gap-6 text-sm">
-              <div>
+              <div onClick={handleCountClick} className="cursor-pointer select-none" title="">
                 <span className="text-2xl font-bold text-primary">{dashboard.total_novels}</span>
                 <span className="text-muted-foreground ml-1.5">本小说</span>
               </div>
@@ -218,7 +255,9 @@ export default function Home() {
               </div>
             ) : (
               <div className="grid gap-4">
-                {novels.map((novel: Novel) => (
+                {visibleNovels.map((novel: Novel) => {
+                  const isHidden = hiddenNovelIds.includes(novel.id)
+                  return (
                   <SpotlightCard
                     key={novel.id}
                     className="rounded-xl border border-border/60 bg-card/80 backdrop-blur-sm cursor-pointer"
@@ -226,7 +265,7 @@ export default function Home() {
                   >
                     <div
                       onClick={() => navigate(`/novel/${novel.id}`)}
-                      className="group p-5"
+                      className={`group p-5 ${isHidden ? 'opacity-50' : ''}`}
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex-1 min-w-0">
@@ -235,6 +274,11 @@ export default function Home() {
                             <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground shrink-0">
                               {novel.genre || '未分类'}
                             </span>
+                            {isHidden && (
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0 flex items-center gap-1">
+                                <EyeOff className="w-3 h-3" />已隐藏
+                              </span>
+                            )}
                           </div>
                           <p className="text-muted-foreground text-sm line-clamp-2">{novel.premise}</p>
                           <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
@@ -248,6 +292,20 @@ export default function Home() {
                         </div>
                         <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
+                            onClick={(e) => { e.stopPropagation(); toggleNovelHidden(novel.id) }}
+                            className="p-2 rounded-md hover:bg-muted transition-colors"
+                            title={isHidden ? '取消隐藏' : '隐藏此小说'}
+                          >
+                            {isHidden ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setCopyModal({ open: true, novel }) }}
+                            className="p-2 rounded-md hover:bg-muted transition-colors"
+                            title="复制小说"
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                          <button
                             onClick={(e) => handleDelete(e, novel.id)}
                             className="p-2 rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
                           >
@@ -258,7 +316,8 @@ export default function Home() {
                       </div>
                     </div>
                   </SpotlightCard>
-                ))}
+                  )
+                })}
               </div>
             )}
           </>
@@ -342,6 +401,47 @@ export default function Home() {
           onClose={() => setPresetModal({ open: false, preset: null })}
           onSave={(data) => savePreset.mutate({ id: presetModal.preset?.id, ...data })}
         />
+      )}
+
+      {copyModal.open && copyModal.novel && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center"
+          onClick={() => !duplicateNovel.isPending && setCopyModal({ open: false, novel: null })}
+        >
+          <div className="bg-background rounded-xl p-5 w-96 space-y-4 shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h3 className="font-medium">复制《{copyModal.novel.title}》</h3>
+              <p className="text-sm text-muted-foreground mt-1">选择复制范围</p>
+            </div>
+            <div className="grid gap-2">
+              <button
+                disabled={duplicateNovel.isPending}
+                onClick={() => duplicateNovel.mutate({ id: copyModal.novel!.id, mode: 'full' })}
+                className="text-left px-4 py-3 rounded-lg border hover:border-primary hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                <div className="font-medium text-sm">全部</div>
+                <div className="text-xs text-muted-foreground mt-0.5">含设定、角色、章节正文与记忆</div>
+              </button>
+              <button
+                disabled={duplicateNovel.isPending}
+                onClick={() => duplicateNovel.mutate({ id: copyModal.novel!.id, mode: 'settings' })}
+                className="text-left px-4 py-3 rounded-lg border hover:border-primary hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                <div className="font-medium text-sm">仅设定</div>
+                <div className="text-xs text-muted-foreground mt-0.5">含世界观、角色、大纲等设定，不含章节正文，写作进度归零</div>
+              </button>
+            </div>
+            <div className="flex justify-end">
+              <button
+                disabled={duplicateNovel.isPending}
+                onClick={() => setCopyModal({ open: false, novel: null })}
+                className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted disabled:opacity-50"
+              >
+                {duplicateNovel.isPending ? '复制中...' : '取消'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

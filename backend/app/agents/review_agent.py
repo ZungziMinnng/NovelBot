@@ -9,11 +9,14 @@ from app.models.chapter import Chapter
 from app.models.character import Character
 from app.prompts.loader import render
 from app.services import llm_client
+from app.services.llm_json import repair_json
+from app.services.summarizer import strip_plot_suggestions
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 20
 DETAIL_REVIEW_WINDOW = 20
+DETAIL_REVIEW_FULL_RECENT = 3
 
 ISSUE_TYPES = {
     "plot_contradiction": "情节矛盾",
@@ -25,6 +28,29 @@ ISSUE_TYPES = {
 }
 
 
+def _build_recent_context(
+    recent_chapters: list[Chapter],
+    full_recent: int = DETAIL_REVIEW_FULL_RECENT,
+) -> str:
+    """细节审查的前文上下文：最近 full_recent 章发正文全文，更早章节只发摘要（控制输入成本）。"""
+    parts: list[str] = []
+    full_start = max(0, len(recent_chapters) - full_recent)
+    for i, ch in enumerate(recent_chapters):
+        summary = (ch.summary or "").strip()
+        if i >= full_start:
+            content = strip_plot_suggestions(ch.content or "").strip()
+            parts.append(
+                f"=== 第{ch.number}章 {ch.title or ''} ===\n"
+                f"摘要：{summary or '无摘要'}\n"
+                f"正文：\n{content}"
+            )
+        else:
+            if not summary:
+                summary = strip_plot_suggestions(ch.content or "")[:200] + "..."
+            parts.append(f"=== 第{ch.number}章 {ch.title or ''} ===\n摘要：{summary}")
+    return "\n\n".join(parts) or "（无前文，仅审查新章节内部文字连续性）"
+
+
 def _build_other_summaries(all_chapters: list[Chapter], batch_chapters: list[Chapter]) -> str:
     """为当前批次构建其余章节的摘要上下文。"""
     batch_ids = {ch.id for ch in batch_chapters}
@@ -34,7 +60,7 @@ def _build_other_summaries(all_chapters: list[Chapter], batch_chapters: list[Cha
             continue
         summary = (ch.summary or "").strip()
         if not summary:
-            summary = (ch.content or "")[:200] + "..."
+            summary = strip_plot_suggestions(ch.content or "")[:200] + "..."
         parts.append(f"第{ch.number}章 {ch.title or ''}：{summary}")
     return "\n".join(parts)
 
@@ -127,23 +153,17 @@ async def review_generated_with_recent_chapters(
     model, api_format = llm_client.get_agent_client("review", model_override)
     type_list = "\n".join(f"- {k}: {v}" for k, v in ISSUE_TYPES.items())
 
-    recent_parts: list[str] = []
-    for ch in recent_chapters:
-        summary = (ch.summary or "").strip()
-        content = (ch.content or "").strip()
-        recent_parts.append(
-            f"=== 第{ch.number}章 {ch.title or ''} ===\n"
-            f"摘要：{summary or '无摘要'}\n"
-            f"正文：\n{content}"
-        )
-    recent_text = "\n\n".join(recent_parts) or "（无前文，仅审查新章节内部文字连续性）"
+    recent_text = _build_recent_context(recent_chapters)
 
-    system_prompt = render("detail_review.jinja2", type_list=type_list, window=window)
+    system_prompt = render(
+        "detail_review.jinja2",
+        type_list=type_list, window=window, recent_full=DETAIL_REVIEW_FULL_RECENT,
+    )
 
     user_prompt = (
         f"小说：《{novel.title}》\n"
         f"当前审查：即将保存的第{chapter_number}章\n\n"
-        f"【前{window}章参考】\n{recent_text}\n\n"
+        f"【前{window}章参考（最近{DETAIL_REVIEW_FULL_RECENT}章为正文全文，更早章节仅摘要）】\n{recent_text}\n\n"
         f"【新生成章节全文】\n{generated_text}\n\n"
         "请只审查新生成章节文字相对前文正文的连续性、矛盾、重复和时间线问题。返回格式：\n"
         '[{"type":"plot_contradiction","severity":"high","chapters":[12,21],'
@@ -161,13 +181,8 @@ async def review_generated_with_recent_chapters(
         max_tokens=2048,
     )
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        raw = raw.rsplit("```", 1)[0]
-
     try:
-        issues = json.loads(raw)
+        issues = json.loads(repair_json(raw, expect="array"))
         if not isinstance(issues, list):
             issues = []
     except json.JSONDecodeError:
@@ -190,7 +205,7 @@ async def _review_batch(
     text_parts = []
     total_words = 0
     for ch in batch_chapters:
-        text_parts.append(f"=== 第{ch.number}章 {ch.title or ''} ===\n{ch.content}")
+        text_parts.append(f"=== 第{ch.number}章 {ch.title or ''} ===\n{strip_plot_suggestions(ch.content or '')}")
         total_words += ch.word_count or 0
     full_text = "\n\n".join(text_parts)
 
@@ -229,13 +244,8 @@ async def _review_batch(
         max_tokens=4096,
     )
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        raw = raw.rsplit("```", 1)[0]
-
     try:
-        issues = json.loads(raw)
+        issues = json.loads(repair_json(raw, expect="array"))
         if not isinstance(issues, list):
             issues = []
     except json.JSONDecodeError:

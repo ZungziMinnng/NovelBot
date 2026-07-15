@@ -22,6 +22,9 @@ class Location(Base):
     # 动态状态（LLM 每章自动更新：当前态势、控制方等）
     current_state: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # 重要性权重（1-5，默认3中性），检索时按 相似度×重要性 重排
+    importance: Mapped[int] = mapped_column(Integer, default=3)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

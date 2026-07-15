@@ -162,8 +162,8 @@ export default function OutlineModal({ novelId, currentChapter, onClose }: Outli
 function ModalShell({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
-      <div className="fixed inset-y-4 left-1/2 -translate-x-1/2 w-full max-w-2xl bg-background border rounded-xl shadow-2xl z-50 flex flex-col">
+      <div className="fixed inset-0 bg-black/40 z-40" />
+      <div className="fixed inset-y-4 left-1/2 -translate-x-1/2 w-full max-w-4xl bg-background border rounded-xl shadow-2xl z-50 flex flex-col">
         {children}
       </div>
     </>

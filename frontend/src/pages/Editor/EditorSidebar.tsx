@@ -8,7 +8,7 @@ import ProjectTab from './sidebar/ProjectTab'
 import CharacterTab from './sidebar/CharacterTab'
 import WorldTab, {
   WORLD_CATEGORIES,
-  WorldSettingView, LocationsView, EntitiesView, NotesView, TimelineView,
+  WorldSettingView, LocationsView, EntitiesView, NotesView, TimelineView, WorldviewChangesView, GlossaryView, WorldRulesView, StoryThreadsView,
 } from './sidebar/WorldTab'
 import FactionsView from './sidebar/FactionsView'
 import TechniquesView, { TechniqueDetail } from './sidebar/TechniquesView'
@@ -231,6 +231,9 @@ export default function EditorSidebar({
             {detailView.type === 'world' && (
               <>
                 {detailView.key === 'world_setting' && <WorldSettingView novel={novel} onEdit={onOpenSettings} />}
+                {detailView.key === 'core_rules' && <WorldRulesView novelId={novelId} kind="rule" />}
+                {detailView.key === 'special_elements' && <WorldRulesView novelId={novelId} kind="element" />}
+                {detailView.key === 'story_threads' && <StoryThreadsView novelId={novelId} />}
                 {detailView.key === 'locations' && (
                   <LocationsView novelId={novelId}
                     onSelectLocation={(id) => setEntitySelection({ kind: 'location', id })}
@@ -259,9 +262,11 @@ export default function EditorSidebar({
                 {detailView.key === 'notes' && (
                   <NotesView novelId={novelId}
                     onSelectNote={(id) => setEntitySelection({ kind: 'note', id })}
+                    onNewNote={() => setEntitySelection({ kind: 'note', id: 0 })}
                     selectedNoteId={entitySelection?.kind === 'note' ? entitySelection.id : null}
                   />
                 )}
+                {detailView.key === 'worldview_changes' && <WorldviewChangesView novelId={novelId} />}
                 {detailView.key === 'timeline' && <TimelineView novelId={novelId} />}
                 {detailView.key === 'relationships' && (
                   <RelationshipGraphView
@@ -271,6 +276,7 @@ export default function EditorSidebar({
                     }
                   />
                 )}
+                {detailView.key === 'glossary' && <GlossaryView novelId={novelId} />}
               </>
             )}
             {detailView.type === 'character' && (
@@ -297,6 +303,7 @@ export default function EditorSidebar({
               {entitySelection.kind === 'entity' ? (entityType === 'item' ? '道具详情' : '系统详情')
                 : entitySelection.kind === 'technique' ? '功法详情'
                 : entitySelection.kind === 'location' ? '地点详情'
+                : entitySelection.id === 0 ? '新建设定'
                 : '设定详情'}
             </span>
             <button onClick={() => setEntitySelection(null)} className="p-1 rounded hover:bg-muted">
@@ -324,6 +331,7 @@ export default function EditorSidebar({
                 noteId={entitySelection.id}
                 novelId={novelId}
                 onClose={() => setEntitySelection(null)}
+                onCreated={(id) => setEntitySelection({ kind: 'note', id })}
               />
             )}
             {entitySelection.kind === 'location' && (

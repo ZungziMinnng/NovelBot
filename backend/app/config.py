@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     https_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTPS_PROXY")
     http_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTP_PROXY")
 
+    # ── 嵌入模型超时（秒）：端点慢/不可达时快速失败，避免拖垮整章生成 ─────────
+    embedding_timeout: float = 20.0
+
+    # ── 可选剧情细节审查超时（秒）：上游失去响应时保留已生成/修订正文 ─────────
+    detail_review_timeout: float = 180.0
+
     # ── 数据路径 ──────────────────────────────────────────────────────────────
     data_dir: str = str(_DATA_DIR)
     database_url: str = f"sqlite+aiosqlite:///{(_DATA_DIR / 'novelbot.db').as_posix()}"

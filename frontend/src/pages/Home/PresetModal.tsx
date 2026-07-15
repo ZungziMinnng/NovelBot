@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X } from 'lucide-react'
-import type { WriterPreset } from '@/api/client'
+import type { WriterPreset, ExampleTurn } from '@/api/client'
+import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
 
 interface Props {
   preset: WriterPreset | null  // null = create mode
-  onSave: (data: { name: string; prompt: string }) => void
+  onSave: (data: { name: string; prompt: string; examples: ExampleTurn[] }) => void
   onClose: () => void
 }
 
@@ -14,6 +15,7 @@ const MIN_H = 400
 export default function PresetModal({ preset, onSave, onClose }: Props) {
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [examples, setExamples] = useState<ExampleTurn[]>([])
   const [size, setSize] = useState({ w: 768, h: 600 })
   const dragging = useRef<{ edge: string; startX: number; startY: number; startW: number; startH: number } | null>(null)
 
@@ -21,6 +23,7 @@ export default function PresetModal({ preset, onSave, onClose }: Props) {
     if (preset) {
       setName(preset.name)
       setPrompt(preset.prompt)
+      setExamples(preset.examples || [])
     }
   }, [preset])
 
@@ -63,13 +66,13 @@ export default function PresetModal({ preset, onSave, onClose }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
-    onSave({ name: name.trim(), prompt })
+    onSave({ name: name.trim(), prompt, examples })
   }
 
   const edgeClass = 'absolute z-10'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div
         className="bg-card border rounded-xl shadow-lg flex flex-col relative"
         style={{ width: size.w, height: size.h, maxWidth: '95vw', maxHeight: '95vh' }}
@@ -104,14 +107,15 @@ export default function PresetModal({ preset, onSave, onClose }: Props) {
               autoFocus
             />
           </div>
-          <div className="flex-1 flex flex-col min-h-0 px-5 pb-4 pt-2">
-            <label className="block text-sm font-medium mb-1 shrink-0">提示词内容</label>
+          <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-4 pt-2">
+            <label className="block text-sm font-medium mb-1">提示词内容</label>
             <textarea
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
               placeholder="输入 Writer 系统提示词..."
-              className="w-full flex-1 min-h-0 px-3 py-2 border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+              className="w-full min-h-[12rem] px-3 py-2 border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50 resize-y"
             />
+            <ExampleTurnsEditor value={examples} onChange={setExamples} />
           </div>
 
           <div className="flex items-center justify-end gap-2 px-5 py-4 border-t shrink-0">

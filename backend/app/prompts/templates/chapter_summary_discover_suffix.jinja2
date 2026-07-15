@@ -1,0 +1,10 @@
+请以 JSON 对象输出结果，且仅输出该 JSON，不要包含任何额外文字或 Markdown 代码块：
+{"day_offset": 0, "period": "", "summary": "剧情梗概正文", "importance": 3, "characters": [{"name": "姓名", "role": "配角", "description": "一句话简介"}], "entities": [{"name": "名称", "type": "item", "description": "一句话简介"}], "locations": [{"name": "地点名", "type": "类型", "description": "一句话简介", "parent_name": ""}], "techniques": [{"name": "名称", "type": "功法", "description": "一句话简介"}], "factions": [{"name": "名称", "type": "类型", "description": "一句话简介"}], "threads": [{"kind": "secret", "title": "10字内标题", "content": "完整事实", "importance": 4, "known_by": ["姓名"]}]}
+
+字段说明：
+- day_offset：本章相对上一章经过的天数（整数，≥0）。同一天=0，第二天=1，跳过N天=N；无法判断时填 0。第1章固定填 0。
+- period：本章覆盖的时段（可选，如“白天”“夜晚”“清晨”）；无法判断时留空字符串。
+- summary：剧情梗概正文（单段，不要换行）。禁止在正文中出现【第X日】、当天、次日等任何时间标记或日期（日期由系统根据 day_offset 统一生成）；正文内不要出现标题、前缀（如『章节剧情梗概：』）或 Markdown 符号（如 ** 或 ##）。
+- importance：本章对全书的重要性，整数 1-5。5=影响全局的重大转折（势力更替、主角重大突破或抉择、核心伏笔揭晓）；4=对主线有明确推进；3=常规剧情推进；2=次要支线；1=过渡或日常细节。
+- characters / entities / locations / techniques / factions：五类新设定候选，按【任务二】的提取规则填写；某个类别没有新条目就输出空数组。
+- threads：长期事实条目，按【任务三】的提取规则填写，最多 2 条；kind 只能是 "secret" 或 "foreshadowing"；importance 为 1-5 整数（影响全书主线填 4-5）；known_by 仅 secret 需要填。没有则输出空数组。

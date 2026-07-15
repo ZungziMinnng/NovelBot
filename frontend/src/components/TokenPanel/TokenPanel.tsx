@@ -4,14 +4,22 @@ import { X, Loader2, Save, RefreshCw } from 'lucide-react'
 import { novelsApi, chaptersApi, type ContextConfigValue, type Novel } from '@/api/client'
 import toast from 'react-hot-toast'
 
-const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'full' | 'field' | 'name' }> = [
-  { key: 'core_setting', label: '世界观设定', source: 'rag' },
+const formatCny = (value: number) => {
+  if (!Number.isFinite(value) || value === 0) return '¥0.00'
+  if (value < 0.0001) return `¥${value.toFixed(6)}`
+  if (value < 0.01) return `¥${value.toFixed(4)}`
+  return `¥${value.toFixed(2)}`
+}
+
+const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'full' | 'field' | 'name' | 'mixed' }> = [
+  { key: 'core_setting', label: '世界观设定', source: 'mixed' },
   { key: 'book_summary', label: '全书概要', source: 'field' },
   { key: 'arc_summary', label: '故事弧概要', source: 'full' },
+  { key: 'story_threads', label: '伏笔/秘密', source: 'field' },
   { key: 'chapter_outline', label: '本章大纲', source: 'full' },
   { key: 'rolling_summary', label: '近期摘要', source: 'full' },
   { key: 'rag_context', label: 'RAG 历史检索', source: 'rag' },
-  { key: 'notes_context', label: '补充设定', source: 'rag' },
+  { key: 'notes_context', label: '补充设定', source: 'mixed' },
   { key: 'recent_text', label: '上一章原文', source: 'full' },
   { key: 'characters', label: '角色状态', source: 'name' },
   { key: 'items', label: '道具', source: 'name' },
@@ -26,6 +34,7 @@ const SOURCE_BADGE: Record<string, { text: string; cls: string }> = {
   rag:   { text: 'RAG', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
   full:  { text: '全量', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
   field: { text: '字段', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400' },
+  mixed: { text: '混合', cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' },
 }
 
 const ENTITY_TOP_K_SECTIONS: Array<{ configKey: string; label: string; defaultVal: number }> = [
@@ -53,10 +62,12 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
 
   const maxChapterNum = chapters.length > 0 ? Math.max(...chapters.map(c => c.number)) : 0
   const [chapterNum, setChapterNum] = useState(() => maxChapterNum + 1)
+  const [targetWords, setTargetWords] = useState(5000)
   const [config, setConfig] = useState<Record<string, ContextConfigValue>>({})
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [reindexing, setReindexing] = useState(false)
+  const [rebuilding, setRebuilding] = useState(false)
 
   useEffect(() => {
     const cfg: Record<string, ContextConfigValue> = {}
@@ -71,8 +82,8 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
   }, [novel.id])
 
   const { data: preview, isLoading } = useQuery({
-    queryKey: ['context-preview', novelId, chapterNum],
-    queryFn: () => novelsApi.contextPreview(novelId, chapterNum),
+    queryKey: ['context-preview', novelId, chapterNum, targetWords],
+    queryFn: () => novelsApi.contextPreview(novelId, chapterNum, '', targetWords),
   })
 
   const toggle = (key: string) => {
@@ -102,6 +113,11 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
 
   const tokens = preview?.token_estimate || {}
   const totalTokens = tokens.total || 0
+  const pricing = preview?.pricing
+  const priceConfigured = Boolean(pricing?.configured)
+  const sectionCost = (tokenCount: number) => (
+    tokenCount * (pricing?.input_price_cny_per_million || 0) / 1_000_000
+  )
   const metaSourceMap: Record<string, string> = Object.fromEntries(
     (preview?.meta || []).map((m: any) => [m.key, m.source])
   )
@@ -125,17 +141,52 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
         </select>
       </div>
 
-      {/* Total token badge */}
+      <div className="flex items-center gap-2">
+        <label className="text-xs font-medium shrink-0">目标字数</label>
+        <input
+          type="number"
+          min={3500}
+          max={8000}
+          step={500}
+          value={targetWords}
+          onChange={e => setTargetWords(Math.max(3500, Math.min(8000, Number(e.target.value) || 5000)))}
+          className="flex-1 border rounded-lg px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+
+      {/* Estimated chapter cost */}
       {isLoading ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 className="w-3.5 h-3.5 animate-spin" /> 计算中...
         </div>
+      ) : !priceConfigured ? (
+        <div className="border border-amber-200 bg-amber-50/70 dark:border-amber-900 dark:bg-amber-950/30 rounded-lg px-3 py-2.5">
+          <p className="text-xs font-medium text-amber-800 dark:text-amber-300">当前 Writer 未配置 Token 价格</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {pricing?.model_name || '未解析 Writer 模型'} · 当前上下文约 {totalTokens.toLocaleString()} tokens
+          </p>
+        </div>
       ) : (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">预估总量</span>
-          <span className="px-2 py-0.5 text-xs font-medium bg-primary/10 text-primary rounded-full">
-            ~{totalTokens.toLocaleString()} tokens
-          </span>
+        <div className="border rounded-lg px-3 py-3 bg-muted/20">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground truncate">{pricing?.model_name || 'Writer 模型'}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                输入 {formatCny(pricing?.input_cost_cny || 0)} + 预计输出 {formatCny(pricing?.output_cost_cny || 0)}
+              </p>
+            </div>
+            <div className="text-right shrink-0">
+              <p className="text-[11px] text-muted-foreground">预计本章</p>
+              <p className="text-base font-semibold tabular-nums">{formatCny(pricing?.total_cost_cny || 0)}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 pt-2 border-t text-[11px] text-muted-foreground tabular-nums">
+            <span>输入约 {totalTokens.toLocaleString()} tokens</span>
+            <span>输出预留 {(pricing?.expected_output_tokens || 0).toLocaleString()} tokens</span>
+            {preview?.dynamic_budget?.input_budget ? (
+              <span>输入预算上限 {formatCny(pricing?.budget_input_cost_cny || 0)}</span>
+            ) : null}
+          </div>
         </div>
       )}
 
@@ -161,8 +212,9 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
               />
               <span className="text-xs flex-1">{label}</span>
               {badge && <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
-              <span className={`text-xs tabular-nums w-14 text-right ${tok > 0 ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}>
-                {tok > 0 ? `~${tok.toLocaleString()}` : '0'}
+              <span className={`w-24 text-right tabular-nums ${tok > 0 ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}>
+                <span className="block text-xs">{priceConfigured ? formatCny(sectionCost(tok)) : '未计价'}</span>
+                <span className="block text-[10px]">{tok > 0 ? `~${tok.toLocaleString()} tokens` : '0 tokens'}</span>
               </span>
             </label>
           )
@@ -178,19 +230,28 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
         ] as [string, number][]).map(([label, tok]) => (
           <div key={label} className="flex items-center gap-3 px-3 py-2">
             <span className="text-xs flex-1 text-muted-foreground">{label}</span>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              ~{tok.toLocaleString()}
+            <span className="text-right tabular-nums text-muted-foreground">
+              <span className="block text-xs">{priceConfigured ? formatCny(sectionCost(tok)) : '未计价'}</span>
+              <span className="block text-[10px]">~{tok.toLocaleString()} tokens</span>
             </span>
           </div>
         ))}
       </div>
 
       {/* Total */}
-      <div className="border-t pt-3 flex items-center justify-between px-3">
-        <span className="text-xs font-medium">合计</span>
-        <span className="text-xs font-medium tabular-nums">
-          ~{totalTokens.toLocaleString()} tokens
-        </span>
+      <div className="border-t pt-3 flex items-start justify-between px-3 gap-4">
+        <div>
+          <span className="text-xs font-medium">上下文输入合计</span>
+          {priceConfigured && pricing && (
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              不含预计输出 {formatCny(pricing.output_cost_cny)}
+            </p>
+          )}
+        </div>
+        <div className="text-right tabular-nums">
+          <span className="block text-xs font-medium">{priceConfigured ? formatCny(pricing?.input_cost_cny || 0) : '未计价'}</span>
+          <span className="block text-[10px] text-muted-foreground">~{totalTokens.toLocaleString()} tokens</span>
+        </div>
       </div>
 
       {/* Per-entity RAG top_k */}
@@ -243,6 +304,25 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
           {reindexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
           {reindexing ? '重建中...' : '重建实体索引'}
         </button>
+        <button
+          onClick={async () => {
+            if (!confirm('将删除并按当前嵌入模型重建整本书的向量库（实体+设定+全部摘要），可能耗时较久。用于修复维度不匹配导致的写入失败。确认继续？')) return
+            setRebuilding(true)
+            try {
+              await novelsApi.rebuildVectors(novelId)
+              toast.success('向量库已重建')
+            } catch {
+              toast.error('重建向量库失败')
+            } finally {
+              setRebuilding(false)
+            }
+          }}
+          disabled={rebuilding}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 border rounded-lg text-sm hover:bg-muted transition-colors disabled:opacity-50"
+        >
+          {rebuilding ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          {rebuilding ? '重建中...' : '重建向量库'}
+        </button>
       </div>
     </div>
   )
@@ -257,8 +337,8 @@ interface TokenPanelProps {
 export default function TokenPanel({ novelId, novel, onClose }: TokenPanelProps) {
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 h-full w-96 bg-background border-l shadow-2xl z-50 flex flex-col">
+      <div className="fixed inset-0 bg-black/40 z-40" />
+      <div className="fixed right-0 top-0 h-full w-full sm:w-[560px] bg-background border-l shadow-2xl z-50 flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b shrink-0">
           <h2 className="text-sm font-semibold">上下文配置</h2>
           <button onClick={onClose} className="p-1 rounded hover:bg-muted">

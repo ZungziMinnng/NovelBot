@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db, AsyncSessionLocal
 from app.api.routes import novels, chapters, characters, generation, app_settings, chat
-from app.api.routes import model_library, admin, writer_presets, world_entities, locations, api_providers, novel_notes, factions, techniques, volumes, outlines, prompts, corrections
+from app.api.routes import model_library, admin, writer_presets, world_entities, locations, api_providers, novel_notes, factions, techniques, volumes, outlines, prompts, corrections, worldview_changes, glossary, world_rules, story_threads
 
 
 async def _auto_migrate_providers(session):
@@ -89,6 +89,10 @@ app.include_router(volumes.router,        prefix="/api/volumes",        tags=["v
 app.include_router(outlines.router,      prefix="/api/outlines",       tags=["outlines"])
 app.include_router(prompts.router,       prefix="/api/prompts",        tags=["prompts"])
 app.include_router(corrections.router,   prefix="/api/corrections",    tags=["corrections"])
+app.include_router(worldview_changes.router, prefix="/api/worldview-changes", tags=["worldview-changes"])
+app.include_router(glossary.router,        prefix="/api/glossary",       tags=["glossary"])
+app.include_router(world_rules.router,     prefix="/api/world-rules",    tags=["world-rules"])
+app.include_router(story_threads.router,   prefix="/api/story-threads",  tags=["story-threads"])
 
 
 _avatars_dir = Path("data/avatars")

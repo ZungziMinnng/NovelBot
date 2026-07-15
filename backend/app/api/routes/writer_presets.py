@@ -18,7 +18,7 @@ async def list_presets(db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=WriterPresetOut)
 async def create_preset(data: WriterPresetCreate, db: AsyncSession = Depends(get_db)):
-    preset = WriterPreset(name=data.name, prompt=data.prompt)
+    preset = WriterPreset(name=data.name, prompt=data.prompt, examples=data.examples)
     db.add(preset)
     await db.commit()
     await db.refresh(preset)
@@ -44,6 +44,8 @@ async def update_preset(
         preset.name = data.name
     if data.prompt is not None:
         preset.prompt = data.prompt
+    if data.examples is not None:
+        preset.examples = data.examples
     await db.commit()
     await db.refresh(preset)
     return preset

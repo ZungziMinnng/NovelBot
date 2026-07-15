@@ -17,8 +17,7 @@ const STAGE_CONFIG: Record<string, { label: string; icon: React.ComponentType<{ 
   updating_memory: { label: '更新记忆库...', icon: Brain },
   updating_memory_summary: { label: '生成章节摘要...', icon: Brain },
   updating_memory_characters: { label: '更新角色状态...', icon: Brain },
-  updating_memory_entities: { label: '更新实体状态...', icon: Brain },
-  updating_memory_locations: { label: '更新地点状态...', icon: Brain },
+  updating_memory_entities: { label: '更新实体/地点状态...', icon: Brain },
 }
 
 export default function AgentStatus({ stage, visible }: Props) {

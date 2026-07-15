@@ -1,4 +1,6 @@
+import asyncio
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -120,6 +122,52 @@ async def update_settings(data: SettingsUpdate):
     return {"ok": True}
 
 
+class ProxyStatusOut(BaseModel):
+    enabled: bool          # 是否配置了代理（https/http 任一非空）
+    proxy: str             # 当前代理地址（本地 127.0.0.1，与设置页输入框同值，无密钥）
+    host: str = ""
+    port: int = 0
+    reachable: bool | None = None  # 实时 TCP 探测结果；未配置或解析失败为 None
+    detail: str = ""       # 不可达时的原因
+
+
+async def _probe_tcp(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
+    """对 host:port 做一次 TCP 连接探测，判断代理端口是否在监听。"""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True, ""
+    except Exception as e:
+        return False, str(e) or e.__class__.__name__
+
+
+@router.get("/proxy-status", response_model=ProxyStatusOut)
+async def proxy_status():
+    """探测当前代理端口是否可连通，用于设置页展示「socket 是否真的在线」。"""
+    proxy = settings.https_proxy or settings.http_proxy
+    if not proxy:
+        return ProxyStatusOut(enabled=False, proxy="")
+    parsed = urlparse(proxy)
+    host = parsed.hostname or ""
+    port = parsed.port or 0
+    if not host or not port:
+        return ProxyStatusOut(
+            enabled=True, proxy=proxy, host=host, port=port,
+            reachable=None, detail="无法解析代理地址的主机/端口",
+        )
+    reachable, detail = await _probe_tcp(host, port)
+    return ProxyStatusOut(
+        enabled=True, proxy=proxy, host=host, port=port,
+        reachable=reachable, detail=detail,
+    )
+
+
 class TestRequest(BaseModel):
     model: str = ""
 
@@ -128,14 +176,20 @@ class TestRequest(BaseModel):
 async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = Depends(get_db)):
     """测试连接：支持指定模型，自动按 api_format 路由到对应 SDK"""
     from app.services import llm_client
-    model = data.model or settings.default_fast_model
+    ref = data.model or settings.default_fast_model
     try:
+        # data.model 可能是 ModelEntry.id（新方案）或旧 model_id 字符串
         entry = None
         if data.model:
-            result = await db.execute(
-                select(ModelEntry).where(ModelEntry.model_id == data.model).limit(1)
-            )
-            entry = result.scalar_one_or_none()
+            if data.model.isdigit():
+                entry = await db.get(ModelEntry, int(data.model))
+            if entry is None:
+                result = await db.execute(
+                    select(ModelEntry).where(ModelEntry.model_id == data.model).limit(1)
+                )
+                entry = result.scalar_one_or_none()
+        # 实际调用 SDK / 展示用真实模型名；dispatch 仍收 ref 以按供应商消歧
+        model = entry.model_id if entry else llm_client.resolve_model_ref(ref)[0]
 
         if entry and entry.model_type == "embedding":
             if entry.api_format != "openai":
@@ -148,7 +202,11 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
 
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
+            client = AsyncOpenAI(
+                api_key=provider.api_key,
+                base_url=provider.base_url,
+                http_client=llm_client._build_httpx_client(provider.use_proxy),
+            )
             response = await client.embeddings.create(
                 input="测试文本",
                 model=model,
@@ -162,10 +220,11 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
                 "model_type": "embedding",
             }
 
-        api_format = llm_client.get_model_api_format(model)
+        api_format = entry.api_format if entry else llm_client.resolve_model_ref(ref)[1]
+        # 传 ref（非真实名）给 dispatch，以便按供应商精确路由
         response = await llm_client.dispatch_chat_complete(
             messages=[{"role": "user", "content": "回复数字1"}],
-            model=model,
+            model=ref,
             api_format=api_format,
             max_tokens=100,
         )
@@ -177,7 +236,7 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
             "model_type": entry.model_type if entry else "chat",
         }
     except Exception as e:
-        api_format = entry.api_format if entry else llm_client.get_model_api_format(model)
+        api_format = entry.api_format if entry else llm_client.resolve_model_ref(ref)[1]
         return {
             "ok": False,
             "error": str(e),

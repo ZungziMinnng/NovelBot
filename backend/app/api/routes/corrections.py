@@ -3,11 +3,13 @@
 搜索同时走「关键词(SQL ilike + JSON 扫描)」与「语义(向量库)」，返回扁平的可编辑命中。
 保存时集中处理跨表与向量库的一致性同步（章节摘要三处一致、角色/地点 re-embed）。
 """
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -166,8 +168,9 @@ def _set_subfield(obj, attr: str, key: str, value: str) -> None:
     setattr(obj, attr, data)
 
 
-async def _sync_chapter_summary(db: AsyncSession, chapter: Chapter, value: str) -> None:
-    """章节摘要三处同步：Chapter.summary + Memory 行 + ChromaDB 向量。"""
+async def _sync_chapter_summary_db(db: AsyncSession, chapter: Chapter, value: str) -> None:
+    """章节摘要数据库两处同步：Chapter.summary + Memory 行。
+    向量同步放事务提交之后（_sync_summary_vector），避免嵌入网络调用期间抱着 SQLite 写锁。"""
     chapter.summary = value
     mem = (await db.execute(
         select(Memory).where(
@@ -177,20 +180,45 @@ async def _sync_chapter_summary(db: AsyncSession, chapter: Chapter, value: str) 
     )).scalars().first()
     if mem:
         mem.content = value
-    await vector_store.astore_text(
-        novel_id=chapter.novel_id,
-        doc_id=f"chapter_{chapter.id}_summary",
-        text=value,
-        metadata={
-            "type": "chapter_summary",
-            "volume": chapter.volume,
-            "chapter_number": chapter.number,
-        },
-    )
+
+
+async def _sync_summary_vector(chapter: Chapter, value: str) -> None:
+    # 向量写入失败不应让摘要修正落库失败（与摘要/实体同步策略一致）。
+    # 典型失败：集合维度与当前嵌入模型不一致（需用「重建向量库」修复）。
+    try:
+        await vector_store.astore_text(
+            novel_id=chapter.novel_id,
+            doc_id=f"chapter_{chapter.id}_summary",
+            text=value,
+            metadata={
+                "type": "chapter_summary",
+                "volume": chapter.volume,
+                "chapter_number": chapter.number,
+            },
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "摘要修正向量同步失败（文本已保存，可重建向量库修复）: novel=%s chapter=%s",
+            chapter.novel_id, chapter.id, exc_info=True,
+        )
 
 
 @router.post("/novel/{novel_id}/apply")
 async def apply_edit(novel_id: int, req: ApplyEditRequest, db: AsyncSession = Depends(get_db)):
+    # WAL 模式下若本事务的读快照期间有其他连接提交（如后台生成），写升级会立即
+    # 报 database is locked 且不等待 busy_timeout；回滚拿新快照重试即可。
+    for attempt in range(3):
+        try:
+            return await _apply_edit_once(novel_id, req, db)
+        except OperationalError as e:
+            await db.rollback()
+            if "database is locked" not in str(e).lower() or attempt == 2:
+                raise
+            await asyncio.sleep(0.3 * (attempt + 1))
+
+
+async def _apply_edit_once(novel_id: int, req: ApplyEditRequest, db: AsyncSession):
     source, field, value = req.source, req.field, req.value
 
     if source == "character":
@@ -231,19 +259,23 @@ async def apply_edit(novel_id: int, req: ApplyEditRequest, db: AsyncSession = De
         chapter = await db.get(Chapter, req.id)
         if not chapter or chapter.novel_id != novel_id:
             raise HTTPException(status_code=404, detail="章节不存在")
-        await _sync_chapter_summary(db, chapter, value)
+        await _sync_chapter_summary_db(db, chapter, value)
         await db.commit()
+        await _sync_summary_vector(chapter, value)
 
     elif source == "memory":
         mem = await db.get(Memory, req.id)
         if not mem or mem.novel_id != novel_id:
             raise HTTPException(status_code=404, detail="记忆条目不存在")
         mem.content = value
+        synced_chapter = None
         if mem.memory_type == "chapter_summary" and mem.chapter_id:
-            ch = await db.get(Chapter, mem.chapter_id)
-            if ch:
-                await _sync_chapter_summary(db, ch, value)
+            synced_chapter = await db.get(Chapter, mem.chapter_id)
+            if synced_chapter:
+                await _sync_chapter_summary_db(db, synced_chapter, value)
         await db.commit()
+        if synced_chapter:
+            await _sync_summary_vector(synced_chapter, value)
 
     elif source == "outline":
         outline = await db.get(Outline, req.id)

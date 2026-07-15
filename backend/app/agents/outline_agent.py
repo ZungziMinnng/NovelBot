@@ -31,7 +31,6 @@ def _outline_max_tokens(chapter_count: int) -> int:
 async def generate_chapter_outlines(
     session: AsyncSession,
     novel: Novel,
-    nsfw_mode: bool = False,
 ) -> list[Outline]:
     """根据小说基本信息生成章级大纲；开启分卷时生成卷级范围大纲。"""
     result = await session.execute(

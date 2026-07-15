@@ -7,11 +7,13 @@ class NoteCreate(BaseModel):
     novel_id: int
     title: str
     content: str = ""
+    importance: int = 3
 
 
 class NoteUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
+    importance: Optional[int] = None
 
 
 class NoteOut(BaseModel):
@@ -19,6 +21,7 @@ class NoteOut(BaseModel):
     novel_id: int
     title: str
     content: str
+    importance: int
     created_at: datetime
     updated_at: datetime
 

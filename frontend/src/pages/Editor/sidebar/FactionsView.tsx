@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Loader2, Search } from 'lucide-react'
 import { factionsApi, locationsApi, type Faction, type Location } from '@/api/client'
+import ImportanceSelect from '@/components/ImportanceSelect'
 import toast from 'react-hot-toast'
 
 interface Props {
@@ -260,6 +261,7 @@ function FactionDetail({ faction, locations, novelId, onClose }: {
           </div>
           <Field label="成员数量" value={form.member_count} onChange={(v) => set('member_count', v)} placeholder="如：数百人、上万人等" />
         </div>
+        <ImportanceSelect value={form.importance} onChange={(v) => set('importance', v)} />
 
         {/* Color */}
         <div>
@@ -376,6 +378,7 @@ function toForm(f: Faction) {
     leader: f.leader, headquarters: f.headquarters, location_id: f.location_id,
     member_count: f.member_count, color: f.color, description: f.description,
     goals: f.goals, traits: f.traits, history: f.history,
+    importance: f.importance ?? 3,
   }
 }
 

@@ -1,15 +1,14 @@
 import { useState, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import {
-  chaptersApi, charactersApi, worldEntitiesApi, locationsApi, techniquesApi,
+  chaptersApi, charactersApi, worldEntitiesApi, locationsApi, techniquesApi, factionsApi,
   streamChapterGeneration, streamChapterRewrite,
 } from '@/api/client'
-import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, LlmCallData, ContextStepData } from '@/api/client'
+import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, NewFactionsData, LlmCallData, ContextStepData, Character } from '@/api/client'
 import { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
 import { useDevLogStore } from '@/store/devLogStore'
-import { useSettingsStore } from '@/store/settingsStore'
 import { useQueryClient } from '@tanstack/react-query'
 
 export interface GenerationStreamState {
@@ -17,14 +16,17 @@ export interface GenerationStreamState {
   newEntityCandidates: Array<{ name: string; type: string; description: string }>
   newLocationCandidates: Array<{ name: string; type: string; description: string; parent_name: string }>
   newTechCandidates: Array<{ name: string; type: string; description: string }>
+  newFactionCandidates: Array<{ name: string; type: string; description: string }>
   selectedCharIndices: Set<number>
   selectedEntityIndices: Set<number>
   selectedLocationIndices: Set<number>
   selectedTechIndices: Set<number>
+  selectedFactionIndices: Set<number>
   addingChars: boolean
   addingEntities: boolean
   addingLocations: boolean
   addingTechs: boolean
+  addingFactions: boolean
   isDiscovering: boolean
 }
 
@@ -40,10 +42,13 @@ export interface GenerationStreamActions {
   toggleLocationSelection: (i: number) => void
   handleAddNewLocations: () => Promise<void>
   handleAddNewTechs: () => Promise<void>
+  toggleFactionSelection: (i: number) => void
+  handleAddNewFactions: () => Promise<void>
   setNewCharCandidates: (v: Array<{ name: string; role: string; description: string }>) => void
   setNewEntityCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
   setNewLocationCandidates: (v: Array<{ name: string; type: string; description: string; parent_name: string }>) => void
   setNewTechCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
+  setNewFactionCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
 }
 
 export function useGenerationStream(
@@ -71,7 +76,11 @@ export function useGenerationStream(
   const [newTechCandidates, setNewTechCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
   const [selectedTechIndices, setSelectedTechIndices] = useState<Set<number>>(new Set())
   const [addingTechs, setAddingTechs] = useState(false)
+  const [newFactionCandidates, setNewFactionCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
+  const [selectedFactionIndices, setSelectedFactionIndices] = useState<Set<number>>(new Set())
+  const [addingFactions, setAddingFactions] = useState(false)
   const [isDiscovering, setIsDiscovering] = useState(false)
+  const [reviewCharacters, setReviewCharacters] = useState<Character[]>([])
 
   const isCurrentlyGenerating = useGenerationStore((s) =>
     s.isGenerating && s.novelId === novelId && s.chapterNum === selectedChapterNum,
@@ -84,6 +93,7 @@ export function useGenerationStream(
     setNewEntityCandidates([])
     setNewLocationCandidates([])
     setNewTechCandidates([])
+    setNewFactionCandidates([])
     try {
       const result = await chaptersApi.discover(chapterId)
       if (result.characters?.length) {
@@ -102,9 +112,13 @@ export function useGenerationStream(
         setNewTechCandidates(result.techniques)
         setSelectedTechIndices(new Set(result.techniques.map((_, i) => i)))
       }
+      if (result.factions?.length) {
+        setNewFactionCandidates(result.factions)
+        setSelectedFactionIndices(new Set(result.factions.map((_, i) => i)))
+      }
       const total = (result.characters?.length || 0) + (result.entities?.length || 0) +
-        (result.locations?.length || 0) + (result.techniques?.length || 0)
-      if (total === 0) toast('未发现新的角色、道具、地点或功法', { icon: 'ℹ️' })
+        (result.locations?.length || 0) + (result.techniques?.length || 0) + (result.factions?.length || 0)
+      if (total === 0) toast('未发现新的角色、道具、地点、功法或势力', { icon: 'ℹ️' })
     } catch (e) {
       console.error('Discover failed:', e)
       toast.error('发现失败')
@@ -123,6 +137,7 @@ export function useGenerationStream(
     setNewEntityCandidates([])
     setNewLocationCandidates([])
     setNewTechCandidates([])
+    setNewFactionCandidates([])
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map()
@@ -134,7 +149,6 @@ export function useGenerationStream(
         volume: selectedVolume,
         instruction,
         target_words: targetWords,
-        nsfw_mode: useSettingsStore.getState().nsfwMode,
         pov: pov || undefined,
       },
       (msg: SSEMessage) => {
@@ -225,6 +239,14 @@ export function useGenerationStream(
             if (d.candidates?.length) {
               setNewTechCandidates(d.candidates)
               setSelectedTechIndices(new Set(d.candidates.map((_, i) => i)))
+            }
+            break
+          }
+          case 'new_factions': {
+            const d = msg.data as NewFactionsData
+            if (d.candidates?.length) {
+              setNewFactionCandidates(d.candidates)
+              setSelectedFactionIndices(new Set(d.candidates.map((_, i) => i)))
             }
             break
           }
@@ -328,7 +350,6 @@ export function useGenerationStream(
         annotations: annotations.map(a => ({ paragraph: a.paragraph, text: a.text })),
         target_words: targetWords,
         rewrite_model: rewriteModel || undefined,
-        nsfw_mode: useSettingsStore.getState().nsfwMode,
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
@@ -482,14 +503,30 @@ export function useGenerationStream(
   const handleAddNewChars = useCallback(async () => {
     if (!selectedCharIndices.size || addingChars) return
     setAddingChars(true)
+    const created: Character[] = []
     try {
       for (const i of selectedCharIndices) {
-        await charactersApi.create({ ...newCharCandidates[i], novel_id: novelId })
+        const char = await charactersApi.create({ ...newCharCandidates[i], novel_id: novelId })
+        created.push(char)
       }
       qc.invalidateQueries({ queryKey: ['characters', novelId] })
       const remaining = newCharCandidates.filter((_, i) => !selectedCharIndices.has(i))
       setNewCharCandidates(remaining)
       setSelectedCharIndices(new Set())
+
+      // 为每个新角色生成角色卡
+      const reviewed: Character[] = []
+      for (const char of created) {
+        try {
+          const updated = await charactersApi.generateSheet(char.id)
+          reviewed.push(updated)
+        } catch {
+          reviewed.push(char) // 生成失败时仍保留基础角色信息
+        }
+      }
+      if (reviewed.length > 0) {
+        setReviewCharacters(reviewed)
+      }
     } finally {
       setAddingChars(false)
     }
@@ -592,20 +629,54 @@ export function useGenerationStream(
     }
   }, [newTechCandidates, selectedTechIndices, addingTechs, novelId, qc])
 
+  // ── Discovery: Faction ────────────────────────────────────────────────────
+  const toggleFactionSelection = useCallback((i: number) => {
+    setSelectedFactionIndices(prev => {
+      const next = new Set(prev)
+      next.has(i) ? next.delete(i) : next.add(i)
+      return next
+    })
+  }, [])
+
+  const handleAddNewFactions = useCallback(async () => {
+    if (!selectedFactionIndices.size || addingFactions) return
+    setAddingFactions(true)
+    try {
+      for (const i of selectedFactionIndices) {
+        const f = newFactionCandidates[i]
+        await factionsApi.create({
+          novel_id: novelId,
+          name: f.name,
+          type: f.type,
+          description: f.description,
+        })
+      }
+      qc.invalidateQueries({ queryKey: ['factions', novelId] })
+      const remaining = newFactionCandidates.filter((_, i) => !selectedFactionIndices.has(i))
+      setNewFactionCandidates(remaining)
+      setSelectedFactionIndices(new Set())
+    } finally {
+      setAddingFactions(false)
+    }
+  }, [newFactionCandidates, selectedFactionIndices, addingFactions, novelId, qc])
+
   return {
     // state
     newCharCandidates,
     newEntityCandidates,
     newLocationCandidates,
     newTechCandidates,
+    newFactionCandidates,
     selectedCharIndices,
     selectedEntityIndices,
     selectedLocationIndices,
     selectedTechIndices,
+    selectedFactionIndices,
     addingChars,
     addingEntities,
     addingLocations,
     addingTechs,
+    addingFactions,
     isDiscovering,
     isCurrentlyGenerating,
     // actions
@@ -618,13 +689,18 @@ export function useGenerationStream(
     toggleEntitySelection,
     toggleLocationSelection,
     toggleTechSelection,
+    toggleFactionSelection,
     handleAddNewChars,
     handleAddNewEntities,
     handleAddNewLocations,
     handleAddNewTechs,
+    handleAddNewFactions,
+    reviewCharacters,
+    setReviewCharacters,
     setNewCharCandidates,
     setNewEntityCandidates,
     setNewLocationCandidates,
     setNewTechCandidates,
+    setNewFactionCandidates,
   }
 }

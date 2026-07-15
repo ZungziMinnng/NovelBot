@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -15,6 +16,33 @@ from app.services import context_builder, llm_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# 非流式 Gemini 写作时，单次阻塞调用可静默数十秒不发任何字节，
+# 中间代理（如 Vite dev proxy）会把空闲连接判定为结束并断流。
+# 在静默期定期发送 SSE 注释行 `: ping`（前端 `data:` 解析与 EventSource 均忽略）保活。
+_HEARTBEAT_INTERVAL = 15.0
+
+
+async def _with_heartbeat(agen):
+    """包裹 SSE 异步生成器：静默超过 _HEARTBEAT_INTERVAL 秒时插入 keepalive 注释行。
+    注意：超时只是再次等待同一个 __anext__ 任务，绝不取消它，避免把 CancelledError
+    抛进 orchestrator 导致误 ROLLBACK。"""
+    nxt = asyncio.ensure_future(agen.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({nxt}, timeout=_HEARTBEAT_INTERVAL)
+            if not done:
+                yield ": ping\n\n"
+                continue
+            try:
+                chunk = nxt.result()
+            except StopAsyncIteration:
+                break
+            yield chunk
+            nxt = asyncio.ensure_future(agen.__anext__())
+    finally:
+        if not nxt.done():
+            nxt.cancel()
 
 
 @router.post("/chapter")
@@ -40,16 +68,15 @@ async def generate_chapter(
     await db.refresh(novel)
 
     async def event_stream():
-        async for chunk in run_chapter_generation(
+        async for chunk in _with_heartbeat(run_chapter_generation(
             session=db,
             novel=novel,
             chapter_number=req.chapter_number,
             volume=req.volume,
             instruction=req.instruction,
             target_words=req.target_words,
-            nsfw_mode=req.nsfw_mode,
             pov=req.pov or "",
-        ):
+        )):
             yield chunk
 
     return StreamingResponse(
@@ -75,16 +102,15 @@ async def rewrite_chapter(
     annotations = [a.model_dump() for a in req.annotations]
 
     async def event_stream():
-        async for chunk in run_chapter_rewrite(
+        async for chunk in _with_heartbeat(run_chapter_rewrite(
             session=db,
             novel=novel,
             chapter_number=req.chapter_number,
             annotations=annotations,
             target_words=req.target_words,
             rewrite_model=req.rewrite_model,
-            nsfw_mode=req.nsfw_mode,
             pov=req.pov or "",
-        ):
+        )):
             yield chunk
 
     return StreamingResponse(

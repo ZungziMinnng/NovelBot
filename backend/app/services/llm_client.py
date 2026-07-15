@@ -28,6 +28,9 @@ _model_formats: dict[str, str] = {}
 _providers_cache: dict[int, dict] = {}
 _model_provider_map: dict[str, int] = {}
 
+# ─── 模型条目索引（ModelEntry.id → 明细）：以 id 作唯一身份消歧同名 model_id ──
+_entry_index: dict[int, dict] = {}
+
 
 def clear_llm_client_cache() -> None:
     global _cached_client, _cached_client_key
@@ -44,59 +47,66 @@ def clear_llm_client_cache() -> None:
     _cached_anthropic_key = ("", "", "", "")
 
 
-def clear_llm_config_cache() -> None:
-    _model_formats.clear()
-    _providers_cache.clear()
-    _model_provider_map.clear()
-
-
-def clear_llm_cache() -> None:
-    clear_llm_client_cache()
-    clear_llm_config_cache()
-
-
-def _build_httpx_client() -> httpx.AsyncClient:
-    """构建带代理设置的 httpx 客户端"""
+def _build_httpx_client(use_proxy: bool = True) -> httpx.AsyncClient:
+    """构建 httpx 客户端。use_proxy=False 时即使配置了全局代理也直连（供可直连的供应商用）。"""
     mounts: dict = {}
-    if settings.https_proxy:
+    if use_proxy and settings.https_proxy:
         mounts["https://"] = httpx.AsyncHTTPTransport(proxy=settings.https_proxy)
-    if settings.http_proxy:
+    if use_proxy and settings.http_proxy:
         mounts["http://"] = httpx.AsyncHTTPTransport(proxy=settings.http_proxy)
     return httpx.AsyncClient(mounts=mounts or None, trust_env=False)
 
 
-def _get_openai_client_for(api_key: str, base_url: str) -> AsyncOpenAI:
-    """按 (api_key, base_url) 获取或创建缓存的 AsyncOpenAI 客户端。"""
-    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+def _gemini_http_options(base_url: str = "", use_proxy: bool = True) -> dict:
+    """构建 genai.Client 的 http_options：注入 base_url、NOVELBOT 代理，并 trust_env=False。
+    genai SDK 不走 _build_httpx_client，需经 client_args 把这些透传给底层 httpx。
+    trust_env=False 关键：否则 genai 默认读取 OS 环境代理（如不被 httpx 支持的 socks4），
+    构造即失败 / 连接全失败。与 OpenAI/Anthropic 客户端保持一致。"""
+    http_options: dict = {}
+    if base_url:
+        http_options["base_url"] = base_url
+    client_args: dict = {"trust_env": False}
+    proxy = (settings.https_proxy or settings.http_proxy) if use_proxy else ""
+    if proxy:
+        client_args["proxy"] = proxy
+    http_options["client_args"] = client_args
+    http_options["async_client_args"] = dict(client_args)
+    return http_options
+
+
+def _get_openai_client_for(api_key: str, base_url: str, use_proxy: bool = True) -> AsyncOpenAI:
+    """按 (api_key, base_url, use_proxy) 获取或创建缓存的 AsyncOpenAI 客户端。"""
+    cache_key = (api_key, base_url, use_proxy, settings.https_proxy, settings.http_proxy)
     if cache_key not in _openai_clients:
         _openai_clients[cache_key] = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-            http_client=_build_httpx_client(),
+            http_client=_build_httpx_client(use_proxy),
         )
     return _openai_clients[cache_key]
 
 
-def _get_gemini_client_for(api_key: str, base_url: str):
-    """按 (api_key, base_url) 获取或创建缓存的 genai.Client。"""
-    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+def _get_gemini_client_for(api_key: str, base_url: str, use_proxy: bool = True):
+    """按 (api_key, base_url, use_proxy) 获取或创建缓存的 genai.Client。"""
+    cache_key = (api_key, base_url, use_proxy, settings.https_proxy, settings.http_proxy)
     if cache_key not in _gemini_clients:
         from google import genai
         client_kwargs: dict = {"api_key": api_key}
-        if base_url:
-            client_kwargs["http_options"] = {"base_url": base_url}
+        http_options = _gemini_http_options(base_url, use_proxy)
+        if http_options:
+            client_kwargs["http_options"] = http_options
         _gemini_clients[cache_key] = genai.Client(**client_kwargs)
     return _gemini_clients[cache_key]
 
 
-def _get_anthropic_client_for(api_key: str, base_url: str):
-    """按 (api_key, base_url) 获取或创建缓存的 AsyncAnthropic 客户端。"""
-    cache_key = (api_key, base_url, settings.https_proxy, settings.http_proxy)
+def _get_anthropic_client_for(api_key: str, base_url: str, use_proxy: bool = True):
+    """按 (api_key, base_url, use_proxy) 获取或创建缓存的 AsyncAnthropic 客户端。"""
+    cache_key = (api_key, base_url, use_proxy, settings.https_proxy, settings.http_proxy)
     if cache_key not in _anthropic_clients:
         import anthropic
         kwargs = {
             "api_key": api_key or "placeholder",
-            "http_client": _build_httpx_client(),
+            "http_client": _build_httpx_client(use_proxy),
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -123,13 +133,23 @@ async def refresh_model_formats(session) -> None:
     """从数据库重建 model_id → api_format 内存映射"""
     from sqlalchemy import select
     from app.models.model_library import ModelEntry
-    result = await session.execute(select(ModelEntry))
+    # 按 id 升序 + 首次写入优先：model_id 无唯一约束，若两个供应商注册同名 model_id，
+    # 保持最早注册者的路由，新增供应商不会静默劫持已有模型（否则新供应商 base_url
+    # 若填错会让原本正常的模型请求打到错误端点）。
+    result = await session.execute(select(ModelEntry).order_by(ModelEntry.id))
     _model_formats.clear()
     _model_provider_map.clear()
+    _entry_index.clear()
     for m in result.scalars():
-        _model_formats[m.model_id] = m.api_format
+        _model_formats.setdefault(m.model_id, m.api_format)
         if m.provider_id:
-            _model_provider_map[m.model_id] = m.provider_id
+            _model_provider_map.setdefault(m.model_id, m.provider_id)
+        # id 全局唯一：以 id 为键索引，供 resolve_model_ref 精确消歧同名 model_id
+        _entry_index[m.id] = {
+            "model_id": m.model_id,
+            "api_format": m.api_format,
+            "provider_id": m.provider_id,
+        }
     logger.info("LLM 模型映射缓存已刷新: models=%d provider_links=%d", len(_model_formats), len(_model_provider_map))
 
 
@@ -146,21 +166,25 @@ async def refresh_provider_cache(session) -> None:
             "api_key": p.api_key,
             "base_url": p.base_url,
             "api_format": p.api_format,
+            "use_proxy": p.use_proxy,
         }
     logger.info("LLM 供应商缓存已刷新，客户端缓存已清空: providers=%d", len(_providers_cache))
-
-
-def _get_provider_config(model: str) -> dict | None:
-    """查找模型对应的供应商配置。未找到则返回 None（回退到全局 settings）。"""
-    provider_id = _model_provider_map.get(model)
-    if provider_id and provider_id in _providers_cache:
-        return _providers_cache[provider_id]
-    return None
 
 
 def get_model_api_format(model_id: str) -> str:
     """查询模型的 api_format，未录入则默认 openai"""
     return _model_formats.get(model_id, "openai")
+
+
+def resolve_model_ref(ref: str) -> tuple[str, str, int | None]:
+    """把存储的模型引用解析为 (real_model_id, api_format, provider_id|None)。
+
+    ref 优先按 ModelEntry.id 解释（新方案，唯一无歧义）；否则按旧的 model_id
+    字符串走"最早注册优先"回退（向后兼容旧数据 / 旧 .env，路由行为不变）。"""
+    if ref and ref.isdigit() and int(ref) in _entry_index:
+        e = _entry_index[int(ref)]
+        return e["model_id"], e["api_format"], e["provider_id"]
+    return ref, _model_formats.get(ref, "openai"), _model_provider_map.get(ref)
 
 
 def _resolve_model(agent_type: str, novel_override: str = "") -> str:
@@ -177,9 +201,10 @@ def _resolve_model(agent_type: str, novel_override: str = "") -> str:
 
 
 def get_fast_client(novel_fast_model: str = "") -> tuple[str, str]:
-    """返回 (model_id, api_format) 用于规划/摘要等低成本任务"""
-    model = novel_fast_model or settings.default_fast_model
-    return model, get_model_api_format(model)
+    """返回 (model_ref, api_format) 用于规划/摘要等低成本任务。
+    model_ref 原样透传（可能是 ModelEntry.id 或旧 model_id），由 dispatch 消歧。"""
+    ref = novel_fast_model or settings.default_fast_model
+    return ref, resolve_model_ref(ref)[1]
 
 
 # Agent-type → (agent_setting_field, fallback_category)
@@ -202,10 +227,11 @@ def get_agent_client(
     """
     按优先级解析 Agent 使用的模型：
       novel_override > agent-level setting > category default (writer/fast)
-    返回 (model_id, api_format)
+    返回 (model_ref, api_format)。model_ref 原样透传（ModelEntry.id 或旧 model_id），
+    由 dispatch 消歧；api_format 已解析正确以供调用方按格式分支。
     """
-    model = _resolve_model(agent_type, novel_override)
-    return model, get_model_api_format(model)
+    ref = _resolve_model(agent_type, novel_override)
+    return ref, resolve_model_ref(ref)[1]
 
 
 # ─── 消息格式转换辅助函数 ──────────────────────────────────────────────────
@@ -242,24 +268,30 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list]:
 
 # ─── 统一分发函数 ──────────────────────────────────────────────────────────
 
-def _resolve_client(model: str, api_format: str):
-    """根据模型的供应商配置获取对应客户端。回退到全局 settings 单例。"""
-    provider = _get_provider_config(model)
+def _resolve_dispatch(model_ref: str, api_format: str):
+    """把流转的 model_ref（ModelEntry.id 或旧 model_id）解析为
+    (real_model_id, client_fmt, client)。provider 由 id 精确定位，彻底消歧；
+    未关联 provider 时回退全局 settings 单例。real_model_id 传给 provider SDK，
+    确保 _is_deepseek_model / _gemini_* 等按模型名判断的逻辑收到真实名。"""
+    real_model, fmt, provider_id = resolve_model_ref(model_ref)
+    provider = _providers_cache.get(provider_id) if provider_id else None
     if provider:
-        fmt = provider["api_format"]
-        if fmt == "gemini":
-            return "gemini", _get_gemini_client_for(provider["api_key"], provider["base_url"])
-        elif fmt == "anthropic":
-            return "anthropic", _get_anthropic_client_for(provider["api_key"], provider["base_url"])
+        pfmt = provider["api_format"]
+        up = provider.get("use_proxy", True)
+        if pfmt == "gemini":
+            return real_model, "gemini", _get_gemini_client_for(provider["api_key"], provider["base_url"], up)
+        elif pfmt == "anthropic":
+            return real_model, "anthropic", _get_anthropic_client_for(provider["api_key"], provider["base_url"], up)
         else:
-            return "openai", _get_openai_client_for(provider["api_key"], provider["base_url"])
-    # 回退到全局 settings
-    if api_format == "gemini":
-        return "gemini", _make_gemini_client()
-    elif api_format == "anthropic":
-        return "anthropic", _make_anthropic_client()
+            return real_model, "openai", _get_openai_client_for(provider["api_key"], provider["base_url"], up)
+    # 回退到全局 settings（用解析出的 fmt，兜底调用方传入的 api_format）
+    use_fmt = fmt or api_format
+    if use_fmt == "gemini":
+        return real_model, "gemini", _make_gemini_client()
+    elif use_fmt == "anthropic":
+        return real_model, "anthropic", _make_anthropic_client()
     else:
-        return "openai", _make_client()
+        return real_model, "openai", _make_client()
 
 
 async def dispatch_chat_complete(
@@ -270,13 +302,13 @@ async def dispatch_chat_complete(
     max_tokens: int = 4096,
 ) -> str:
     """根据 api_format 分发非流式调用，返回文本内容"""
-    fmt, client = _resolve_client(model, api_format)
+    real_model, fmt, client = _resolve_dispatch(model, api_format)
     if fmt == "gemini":
-        return await _gemini_complete(messages, model, temperature, max_tokens, client)
+        return await _gemini_complete(messages, real_model, temperature, max_tokens, client)
     elif fmt == "anthropic":
-        return await _anthropic_complete(messages, model, temperature, max_tokens, client)
+        return await _anthropic_complete(messages, real_model, temperature, max_tokens, client)
     else:
-        return await chat_complete(messages, model, client, temperature, max_tokens)
+        return await chat_complete(messages, real_model, client, temperature, max_tokens)
 
 
 async def dispatch_chat_complete_with_usage(
@@ -287,13 +319,13 @@ async def dispatch_chat_complete_with_usage(
     max_tokens: int = 4096,
 ) -> tuple[str, int, int]:
     """根据 api_format 分发非流式调用，返回 (content, input_tokens, output_tokens)"""
-    fmt, client = _resolve_client(model, api_format)
+    real_model, fmt, client = _resolve_dispatch(model, api_format)
     if fmt == "gemini":
-        return await _gemini_complete_with_usage(messages, model, temperature, max_tokens, client)
+        return await _gemini_complete_with_usage(messages, real_model, temperature, max_tokens, client)
     elif fmt == "anthropic":
-        return await _anthropic_complete_with_usage(messages, model, temperature, max_tokens, client)
+        return await _anthropic_complete_with_usage(messages, real_model, temperature, max_tokens, client)
     else:
-        return await chat_complete_with_usage(messages, model, client, temperature, max_tokens)
+        return await chat_complete_with_usage(messages, real_model, client, temperature, max_tokens)
 
 
 async def dispatch_chat_stream_with_usage(
@@ -302,24 +334,26 @@ async def dispatch_chat_stream_with_usage(
     api_format: str,
     temperature: float = 0.85,
     max_tokens: int = 4096,
-    thinking_level: str = "medium",
+    gemini_thinking_level: str = "medium",
+    deepseek_thinking_level: str = "high",
     gemini_stream: bool = False,
 ) -> AsyncIterator[Union[str, tuple[int, int]]]:
     """根据 api_format 分发流式调用，yield str token 最后 yield (in_tok, out_tok)。
+    Gemini 用 gemini_thinking_level，DeepSeek（走 openai 格式）用 deepseek_thinking_level。
     可能 yield dict 表示元信息（如 {"warning": "..."} 重试提醒）。"""
-    fmt, client = _resolve_client(model, api_format)
+    real_model, fmt, client = _resolve_dispatch(model, api_format)
     if fmt == "gemini":
         if gemini_stream:
-            async for item in _gemini_true_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+            async for item in _gemini_true_stream_with_usage(messages, real_model, temperature, max_tokens, gemini_thinking_level, client):
                 yield item
         else:
-            async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+            async for item in _gemini_stream_with_usage(messages, real_model, temperature, max_tokens, gemini_thinking_level, client):
                 yield item
     elif fmt == "anthropic":
-        async for item in _anthropic_stream_with_usage(messages, model, temperature, max_tokens, client):
+        async for item in _anthropic_stream_with_usage(messages, real_model, temperature, max_tokens, client):
             yield item
     else:
-        async for item in chat_stream_with_usage(messages, model, client, temperature, max_tokens, thinking_level):
+        async for item in chat_stream_with_usage(messages, real_model, client, temperature, max_tokens, deepseek_thinking_level):
             yield item
 
 
@@ -349,11 +383,9 @@ def _is_deepseek_model(model_id: str) -> bool:
 
 
 def _deepseek_reasoning_effort(thinking_level: str) -> str:
-    """将前端 thinking_level 映射到 DeepSeek reasoning_effort 值。
-    DeepSeek V4 只支持 "high" 和 "max"（low/medium 被服务端映射为 high）。"""
-    if thinking_level == "high":
-        return "max"
-    return "high"
+    """将 DeepSeek 思考档位映射到 reasoning_effort 值。
+    档位为 "high" | "max"（"off" 在上层走 thinking disabled，不会进入此函数）。"""
+    return "max" if thinking_level == "max" else "high"
 
 
 # 参考 Cherry Studio THINKING_TOKEN_MAP (config/models/reasoning.ts:775-779)
@@ -418,14 +450,9 @@ def _make_gemini_client():
     from google import genai
 
     client_kwargs: dict = {"api_key": settings.gemini_api_key}
-    if settings.gemini_base_url:
-        client_kwargs["http_options"] = {"base_url": settings.gemini_base_url}
-    proxy = settings.https_proxy or settings.http_proxy or None
-    if proxy:
-        client_kwargs["http_options"] = {
-            **(client_kwargs.get("http_options", {})),
-            "headers": {},  # placeholder; proxy 由底层 httpx 环境变量处理
-        }
+    http_options = _gemini_http_options(settings.gemini_base_url)
+    if http_options:
+        client_kwargs["http_options"] = http_options
 
     _cached_gemini_client = genai.Client(**client_kwargs)
     _cached_gemini_key = key
@@ -454,6 +481,45 @@ def _parse_gemini_response(response) -> tuple[str, int, int, str]:
     return text, in_tok, out_tok, finish_reason
 
 
+def _gemini_block_message(block_reason) -> str:
+    """根据 blockReason 给出可操作的中文报错。"""
+    reason = getattr(block_reason, "name", str(block_reason))
+    if "PROHIBITED_CONTENT" in reason:
+        return (
+            "Gemini 在 prompt 级别拦截了请求（blockReason=PROHIBITED_CONTENT）。"
+            "这属于 Google 核心政策的硬过滤，无法通过 safetySettings 或任何 API 参数绕过。"
+            "请软化/改写输入内容，或为该场景改用其他模型（如 NSFW 场景换非 Gemini 模型）。"
+        )
+    return (
+        f"Gemini 在 prompt 级别拦截了请求（blockReason={reason}）。"
+        "已对可配置类别设为 BLOCK_NONE；若仍被拦截，请改写输入内容或更换模型。"
+    )
+
+
+_cached_gemini_safety = None
+
+
+def _gemini_safety_settings():
+    """对四个可配置类别设 BLOCK_NONE，尽量放宽 SAFETY 类拦截。
+    注意：PROHIBITED_CONTENT 属 Google 核心政策硬过滤，不受 safetySettings 影响。"""
+    global _cached_gemini_safety
+    if _cached_gemini_safety is not None:
+        return _cached_gemini_safety
+    from google.genai import types as genai_types
+
+    categories = [
+        genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    ]
+    _cached_gemini_safety = [
+        genai_types.SafetySetting(category=c, threshold=genai_types.HarmBlockThreshold.BLOCK_NONE)
+        for c in categories
+    ]
+    return _cached_gemini_safety
+
+
 async def _gemini_call(
     model: str,
     contents: list,
@@ -469,13 +535,16 @@ async def _gemini_call(
     if client is None:
         client = _make_gemini_client()
 
-    config_kwargs: dict = {"temperature": temperature}
+    config_kwargs: dict = {}
+    if temperature >= 0:
+        config_kwargs["temperature"] = temperature
     if max_output_tokens is not None:
         config_kwargs["max_output_tokens"] = max_output_tokens
     if thinking_config is not None:
         config_kwargs["thinking_config"] = thinking_config
     if system_instruction:
         config_kwargs["system_instruction"] = system_instruction
+    config_kwargs["safety_settings"] = _gemini_safety_settings()
 
     return await client.aio.models.generate_content(
         model=model,
@@ -511,7 +580,7 @@ async def _gemini_complete(
             model, finish_reason, block_reason, in_tok, out_tok,
         )
         if block_reason:
-            raise RuntimeError(f"Gemini 在 prompt 级别拦截了请求（blockReason={block_reason}）。")
+            raise RuntimeError(_gemini_block_message(block_reason))
         if finish_reason == "MAX_TOKENS":
             raise RuntimeError(
                 f"Gemini 输出 token 预算耗尽（finish_reason=MAX_TOKENS, max_tokens={max_tokens}），"
@@ -602,13 +671,12 @@ async def _gemini_stream_with_usage(
             model, finish_reason_str, block_reason, bool(response.candidates),
         )
         if block_reason:
-            raise RuntimeError(
-                f"Gemini 在 prompt 级别拦截了请求（blockReason={block_reason}）。"
-                f"这是模型对输入内容的安全过滤，与 safetySettings 无关。"
-            )
+            raise RuntimeError(_gemini_block_message(block_reason))
 
     # ── 空响应时自动重试一次：关闭 thinking、降低温度 ──
-    if not text and in_tok > 0:
+    # 含 in_tok==0 的瞬时空响应（aihubmix/Gemini 偶发，has_candidates=False）也重试，
+    # 避免单次上游抖动直接整章失败 ROLLBACK。
+    if not text:
         logger.warning(
             "Gemini 非流式空响应（model=%s, finish_reason=%s, in_tok=%d），"
             "关闭 thinking 重试...",
@@ -790,9 +858,10 @@ async def _anthropic_complete_with_usage(
     kwargs = {
         "model": model,
         "messages": filtered,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     if system_prompt:
         kwargs["system"] = system_prompt
     response = await client.messages.create(**kwargs)
@@ -815,9 +884,10 @@ async def _anthropic_stream_with_usage(
     kwargs = {
         "model": model,
         "messages": filtered,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     if system_prompt:
         kwargs["system"] = system_prompt
     in_tok = 0
@@ -836,7 +906,29 @@ async def _anthropic_stream_with_usage(
     yield (finish_reason, in_tok, out_tok)
 
 
-# ─── 旧式 OpenAI 调用（保留向后兼容）─────────────────────────────────────
+# ─── OpenAI 格式实现（dispatch_* 的 openai 分支）──────────────────────────
+
+def _log_cached_tokens(usage, model: str) -> None:
+    """观测 provider 端 prompt 缓存命中情况（不输出该字段的供应商不打日志）。
+    用于决定是否值得为吃缓存重排消息前缀。"""
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    cached = getattr(details, "cached_tokens", None) if details else None
+    if cached is not None:
+        logger.info(
+            "prompt 缓存观测: model=%s cached_tokens=%s prompt_tokens=%s",
+            model, cached, usage.prompt_tokens,
+        )
+
+
+def _first_choice(response, model: str):
+    """部分中转站会返回 HTTP 200 但 choices 为空/None 的错误载荷，
+    直接下标会抛难读的 NoneType 错误，这里把上游原始信息透出来。"""
+    if response.choices:
+        return response.choices[0]
+    extra = getattr(response, "model_extra", None) or {}
+    detail = extra.get("error") or extra or "响应中没有 choices 字段"
+    raise RuntimeError(f"上游返回异常响应（model={model}）：{detail}")
+
 
 async def chat_complete(
     messages: list[dict],
@@ -856,7 +948,7 @@ async def chat_complete(
     if _is_deepseek_model(model):
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     response = await client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content or ""
+    return _first_choice(response, model).message.content or ""
 
 
 async def chat_complete_with_usage(
@@ -870,13 +962,14 @@ async def chat_complete_with_usage(
     kwargs: dict = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     if _is_deepseek_model(model):
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     response = await client.chat.completions.create(**kwargs)
-    choice = response.choices[0]
+    choice = _first_choice(response, model)
     content = choice.message.content or ""
     if choice.finish_reason and choice.finish_reason != "stop":
         logging.getLogger(__name__).warning(
@@ -886,6 +979,7 @@ async def chat_complete_with_usage(
     usage = response.usage
     in_tok = usage.prompt_tokens if usage else 0
     out_tok = usage.completion_tokens if usage else 0
+    _log_cached_tokens(usage, model)
     return content, in_tok, out_tok
 
 
@@ -905,11 +999,12 @@ async def chat_stream_with_usage(
     kwargs: dict = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     if _is_deepseek_model(model):
         if thinking_level != "off":
             kwargs["extra_body"] = {
@@ -931,4 +1026,5 @@ async def chat_stream_with_usage(
         if chunk.usage:
             in_tok = chunk.usage.prompt_tokens or 0
             out_tok = chunk.usage.completion_tokens or 0
+            _log_cached_tokens(chunk.usage, model)
     yield (finish_reason, in_tok, out_tok)

@@ -213,6 +213,32 @@ function ChapterSummariesTab({ chapters, qc, novelId }: { chapters: Chapter[]; q
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillResult, setBackfillResult] = useState('')
+
+  const missingCount = chapters.filter(ch => !ch.summary && ch.content).length
+
+  const runBackfill = async (mode: 'missing' | 'all' = 'missing') => {
+    if (mode === 'all') {
+      const total = chapters.filter(ch => ch.content).length
+      if (!window.confirm(`将用新模板重写全部 ${total} 章的摘要（覆盖已有摘要），耗时较长，确定继续？`)) return
+    }
+    setBackfilling(true)
+    setBackfillResult('')
+    try {
+      const r = await chaptersApi.backfillSummaries(novelId, mode)
+      const parts = [`成功 ${r.done.length}/${r.total} 章`]
+      if (r.failed.length > 0) {
+        parts.push(`失败：${r.failed.map(f => `第${f.number}章(${f.error})`).join('、')}`)
+      }
+      setBackfillResult(parts.join('；'))
+      qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+    } catch (e) {
+      setBackfillResult(`补全失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBackfilling(false)
+    }
+  }
 
   const startEdit = (ch: Chapter) => {
     setEditValue(ch.summary || '')
@@ -236,6 +262,25 @@ function ChapterSummariesTab({ chapters, qc, novelId }: { chapters: Chapter[]; q
 
   return (
     <div className="space-y-2">
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => runBackfill('missing')}
+          disabled={backfilling || missingCount === 0}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50"
+        >
+          {backfilling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          {backfilling ? '生成中...' : `一键补全摘要（${missingCount} 章无摘要）`}
+        </button>
+        <button
+          onClick={() => runBackfill('all')}
+          disabled={backfilling}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-lg hover:bg-muted disabled:opacity-50"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          重写全部摘要
+        </button>
+        {backfillResult && <span className="text-xs text-muted-foreground">{backfillResult}</span>}
+      </div>
       {chapters.map(ch => (
         <div key={ch.id} className="border rounded-lg p-4 hover:border-primary/30 transition-colors">
           <div className="flex items-center gap-2 mb-2">

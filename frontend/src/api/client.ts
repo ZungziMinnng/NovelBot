@@ -24,17 +24,19 @@ export interface Novel {
   fast_model: string
   embedding_model: string
   writer_system_prompt: string
+  writer_examples: ExampleTurn[]
   enable_critic: boolean
   critic_model: string
   enable_detail_review: boolean
   detail_review_model: string
   writer_temperature: number
+  writer_use_custom_temperature: boolean
   writer_max_tokens: number
   rolling_summary_count: number
   rag_top_k: number
   chat_context_rounds: number
-  enable_thinking: boolean
-  thinking_level: string
+  deepseek_thinking_level: string
+  gemini_thinking_level: string
   gemini_stream: boolean
   enable_full_text_context: boolean
   full_text_chapters: number
@@ -88,8 +90,10 @@ export interface WorldEntity {
   type: 'item' | 'system'
   name: string
   description: string
+  function: string
   properties: Record<string, unknown>
   current_state: Record<string, unknown>
+  importance: number
   created_at: string
   updated_at: string
 }
@@ -103,6 +107,7 @@ export interface Location {
   parent_id: number | null
   properties: Record<string, unknown>
   current_state: Record<string, unknown>
+  importance: number
   created_at: string
   updated_at: string
 }
@@ -148,7 +153,27 @@ export interface ModelEntry {
   api_format: string
   model_type: string
   provider_id: number | null
+  context_window: number
+  input_price: number
+  output_price: number
+  price_currency: string
+  currency_to_cny_rate: number
   created_at: string
+}
+
+// 模型下拉框统一用 ModelEntry.id 作 value（消歧同名 model_id 跨供应商）。
+// stored 可能是 id 字符串（新）或旧的 model_id 字符串，都解析到对应条目。
+export const findModelEntry = (
+  models: ModelEntry[],
+  stored: string,
+): ModelEntry | undefined =>
+  models.find((m) => String(m.id) === stored) ||
+  models.find((m) => m.model_id === stored)
+
+// 受控 <select> 的 value：把存储值归一化为 id 字符串，旧值找不到则空串
+export const modelSelectValue = (models: ModelEntry[], stored: string): string => {
+  const entry = findModelEntry(models, stored)
+  return entry ? String(entry.id) : ''
 }
 
 export interface ApiProvider {
@@ -158,13 +183,20 @@ export interface ApiProvider {
   api_key_set: boolean
   api_key_masked: string
   api_format: string
+  use_proxy: boolean
   created_at: string
+}
+
+export interface ExampleTurn {
+  user: string
+  assistant: string
 }
 
 export interface WriterPreset {
   id: number
   name: string
   prompt: string
+  examples: ExampleTurn[]
   created_at: string
   updated_at: string
 }
@@ -174,6 +206,66 @@ export interface NovelNote {
   novel_id: number
   title: string
   content: string
+  importance: number
+  created_at: string
+  updated_at: string
+}
+
+export interface GlossaryEntry {
+  id: number
+  novel_id: number
+  term: string
+  category: string
+  forbidden_variants: string
+  notes: string
+  importance: number
+  created_at: string
+  updated_at: string
+}
+
+export const GLOSSARY_CATEGORIES = ['描写用词', '人名', '地名', '功法', '丹药', '武器', '常用词', '禁忌词', '自定义']
+
+export interface WorldRule {
+  id: number
+  novel_id: number
+  kind: 'rule' | 'element'
+  title: string
+  content: string
+  importance: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface WorldviewChange {
+  id: number
+  novel_id: number
+  fact: string
+  supersedes: string
+  effective_chapter: number
+  status: string
+  source: string
+  created_at: string
+}
+
+export type StoryThreadKind = 'foreshadowing' | 'secret'
+export type StoryThreadStatus = 'active' | 'resolved' | 'abandoned'
+
+export interface StoryThread {
+  id: number
+  novel_id: number
+  kind: StoryThreadKind
+  title: string
+  content: string
+  status: StoryThreadStatus
+  source_chapter: number
+  due_chapter: number
+  resolved_chapter: number
+  resolution: string
+  known_by: string[]
+  related_entities: string[]
+  importance: number
+  source: string
   created_at: string
   updated_at: string
 }
@@ -194,6 +286,7 @@ export interface Faction {
   goals: string
   traits: string
   history: string
+  importance: number
   created_at: string
   updated_at: string
 }
@@ -206,6 +299,7 @@ export interface Technique {
   description: string
   practitioners: string
   power_level: string
+  importance: number
   created_at: string
   updated_at: string
 }
@@ -245,6 +339,10 @@ export interface NewLocationsData {
   candidates: Array<{ name: string; type: string; description: string; parent_name: string }>
 }
 
+export interface NewFactionsData {
+  candidates: Array<{ name: string; type: string; description: string }>
+}
+
 export interface ReviewIssue {
   type: string
   severity: string
@@ -277,11 +375,11 @@ export interface SearchResult {
 }
 
 export const PROVIDER_PRESETS = [
-  { name: 'OpenAI',        base_url: 'https://api.openai.com/v1',                api_format: 'openai' },
-  { name: 'DeepSeek',      base_url: 'https://api.deepseek.com',                 api_format: 'openai' },
-  { name: 'AiHubMix',      base_url: 'https://aihubmix.com/v1',                  api_format: 'openai' },
-  { name: 'Google Gemini',  base_url: 'https://generativelanguage.googleapis.com', api_format: 'gemini' },
-  { name: 'Anthropic',     base_url: 'https://api.anthropic.com',                api_format: 'anthropic' },
+  { name: 'OpenAI',        base_url: 'https://api.openai.com/v1',                api_format: 'openai',    use_proxy: false },
+  { name: 'DeepSeek',      base_url: 'https://api.deepseek.com',                 api_format: 'openai',    use_proxy: false },
+  { name: 'AiHubMix',      base_url: 'https://aihubmix.com/v1',                  api_format: 'openai',    use_proxy: true },
+  { name: 'Google Gemini',  base_url: 'https://generativelanguage.googleapis.com', api_format: 'gemini',    use_proxy: false },
+  { name: 'Anthropic',     base_url: 'https://api.anthropic.com',                api_format: 'anthropic', use_proxy: false },
 ] as const
 
 // ── Novel APIs ─────────────────────────────────────────────────────────────
@@ -300,16 +398,14 @@ export const novelsApi = {
   create: (data: Partial<Novel>) => api.post<Novel>('/novels/', data).then(r => r.data),
   update: (id: number, data: Partial<Novel>) => api.patch<Novel>(`/novels/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/novels/${id}`).then(r => r.data),
-  optimizeWorld: (novelId: number, coreSetting: string) =>
-    api.post<{ core_setting: string }>(`/novels/${novelId}/optimize-world`, { core_setting: coreSetting }).then(r => r.data),
+  duplicate: (id: number, mode: 'full' | 'settings') =>
+    api.post<Novel>(`/novels/${id}/duplicate`, { mode }, { timeout: 120000 }).then(r => r.data),
+  optimizeWorld: (novelId: number, coreSetting: string, section?: string) =>
+    api.post<{ core_setting: string }>(`/novels/${novelId}/optimize-world`, { core_setting: coreSetting, section }).then(r => r.data),
   refreshBookSummary: (novelId: number) =>
     api.post<{ book_summary: string }>(`/novels/${novelId}/book-summary`).then(r => r.data),
-  wizardWorld: (novelId: number, rawSetting: string, rawRules: string) =>
-    api.post('/novels/wizard/world', { novel_id: novelId, raw_world_setting: rawSetting, raw_world_rules: rawRules }).then(r => r.data),
   wizardCharacters: (novelId: number, characters: object[]) =>
     api.post('/novels/wizard/characters', { novel_id: novelId, characters }, { timeout: 120000 }).then(r => r.data),
-  wizardOutline: (novelId: number) =>
-    api.post<{ outlines: Outline[] }>('/novels/wizard/outline', { novel_id: novelId }, { timeout: 120000 }).then(r => r.data),
   contextPreview: (novelId: number, chapterNumber?: number, instruction?: string, targetWords?: number) =>
     api.get<ContextPreview>(`/novels/${novelId}/context-preview`, {
       params: { chapter_number: chapterNumber, instruction, target_words: targetWords },
@@ -318,6 +414,8 @@ export const novelsApi = {
     api.post<{ updated: number; results: Array<{ chapter: number; old: string; new: string }> }>(`/novels/${novelId}/reindex-timeline`).then(r => r.data),
   reindexEntities: (novelId: number) =>
     api.post<Record<string, number>>(`/novels/${novelId}/reindex-entities`).then(r => r.data),
+  rebuildVectors: (novelId: number) =>
+    api.post<{ ok: boolean }>(`/novels/${novelId}/rebuild-vectors`, undefined, { timeout: 300000 }).then(r => r.data),
   search: (novelId: number, query: string) =>
     api.get<SearchResult>(`/novels/${novelId}/search`, { params: { q: query } }).then(r => r.data),
   streamBuild: (
@@ -370,17 +468,43 @@ export interface ContextPreview {
   writer_model: string
   token_estimate: Record<string, number>
   context_config: Record<string, ContextConfigValue>
+  dynamic_budget: {
+    target_words: number
+    context_window: number
+    output_reserve: number
+    thinking_reserve: number
+    safety_reserve: number
+    input_budget: number
+    allocations: Record<string, number>
+  }
+  pricing: {
+    model_entry_id: number | null
+    model_name: string
+    currency: string
+    currency_to_cny_rate: number
+    input_price_per_million: number
+    output_price_per_million: number
+    input_price_cny_per_million: number
+    output_price_cny_per_million: number
+    configured: boolean
+    input_tokens: number
+    expected_output_tokens: number
+    input_cost_cny: number
+    output_cost_cny: number
+    total_cost_cny: number
+    budget_input_cost_cny: number
+  }
 }
 
 // ── Chapter APIs ───────────────────────────────────────────────────────────
 
 export const chaptersApi = {
   list: (novelId: number) => api.get<Chapter[]>(`/chapters/novel/${novelId}`).then(r => r.data),
-  get: (id: number) => api.get<Chapter>(`/chapters/${id}`).then(r => r.data),
-  create: (data: Partial<Chapter>) => api.post<Chapter>('/chapters/', data).then(r => r.data),
   update: (id: number, data: Partial<Chapter>) => api.patch<Chapter>(`/chapters/${id}`, data).then(r => r.data),
   confirm: (chapterId: number) => api.post('/chapters/confirm', { chapter_id: chapterId }, { timeout: 120000 }).then(r => r.data),
   delete: (id: number) => api.delete(`/chapters/${id}`).then(r => r.data),
+  batchDelete: (chapterIds: number[]) =>
+    api.post<{ ok: boolean; deleted: number }>('/chapters/batch-delete', { chapter_ids: chapterIds }).then(r => r.data),
   batchVolume: (chapterIds: number[], volume: number) =>
     api.post('/chapters/batch-volume', { chapter_ids: chapterIds, volume }).then(r => r.data),
   discover: (chapterId: number) =>
@@ -389,14 +513,20 @@ export const chaptersApi = {
       entities: Array<{ name: string; type: string; description: string }>
       locations: Array<{ name: string; type: string; description: string; parent_name: string }>
       techniques: Array<{ name: string; type: string; description: string }>
+      factions: Array<{ name: string; type: string; description: string }>
     }>(`/chapters/${chapterId}/discover`, {}, { timeout: 60000 }).then(r => r.data),
+  backfillSummaries: (novelId: number, mode: 'missing' | 'all' = 'missing') =>
+    api.post<{
+      total: number
+      done: number[]
+      failed: Array<{ number: number; error: string }>
+    }>(`/chapters/novel/${novelId}/backfill-summaries`, { mode }, { timeout: 1800000 }).then(r => r.data),
 }
 
 // ── Character APIs ─────────────────────────────────────────────────────────
 
 export const charactersApi = {
   list: (novelId: number) => api.get<Character[]>(`/characters/novel/${novelId}`).then(r => r.data),
-  get: (id: number) => api.get<Character>(`/characters/${id}`).then(r => r.data),
   create: (data: Partial<Character>) => api.post<Character>('/characters/', data).then(r => r.data),
   update: (id: number, data: Partial<Character>) => api.patch<Character>(`/characters/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/characters/${id}`).then(r => r.data),
@@ -419,6 +549,8 @@ export const charactersApi = {
     api.post<Character>(`/characters/${characterId}/generate-history`, {}, { timeout: 300000 }).then(r => r.data),
   generateImagePrompt: (characterId: number, style: 'sd_tags' | 'natural_zh') =>
     api.post<{ prompt: string }>(`/characters/${characterId}/generate-image-prompt`, { style }, { timeout: 60000 }).then(r => r.data),
+  generateSheet: (characterId: number) =>
+    api.post<Character>(`/characters/${characterId}/generate-sheet`, {}, { timeout: 120000 }).then(r => r.data),
 }
 
 // ── World Entity APIs ─────────────────────────────────────────────────────
@@ -426,7 +558,6 @@ export const charactersApi = {
 export const worldEntitiesApi = {
   list: (novelId: number, type?: string) =>
     api.get<WorldEntity[]>(`/world-entities/novel/${novelId}`, { params: type ? { type } : {} }).then(r => r.data),
-  get: (id: number) => api.get<WorldEntity>(`/world-entities/${id}`).then(r => r.data),
   create: (data: Partial<WorldEntity>) => api.post<WorldEntity>('/world-entities/', data).then(r => r.data),
   update: (id: number, data: Partial<WorldEntity>) => api.patch<WorldEntity>(`/world-entities/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/world-entities/${id}`).then(r => r.data),
@@ -439,7 +570,6 @@ export const worldEntitiesApi = {
 export const locationsApi = {
   list: (novelId: number, type?: string) =>
     api.get<Location[]>(`/locations/novel/${novelId}`, { params: type ? { type } : {} }).then(r => r.data),
-  get: (id: number) => api.get<Location>(`/locations/${id}`).then(r => r.data),
   create: (data: Partial<Location>) => api.post<Location>('/locations/', data).then(r => r.data),
   update: (id: number, data: Partial<Location>) => api.patch<Location>(`/locations/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/locations/${id}`).then(r => r.data),
@@ -481,19 +611,29 @@ export const correctionsApi = {
 
 // ── Settings APIs ──────────────────────────────────────────────────────────
 
+export interface ProxyStatus {
+  enabled: boolean
+  proxy: string
+  host: string
+  port: number
+  reachable: boolean | null
+  detail: string
+}
+
 export const settingsApi = {
   get: () => api.get('/settings/').then(r => r.data),
   update: (data: object) => api.patch('/settings/', data).then(r => r.data),
   test: (model?: string) => api.post('/settings/test', { model: model ?? '' }).then(r => r.data),
+  proxyStatus: () => api.get<ProxyStatus>('/settings/proxy-status').then(r => r.data),
 }
 
 // ── Provider APIs ────────────────────────────────────────────────────────────
 
 export const providersApi = {
   list: () => api.get<ApiProvider[]>('/providers/').then(r => r.data),
-  create: (data: { name: string; base_url: string; api_key: string; api_format: string }) =>
+  create: (data: { name: string; base_url: string; api_key: string; api_format: string; use_proxy?: boolean }) =>
     api.post<ApiProvider>('/providers/', data).then(r => r.data),
-  update: (id: number, data: { name?: string; base_url?: string; api_key?: string; api_format?: string }) =>
+  update: (id: number, data: { name?: string; base_url?: string; api_key?: string; api_format?: string; use_proxy?: boolean }) =>
     api.patch<ApiProvider>(`/providers/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/providers/${id}`).then(r => r.data),
 }
@@ -502,9 +642,9 @@ export const providersApi = {
 
 export const modelLibraryApi = {
   list: () => api.get<ModelEntry[]>('/models/').then(r => r.data),
-  create: (data: { display_name: string; model_id: string; provider_id: number; provider?: string; api_format?: string; model_type?: string }) =>
+  create: (data: { display_name: string; model_id: string; provider_id: number; provider?: string; api_format?: string; model_type?: string; context_window?: number; input_price?: number; output_price?: number; price_currency?: string; currency_to_cny_rate?: number }) =>
     api.post<ModelEntry>('/models/', data).then(r => r.data),
-  update: (id: number, data: { display_name?: string; model_id?: string; provider_id?: number; model_type?: string }) =>
+  update: (id: number, data: { display_name?: string; model_id?: string; provider_id?: number; model_type?: string; context_window?: number; input_price?: number; output_price?: number; price_currency?: string; currency_to_cny_rate?: number }) =>
     api.patch<ModelEntry>(`/models/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/models/${id}`).then(r => r.data),
 }
@@ -513,9 +653,35 @@ export const modelLibraryApi = {
 
 export const writerPresetsApi = {
   list: () => api.get<WriterPreset[]>('/writer-presets/').then(r => r.data),
-  create: (data: { name: string; prompt?: string }) => api.post<WriterPreset>('/writer-presets/', data).then(r => r.data),
-  update: (id: number, data: { name?: string; prompt?: string }) => api.patch<WriterPreset>(`/writer-presets/${id}`, data).then(r => r.data),
+  create: (data: { name: string; prompt?: string; examples?: ExampleTurn[] }) => api.post<WriterPreset>('/writer-presets/', data).then(r => r.data),
+  update: (id: number, data: { name?: string; prompt?: string; examples?: ExampleTurn[] }) => api.patch<WriterPreset>(`/writer-presets/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/writer-presets/${id}`).then(r => r.data),
+}
+
+// ── Glossary APIs ──────────────────────────────────────────────────────────
+
+export const glossaryApi = {
+  list: (novelId: number) =>
+    api.get<GlossaryEntry[]>(`/glossary/novel/${novelId}`).then(r => r.data),
+  create: (data: { novel_id: number; term: string; category?: string; forbidden_variants?: string; notes?: string; importance?: number }) =>
+    api.post<GlossaryEntry>('/glossary/', data).then(r => r.data),
+  update: (id: number, data: { term?: string; category?: string; forbidden_variants?: string; notes?: string; importance?: number }) =>
+    api.patch<GlossaryEntry>(`/glossary/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/glossary/${id}`).then(r => r.data),
+}
+
+// ── World Rules APIs（核心规则/特殊元素）─────────────────────────────────────
+
+export const worldRulesApi = {
+  list: (novelId: number, kind?: 'rule' | 'element') =>
+    api.get<WorldRule[]>(`/world-rules/novel/${novelId}`, { params: kind ? { kind } : undefined }).then(r => r.data),
+  create: (data: { novel_id: number; kind: 'rule' | 'element'; title?: string; content?: string; importance?: number; enabled?: boolean }) =>
+    api.post<WorldRule>('/world-rules/', data).then(r => r.data),
+  update: (id: number, data: { title?: string; content?: string; importance?: number; enabled?: boolean }) =>
+    api.patch<WorldRule>(`/world-rules/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/world-rules/${id}`).then(r => r.data),
 }
 
 // ── Generation APIs ─────────────────────────────────────────────────────────
@@ -530,7 +696,7 @@ export const generationApi = {
 export const novelNotesApi = {
   list: (novelId: number) =>
     api.get<NovelNote[]>(`/notes/novel/${novelId}`).then(r => r.data),
-  create: (data: { novel_id: number; title: string; content?: string }) =>
+  create: (data: { novel_id: number; title: string; content?: string; importance?: number }) =>
     api.post<NovelNote>('/notes/', data).then(r => r.data),
   update: (id: number, data: { title?: string; content?: string }) =>
     api.patch<NovelNote>(`/notes/${id}`, data).then(r => r.data),
@@ -549,6 +715,36 @@ export const factionsApi = {
     api.patch<Faction>(`/factions/${id}`, data).then(r => r.data),
   delete: (id: number) =>
     api.delete(`/factions/${id}`).then(r => r.data),
+}
+
+// ── Worldview Change APIs ─────────────────────────────────────────────────
+
+export const worldviewChangesApi = {
+  list: (novelId: number) =>
+    api.get<WorldviewChange[]>(`/worldview-changes/novel/${novelId}`).then(r => r.data),
+  create: (data: Partial<WorldviewChange> & { novel_id: number; fact: string }) =>
+    api.post<WorldviewChange>('/worldview-changes/', data).then(r => r.data),
+  update: (id: number, data: Partial<WorldviewChange>) =>
+    api.patch<WorldviewChange>(`/worldview-changes/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/worldview-changes/${id}`).then(r => r.data),
+  scan: (novelId: number) =>
+    api.post<{ detected: number; added: number }>(`/worldview-changes/novel/${novelId}/scan`, {}, { timeout: 300000 }).then(r => r.data),
+}
+
+// ── Durable Foreshadowing / Secret APIs ───────────────────────────────────
+
+export const storyThreadsApi = {
+  list: (novelId: number, kind?: StoryThreadKind, status?: StoryThreadStatus) =>
+    api.get<StoryThread[]>(`/story-threads/novel/${novelId}`, {
+      params: { ...(kind ? { kind } : {}), ...(status ? { status } : {}) },
+    }).then(r => r.data),
+  create: (data: Partial<StoryThread> & { novel_id: number; kind: StoryThreadKind; content: string }) =>
+    api.post<StoryThread>('/story-threads/', data).then(r => r.data),
+  update: (id: number, data: Partial<StoryThread>) =>
+    api.patch<StoryThread>(`/story-threads/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/story-threads/${id}`).then(r => r.data),
 }
 
 // ── Technique APIs ────────────────────────────────────────────────────────
@@ -676,6 +872,7 @@ export type SSEMessage =
   | { event: 'llm_request'; data: Record<string, unknown> }
   | { event: 'llm_call'; data: LlmCallData }
   | { event: 'new_locations'; data: NewLocationsData }
+  | { event: 'new_factions'; data: NewFactionsData }
   | { event: 'new_techniques'; data: NewTechniquesData }
   | { event: 'context_step'; data: ContextStepData }
   | { event: 'critic_issues'; data: CriticIssuesData }
@@ -756,7 +953,6 @@ export function streamChat(
     temperature?: number
     max_tokens?: number
     context_rounds?: number
-    nsfw_mode?: boolean
   },
   onMessage: (msg: ChatSSEMessage) => void,
   onClose: () => void,
@@ -795,7 +991,6 @@ export function streamChapterRewrite(
     annotations: AnnotationItem[]
     target_words: number
     rewrite_model?: string
-    nsfw_mode?: boolean
   },
   onMessage: (msg: SSEMessage) => void,
   onClose: () => void,
@@ -829,7 +1024,6 @@ export function streamChapterGeneration(
     volume: number
     instruction: string
     target_words: number
-    nsfw_mode?: boolean
     pov?: string
   },
   onMessage: (msg: SSEMessage) => void,

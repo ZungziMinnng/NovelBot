@@ -143,9 +143,9 @@ export default function DevPanel({ onClose }: Props) {
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/20 z-40" />
 
-      <div className="fixed inset-y-0 right-0 w-[480px] bg-background border-l shadow-xl z-50 flex flex-col">
+      <div className="fixed inset-y-0 right-0 w-[640px] bg-background border-l shadow-xl z-50 flex flex-col">
         <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0">
           <span className="text-sm font-semibold">LLM Calls</span>
           <span className="text-xs text-muted-foreground ml-1">({llmCalls.length})</span>

@@ -27,7 +27,7 @@ interface EditorStore {
   clearAnnotations: (novelId: number, chapterNum: number) => void
 }
 
-const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 800 }
+const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 5000 }
 const EMPTY_ANNOTATIONS: Annotation[] = []
 
 export const useEditorStore = create<EditorStore>()(

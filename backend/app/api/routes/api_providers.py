@@ -25,6 +25,7 @@ def _to_out(p: ApiProvider) -> ApiProviderOut:
         api_key_set=bool(p.api_key),
         api_key_masked=_mask_key(p.api_key),
         api_format=p.api_format,
+        use_proxy=p.use_proxy,
         created_at=p.created_at,
     )
 
@@ -42,6 +43,7 @@ async def create_provider(data: ApiProviderCreate, db: AsyncSession = Depends(ge
         base_url=data.base_url,
         api_key=data.api_key,
         api_format=data.api_format,
+        use_proxy=data.use_proxy,
     )
     db.add(provider)
     await db.commit()
@@ -63,6 +65,8 @@ async def update_provider(provider_id: int, data: ApiProviderUpdate, db: AsyncSe
         provider.api_key = data.api_key
     if data.api_format is not None:
         provider.api_format = data.api_format
+    if data.use_proxy is not None:
+        provider.use_proxy = data.use_proxy
     await db.commit()
     await db.refresh(provider)
     # 同步更新引用该供应商的模型的反规范化字段

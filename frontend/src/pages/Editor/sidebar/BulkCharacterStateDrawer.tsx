@@ -56,7 +56,7 @@ export default function BulkCharacterStateDrawer({ novelId, offsetLeft, onClose 
   }
 
   return (
-    <div className="fixed inset-y-0 z-40 w-[360px] border-r bg-background shadow-xl flex flex-col" style={{ left: offsetLeft }}>
+    <div className="fixed inset-y-0 z-40 w-[480px] border-r bg-background shadow-xl flex flex-col" style={{ left: offsetLeft }}>
       <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0">
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-semibold">批量添加角色状态词条</h3>

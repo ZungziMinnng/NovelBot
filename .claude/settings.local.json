@@ -8,7 +8,27 @@
       "Bash(npx tsc *)",
       "Read(//c/Users/user/.claude/plans/**)",
       "Bash(mkdir -p \"C:/Users/user/.claude/plans/\")",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(./.venv/Scripts/pip.exe install *)",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(findstr /V \"sqlalchemy INFO\")",
+      "Bash(curl -s -o NUL -w \"%{http_code}\" http://localhost:8000/api/app-settings/)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \":8000\")",
+      "Bash(findstr LISTENING)",
+      "Bash(cd /d D:\\\\GitHubProject\\\\NovelBot\\\\backend)",
+      "Bash(.venv\\\\Scripts\\\\python -c \"import app.main; print\\('OK'\\)\")",
+      "Bash(\".venv\\\\Scripts\\\\python\" -c \"import app.main; print\\('OK'\\)\")",
+      "Bash(\".venv\\\\Scripts\\\\python\" -c \"import sqlite3,glob; print\\(glob.glob\\('./data/*.db*'\\)\\)\")",
+      "Bash('.venv\\\\Scripts\\\\python' -c ' *)",
+      "Bash('.venv\\\\Scripts\\\\python' -X utf8 -c ' *)",
+      "Bash(\".venv\\\\Scripts\\\\python\" -X utf8 -c \"from app.config import settings; print\\('gemini_stream=',getattr\\(settings,'gemini_stream','MISSING'\\)\\)\")",
+      "Read(//d//**)",
+      "Read(//c/Users/user/**)",
+      "Bash(\".venv\\\\Scripts\\\\python\" -c \"import app.main; print\\('backend import OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m unittest discover tests)",
+      "Bash(./.venv/Scripts/python.exe -c \"from app.main import app; print\\('import ok'\\)\")"
     ]
   }
 }

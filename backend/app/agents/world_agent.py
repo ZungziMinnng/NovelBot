@@ -55,6 +55,35 @@ async def optimize_world_setting(novel: Novel, core_setting: str) -> str:
     return result.strip()
 
 
+_SECTION_GUIDE = {
+    "时代背景": "时代与地理、政治格局、社会阶层",
+    "核心规则": "世界运行的核心法则、重要规则或禁忌",
+    "特殊元素": "核心矛盾/张力、独特的文化或超自然元素",
+    "补充备注": "其他需要补充的设定信息",
+}
+
+
+async def optimize_world_section(novel: Novel, section: str, content: str) -> str:
+    """针对单个世界观区块生成（content 为空）或优化（content 非空），只返回该区块正文。"""
+    prompt = render(
+        "world_section.jinja2",
+        section_label=section,
+        section_guidance=_SECTION_GUIDE.get(section, ""),
+        genre=novel.genre,
+        content=content,
+        is_generate=not content.strip(),
+    )
+    model, api_format = llm_client.get_agent_client("world", novel.fast_model)
+    result = await llm_client.dispatch_chat_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_format=api_format,
+        temperature=0.7,
+        max_tokens=500,
+    )
+    return result.strip()
+
+
 async def embed_world_setting(novel_id: int, core_setting: str) -> None:
     """将世界观分块写入向量库，支持按需 RAG 检索"""
     # 清理旧向量（旧的单条 + 分块）

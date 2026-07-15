@@ -10,8 +10,12 @@ from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.models.novel import Novel
+from app.models.story_thread import StoryThread
+from app.models.worldview_change import WorldviewChange
 from app.prompts.loader import render
 from app.services import llm_client, vector_store
+from app.services.context_budget import estimate_tokens
+from app.services.llm_json import JsonCallError, call_json, repair_json
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -34,19 +38,95 @@ def _build_analysis_messages(
 
 # ── 正文清理：截断 LLM 可能自行附加的剧情发展选项 ─────────────────────────
 _PLOT_SUGGESTION_PATTERNS = re.compile(
-    r'\n\s*(?:---+\s*\n\s*)?'
-    r'(?:剧情发展选项|剧情走向建议|下一章剧情发展|后续剧情发展|'
-    r'接下来的剧情|下一章可能的发展|剧情发展方向|可能的发展方向)'
+    r'\n\s*'
+    r'(?:[-=*#＃_]{2,}\s*\n\s*)?'          # 可选分隔线（--- === *** 等独占一行）
+    r'(?:[#＃]{1,6}\s*)?'                   # 可选 markdown 标题井号
+    r'[*【「\s]{0,3}'                       # 可选加粗 / 方括号 / 引号
+    r'(?:'
+    r'后续剧情选项|后续剧情发展|后续剧情走向|后续剧情方向|后续剧情|'
+    r'剧情发展选项|剧情发展方向|剧情发展建议|剧情发展|'
+    r'剧情走向建议|剧情走向|剧情走势|剧情选项|'
+    r'下一章剧情发展|下一章可能的发展|接下来的剧情|可能的发展方向|'
+    r'后续选项|发展选项|选项'
+    r')'
+    r'[*】」\s]{0,3}'                       # 可选加粗 / 方括号 / 引号收尾
+    r'[一二三四五六七八九十\d]*'             # 可选编号（如“选项一”“选项1”）
     r'[：:\s]',
 )
 
 
+# 无关键词的纯编号/字母选项行：序号(1-99 / A-Z / 一~十) + 分隔符 + 实际内容
+_ENUM_LINE_PATTERN = re.compile(
+    r'^[*_\s]*[(（【\[]?\s*'
+    r'(?P<marker>\d{1,2}|[A-Za-z]|[一二三四五六七八九十]+)'
+    r'\s*[)）】\].、:：.。]\s*'
+    r'\S'
+)
+
+
+def _marker_ordinal(marker: str) -> tuple[str, int] | None:
+    """返回 (类型, 序数)。类型用于要求同一块内序号同类，避免 1./B. 混搭误判。"""
+    if marker.isdigit():
+        return "num", int(marker)
+    cjk = "一二三四五六七八九十"  # 须在字母判断之前：中文数字在 Python 里 isalpha() 也为真
+    if marker and all(ch in cjk for ch in marker):
+        return "cjk", cjk.index(marker[0]) + 1  # 仅需判定起始为「一」
+    if len(marker) == 1 and marker.isalpha():
+        return "alpha", ord(marker.upper()) - ord("A") + 1
+    return None
+
+
+def _strip_trailing_enum_options(text: str) -> str:
+    """去除正文末尾「无关键词的纯编号/字母选项块」。
+    强约束（尽量不误删正文）：位于文本末尾、连续 ≥2 行、序号同类型、从 1/A/一 起连续递增。"""
+    lines = text.rstrip().split("\n")
+    collected: list[tuple[int, str, int]] = []  # (行号, 类型, 序数)，自底向上
+    cut = len(lines)
+    i = len(lines) - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if not stripped:  # 跳过尾部/块内空行
+            i -= 1
+            continue
+        m = _ENUM_LINE_PATTERN.match(stripped)
+        if not m:
+            break
+        parsed = _marker_ordinal(m.group("marker"))
+        if parsed is None:
+            break
+        collected.append((i, parsed[0], parsed[1]))
+        cut = i
+        i -= 1
+
+    if len(collected) < 2:
+        return text
+    top_down = list(reversed(collected))
+    kinds = {k for _, k, _ in top_down}
+    ords = [o for _, _, o in top_down]
+    if len(kinds) != 1 or ords[0] != 1:
+        return text
+    if any(b - a != 1 for a, b in zip(ords, ords[1:])):
+        return text
+
+    # 紧邻选项块上方、以冒号收尾的短引导行（如「接下来：」）一并去除；
+    # 以问号收尾的悬念句属正文，保留。
+    j = cut - 1
+    while j >= 0 and not lines[j].strip():
+        j -= 1
+    if j >= 0:
+        lead = lines[j].strip()
+        if len(lead) <= 30 and lead.rstrip("*_").endswith(("：", ":")):
+            cut = j
+    return "\n".join(lines[:cut]).rstrip()
+
+
 def strip_plot_suggestions(text: str) -> str:
-    """去除章节正文末尾 LLM 自行附加的剧情发展选项段落。"""
+    """去除章节正文末尾 LLM 自行附加的剧情发展选项段落。
+    先按关键词标题截断；再兜底去除无关键词的纯编号/字母选项块。"""
     m = _PLOT_SUGGESTION_PATTERNS.search(text)
     if m:
-        return text[:m.start()].rstrip()
-    return text
+        text = text[:m.start()].rstrip()
+    return _strip_trailing_enum_options(text)
 
 
 # ── 摘要清理：去除 LLM 自行添加的前缀标题 ──────────────────────────────────
@@ -119,60 +199,125 @@ def normalize_timeline_tag(time_tag: str, previous_time_tag: str = "") -> str:
     return tag
 
 
-def normalize_summary_timeline_tag(summary: str, previous_time_tag: str = "") -> str:
-    match = _TIME_TAG_PATTERN.match((summary or "").strip())
-    if not match:
-        return summary
-    old_tag = match.group(1)
-    new_tag = normalize_timeline_tag(old_tag, previous_time_tag)
-    if new_tag == old_tag:
-        return summary
-    return summary.replace(f"【{old_tag}】", f"【{new_tag}】", 1)
+# ── 本地时间推进词扫描：从章节开头判断相对上一章的天数偏移 ─────────────────
+_CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 
 
-CHAPTER_SUMMARY_PROMPT_PREFIX = """你是一位小说编辑，需要将以下章节内容压缩为250字以内的剧情梗概。
+def _parse_small_number(s: str) -> int | None:
+    """解析数字或简单中文数字（一~九十九）。"""
+    if s.isdigit():
+        return int(s)
+    if not s or any(ch not in _CN_NUM for ch in s):
+        return None
+    if len(s) == 1:
+        return _CN_NUM[s]
+    if "十" in s:
+        tens_part, _, ones_part = s.partition("十")
+        tens = _CN_NUM.get(tens_part, 1) if tens_part else 1
+        ones = _CN_NUM.get(ones_part, 0) if ones_part else 0
+        if tens > 9:
+            return None
+        return tens * 10 + ones
+    return None
 
-输出规范：
-- 梗概开头用【第X日】标注本章覆盖的故事时间段（如：【第12日·白天】、【第13日·夜晚】）
-- 时间必须使用绝对日期计数，禁止使用“当天、当日、次日、翌日、第二天、三日后”等相对表达
-- 如果章节内发生了时间跳跃，必须明确标注
-- 如实记录章节中发生的所有重要事件，包括人物行为、决定、冲突、关系变化
-- 保留对后续剧情有影响的关键细节
-- 使用简洁的叙述语言"""
 
-CHAPTER_SUMMARY_PROMPT_SUFFIX = (
-    "请直接输出剧情梗概文本。\n"
-    "⚠️ 格式要求（必须遵守）：\n"
-    "1. 第一行必须以【第X日】开头（如【第12日·夜晚】、【第13日·清晨】）\n"
-    "2. 禁止使用当天、当日、次日、翌日、第二天、三日后等相对时间词\n"
-    "3. 不要输出任何标题、前缀（如『章节剧情梗概：』）或 Markdown 格式符号（如 ** 或 ##）\n"
-    "4. 直接以【时间标注】开始正文"
+_LOCAL_NEXT_DAY_RE = re.compile(r'次日|翌日|第二天|隔日|隔天')
+_LOCAL_SAME_DAY_RE = re.compile(r'当天|当日|当晚|当夜|同日|同一天')
+_LOCAL_LATER_RE = re.compile(
+    r'(?:半个?月|(?P<num>\d{1,3}|[一两二三四五六七八九十]{1,3})\s*(?P<unit>个月|[天日]|年))(?:之|过)?后'
 )
+_LATER_UNIT_DAYS = {"天": 1, "日": 1, "个月": 30, "年": 365}
 
 
-CHARACTER_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新角色状态卡。
+def _inside_quotes(text: str, pos: int) -> bool:
+    """粗判 pos 是否处于未闭合的引号内（对话中的时间词不算叙事推进）。"""
+    before = text[:pos]
+    for open_ch, close_ch in (("「", "」"), ("“", "”"), ("『", "』")):
+        if before.count(open_ch) > before.count(close_ch):
+            return True
+    return False
 
-输出规范：
-- 如实记录本章中角色的状态变化
-- 提取对后续剧情有影响的变化：位置、目标、已知秘密、关系变化、能力变化
-- 使用简洁的事实语言
 
-小说当前角色状态：
-{character_states}"""
+def _detect_local_day_offset(content: str) -> int | None:
+    """扫描章节开头第一段的时间推进词，返回相对上一章的天数偏移。
 
-CHARACTER_UPDATE_PROMPT_SUFFIX = """以 JSON 格式输出，格式为：
-{
-  "角色名": {
-    "location": "当前位置",
-    "current_goal": "当前目标",
-    "titles": ["称谓/头衔列表，如：师姐、掌门、院长；本章无新称谓则为空数组"],
-    "affiliation": "所属门派/组织/学院，如：太渊宫；本章无变化则保持原值或留空字符串",
-    "known_secrets": ["仅限：阴谋、隐藏身份、未公开的关键情报；不要记录普通对话或公开信息"],
-    "relationship_changes": {"其他角色名": "当前最显著的关系变化（仅1-2条最重要的）"}
-  }
-}
+    只信任高置信度的显式线索（次日/三天后/当天等）；扫不到或无法量化
+    （如"数日后"）时返回 None，交由 LLM 判断。"""
+    head = (content or "").lstrip()
+    head = head.split("\n", 1)[0][:200]
+    if not head:
+        return None
 
-只输出 JSON，不要任何解释。"""
+    candidates: list[tuple[int, int]] = []  # (位置, 偏移天数)
+    for m in _LOCAL_NEXT_DAY_RE.finditer(head):
+        candidates.append((m.start(), 1))
+    for m in _LOCAL_SAME_DAY_RE.finditer(head):
+        candidates.append((m.start(), 0))
+    for m in _LOCAL_LATER_RE.finditer(head):
+        if m.group("num") is None:  # 半月后 / 半个月后
+            candidates.append((m.start(), 15))
+            continue
+        num = _parse_small_number(m.group("num"))
+        if num is None:
+            continue
+        candidates.append((m.start(), num * _LATER_UNIT_DAYS[m.group("unit")]))
+
+    for pos, offset in sorted(candidates):
+        if not _inside_quotes(head, pos):
+            return offset
+    return None
+
+
+def _strip_leading_time_tag(body: str) -> str:
+    """去除模型仍自带的开头【…】时间标记（日期由系统统一生成）。"""
+    return _TIME_TAG_PATTERN.sub("", (body or "").strip(), count=1).strip()
+
+
+def _compose_summary_with_day(body: str, absolute_day: int, period: str) -> str:
+    """在梗概正文前拼接系统计算的绝对日期标记。"""
+    period_part = f"·{period}" if period else ""
+    return f"【第{absolute_day}日{period_part}】{body}"
+
+
+async def _prev_absolute_day(
+    session: AsyncSession,
+    novel_id: int,
+    chapter_number: int,
+) -> int:
+    """回溯查找当前章之前最近一条带【第X日】标记的摘要，返回其绝对日数。
+    首章或历史摘要均无可解析标记时返回 0。"""
+    if chapter_number <= 1:
+        return 0
+    result = await session.execute(
+        select(Memory.content, Memory.chapter_number)
+        .where(
+            Memory.novel_id == novel_id,
+            Memory.memory_type == "chapter_summary",
+            Memory.chapter_number < chapter_number,
+        )
+        .order_by(Memory.chapter_number.desc(), Memory.id.desc())
+    )
+    seen: set[int] = set()
+    for content, ch_num in result:
+        if ch_num in seen:  # 每章只看最新一条（id 最大）
+            continue
+        seen.add(ch_num)
+        match = _TIME_TAG_PATTERN.match((content or "").strip())
+        if match:
+            day = _extract_day_number(match.group(1))
+            if day is not None:
+                return day
+    return 0
+
+
+def _day_offset_hint(chapter_number: int) -> str:
+    if chapter_number > 1:
+        return (
+            f"\n- 这是第{chapter_number}章，前面已有章节；请判断本章相对上一章经过了多少天，"
+            "填入 day_offset（同一天=0，第二天=1，跳过N天=N），不要输出绝对日期。"
+        )
+    return "\n- 这是第1章，day_offset 请填 0。"
 
 
 async def summarize_chapter(
@@ -187,48 +332,25 @@ async def summarize_chapter(
     clean_content = strip_plot_suggestions(chapter.content)
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
 
-    # 查询上一章摘要的时间标记，为当前章提供日期连续性上下文
-    prev_time_hint = ""
-    prev_time_tag = ""
-    if chapter.number > 1:
-        prev_mem_result = await session.execute(
-            select(Memory.content)
-            .where(
-                Memory.novel_id == novel.id,
-                Memory.memory_type == "chapter_summary",
-                Memory.chapter_number == chapter.number - 1,
-            )
-            .order_by(Memory.id.desc())
-            .limit(1)
-        )
-        prev_summary = prev_mem_result.scalar_one_or_none()
-        if prev_summary:
-            import re as _re
-            m = _re.match(r'【(.+?)】', prev_summary)
-            if m:
-                prev_time_tag = m.group(1)
-                prev_time_hint = (
-                    f"\n- 上一章（第{chapter.number - 1}章）的时间标记为【{prev_time_tag}】，"
-                    "请根据本章内容推算本章的绝对日期，保持日期连续性；"
-                    "如果本章写“当天/当日”，换算为上一章同一日；如果写“次日/翌日”，换算为上一章后一日"
-                )
-
-    prompt_prefix = render("chapter_summary_prefix.jinja2") + prev_time_hint
+    # 回溯上一章的绝对日期，供代码确定性累加（模型只判断相对偏移 day_offset）
+    prev_day = await _prev_absolute_day(session, novel.id, chapter.number)
+    prompt_prefix = render("chapter_summary_prefix.jinja2") + _day_offset_hint(chapter.number)
     messages = _build_analysis_messages(
-        prompt_prefix, clean_content[:6000],
+        prompt_prefix, clean_content[:12000],
         render("chapter_summary_suffix.jinja2"), api_format,
     )
-    summary, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
+    raw_summary, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
         messages=messages,
         model=model,
         api_format=api_format,
         temperature=0.3,
         max_tokens=2000,
     )
-    summary = _clean_summary(summary)
+    body, importance, day_offset, period = _parse_summary_payload(raw_summary)
+    body = _strip_leading_time_tag(_clean_summary(body))
 
-    # 检测输出截断：摘要未以正常标点结尾，说明被中途截断（token 耗尽或安全过滤）
-    _s = summary.strip()
+    # 检测输出截断：正文未以正常标点结尾，说明被中途截断（token 耗尽或安全过滤）
+    _s = body.strip()
     _truncated = bool(_s) and _s[-1] not in '。！？…」】'
     if _truncated:
         logger.warning(
@@ -241,15 +363,15 @@ async def summarize_chapter(
         # 截断重试：换用更简洁的提示，减少输出长度
         retry_messages = _build_analysis_messages(
             (
-                "请为一部小说章节写一段200字的剧情梗概。\n"
-                "第一行必须以【第X日】或【第X日·时段】开头，禁止使用当天、次日等相对时间词。\n"
-                f"上一章时间标记：{f'【{prev_time_tag}】' if prev_time_tag else '未知'}。"
+                "请为一部小说章节写一段200字以内的剧情梗概，并判断本章相对上一章经过的天数。\n"
+                "只输出 JSON：{\"day_offset\": 0, \"period\": \"\", \"summary\": \"梗概正文\", \"importance\": 3}\n"
+                "day_offset：同一天=0，第二天=1，跳过N天=N；正文中不要出现【第X日】等时间标记。"
             ),
             clean_content[:4000],
-            "请基于以上内容输出剧情梗概，直接以【第X日】时间标记开始：",
+            "请基于以上内容输出 JSON：",
             api_format,
         )
-        retry_summary, retry_in, retry_out = await llm_client.dispatch_chat_complete_with_usage(
+        retry_raw, retry_in, retry_out = await llm_client.dispatch_chat_complete_with_usage(
             messages=retry_messages,
             model=model,
             api_format=api_format,
@@ -258,24 +380,56 @@ async def summarize_chapter(
         )
         in_tok += retry_in
         out_tok += retry_out
-        retry_summary = _clean_summary(retry_summary)
-        if retry_summary.strip() and len(retry_summary.strip()) > len(summary.strip()):
+        r_body, r_imp, r_offset, r_period = _parse_summary_payload(retry_raw)
+        r_body = _strip_leading_time_tag(_clean_summary(r_body))
+        if r_body.strip() and len(r_body.strip()) > len(body.strip()):
             logger.info(
                 "章节 %s 脱敏重试成功 (len=%d → %d)",
-                chapter.number, len(summary.strip()), len(retry_summary.strip()),
+                chapter.number, len(body.strip()), len(r_body.strip()),
             )
-            summary = retry_summary
+            body, importance, day_offset, period = r_body, r_imp, r_offset, r_period
         else:
             logger.warning(
                 "章节 %s 脱敏重试未改善 (original=%d, retry=%d)",
-                chapter.number, len(summary.strip()), len(retry_summary.strip()),
+                chapter.number, len(body.strip()), len(r_body.strip()),
             )
 
     # LLM 返回空字符串时（内容过滤等），跳过保存，避免创建空 Memory 行
-    if not summary.strip():
+    if not body.strip():
         return "", in_tok, out_tok
 
-    summary = normalize_summary_timeline_tag(summary, prev_time_tag)
+    summary = await _persist_summary(
+        session, chapter, novel, body, importance, day_offset, period, prev_day, clean_content,
+    )
+    return summary, in_tok, out_tok
+
+
+async def _persist_summary(
+    session: AsyncSession,
+    chapter: Chapter,
+    novel: Novel,
+    body: str,
+    importance: int,
+    day_offset: int,
+    period: str,
+    prev_day: int,
+    clean_content: str,
+) -> str:
+    """时间线判定 + 摘要落库（章节字段 / Memory 表 / 向量库）。返回最终摘要文本。"""
+    # 本地时间线索优先：章节开头有显式时间推进词（次日/三天后/当天等）时，
+    # 用代码判定覆盖 LLM 的 day_offset；扫不到线索才信 LLM
+    local_offset = _detect_local_day_offset(clean_content)
+    if local_offset is not None:
+        if local_offset != day_offset:
+            logger.info(
+                "章节 %s day_offset 本地判定 %d 覆盖 LLM 判定 %d",
+                chapter.number, local_offset, day_offset,
+            )
+        day_offset = local_offset
+
+    # 代码确定性累加绝对日期：单调不减，首章/无历史标记时锚定第1日
+    absolute_day = prev_day + max(0, day_offset) if prev_day > 0 else 1
+    summary = _compose_summary_with_day(body, absolute_day, period)
 
     # 保存摘要到章节
     chapter.summary = summary
@@ -296,78 +450,240 @@ async def summarize_chapter(
         content=summary,
         volume=chapter.volume,
         chapter_number=chapter.number,
+        importance=importance,
     )
     session.add(memory)
 
     # 存入向量库（异步，不阻塞事件循环）
+    # 先确保加载小说配置的嵌入模型：冷缓存时回退默认模型会导致维度不匹配。
+    try:
+        await vector_store.ensure_embedding_configured(novel.id, session)
+    except Exception:
+        logger.warning("章节 %s 摘要嵌入模型配置加载失败，回退默认模型", chapter.number, exc_info=True)
+
+    # 向量写入失败不应回滚摘要落库（与实体向量同步策略一致），否则会连带
+    # 触发 confirm 流程后续步骤在已过期 ORM 对象上的 greenlet 错误。
     doc_id = f"chapter_{chapter.id}_summary"
-    await vector_store.astore_text(
-        novel_id=novel.id,
-        doc_id=doc_id,
-        text=summary,
-        metadata={
-            "type": "chapter_summary",
-            "volume": chapter.volume,
-            "chapter_number": chapter.number,
-        },
-    )
-    memory.embedding_id = doc_id
-    return summary, in_tok, out_tok
+    try:
+        await vector_store.astore_text(
+            novel_id=novel.id,
+            doc_id=doc_id,
+            text=summary,
+            metadata={
+                "type": "chapter_summary",
+                "volume": chapter.volume,
+                "chapter_number": chapter.number,
+                "importance": importance,
+            },
+        )
+        memory.embedding_id = doc_id
+    except Exception:
+        logger.warning(
+            "章节 %s 摘要向量写入失败（摘要已保存，可稍后 reindex 重建）",
+            chapter.number, exc_info=True,
+        )
+    return summary
 
 
-def _repair_json(raw: str) -> str:
-    """尝试修复 LLM 常见的 JSON 格式问题"""
-    text = raw.strip()
-    # 去除 markdown 代码块包裹
-    text = re.sub(r'^```(?:json)?\s*\n?', '', text)
-    text = re.sub(r'\n?```\s*$', '', text.strip())
-    # 提取最外层 { ... }
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end <= 0:
-        return text
-    text = text[start:end]
-    # 去除行尾 // 注释
-    text = re.sub(r'//[^\n]*', '', text)
-    # 去除尾部逗号: ,} 或 ,]
-    text = re.sub(r',\s*([}\]])', r'\1', text)
-    # 修复字符串值内的裸换行符（JSON 标准不允许字符串里有未转义换行）
-    # 逐字符扫描：在引号内部时将 \n \r \t 替换为转义形式
-    result = []
-    in_string = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == '\\' and in_string and i + 1 < len(text):
-            result.append(ch)
-            result.append(text[i + 1])
-            i += 2
+_DISCOVER_KEYS = ("characters", "entities", "locations", "techniques", "factions")
+
+# 长期事实（伏笔/秘密）自动提取：kind 归一化 + 每章条数上限
+_THREAD_KIND_MAP = {
+    "secret": "secret", "秘密": "secret", "谎言": "secret",
+    "foreshadowing": "foreshadowing", "伏笔": "foreshadowing",
+    "承诺": "foreshadowing", "处置": "foreshadowing",
+}
+_MAX_THREADS_PER_CHAPTER = 2
+
+
+async def _save_extracted_threads(
+    session: AsyncSession,
+    novel_id: int,
+    chapter_number: int,
+    raw_threads,
+    stale_auto: list[StoryThread],
+    dedup_pool: list[StoryThread],
+) -> None:
+    """把合并调用里提取的长期事实写入伏笔/秘密库（source='auto'）。
+
+    raw_threads 不是列表（模型未按新格式输出）时不做任何事；
+    是列表时视为提取已生效——先删本章旧的 auto 活跃条目（重新生成后已过期），
+    再与库内其余条目按标题/内容互含去重后插入。
+    """
+    if not isinstance(raw_threads, list):
+        return
+    saved: list[StoryThread] = []
+    for t in raw_threads:
+        if len(saved) >= _MAX_THREADS_PER_CHAPTER:
+            break
+        if not isinstance(t, dict):
             continue
-        if ch == '"':
-            in_string = not in_string
-            result.append(ch)
-        elif in_string and ch == '\n':
-            result.append('\\n')
-        elif in_string and ch == '\r':
-            result.append('\\r')
-        elif in_string and ch == '\t':
-            result.append('\\t')
-        else:
-            result.append(ch)
-        i += 1
-    text = ''.join(result)
-    # 修复未闭合的字符串（LLM 截断导致引号不配对）
-    unescaped_quotes = re.findall(r'(?<!\\)"', text)
-    if len(unescaped_quotes) % 2 != 0:
-        text += '"'
-    # 截断修复：如果 JSON 未闭合，补齐缺失的闭合符号
-    open_brackets = text.count('[') - text.count(']')
-    open_braces = text.count('{') - text.count('}')
-    if open_brackets > 0:
-        text += ']' * open_brackets
-    if open_braces > 0:
-        text += '}' * open_braces
-    return text
+        kind = _THREAD_KIND_MAP.get(str(t.get("kind") or "").strip().lower())
+        content = str(t.get("content") or "").strip()
+        if not kind or not content:
+            continue
+        title = str(t.get("title") or "").strip()[:50]
+        try:
+            imp = max(1, min(5, int(round(float(t.get("importance", 3))))))
+        except (TypeError, ValueError):
+            imp = 3
+        known_by = (
+            [str(n).strip() for n in (t.get("known_by") or []) if str(n).strip()]
+            if kind == "secret" and isinstance(t.get("known_by"), list) else []
+        )
+        dup = False
+        for e in dedup_pool + saved:
+            e_title = ((e.title or "")).strip()
+            e_content = (e.content or "").strip()
+            if (title and title == e_title) or (e_content and (content in e_content or e_content in content)):
+                dup = True
+                break
+        if dup:
+            continue
+        saved.append(StoryThread(
+            novel_id=novel_id,
+            kind=kind,
+            title=title,
+            content=content,
+            importance=imp,
+            known_by=known_by,
+            source_chapter=chapter_number,
+            source="auto",
+        ))
+    for stale in stale_auto:
+        await session.delete(stale)
+    for thread in saved:
+        session.add(thread)
+    if saved:
+        logger.info(
+            "章节 %s 自动提取 %d 条长期事实: %s",
+            chapter_number, len(saved), "；".join(t.title or t.content[:20] for t in saved),
+        )
+
+
+def _fmt_known(names: list[str]) -> str:
+    return "、".join(names) if names else "（暂无）"
+
+
+async def summarize_and_discover(
+    session: AsyncSession,
+    chapter: Chapter,
+    novel: Novel,
+    *,
+    known_char_names: list[str],
+    known_entity_names: list[str],
+    known_locations: list[dict],
+    known_tech_names: list[str],
+    known_faction_names: list[str],
+) -> tuple[str, dict | None, int, int]:
+    """单次 LLM 调用同时生成章节摘要 + 发现五类新设定候选。
+
+    返回 (summary, discovered_raw | None, input_tokens, output_tokens)。
+    discovered_raw 为 LLM 原始输出的五类候选 dict（未过滤已知名称）；
+    合并调用失败或摘要为空/截断时降级为纯摘要路径，discovered_raw 返回 None。
+    """
+    if not chapter.content.strip():
+        return "", None, 0, 0
+
+    clean_content = strip_plot_suggestions(chapter.content)
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    prev_day = await _prev_absolute_day(session, novel.id, chapter.number)
+
+    loc_str = (
+        "、".join(f"{l['name']}({l['type']})" for l in known_locations)
+        if known_locations else "（暂无）"
+    )
+
+    # 已有伏笔/秘密条目：本章旧的 auto 活跃条目（重新生成后过期，稍后删除重提）
+    # 不进提示词和去重池，否则 regen 时同一事实会被去重拦下、随删除一起丢失
+    existing_threads = (await session.execute(
+        select(StoryThread).where(
+            StoryThread.novel_id == novel.id,
+            StoryThread.status != "abandoned",
+        )
+    )).scalars().all()
+    stale_auto = [
+        t for t in existing_threads
+        if t.source == "auto" and t.source_chapter == chapter.number and t.status == "active"
+    ]
+    dedup_pool = [t for t in existing_threads if t not in stale_auto]
+
+    prompt_prefix = render(
+        "chapter_summary_discover_prefix.jinja2",
+        known_characters=_fmt_known(known_char_names),
+        known_entities=_fmt_known(known_entity_names),
+        known_locations=loc_str,
+        known_techniques=_fmt_known(known_tech_names),
+        known_factions=_fmt_known(known_faction_names),
+        known_threads="；".join(
+            (t.title or (t.content or "")[:20]) for t in dedup_pool
+        ) or "（暂无）",
+    ) + _day_offset_hint(chapter.number)
+    messages = _build_analysis_messages(
+        prompt_prefix, clean_content[:12000],
+        render("chapter_summary_discover_suffix.jinja2"), api_format,
+    )
+
+    try:
+        data, in_tok, out_tok = await call_json(
+            messages, model, api_format,
+            temperatures=(0.3, 0.1), max_tokens=3000,
+        )
+    except JsonCallError as e:
+        logger.warning("章节 %s 合并摘要+发现调用失败，降级为纯摘要: %s", chapter.number, e)
+        summary, s_in, s_out = await summarize_chapter(session, chapter, novel)
+        return summary, None, e.input_tokens + s_in, e.output_tokens + s_out
+
+    body = _strip_leading_time_tag(_clean_summary(str(data.get("summary") or "").strip()))
+    _s = body.strip()
+    if not _s or _s[-1] not in '。！？…」】':
+        # 摘要为空或疑似截断：整体降级为纯摘要路径（其内部含截断重试），发现结果丢弃
+        logger.warning(
+            "章节 %s 合并调用摘要为空或疑似截断 (len=%d)，降级为纯摘要", chapter.number, len(_s),
+        )
+        summary, s_in, s_out = await summarize_chapter(session, chapter, novel)
+        return summary, None, in_tok + s_in, out_tok + s_out
+
+    importance, day_offset, period = _coerce_summary_fields(data)
+    summary = await _persist_summary(
+        session, chapter, novel, body, importance, day_offset, period, prev_day, clean_content,
+    )
+    await _save_extracted_threads(
+        session, novel.id, chapter.number, data.get("threads"), stale_auto, dedup_pool,
+    )
+    discovered = {k: data.get(k) if isinstance(data.get(k), list) else [] for k in _DISCOVER_KEYS}
+    return summary, discovered, in_tok, out_tok
+
+
+def _coerce_summary_fields(data: dict) -> tuple[int, int, str]:
+    """从摘要 JSON 中提取并规整 (importance, day_offset, period)。"""
+    try:
+        imp = int(round(float(data.get("importance", 3))))
+    except (TypeError, ValueError):
+        imp = 3
+    imp = max(1, min(5, imp))
+    try:
+        offset = int(round(float(data.get("day_offset", 0))))
+    except (TypeError, ValueError):
+        offset = 0
+    period = str(data.get("period") or "").strip()
+    return imp, max(0, offset), period
+
+
+def _parse_summary_payload(raw: str) -> tuple[str, int, int, str]:
+    """解析章节摘要 LLM 的 JSON 输出 {summary, importance, day_offset, period}。
+    返回 (summary, importance, day_offset, period)。失败时回退为
+    「整段文本 + 中性分3 + 偏移0 + 空时段」，保证核心摘要路径不因 JSON 解析失败而中断。"""
+    try:
+        data = json.loads(repair_json(raw))
+        if isinstance(data, dict) and "summary" in data:
+            summary = str(data.get("summary") or "").strip()
+            imp, offset, period = _coerce_summary_fields(data)
+            if summary:
+                return summary, imp, offset, period
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return raw.strip(), 3, 0, ""
 
 
 def _fuzzy_match_character(name: str, char_map: dict[str, "Character"]) -> str | None:
@@ -387,30 +703,58 @@ def _fuzzy_match_character(name: str, char_map: dict[str, "Character"]) -> str |
     return None
 
 
+def _char_titles(c: Character) -> list:
+    titles = (c.current_state or {}).get("titles")
+    return titles if isinstance(titles, list) else []
+
+
+def _filter_mentioned(items: list, text: str, aliases_of=None) -> list:
+    """只保留名字（或称谓别名）出现在正文里的条目，控制状态更新的输入成本。
+    未点名的条目本章状态基本不会变，不再全量发给 LLM。"""
+    out = []
+    for it in items:
+        names = [it.name]
+        if aliases_of is not None:
+            names.extend(aliases_of(it))
+        if any(isinstance(n, str) and n.strip() and n in text for n in names):
+            out.append(it)
+    return out
+
+
 async def update_character_states(
     session: AsyncSession,
     chapter: Chapter,
     novel: Novel,
     instruction: str = "",
-) -> tuple[bool, str, int, int, list[str]]:
+) -> tuple[bool, str, int, int, list[str], list[int]]:
     """根据章节内容更新角色状态卡。
-    返回 (success, warning_message, input_tokens, output_tokens, unmatched_names)。
+    返回 (success, warning_message, input_tokens, output_tokens, unmatched_names, updated_ids)。
     """
     result = await session.execute(
         select(Character).where(Character.novel_id == novel.id)
     )
-    characters = result.scalars().all()
+    all_characters = result.scalars().all()
+    if not all_characters:
+        return True, "", 0, 0, [], []
+
+    chapter_content = strip_plot_suggestions(chapter.content)[:12000]
+    if instruction:
+        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
+
+    # 只发本章点名（含称谓）的角色状态；一个都没命中就跳过调用
+    characters = _filter_mentioned(all_characters, chapter_content, _char_titles)
     if not characters:
-        return True, "", 0, 0, []
+        return True, "", 0, 0, [], []
 
     states_text = json.dumps(
         {c.name: c.current_state for c in characters},
         ensure_ascii=False,
         indent=2,
     )
+    # 字段词表取全库，保持字段命名跨章一致
     existing_fields = sorted({
         str(key)
-        for c in characters
+        for c in all_characters
         if isinstance(c.current_state, dict)
         for key in c.current_state.keys()
         if str(key).strip()
@@ -422,55 +766,23 @@ async def update_character_states(
         character_states=states_text,
         state_fields=state_fields,
     )
-    chapter_content = strip_plot_suggestions(chapter.content)[:6000]
-    if instruction:
-        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
     messages = _build_analysis_messages(
         prompt_prefix, chapter_content, render("character_update_suffix.jinja2"), api_format,
     )
 
-    total_in, total_out = 0, 0
     try:
-        raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.2,
-            max_tokens=1500,
+        updates, total_in, total_out = await call_json(
+            messages, model, api_format,
+            temperatures=(0.2, 0.1), max_tokens=1500,
         )
-        total_in += in_tok
-        total_out += out_tok
-    except Exception as e:
-        return False, f"角色状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
-
-    # 提取并修复 JSON（处理尾部逗号、截断、markdown 包裹等常见 LLM 问题）
-    json_text = _repair_json(raw)
-    try:
-        updates = json.loads(json_text)
-    except json.JSONDecodeError:
-        # 修复失败 → 降低 temperature 重试一次 LLM 调用
-        try:
-            raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-                messages=messages,
-                model=model,
-                api_format=api_format,
-                temperature=0.1,
-                max_tokens=1500,
-            )
-            total_in += in_tok
-            total_out += out_tok
-            json_text = _repair_json(raw)
-            updates = json.loads(json_text)
-        except Exception as e:
-            return False, f"角色状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
-
-    if not isinstance(updates, dict):
-        return False, "角色状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
+    except JsonCallError as e:
+        return False, f"角色状态更新：LLM 调用/解析失败（含重试）({e})", e.input_tokens, e.output_tokens, [], []
 
     char_map = {c.name: c for c in characters}
     unmatched = []
     matched_count = 0
+    updated_ids: list[int] = []
     for name, state in updates.items():
         if not isinstance(state, dict):
             continue
@@ -509,38 +821,14 @@ async def update_character_states(
         char_map[target_name].current_state = merged
         flag_modified(char_map[target_name], "current_state")
         matched_count += 1
+        updated_ids.append(char_map[target_name].id)
 
     warning = ""
     if unmatched:
         warning = f"角色状态更新：以下名称未匹配到角色库 [{', '.join(unmatched)}]"
     if matched_count == 0 and not unmatched:
         warning = "角色状态更新：LLM 未返回任何角色状态数据"
-    return True, warning, total_in, total_out, unmatched
-
-
-ENTITY_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新世界实体（道具/系统）的状态。
-
-输出规范：
-- 如实记录本章中实体的状态变化
-- 道具：关注持有者变化、已知能力
-- 系统：关注等级/层次变化、已解锁能力
-- 只输出本章有变化的实体，无变化的不要输出
-- 每个实体所有字段内容合计不超过300字，请精炼概括
-
-当前世界实体状态：
-{entity_states}"""
-
-ENTITY_UPDATE_PROMPT_SUFFIX = """以 JSON 格式输出，格式为：
-{
-  "实体名": {
-    "owner": "当前持有者/归属者，无变化则留空字符串",
-    "description": "综合已有信息和本章新信息，简要描述该实体；无新信息则留空字符串",
-    "new_abilities": "简要概括该实体目前已知的所有能力，无则留空字符串",
-    "level_changes": "当前等级/层次，无变化则留空字符串"
-  }
-}
-
-只输出 JSON，不要任何解释。"""
+    return True, warning, total_in, total_out, unmatched, updated_ids
 
 
 def _trim_entity_state(state: dict, limit: int = 300) -> None:
@@ -549,7 +837,7 @@ def _trim_entity_state(state: dict, limit: int = 300) -> None:
     if total <= limit:
         return
     overflow = total - limit
-    for key in ("description", "new_abilities", "level_changes"):
+    for key in ("recent_changes", "level", "owner"):
         if key not in state or not isinstance(state[key], str):
             continue
         val = state[key]
@@ -562,76 +850,24 @@ def _trim_entity_state(state: dict, limit: int = 300) -> None:
             return
 
 
-async def update_entity_states(
-    session: AsyncSession,
-    chapter: Chapter,
-    novel: Novel,
-    instruction: str = "",
-) -> tuple[bool, str, int, int, list[str]]:
-    """根据章节内容更新世界实体状态。
-    返回 (success, warning_message, input_tokens, output_tokens, unmatched_names)。
-    """
-    result = await session.execute(
-        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
-    )
-    entities = result.scalars().all()
-    if not entities:
-        return True, "", 0, 0, []
+# 旧版每章全量重写字段已废弃（与静态描述/属性重复），落库时顺带清理
+_OBSOLETE_ENTITY_STATE_KEYS = ("description", "new_abilities", "level_changes")
 
-    states_text = json.dumps(
-        {e.name: {"type": e.type, **(e.current_state or {})} for e in entities},
-        ensure_ascii=False,
-        indent=2,
-    )
-    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = render("entity_update_prefix.jinja2", entity_states=states_text)
-    chapter_content = strip_plot_suggestions(chapter.content)[:6000]
-    if instruction:
-        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
 
-    messages = _build_analysis_messages(
-        prompt_prefix, chapter_content, render("entity_update_suffix.jinja2"), api_format,
-    )
-
-    total_in, total_out = 0, 0
-    try:
-        raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.2,
-            max_tokens=1500,
-        )
-        total_in += in_tok
-        total_out += out_tok
-    except Exception as e:
-        return False, f"实体状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
-
-    json_text = _repair_json(raw)
-    try:
-        updates = json.loads(json_text)
-    except json.JSONDecodeError:
-        try:
-            raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-                messages=messages,
-                model=model,
-                api_format=api_format,
-                temperature=0.1,
-                max_tokens=1500,
-            )
-            total_in += in_tok
-            total_out += out_tok
-            json_text = _repair_json(raw)
-            updates = json.loads(json_text)
-        except Exception as e:
-            return False, f"实体状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
-
-    if not isinstance(updates, dict):
-        return False, "实体状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
-
+def _apply_entity_updates(entities, updates: dict) -> tuple[int, list[str], list[int]]:
+    """将 LLM 输出的实体状态合并入库，返回 (matched_count, unmatched_names, updated_ids)。"""
     entity_map = {e.name: e for e in entities}
+    for e in entities:
+        st = e.current_state or {}
+        if any(k in st for k in _OBSOLETE_ENTITY_STATE_KEYS):
+            for k in _OBSOLETE_ENTITY_STATE_KEYS:
+                st.pop(k, None)
+            e.current_state = st
+            flag_modified(e, "current_state")
+
     unmatched = []
     matched_count = 0
+    updated_ids: list[int] = []
     for name, state in updates.items():
         if not isinstance(state, dict):
             continue
@@ -644,108 +880,22 @@ async def update_entity_states(
         for key, val in state.items():
             if val:
                 merged[key] = val
+        for k in _OBSOLETE_ENTITY_STATE_KEYS:
+            merged.pop(k, None)
         _trim_entity_state(merged)
         entity_map[target_name].current_state = merged
         flag_modified(entity_map[target_name], "current_state")
         matched_count += 1
-
-    warning = ""
-    if unmatched:
-        warning = f"实体状态更新：以下名称未匹配到实体库 [{', '.join(unmatched)}]"
-    if matched_count == 0 and not unmatched:
-        warning = "实体状态更新：LLM 未返回任何实体状态数据"
-    return True, warning, total_in, total_out, unmatched
+        updated_ids.append(entity_map[target_name].id)
+    return matched_count, unmatched, updated_ids
 
 
-LOCATION_UPDATE_PROMPT_PREFIX = """根据以下章节内容，更新地点的动态状态。
-
-输出规范：
-- 如实记录本章中地点的状态变化
-- 关注控制方、当前局势、破坏/修复、封锁/开放、重要事件遗留影响
-- 只输出本章有变化的地点，无变化的不要输出
-
-当前地点状态：
-{location_states}"""
-
-LOCATION_UPDATE_PROMPT_SUFFIX = """以 JSON 格式输出，格式为：
-{
-  "地点名": {
-    "current_situation": "当前局势或状态，无法判断则留空字符串",
-    "control": "当前控制方/所属势力，无变化则留空字符串",
-    "notable_changes": ["本章造成的地点变化，无则为空数组"]
-  }
-}
-
-只输出 JSON，不要任何解释。"""
-
-
-async def update_location_states(
-    session: AsyncSession,
-    chapter: Chapter,
-    novel: Novel,
-    instruction: str = "",
-) -> tuple[bool, str, int, int, list[str]]:
-    result = await session.execute(
-        select(Location).where(Location.novel_id == novel.id)
-    )
-    locations = result.scalars().all()
-    if not locations:
-        return True, "", 0, 0, []
-
-    states_text = json.dumps(
-        {l.name: {"type": l.type, **(l.current_state or {})} for l in locations},
-        ensure_ascii=False,
-        indent=2,
-    )
-    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
-    prompt_prefix = render("location_update_prefix.jinja2", location_states=states_text)
-    chapter_content = strip_plot_suggestions(chapter.content)[:6000]
-    if instruction:
-        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
-
-    messages = _build_analysis_messages(
-        prompt_prefix, chapter_content, render("location_update_suffix.jinja2"), api_format,
-    )
-
-    total_in, total_out = 0, 0
-    try:
-        raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-            messages=messages,
-            model=model,
-            api_format=api_format,
-            temperature=0.2,
-            max_tokens=1500,
-        )
-        total_in += in_tok
-        total_out += out_tok
-    except Exception as e:
-        return False, f"地点状态更新：LLM 调用失败 ({type(e).__name__}: {e})", 0, 0, []
-
-    json_text = _repair_json(raw)
-    try:
-        updates = json.loads(json_text)
-    except json.JSONDecodeError:
-        try:
-            raw, in_tok, out_tok = await llm_client.dispatch_chat_complete_with_usage(
-                messages=messages,
-                model=model,
-                api_format=api_format,
-                temperature=0.1,
-                max_tokens=1500,
-            )
-            total_in += in_tok
-            total_out += out_tok
-            json_text = _repair_json(raw)
-            updates = json.loads(json_text)
-        except Exception as e:
-            return False, f"地点状态更新：JSON 解析失败（含重试）({e})", total_in, total_out, []
-
-    if not isinstance(updates, dict):
-        return False, "地点状态更新：LLM 返回的 JSON 不是对象类型", total_in, total_out, []
-
+def _apply_location_updates(locations, updates: dict) -> tuple[int, list[str], list[int]]:
+    """将 LLM 输出的地点状态合并入库，返回 (matched_count, unmatched_names, updated_ids)。"""
     location_map = {l.name: l for l in locations}
     unmatched = []
     matched_count = 0
+    updated_ids: list[int] = []
     for name, state in updates.items():
         if not isinstance(state, dict):
             continue
@@ -765,27 +915,105 @@ async def update_location_states(
         location_map[target_name].current_state = merged
         flag_modified(location_map[target_name], "current_state")
         matched_count += 1
-
-    warning = ""
-    if unmatched:
-        warning = f"地点状态更新：以下名称未匹配到地点库 [{', '.join(unmatched)}]"
-    if matched_count == 0 and not unmatched:
-        warning = "地点状态更新：LLM 未返回任何地点状态数据"
-    return True, warning, total_in, total_out, unmatched
+        updated_ids.append(location_map[target_name].id)
+    return matched_count, unmatched, updated_ids
 
 
-ARC_SUMMARY_PROMPT = """你是一位专业的文学编辑。以下是一部小说连续若干章的章节摘要，请将它们整合为一段故事弧概要。
+async def update_entity_location_states(
+    session: AsyncSession,
+    chapter: Chapter,
+    novel: Novel,
+    instruction: str = "",
+) -> dict:
+    """单次 LLM 调用同时更新世界实体（道具/系统）与地点状态。
 
-要求：
-- 聚焦这段章节内的主线进展、重要事件、核心角色变化
-- 保留新引入的伏笔和待解决的冲突
-- 控制在500字以内
-- 使用客观叙述语气，按时间线组织
+    返回 {
+        "entity": {"ok": bool, "warning": str, "unmatched": list[str], "updated_ids": list[int]},
+        "location": {"ok": bool, "warning": str, "unmatched": list[str], "updated_ids": list[int]},
+        "input_tokens": int, "output_tokens": int,
+    }
+    """
+    def _section(ok: bool = True, warning: str = "", unmatched: list[str] | None = None,
+                 updated_ids: list[int] | None = None) -> dict:
+        return {"ok": ok, "warning": warning, "unmatched": unmatched or [], "updated_ids": updated_ids or []}
 
-各章节摘要：
-{summaries}
+    def _result(entity: dict, location: dict, in_tok: int = 0, out_tok: int = 0) -> dict:
+        return {"entity": entity, "location": location, "input_tokens": in_tok, "output_tokens": out_tok}
 
-直接输出故事弧概要，不要任何前缀。"""
+    ent_result = await session.execute(
+        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
+    )
+    entities = ent_result.scalars().all()
+    loc_result = await session.execute(
+        select(Location).where(Location.novel_id == novel.id)
+    )
+    locations = loc_result.scalars().all()
+    if not entities and not locations:
+        return _result(_section(), _section())
+
+    chapter_content = strip_plot_suggestions(chapter.content)[:12000]
+    if instruction:
+        chapter_content = f"[写作指令参考：{instruction}]\n\n{chapter_content}"
+
+    # 只发本章点名的实体/地点状态；全都没命中就跳过调用
+    entities = _filter_mentioned(entities, chapter_content)
+    locations = _filter_mentioned(locations, chapter_content)
+    if not entities and not locations:
+        return _result(_section(), _section())
+
+    entity_states = json.dumps(
+        {e.name: {"type": e.type, **(e.current_state or {})} for e in entities},
+        ensure_ascii=False,
+        indent=2,
+    ) if entities else ""
+    location_states = json.dumps(
+        {l.name: {"type": l.type, **(l.current_state or {})} for l in locations},
+        ensure_ascii=False,
+        indent=2,
+    ) if locations else ""
+
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    prompt_prefix = render(
+        "entity_location_update_prefix.jinja2",
+        entity_states=entity_states,
+        location_states=location_states,
+    )
+
+    messages = _build_analysis_messages(
+        prompt_prefix, chapter_content, render("entity_location_update_suffix.jinja2"), api_format,
+    )
+
+    try:
+        updates, total_in, total_out = await call_json(
+            messages, model, api_format,
+            temperatures=(0.2, 0.1), max_tokens=2000,
+        )
+    except JsonCallError as e:
+        msg = f"实体/地点状态更新：LLM 调用/解析失败（含重试）({e})"
+        return _result(_section(False, msg), _section(False, msg), e.input_tokens, e.output_tokens)
+
+    ent_updates = updates.get("entities")
+    loc_updates = updates.get("locations")
+    ent_updates = ent_updates if isinstance(ent_updates, dict) else {}
+    loc_updates = loc_updates if isinstance(loc_updates, dict) else {}
+
+    entity_section = _section()
+    if entities:
+        matched, unmatched, updated_ids = _apply_entity_updates(entities, ent_updates)
+        warning = ""
+        if unmatched:
+            warning = f"实体状态更新：以下名称未匹配到实体库 [{', '.join(unmatched)}]"
+        entity_section = _section(True, warning, unmatched, updated_ids)
+
+    location_section = _section()
+    if locations:
+        matched, unmatched, updated_ids = _apply_location_updates(locations, loc_updates)
+        warning = ""
+        if unmatched:
+            warning = f"地点状态更新：以下名称未匹配到地点库 [{', '.join(unmatched)}]"
+        location_section = _section(True, warning, unmatched, updated_ids)
+
+    return _result(entity_section, location_section, total_in, total_out)
 
 
 async def generate_arc_summary(
@@ -851,34 +1079,12 @@ async def generate_arc_summary(
     return arc_summary.strip()
 
 
-BOOK_SUMMARY_PROMPT = """你是一位专业的文学编辑。以下是一部小说各章节的摘要，请将它们整合为一份全书概要。
-
-要求：
-- 聚焦主线剧情、核心人物关系、重要转折点
-- 保留关键伏笔和待解决的矛盾
-- 控制在500字以内
-- 使用客观叙述语气，不添加评价
-
-各章节摘要：
-{summaries}
-
-直接输出全书概要，不要任何前缀。"""
-
-BOOK_SUMMARY_MERGE_PROMPT = """你是一位专业的文学编辑。以下是一部小说的多段分批概要，请将它们整合为一份完整的全书概要。
-
-要求：
-- 聚焦主线剧情、核心人物关系、重要转折点
-- 保留关键伏笔和待解决的矛盾
-- 控制在500字以内
-- 使用客观叙述语气，不添加评价
-- 按时间线顺序组织，保持因果关系清晰
-
-各段概要：
-{summaries}
-
-直接输出全书概要，不要任何前缀。"""
-
 BATCH_SIZE = 50  # 每批最多处理 50 章摘要
+
+
+def _book_summary_max_tokens(chapter_count: int) -> int:
+    """全书概要的输出预算随篇幅增长：基础 2000，每满 50 章加 500。"""
+    return 2000 + (max(0, chapter_count) // 50) * 500
 
 
 async def _summarize_batch(
@@ -886,6 +1092,7 @@ async def _summarize_batch(
     model: str,
     api_format: str,
     prompt_template: str = "book_summary.jinja2",
+    max_tokens: int = 2000,
 ) -> str:
     """用指定 prompt 模板对一段摘要文本做概要"""
     prompt = render(prompt_template, summaries=summaries_text)
@@ -894,17 +1101,60 @@ async def _summarize_batch(
         model=model,
         api_format=api_format,
         temperature=0.3,
-        max_tokens=2000,
+        max_tokens=max_tokens,
     )
 
 
 async def generate_book_summary(
     session: AsyncSession,
     novel: "Novel",  # noqa: F821
+    window: tuple[int, int] | None = None,
 ) -> str:
     """将所有章节摘要整合成全书概要，存入 novel.book_summary。
-    优先使用弧摘要（arc_summary）减少压缩层级；若无弧摘要则回退到章节摘要。
+
+    window=(start_ch, end_ch) 且已有概要时走增量路径：旧概要 + 窗口内新章摘要 →
+    更新版概要，成本与总章数无关。增量前提不满足（无旧概要/窗口无摘要/输出为空）
+    自动退回全量重建。
+
+    全量路径：优先使用弧摘要（arc_summary）减少压缩层级；若无弧摘要则回退到章节摘要。
     当摘要数超过 BATCH_SIZE 时，自动分批概括再整合，支持百章级别。"""
+    if window and (novel.book_summary or "").strip():
+        start_ch, end_ch = window
+        window_result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.novel_id == novel.id,
+                Memory.memory_type == "chapter_summary",
+                Memory.chapter_number >= start_ch,
+                Memory.chapter_number <= end_ch,
+            )
+            .order_by(Memory.chapter_number.asc(), Memory.id.asc())
+        )
+        latest_by_chapter: dict[int, Memory] = {
+            m.chapter_number: m for m in window_result.scalars().all()
+        }
+        if latest_by_chapter:
+            new_summaries = "\n".join(
+                f"第{n}章：{latest_by_chapter[n].content}"
+                for n in sorted(latest_by_chapter)
+            )
+            model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+            prompt = render(
+                "book_summary_update.jinja2",
+                old_summary=novel.book_summary,
+                new_summaries=new_summaries,
+            )
+            updated = (await llm_client.dispatch_chat_complete(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                api_format=api_format,
+                temperature=0.3,
+                max_tokens=_book_summary_max_tokens(end_ch),
+            )).strip()
+            if updated:
+                novel.book_summary = updated
+                return updated
+
     # 优先使用弧摘要（中间粒度，信息保留率更高）
     arc_result = await session.execute(
         select(Memory)
@@ -946,13 +1196,14 @@ async def generate_book_summary(
         return ""
 
     model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    budget = _book_summary_max_tokens(max((m.chapter_number or 0) for m in memories))
 
     if len(memories) <= BATCH_SIZE:
         # 少量章节：单次生成
         summaries_text = "\n".join(
             f"第{m.chapter_number}章：{m.content}" for m in memories
         )
-        book_summary = await _summarize_batch(summaries_text, model, api_format)
+        book_summary = await _summarize_batch(summaries_text, model, api_format, max_tokens=budget)
     else:
         # 大量章节：分批概括 → 再整合
         batch_summaries = []
@@ -971,10 +1222,110 @@ async def generate_book_summary(
         book_summary = await _summarize_batch(
             merged_text, model, api_format,
             prompt_template="book_summary_merge.jinja2",
+            max_tokens=budget,
         )
 
     novel.book_summary = book_summary
     return book_summary
+
+
+async def detect_worldview_drift(
+    session: AsyncSession,
+    novel: "Novel",  # noqa: F821
+    recent: int = 10,
+) -> list[dict]:
+    """AI 检测：找出原世界观设定中被近期剧情推翻/取代的条目。
+
+    对比原 core_setting + 已有变更 + 最近 N 章摘要，返回 list[dict]
+    （fact / supersedes / effective_chapter）。只返回，不落库；
+    去重与写入由调用方通过 persist_pending_drifts 处理。
+    """
+    if not (novel.core_setting or "").strip():
+        return []
+
+    # 最近 N 章摘要（每章取最新一条）
+    rolling_text, rolling_nums = await get_rolling_summary(
+        session, novel.id, novel.current_chapter + 1,
+        volume=novel.current_volume, max_summaries=recent,
+    )
+    if not rolling_text.strip():
+        return []
+
+    existing = (await session.execute(
+        select(WorldviewChange).where(WorldviewChange.novel_id == novel.id)
+    )).scalars().all()
+    existing_text = "\n".join(f"- {c.fact}" for c in existing) or "（暂无）"
+
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    prompt = render(
+        "worldview_drift.jinja2",
+        core_setting=novel.core_setting,
+        existing_changes=existing_text,
+        recent_summaries=rolling_text,
+    )
+    messages = [{"role": "user", "content": prompt}]
+
+    # 模板要求输出 JSON 数组，expect="array" 才能正确提取（旧版按对象提取导致数组输出被剥坏）
+    try:
+        parsed, _, _ = await call_json(
+            messages, model, api_format,
+            temperatures=(0.2, 0.1), max_tokens=1500, expect="array",
+        )
+    except JsonCallError as e:
+        logger.warning("世界观漂移检测失败: %s", e)
+        return []
+
+    drifts: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        fact = str(item.get("fact") or "").strip()
+        if not fact:
+            continue
+        try:
+            eff = int(item.get("effective_chapter") or 0)
+        except (TypeError, ValueError):
+            eff = 0
+        drifts.append({
+            "fact": fact,
+            "supersedes": str(item.get("supersedes") or "").strip(),
+            "effective_chapter": eff,
+        })
+    return drifts
+
+
+async def persist_pending_drifts(
+    session: AsyncSession,
+    novel_id: int,
+    drifts: list[dict],
+) -> list[WorldviewChange]:
+    """把检测到的漂移以 status=pending/source=ai 写入，跳过 fact 文本重复的项。
+
+    不 commit，由调用方提交。"""
+    if not drifts:
+        return []
+    existing_facts = {
+        f.strip() for (f,) in (await session.execute(
+            select(WorldviewChange.fact).where(WorldviewChange.novel_id == novel_id)
+        )).all()
+    }
+    new_rows: list[WorldviewChange] = []
+    for d in drifts:
+        fact = d["fact"].strip()
+        if fact in existing_facts:
+            continue
+        existing_facts.add(fact)
+        row = WorldviewChange(
+            novel_id=novel_id,
+            fact=fact,
+            supersedes=d.get("supersedes", ""),
+            effective_chapter=d.get("effective_chapter", 0),
+            status="pending",
+            source="ai",
+        )
+        session.add(row)
+        new_rows.append(row)
+    return new_rows
 
 
 async def get_rolling_summary(
@@ -983,6 +1334,8 @@ async def get_rolling_summary(
     current_chapter_number: int,
     volume: int = 1,
     max_summaries: int = 5,
+    token_budget: int | None = None,
+    min_summaries: int = 3,
 ) -> tuple[str, list[int]]:
     """获取最近 N 章摘要拼接（每章只取最新一条，避免重复生成导致窗口被挤压）。
     返回 (摘要文本, 包含的章节号列表)。"""
@@ -1007,6 +1360,18 @@ async def get_rolling_summary(
     memories = result.scalars().all()
     if not memories:
         return "", []
-    chapter_nums = sorted(m.chapter_number for m in memories)
-    parts = [f"第{m.chapter_number}章摘要：{m.content}" for m in reversed(memories)]
+
+    selected: list[Memory] = []
+    used_tokens = 0
+    minimum = min(max_summaries, max(0, min_summaries))
+    for memory in memories:  # newest -> oldest
+        part = f"第{memory.chapter_number}章摘要：{memory.content}"
+        part_tokens = estimate_tokens(part)
+        if token_budget and selected and used_tokens + part_tokens > token_budget and len(selected) >= minimum:
+            break
+        selected.append(memory)
+        used_tokens += part_tokens
+
+    chapter_nums = sorted(m.chapter_number for m in selected)
+    parts = [f"第{m.chapter_number}章摘要：{m.content}" for m in reversed(selected)]
     return "\n".join(parts), chapter_nums

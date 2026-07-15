@@ -11,12 +11,19 @@ from app.models.chapter import Chapter
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
 from app.agents import world_agent, outline_agent, character_agent, build_agent
 from app.services import summarizer, context_builder, llm_client, entity_embeddings
+from app.services.llm_json import repair_json
+from app.services.world_rules_sync import seed_or_sync
 from app.models.character import Character
 from app.models.world_entity import WorldEntity
 from app.models.location import Location
 from app.models.faction import Faction
 from app.models.technique import Technique
 from app.models.novel_note import NovelNote
+from app.models.volume import Volume
+from app.models.worldview_change import WorldviewChange
+from app.models.story_thread import StoryThread
+from app.models.llm_usage import LlmUsage
+from app.models.model_library import ModelEntry
 from app.services import vector_store
 from app.models.memory import Memory
 
@@ -53,6 +60,7 @@ async def _reindex_after_embedding_change(db, novel):
                 "type": "chapter_summary",
                 "volume": m.volume,
                 "chapter_number": m.chapter_number,
+                "importance": m.importance,
             }))
         await vector_store.astore_texts_batch(novel.id, batch)
 
@@ -139,6 +147,191 @@ async def delete_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(novel)
     await db.commit()
     return {"ok": True}
+
+
+# ── 复制整本小说 ────────────────────────────────────────────────────────────
+
+class _DuplicateBody(BaseModel):
+    mode: str = "full"  # full=全部（含章节/记忆） / settings=仅设定
+    title: str | None = None
+
+
+def _clone_cols(obj, exclude: set[str], **overrides) -> dict:
+    """复制 ORM 行的标量列值（排除主键/外键/时间戳等），叠加 overrides。"""
+    data = {c.name: getattr(obj, c.name) for c in obj.__table__.columns if c.name not in exclude}
+    data.update(overrides)
+    return data
+
+
+@router.post("/{novel_id}/duplicate", response_model=NovelOut)
+async def duplicate_novel(novel_id: int, body: _DuplicateBody, db: AsyncSession = Depends(get_db)):
+    """深拷贝整本小说：SQL 行重映射 id + 直接复制向量（不重嵌入）。
+    mode=full 含章节与对应记忆；mode=settings 仅复制设定并重置写作进度。"""
+    import re, logging
+    log = logging.getLogger(__name__)
+
+    src = await db.get(Novel, novel_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    full = body.mode != "settings"
+    CHILD_EXCLUDE = {"id", "novel_id", "created_at", "updated_at"}
+
+    # 1. Novel 本体
+    novel_overrides: dict = {"title": (body.title or f"{src.title} - 副本")}
+    if not full:
+        novel_overrides.update(current_volume=1, current_chapter=0, book_summary="")
+    new_novel = Novel(**_clone_cols(src, {"id", "created_at", "updated_at"}, **novel_overrides))
+    db.add(new_novel)
+    await db.flush()
+    new_id = new_novel.id
+
+    async def _load(model):
+        return (await db.execute(select(model).where(model.novel_id == novel_id))).scalars().all()
+
+    # 2. 角色
+    char_pairs = [(c.id, Character(**_clone_cols(c, CHILD_EXCLUDE, novel_id=new_id))) for c in await _load(Character)]
+    for _, nc in char_pairs:
+        db.add(nc)
+
+    # 3. 道具/系统
+    entity_pairs = [(e.id, WorldEntity(**_clone_cols(e, CHILD_EXCLUDE, novel_id=new_id))) for e in await _load(WorldEntity)]
+    for _, ne in entity_pairs:
+        db.add(ne)
+
+    # 4. 地点（parent_id 自引用，先建后补）
+    loc_pairs = []
+    for l in await _load(Location):
+        nl = Location(**_clone_cols(l, CHILD_EXCLUDE | {"parent_id"}, novel_id=new_id))
+        db.add(nl)
+        loc_pairs.append((l, nl))
+
+    # 5. 势力（location_id 指向地点）
+    fac_src = await _load(Faction)
+
+    # 6. 功法 / 7. 笔记 / 8. 分卷 / 9. 世界观变更 / 10. 大纲
+    tech_pairs = [(t.id, Technique(**_clone_cols(t, CHILD_EXCLUDE, novel_id=new_id))) for t in await _load(Technique)]
+    for _, nt in tech_pairs:
+        db.add(nt)
+    note_pairs = [(n.id, NovelNote(**_clone_cols(n, CHILD_EXCLUDE, novel_id=new_id))) for n in await _load(NovelNote)]
+    for _, nn in note_pairs:
+        db.add(nn)
+    for v in await _load(Volume):
+        db.add(Volume(**_clone_cols(v, CHILD_EXCLUDE, novel_id=new_id)))
+    for w in await _load(WorldviewChange):
+        db.add(WorldviewChange(**_clone_cols(w, CHILD_EXCLUDE, novel_id=new_id)))
+    for thread in await _load(StoryThread):
+        db.add(StoryThread(**_clone_cols(thread, CHILD_EXCLUDE, novel_id=new_id)))
+    for o in await _load(Outline):
+        db.add(Outline(**_clone_cols(o, CHILD_EXCLUDE, novel_id=new_id)))
+
+    await db.flush()
+    char_map = {old: nc.id for old, nc in char_pairs}
+    entity_map = {old: ne.id for old, ne in entity_pairs}
+    loc_map = {l.id: nl.id for l, nl in loc_pairs}
+    tech_map = {old: nt.id for old, nt in tech_pairs}
+    note_map = {old: nn.id for old, nn in note_pairs}
+
+    # 补地点 parent_id
+    for l, nl in loc_pairs:
+        if l.parent_id and l.parent_id in loc_map:
+            nl.parent_id = loc_map[l.parent_id]
+
+    # 势力重映射 location_id
+    fac_pairs = []
+    for f in fac_src:
+        nf = Faction(**_clone_cols(
+            f, CHILD_EXCLUDE | {"location_id"}, novel_id=new_id,
+            location_id=loc_map.get(f.location_id) if f.location_id else None,
+        ))
+        db.add(nf)
+        fac_pairs.append((f.id, nf))
+
+    # 11+12. 章节 + 记忆（仅 full）
+    chapter_map: dict[int, int] = {}
+    if full:
+        chap_pairs = [(ch.id, Chapter(**_clone_cols(ch, CHILD_EXCLUDE, novel_id=new_id))) for ch in await _load(Chapter)]
+        for _, nch in chap_pairs:
+            db.add(nch)
+        await db.flush()
+        chapter_map = {old: nch.id for old, nch in chap_pairs}
+
+        for m in await _load(Memory):
+            new_chapter_id = chapter_map.get(m.chapter_id) if m.chapter_id else None
+            new_emb = m.embedding_id
+            if m.embedding_id and m.chapter_id and m.chapter_id in chapter_map:
+                new_emb = m.embedding_id.replace(
+                    f"chapter_{m.chapter_id}_", f"chapter_{chapter_map[m.chapter_id]}_", 1
+                )
+            db.add(Memory(**_clone_cols(
+                m, {"id", "created_at", "novel_id", "chapter_id", "embedding_id"},
+                novel_id=new_id, chapter_id=new_chapter_id, embedding_id=new_emb,
+            )))
+
+    await db.commit()
+    await db.refresh(new_novel)
+
+    # 13. 向量复制（直接搬运 embedding，不重新嵌入）
+    fac_map = {old: nf.id for old, nf in fac_pairs}
+    simple_specs = [
+        ("character_", char_map, "entity_id"),
+        ("entity_item_", entity_map, "entity_id"),
+        ("entity_system_", entity_map, "entity_id"),
+        ("location_", loc_map, "entity_id"),
+        ("faction_", fac_map, "entity_id"),
+        ("technique_", tech_map, "entity_id"),
+        ("note_", note_map, "note_id"),
+    ]
+
+    def _remap_doc(doc_id: str, meta: dict):
+        meta = dict(meta or {})
+        m = re.match(r"^world_setting_(\d+)_chunk_(\d+)$", doc_id)
+        if m:
+            return f"world_setting_{new_id}_chunk_{m.group(2)}", meta
+        m = re.match(r"^chapter_(\d+)_summary(.*)$", doc_id)
+        if m:
+            if not full:
+                return None
+            new_ch = chapter_map.get(int(m.group(1)))
+            if new_ch is None:
+                return None
+            return f"chapter_{new_ch}_summary{m.group(2)}", meta
+        for prefix, id_map, meta_key in simple_specs:
+            if doc_id.startswith(prefix):
+                rest = doc_id[len(prefix):]
+                if not rest.isdigit():
+                    return None
+                new = id_map.get(int(rest))
+                if new is None:
+                    return None
+                if meta_key in meta:
+                    meta[meta_key] = new
+                return f"{prefix}{new}", meta
+        return None
+
+    try:
+        # 先按新小说的 embedding_model 配置嵌入函数，确保新集合以正确维度创建
+        await vector_store.ensure_embedding_configured(new_id, db)
+        data = await vector_store.aget_all_docs(novel_id)
+        old_ids = data["ids"]
+        embs, docs, metas = data["embeddings"], data["documents"], data["metadatas"]
+        new_ids, new_embs, new_docs, new_metas = [], [], [], []
+        for i, did in enumerate(old_ids):
+            remapped = _remap_doc(did, metas[i] if i < len(metas) else {})
+            if remapped is None:
+                continue
+            ndid, nmeta = remapped
+            new_ids.append(ndid)
+            new_embs.append(embs[i])
+            new_docs.append(docs[i] if i < len(docs) else "")
+            new_metas.append(nmeta)
+        if new_ids:
+            await vector_store.aadd_with_embeddings(new_id, new_ids, new_embs, new_docs, new_metas)
+        log.info("duplicate novel %d → %d: copied %d/%d vectors", novel_id, new_id, len(new_ids), len(old_ids))
+    except Exception:
+        log.warning("复制向量失败（SQL 已提交，可后续 reindex 重建）: novel %d → %d", novel_id, new_id, exc_info=True)
+
+    return new_novel
 
 
 # ── 搜索 ─────────────────────────────────────────────────────────────────
@@ -266,6 +459,21 @@ async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, db: 
     novel = await db.get(Novel, novel_id)
     if not novel:
         raise HTTPException(status_code=404, detail="小说不存在")
+
+    # 分区块模式：针对单个区块生成（空内容）或优化（有内容），只返回文本、不入库、不重建向量。
+    # 由前端「保存世界观」统一合并落库。
+    if data.section:
+        try:
+            text = await world_agent.optimize_world_section(novel, data.section, data.core_setting)
+        except OpenAIAuthError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"API Key 或模型名无效，请前往「设置」页面检查配置。原始错误：{e}"
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
+        return {"core_setting": text}
+
     if not data.core_setting.strip():
         raise HTTPException(status_code=400, detail="当前世界观设定为空，无法优化")
     try:
@@ -278,9 +486,10 @@ async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, db: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
     novel.core_setting = core_setting
-    await world_agent.embed_world_setting(novel.id, core_setting)
+    await seed_or_sync(db, novel)
+    await world_agent.embed_world_setting(novel.id, novel.core_setting)
     await db.commit()
-    return {"core_setting": core_setting}
+    return {"core_setting": novel.core_setting}
 
 
 @router.post("/{novel_id}/book-summary")
@@ -315,9 +524,10 @@ async def wizard_expand_world(data: WizardStep2, db: AsyncSession = Depends(get_
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"调用 LLM 失败：{e}")
     novel.core_setting = core_setting
-    await world_agent.embed_world_setting(novel.id, core_setting)
+    await seed_or_sync(db, novel)
+    await world_agent.embed_world_setting(novel.id, novel.core_setting)
     await db.commit()
-    return {"core_setting": core_setting}
+    return {"core_setting": novel.core_setting}
 
 
 @router.post("/wizard/characters")
@@ -409,7 +619,7 @@ async def get_context_preview(
     novel_id: int,
     chapter_number: int | None = None,
     instruction: str = "",
-    target_words: int = 800,
+    target_words: int = 5000,
     db: AsyncSession = Depends(get_db),
 ):
     """预览 Writer 在生成指定章节时收到的完整上下文（JSON 结构化）。"""
@@ -428,6 +638,7 @@ async def get_context_preview(
         chapter_number=chapter_number,
         volume=novel.current_volume or 1,
         scene_hint=instruction,
+        target_words=target_words,
     )
     context_meta = ctx.get("_meta", [])
     context_block, chars_block, task_instruction = context_builder.format_context_for_writer(
@@ -507,6 +718,14 @@ async def get_context_preview(
         + chars_tokens + items_tokens + systems_tokens + locations_tokens + factions_tokens + techniques_tokens
         + task_tokens + system_tokens
     )
+    dynamic_budget = ctx.get("_budget", {})
+    expected_output_tokens = int(dynamic_budget.get("output_reserve") or 0)
+    pricing = ctx.get("_pricing", {})
+    input_price_cny = float(pricing.get("input_price_cny_per_million") or 0)
+    output_price_cny = float(pricing.get("output_price_cny_per_million") or 0)
+    input_cost_cny = total_est_tokens * input_price_cny / 1_000_000
+    output_cost_cny = expected_output_tokens * output_price_cny / 1_000_000
+    budget_input_tokens = int(dynamic_budget.get("input_budget") or 0)
 
     cfg = novel.context_config or {}
     context_config_keys = [
@@ -552,6 +771,16 @@ async def get_context_preview(
             "system_prompt": system_tokens,
             "total": total_est_tokens,
         },
+        "dynamic_budget": dynamic_budget,
+        "pricing": {
+            **pricing,
+            "input_tokens": total_est_tokens,
+            "expected_output_tokens": expected_output_tokens,
+            "input_cost_cny": input_cost_cny,
+            "output_cost_cny": output_cost_cny,
+            "total_cost_cny": input_cost_cny + output_cost_cny,
+            "budget_input_cost_cny": budget_input_tokens * input_price_cny / 1_000_000,
+        },
         "writer_messages": [
             {"role": "system", "content": f"（系统提示由 writer.jinja2 渲染，genre={ctx.get('genre')}, writing_style={ctx.get('writing_style')}）"},
             {"role": "user", "content": context_block or "（无上下文区块）"},
@@ -584,6 +813,18 @@ async def reindex_entities(novel_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="小说不存在")
     counts = await entity_embeddings.reindex_all_entities(db, novel_id)
     return counts
+
+
+@router.post("/{novel_id}/rebuild-vectors")
+async def rebuild_vectors(novel_id: int, db: AsyncSession = Depends(get_db)):
+    """删除并按当前嵌入模型重建整本书的向量集合。
+    用于修复历史集合维度与当前模型不一致（如 384 vs 1536）导致的写入失败。"""
+    novel = await db.get(Novel, novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    await _reindex_after_embedding_change(db, novel)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post("/{novel_id}/reindex-timeline")
@@ -621,12 +862,7 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
             raw_text = raw_text.strip()
             if not raw_text:
                 return []
-            if raw_text.startswith("```"):
-                raw_text = re.sub(r'^```\w*\n?', '', raw_text)
-                raw_text = re.sub(r'\n?```$', '', raw_text)
-            raw_text = raw_text.strip()
-            raw_text = re.sub(r',\s*]', ']', raw_text)
-            return _json.loads(raw_text)
+            return _json.loads(repair_json(raw_text, expect="array"))
 
         time_map: dict[int, str] = {}
         resolved_tail: list[tuple[int, str]] = []  # (chapter_number, time) of last few resolved
@@ -727,6 +963,71 @@ async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        tb = traceback.format_exc()
-        log.error("reindex-timeline failed:\n%s", tb)
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb[-500:]}")
+        log.error("reindex-timeline failed:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+def aggregate_usage(rows: list[tuple], price_map: dict, group_by: str) -> dict:
+    """把 (key, model, calls, in_tok, out_tok, dur_ms) 聚合行按 key 归并，
+    并按 price_map（model → (输入单价, 输出单价)，单位 元/百万token）折算成本。"""
+    groups: dict = {}
+    for key, model, calls, in_tok, out_tok, dur_ms in rows:
+        g = groups.setdefault(key, {
+            "key": key, "calls": 0, "input_tokens": 0, "output_tokens": 0,
+            "duration_ms": 0, "cost_cny": 0.0,
+        })
+        in_tok = in_tok or 0
+        out_tok = out_tok or 0
+        g["calls"] += calls or 0
+        g["input_tokens"] += in_tok
+        g["output_tokens"] += out_tok
+        g["duration_ms"] += dur_ms or 0
+        in_price, out_price = price_map.get(model, (0.0, 0.0))
+        g["cost_cny"] += in_tok * in_price / 1_000_000 + out_tok * out_price / 1_000_000
+    result_rows = sorted(groups.values(), key=lambda g: (-g["cost_cny"], -g["input_tokens"]))
+    total = {
+        "calls": sum(g["calls"] for g in result_rows),
+        "input_tokens": sum(g["input_tokens"] for g in result_rows),
+        "output_tokens": sum(g["output_tokens"] for g in result_rows),
+        "duration_ms": sum(g["duration_ms"] for g in result_rows),
+        "cost_cny": sum(g["cost_cny"] for g in result_rows),
+    }
+    return {"group_by": group_by, "rows": result_rows, "total": total}
+
+
+@router.get("/{novel_id}/usage")
+async def get_llm_usage(
+    novel_id: int,
+    group_by: str = Query("agent"),
+    db: AsyncSession = Depends(get_db),
+):
+    """LLM 用量账本汇总：按环节/模型/章节分组，折算成人民币成本（未配置单价的模型计 0）。"""
+    if group_by not in ("agent", "model", "chapter"):
+        raise HTTPException(status_code=400, detail="group_by 只支持 agent / model / chapter")
+    key_col = {
+        "agent": LlmUsage.agent,
+        "model": LlmUsage.model,
+        "chapter": LlmUsage.chapter_number,
+    }[group_by]
+    result = await db.execute(
+        select(
+            key_col, LlmUsage.model,
+            func.count(LlmUsage.id),
+            func.sum(LlmUsage.input_tokens),
+            func.sum(LlmUsage.output_tokens),
+            func.sum(LlmUsage.duration_ms),
+        )
+        .where(LlmUsage.novel_id == novel_id)
+        .group_by(key_col, LlmUsage.model)
+    )
+    rows = result.all()
+
+    entries = (await db.execute(select(ModelEntry))).scalars().all()
+    price_map = {
+        e.model_id: (
+            float(e.input_price or 0) * float(e.currency_to_cny_rate or 1),
+            float(e.output_price or 0) * float(e.currency_to_cny_rate or 1),
+        )
+        for e in entries
+    }
+    return aggregate_usage([tuple(r) for r in rows], price_map, group_by)

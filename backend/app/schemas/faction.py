@@ -18,6 +18,7 @@ class FactionCreate(BaseModel):
     goals: str = ""
     traits: str = ""
     history: str = ""
+    importance: int = 3
 
 
 class FactionUpdate(BaseModel):
@@ -34,6 +35,7 @@ class FactionUpdate(BaseModel):
     goals: Optional[str] = None
     traits: Optional[str] = None
     history: Optional[str] = None
+    importance: Optional[int] = None
 
 
 class FactionOut(BaseModel):
@@ -52,6 +54,7 @@ class FactionOut(BaseModel):
     goals: str
     traits: str
     history: str
+    importance: int
     created_at: datetime
     updated_at: datetime
 

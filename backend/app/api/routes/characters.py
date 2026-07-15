@@ -213,6 +213,23 @@ async def enhance_character_endpoint(
     return char
 
 
+@router.post("/{character_id}/generate-sheet", response_model=CharacterOut)
+async def generate_sheet(character_id: int, db: AsyncSession = Depends(get_db)):
+    char = await db.get(Character, character_id)
+    if not char:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    novel = await db.get(Novel, char.novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    sheet = await character_agent.generate_character_sheet(novel, char)
+    char.full_sheet = sheet
+    await db.commit()
+    await db.refresh(char)
+    await embed_character(char.novel_id, char)
+    return char
+
+
 @router.post("/{character_id}/generate-image-prompt")
 async def generate_image_prompt(
     character_id: int,
