@@ -31,6 +31,13 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# 前端构建产物，打包脚本生成后由后端托管
+backend/web/
+
+# 分发包产物（打包脚本默认输出到仓库外，这里兜底防手滑）
+release/
+NovelBot-dist*/
+
 # ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

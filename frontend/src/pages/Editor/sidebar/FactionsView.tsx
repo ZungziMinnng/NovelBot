@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Loader2, Search } from 'lucide-react'
 import { factionsApi, locationsApi, type Faction, type Location } from '@/api/client'
 import ImportanceSelect from '@/components/ImportanceSelect'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 interface Props {
@@ -115,7 +116,7 @@ export default function FactionsView({ novelId }: Props) {
               }`}
             >
               <div
-                className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold text-white"
+                className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[0.625rem] font-bold text-white"
                 style={{ backgroundColor: f.color || '#6b7280' }}
               >
                 {f.name[0]}
@@ -124,7 +125,7 @@ export default function FactionsView({ novelId }: Props) {
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-medium truncate">{f.name}</span>
                   {f.alignment && (
-                    <span className={`text-[10px] px-1.5 py-px rounded ${ALIGNMENT_COLORS[f.alignment] || ALIGNMENT_COLORS['中立']}`}>
+                    <span className={`text-[0.625rem] px-1.5 py-px rounded ${ALIGNMENT_COLORS[f.alignment] || ALIGNMENT_COLORS['中立']}`}>
                       {f.alignment}
                     </span>
                   )}
@@ -134,7 +135,7 @@ export default function FactionsView({ novelId }: Props) {
                 )}
               </div>
               {f.power_level && (
-                <span className="text-[10px] text-muted-foreground shrink-0">{f.power_level}</span>
+                <span className="text-[0.625rem] text-muted-foreground shrink-0">{f.power_level}</span>
               )}
             </div>
           ))}
@@ -249,7 +250,7 @@ function FactionDetail({ faction, locations, novelId, onClose }: {
         </div>
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <label className="text-[10px] text-muted-foreground">关联地图</label>
+            <label className="text-[0.625rem] text-muted-foreground">关联地图</label>
             <select
               value={form.location_id ?? ''}
               onChange={(e) => set('location_id', e.target.value ? Number(e.target.value) : null)}
@@ -265,7 +266,7 @@ function FactionDetail({ faction, locations, novelId, onClose }: {
 
         {/* Color */}
         <div>
-          <label className="text-[10px] text-muted-foreground">代表颜色</label>
+          <label className="text-[0.625rem] text-muted-foreground">代表颜色</label>
           <div className="flex items-center gap-2">
             <input
               type="color"
@@ -297,11 +298,10 @@ function FactionDetail({ faction, locations, novelId, onClose }: {
               </button>
             ))}
           </div>
-          <textarea
+          <AutoTextarea
             value={form[detailTab]}
             onChange={(e) => set(detailTab, e.target.value)}
-            rows={5}
-            className="w-full border rounded px-2 py-2 text-sm bg-background resize-y"
+            className="w-full border rounded px-2 py-2 text-sm bg-background"
           />
         </div>
       </div>
@@ -387,7 +387,7 @@ function Field({ label, value, onChange, placeholder }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -403,7 +403,7 @@ function SelectField({ label, value, onChange, options }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -420,12 +420,11 @@ function TextareaField({ label, value, onChange }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
-      <textarea
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
+      <AutoTextarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        rows={3}
-        className="w-full border rounded px-2 py-2 text-sm bg-background resize-y"
+        className="w-full border rounded px-2 py-2 text-sm bg-background"
       />
     </div>
   )

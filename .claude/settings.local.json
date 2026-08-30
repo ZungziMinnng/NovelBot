@@ -28,7 +28,11 @@
       "Read(//c/Users/user/**)",
       "Bash(\".venv\\\\Scripts\\\\python\" -c \"import app.main; print\\('backend import OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -m unittest discover tests)",
-      "Bash(./.venv/Scripts/python.exe -c \"from app.main import app; print\\('import ok'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"from app.main import app; print\\('import ok'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m unittest tests.test_memory_pipeline_characterization -v)",
+      "Read(//Users/n2okjm/GitHubProject/**)",
+      "Bash(ls -d /Volumes/*/GitHubProject/NovelBot)",
+      "Bash(mdfind -name NovelBot)"
     ]
   }
 }

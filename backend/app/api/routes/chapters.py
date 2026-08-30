@@ -2,7 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete as sql_delete, func
+from sqlalchemy import select, delete as sql_delete, func, update as sql_update
 from app.database import get_db
 from app.models.chapter import Chapter
 from app.models.novel import Novel
@@ -14,31 +14,60 @@ from app.models.faction import Faction
 from app.models.memory import Memory
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
 from app.agents import character_agent
-from app.services import summarizer, vector_store, entity_embeddings
+from app.services import summarizer, vector_store, entity_embeddings, prose_lint
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
 
+async def _owned_chapters_by_ids(db: AsyncSession, chapter_ids: list[int], user) -> list[Chapter]:
+    """按 id 批量取章节并逐一校验归属（任一不属于当前用户即 404）。"""
+    chapters = (await db.execute(
+        select(Chapter).where(Chapter.id.in_(chapter_ids))
+    )).scalars().all()
+    for novel_id in {c.novel_id for c in chapters}:
+        await get_owned_novel(db, novel_id, user)
+    return chapters
+
+
+class LintRequest(BaseModel):
+    text: str
+
+
+@router.post("/lint")
+async def lint_text(body: LintRequest, user: CurrentUser):
+    """对编辑器里的正文跑一遍机械体检，返回 findings。
+
+    收正文而不是 chapter_id：编辑器里的草稿可能还没保存，作者要看的是眼前这一版。
+    这里和 critic 的打回用同一个 prose_lint，口径不会分叉。纯函数、不碰库。
+    """
+    findings = prose_lint.lint(body.text or "")
+    return {
+        "findings": findings,
+        "blocking_count": sum(1 for f in findings if f["severity"] == "blocking"),
+    }
+
+
 @router.get("/novel/{novel_id}", response_model=list[ChapterOut])
-async def list_chapters(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def list_chapters(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     result = await db.execute(
         select(Chapter)
         .where(Chapter.novel_id == novel_id)
-        .order_by(Chapter.volume, Chapter.number)
+        # 章节号全书连续递增，按 number 排序；按 (volume, number) 会让未分卷章节插到已分卷之前
+        .order_by(Chapter.number)
     )
     return result.scalars().all()
 
 
 @router.get("/{chapter_id}", response_model=ChapterOut)
-async def get_chapter(chapter_id: int, db: AsyncSession = Depends(get_db)):
-    chapter = await db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
-    return chapter
+async def get_chapter(chapter_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    return await get_owned_child(db, Chapter, chapter_id, user, "章节")
 
 
 @router.post("/", response_model=ChapterOut)
-async def create_chapter(data: ChapterCreate, db: AsyncSession = Depends(get_db)):
+async def create_chapter(data: ChapterCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     chapter = Chapter(**data.model_dump())
     chapter.word_count = len(chapter.content)
     db.add(chapter)
@@ -48,10 +77,8 @@ async def create_chapter(data: ChapterCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.patch("/{chapter_id}", response_model=ChapterOut)
-async def update_chapter(chapter_id: int, data: ChapterUpdate, db: AsyncSession = Depends(get_db)):
-    chapter = await db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
+async def update_chapter(chapter_id: int, data: ChapterUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(chapter, k, v)
     if data.content is not None:
@@ -62,11 +89,9 @@ async def update_chapter(chapter_id: int, data: ChapterUpdate, db: AsyncSession 
 
 
 @router.post("/confirm")
-async def confirm_chapter(req: ChapterConfirmRequest, db: AsyncSession = Depends(get_db)):
+async def confirm_chapter(req: ChapterConfirmRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """确认章节 → 触发摘要生成和记忆更新"""
-    chapter = await db.get(Chapter, req.chapter_id)
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
+    chapter = await get_owned_child(db, Chapter, req.chapter_id, user, "章节")
 
     novel = await db.get(Novel, chapter.novel_id)
     chapter.status = "confirmed"
@@ -189,13 +214,12 @@ class BackfillSummariesRequest(BaseModel):
 @router.post("/novel/{novel_id}/backfill-summaries")
 async def backfill_summaries(
     novel_id: int,
+    user: CurrentUser,
     body: BackfillSummariesRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """批量生成章节摘要，逐章提交，失败跳过继续。mode=all 时重写已有摘要。"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, novel_id, user)
 
     mode = body.mode if body else "missing"
     conditions = [Chapter.novel_id == novel_id, Chapter.content != ""]
@@ -234,11 +258,9 @@ async def backfill_summaries(
 
 
 @router.post("/{chapter_id}/discover")
-async def discover_entities(chapter_id: int, db: AsyncSession = Depends(get_db)):
+async def discover_entities(chapter_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """对已有章节重新运行角色/实体/地点发现"""
-    chapter = await db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
+    chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
     if not chapter.content:
         raise HTTPException(status_code=400, detail="章节无内容")
 
@@ -290,26 +312,40 @@ class BatchVolumeRequest(BaseModel):
 
 
 @router.post("/batch-volume")
-async def batch_update_volume(body: BatchVolumeRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Chapter).where(Chapter.id.in_(body.chapter_ids))
-    )
-    chapters = result.scalars().all()
+async def batch_update_volume(body: BatchVolumeRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    chapters = await _owned_chapters_by_ids(db, body.chapter_ids, user)
     for ch in chapters:
         ch.volume = body.volume
+    # 同步 Memory.volume，否则滚动摘要/快照按卷过滤会与章节漂移，静默丢上下文
+    if chapters:
+        await db.execute(
+            sql_update(Memory)
+            .where(
+                Memory.novel_id == chapters[0].novel_id,
+                Memory.chapter_number.in_([ch.number for ch in chapters]),
+            )
+            .values(volume=body.volume)
+        )
     await db.commit()
     return {"ok": True, "updated": len(chapters)}
 
 
 @router.delete("/{chapter_id}")
-async def delete_chapter(chapter_id: int, db: AsyncSession = Depends(get_db)):
-    chapter = await db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(status_code=404, detail="章节不存在")
+async def delete_chapter(chapter_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
     # 删除该章节的所有 Memory 行，防止污染后续章节的滚动摘要窗口
     await db.execute(
         sql_delete(Memory).where(
             Memory.chapter_id == chapter.id,
+        )
+    )
+    # state_snapshot 按 (novel_id, chapter_number) 存且 chapter_id 为空，须单独删，
+    # 否则重建同号章节时会用旧快照回滚人物状态
+    await db.execute(
+        sql_delete(Memory).where(
+            Memory.novel_id == chapter.novel_id,
+            Memory.memory_type == "state_snapshot",
+            Memory.chapter_number == chapter.number,
         )
     )
     # 清理 ChromaDB 中的 summary 向量（兼容清理历史遗留的 content chunk）
@@ -330,13 +366,11 @@ class BatchDeleteRequest(BaseModel):
 
 
 @router.post("/batch-delete")
-async def batch_delete_chapters(body: BatchDeleteRequest, db: AsyncSession = Depends(get_db)):
+async def batch_delete_chapters(body: BatchDeleteRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """批量删除章节：连同各章的 Memory 行与摘要向量一并清理，最后按剩余章节回退小说进度。"""
     if not body.chapter_ids:
         return {"ok": True, "deleted": 0}
-    chapters = (await db.execute(
-        select(Chapter).where(Chapter.id.in_(body.chapter_ids))
-    )).scalars().all()
+    chapters = await _owned_chapters_by_ids(db, body.chapter_ids, user)
     if not chapters:
         return {"ok": True, "deleted": 0}
 
@@ -345,6 +379,14 @@ async def batch_delete_chapters(body: BatchDeleteRequest, db: AsyncSession = Dep
 
     # 删除这些章节的所有 Memory 行，防止污染后续章节的滚动摘要窗口
     await db.execute(sql_delete(Memory).where(Memory.chapter_id.in_(ids)))
+    # state_snapshot 按 (novel_id, chapter_number) 存且 chapter_id 为空，须单独删
+    await db.execute(
+        sql_delete(Memory).where(
+            Memory.novel_id == novel_id,
+            Memory.memory_type == "state_snapshot",
+            Memory.chapter_number.in_([c.number for c in chapters]),
+        )
+    )
 
     # 清理 ChromaDB 中的 summary 向量（兼容清理历史遗留的 content chunk）
     doc_ids: list[str] = []

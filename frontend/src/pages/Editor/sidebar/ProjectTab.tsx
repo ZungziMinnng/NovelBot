@@ -5,6 +5,7 @@ import {
   Plus, X, Loader2,
 } from 'lucide-react'
 import { chaptersApi, volumesApi, type Chapter, type Novel, type Volume } from '@/api/client'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 interface Props {
@@ -52,7 +53,11 @@ export default function ProjectTab({
 
   // Edit volume
   const [editingVol, setEditingVol] = useState<Volume | null>(null)
-  const [editForm, setEditForm] = useState({ title: '', description: '' })
+  const [editForm, setEditForm] = useState({
+    title: '', description: '',
+    // 卷级库存，不注入写作上下文，只用于大纲体检
+    endgame_cards: '', power_tiers: '', tier_count: 0, words_per_tier: 0, spent_payoffs: '',
+  })
 
   // Move to existing volume
   const [showMoveMenu, setShowMoveMenu] = useState(false)
@@ -86,8 +91,8 @@ export default function ProjectTab({
 
   const hasVolumes = volumes.length > 0
 
-  // Flat ordered list of all chapter ids for shift-click range selection
-  const flatChapterIds = chapters.map(c => c.id)
+  // Flat ordered list of all chapter ids for shift-click range selection (follows displayed group order)
+  const flatChapterIds = groups.flatMap(g => g.chapters.map(c => c.id))
 
   const handleSelect = useCallback((id: number, shiftKey: boolean) => {
     const currentIdx = flatChapterIds.indexOf(id)
@@ -179,6 +184,7 @@ export default function ProjectTab({
     try {
       await volumesApi.update(editingVol.id, editForm)
       qc.invalidateQueries({ queryKey: ['volumes', novelId] })
+      qc.invalidateQueries({ queryKey: ['outline-health', novelId] })
       setEditingVol(null)
       toast.success('已保存')
     } finally { setSaving(false) }
@@ -207,6 +213,14 @@ export default function ProjectTab({
         <button
           onClick={(e) => {
             if (selectMode) {
+              handleSelect(c.id, e.shiftKey)
+            } else if (e.ctrlKey || e.metaKey || e.shiftKey) {
+              // ctrl/shift+点击直接进入选择模式；shift 从当前打开章节范围选到点击章节
+              setSelectMode(true)
+              if (e.shiftKey) {
+                const activeCh = chapters.find(ch => ch.number === selectedChapterNum)
+                if (activeCh) lastClickedIdx.current = flatChapterIds.indexOf(activeCh.id)
+              }
               handleSelect(c.id, e.shiftKey)
             } else {
               onSelectChapter(c.number)
@@ -249,7 +263,7 @@ export default function ProjectTab({
               {chapters.length} 章 · {volumes.length > 0 ? `${volumes.length} 卷` : `第${novel.current_volume || 1}卷`}
             </p>
             {totalWords > 0 && (
-              <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+              <p className="text-[0.6875rem] text-muted-foreground/70 mt-0.5">
                 {totalWords.toLocaleString()} 字 · ~{totalTokens.toLocaleString()} tokens
               </p>
             )}
@@ -280,12 +294,17 @@ export default function ProjectTab({
                   <div className="flex-1 min-w-0">
                     <span className="text-xs font-medium truncate block">{vol.title}</span>
                     {vol.description && (
-                      <span className="text-[10px] text-muted-foreground truncate block">{vol.description}</span>
+                      <span className="text-[0.625rem] text-muted-foreground truncate block">{vol.description}</span>
                     )}
                   </div>
-                  <span className="text-[10px] text-muted-foreground shrink-0">{chs.length}章</span>
+                  <span className="text-[0.625rem] text-muted-foreground shrink-0">{chs.length}章</span>
                   <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-                    <button onClick={(e) => { e.stopPropagation(); setEditForm({ title: vol.title, description: vol.description }); setEditingVol(vol) }}
+                    <button onClick={(e) => { e.stopPropagation(); setEditForm({
+                      title: vol.title, description: vol.description,
+                      endgame_cards: vol.endgame_cards, power_tiers: vol.power_tiers,
+                      tier_count: vol.tier_count, words_per_tier: vol.words_per_tier,
+                      spent_payoffs: vol.spent_payoffs,
+                    }); setEditingVol(vol) }}
                       className="p-0.5 hover:text-foreground text-muted-foreground">
                       <Pencil className="w-3 h-3" />
                     </button>
@@ -302,7 +321,7 @@ export default function ProjectTab({
                     : <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
                   }
                   <span className="text-xs text-muted-foreground">未分卷</span>
-                  <span className="text-[10px] text-muted-foreground ml-auto">{chs.length}章</span>
+                  <span className="text-[0.625rem] text-muted-foreground ml-auto">{chs.length}章</span>
                 </div>
               )}
               {/* Chapters in this volume */}
@@ -333,8 +352,8 @@ export default function ProjectTab({
       {selectMode && (
         <div className="px-2 py-2 border-t space-y-1.5 shrink-0 bg-muted/30">
           <div className="flex items-center justify-between px-1">
-            <span className="text-[10px] text-muted-foreground">已选 {selected.size} 章</span>
-            <button onClick={exitSelectMode} className="text-[10px] text-muted-foreground hover:text-foreground">
+            <span className="text-[0.625rem] text-muted-foreground">已选 {selected.size} 章</span>
+            <button onClick={exitSelectMode} className="text-[0.625rem] text-muted-foreground hover:text-foreground">
               <X className="w-3 h-3" />
             </button>
           </div>
@@ -342,7 +361,7 @@ export default function ProjectTab({
             <button
               onClick={() => setShowCreate(true)}
               disabled={selected.size === 0}
-              className="flex-1 flex items-center justify-center gap-1 py-1.5 text-[11px] bg-primary text-primary-foreground rounded-md disabled:opacity-50"
+              className="flex-1 flex items-center justify-center gap-1 py-1.5 text-[0.6875rem] bg-primary text-primary-foreground rounded-md disabled:opacity-50"
             >
               <Plus className="w-3 h-3" /> 新建分卷
             </button>
@@ -351,7 +370,7 @@ export default function ProjectTab({
                 <button
                   onClick={() => setShowMoveMenu(!showMoveMenu)}
                   disabled={selected.size === 0}
-                  className="w-full flex items-center justify-center gap-1 py-1.5 text-[11px] border rounded-md hover:bg-muted disabled:opacity-50"
+                  className="w-full flex items-center justify-center gap-1 py-1.5 text-[0.6875rem] border rounded-md hover:bg-muted disabled:opacity-50"
                 >
                   移入已有卷 <ChevronDown className="w-3 h-3" />
                 </button>
@@ -371,7 +390,7 @@ export default function ProjectTab({
           <button
             onClick={handleBatchDelete}
             disabled={selected.size === 0 || saving}
-            className="w-full flex items-center justify-center gap-1 py-1.5 text-[11px] border border-destructive/40 text-destructive rounded-md hover:bg-destructive/10 disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-1 py-1.5 text-[0.6875rem] border border-destructive/40 text-destructive rounded-md hover:bg-destructive/10 disabled:opacity-50"
           >
             <Trash2 className="w-3 h-3" /> 删除选中章节
           </button>
@@ -390,12 +409,12 @@ export default function ProjectTab({
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               autoFocus
             />
-            <textarea
+            <AutoTextarea
               value={createForm.description}
               onChange={e => setCreateForm({ ...createForm, description: e.target.value })}
               placeholder="简要描述（可选）"
-              rows={3}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              minRows={3}
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             />
             {selected.size > 0 && (
               <p className="text-xs text-muted-foreground">将 {selected.size} 个已选章节移入此卷</p>
@@ -414,7 +433,7 @@ export default function ProjectTab({
       {/* Edit volume modal */}
       {editingVol && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setEditingVol(null)}>
-          <div className="bg-background rounded-xl p-5 w-80 space-y-3 shadow-lg" onClick={e => e.stopPropagation()}>
+          <div className="bg-background rounded-xl p-5 w-96 max-h-[85vh] overflow-y-auto space-y-3 shadow-lg" onClick={e => e.stopPropagation()}>
             <h3 className="font-medium text-sm">编辑分卷</h3>
             <input
               value={editForm.title}
@@ -423,13 +442,59 @@ export default function ProjectTab({
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               autoFocus
             />
-            <textarea
+            <AutoTextarea
               value={editForm.description}
               onChange={e => setEditForm({ ...editForm, description: e.target.value })}
               placeholder="简要描述（可选）"
-              rows={3}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              minRows={3}
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             />
+
+            <div className="border-t pt-3 space-y-2">
+              <p className="text-[0.625rem] text-muted-foreground">
+                下面这些只用于大纲体检，不会写进提示词。一行一条。
+              </p>
+              <label className="text-[0.625rem] text-muted-foreground block">留到结尾才揭的牌
+                <AutoTextarea
+                  value={editForm.endgame_cards}
+                  onChange={e => setEditForm({ ...editForm, endgame_cards: e.target.value })}
+                  placeholder={'主角身世\n大反派真身\n世界真相'}
+                  minRows={3}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                />
+              </label>
+              <label className="text-[0.625rem] text-muted-foreground block">实力档位
+                <AutoTextarea
+                  value={editForm.power_tiers}
+                  onChange={e => setEditForm({ ...editForm, power_tiers: e.target.value })}
+                  placeholder={'练气\n筑基\n金丹'}
+                  minRows={3}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-[0.625rem] text-muted-foreground">共几档
+                  <input type="number" min={0} value={editForm.tier_count}
+                    onChange={e => setEditForm({ ...editForm, tier_count: Number(e.target.value) })}
+                    className="mt-1 w-full border rounded-lg px-2 py-2 text-sm bg-background" />
+                </label>
+                <label className="text-[0.625rem] text-muted-foreground">每档约几字
+                  <input type="number" min={0} step={1000} value={editForm.words_per_tier}
+                    onChange={e => setEditForm({ ...editForm, words_per_tier: Number(e.target.value) })}
+                    className="mt-1 w-full border rounded-lg px-2 py-2 text-sm bg-background" />
+                </label>
+              </div>
+              <label className="text-[0.625rem] text-muted-foreground block">本卷已用掉的大爆点
+                <AutoTextarea
+                  value={editForm.spent_payoffs}
+                  onChange={e => setEditForm({ ...editForm, spent_payoffs: e.target.value })}
+                  placeholder={'师父身死\n宗门被灭'}
+                  minRows={3}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 text-sm bg-background"
+                />
+              </label>
+            </div>
+
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditingVol(null)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleEditVolume} disabled={saving || !editForm.title.trim()}

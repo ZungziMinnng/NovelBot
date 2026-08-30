@@ -1,22 +1,93 @@
 import axios from 'axios'
+import { useAuthStore, type AuthUser } from '@/store/authStore'
 
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
 })
 
+// 裸 fetch（SSE 流式）调用点使用；axios 走下面的拦截器
+export function authHeaders(): Record<string, string> {
+  const token = useAuthStore.getState().token
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function handleUnauthorized() {
+  useAuthStore.getState().clear()
+  if (!window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login'
+  }
+}
+
+api.interceptors.request.use((config) => {
+  const token = useAuthStore.getState().token
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      handleUnauthorized()
+    }
+    return Promise.reject(error)
+  }
+)
+
+// ── Auth APIs ──────────────────────────────────────────────────────────────
+
+export interface AuthResponse {
+  token: string
+  user: AuthUser
+}
+
+export const authApi = {
+  register: (username: string, password: string) =>
+    api.post<AuthResponse>('/auth/register', { username, password }).then(r => r.data),
+  login: (username: string, password: string) =>
+    api.post<AuthResponse>('/auth/login', { username, password }).then(r => r.data),
+  logout: () => api.post('/auth/logout').then(r => r.data),
+  me: () => api.get<AuthUser>('/auth/me').then(r => r.data),
+  updateMe: (data: { username?: string; default_writer_model?: string; default_fast_model?: string; hidden_novel_ids?: number[]; hidden_preset_ids?: number[]; old_password?: string; new_password?: string }) =>
+    api.patch<AuthUser>('/auth/me', data).then(r => r.data),
+}
+
 export type ContextConfigValue = boolean | number
 
 // ── Types ──────────────────────────────────────────────────────────────────
+
+export interface GenreCard {
+  name: string
+  body: string
+  /** 市面上的别称，写进题材栏也能匹配到这张卡 */
+  aliases: string[]
+}
+
+export interface GenreCardList {
+  /** genre_card 存这个值表示本书不用题材卡 */
+  off_value: string
+  cards: GenreCard[]
+}
 
 export interface Novel {
   id: number
   title: string
   genre: string
+  /** 题材腔调卡：'' = 按 genre 自动匹配，'none' = 不用卡，其他 = 指定卡名 */
+  genre_card: string
   premise: string
+  plot_design: string
+  /** 结局一句话：主角最后走到哪、跟谁、什么状态 */
+  ending: string
+  /** 主角起点→终点 */
+  protagonist_arc: string
   writing_style: string
   target_length: string
   core_setting: string
+  world_rules_seed: string
   current_volume: number
   current_chapter: number
   book_summary: string
@@ -41,7 +112,12 @@ export interface Novel {
   enable_full_text_context: boolean
   full_text_chapters: number
   context_config: Record<string, ContextConfigValue>
+  // null = 从未配置（后端走内置规则默认）；[] = 用户显式全关。不要 `|| []` 把 null 塌成 []
+  enabled_rule_ids: number[] | null
   tags: Record<string, string[]>
+  // 投稿元数据：番茄/起点开书必填的作品简介与平台标签
+  blurb: string
+  submission_tags: string[]
   estimated_chapters: number
   enable_volume_split: boolean
   skip_outline: boolean
@@ -128,6 +204,7 @@ export interface Memory {
   content: string
   volume: number
   chapter_number: number
+  in_context: boolean
   created_at: string
 }
 
@@ -141,6 +218,12 @@ export interface OutlineEntry {
   end_chapter: number
   title: string
   content: string
+  // 执行计划，仅章级有意义。空串/0 = 未规划
+  chapter_role: string
+  emotion_tone: string
+  emotion_intensity: number
+  hook_type: string
+  hook_strength: number
   created_at: string
   updated_at: string
 }
@@ -201,6 +284,21 @@ export interface WriterPreset {
   updated_at: string
 }
 
+// 规则广场条目。与 WriterPreset 不同：预设是快照拷贝，规则是活链接，
+// 改内容立刻对所有勾选它的小说生效
+export interface PromptRule {
+  id: number
+  name: string
+  content: string
+  category: string
+  enabled: boolean
+  is_builtin: boolean
+  builtin_key: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
 export interface NovelNote {
   id: number
   novel_id: number
@@ -249,7 +347,8 @@ export interface WorldviewChange {
 }
 
 export type StoryThreadKind = 'foreshadowing' | 'secret'
-export type StoryThreadStatus = 'active' | 'resolved' | 'abandoned'
+/** expired = 埋太久过期失效，仍算欠着的账，不注入写作上下文 */
+export type StoryThreadStatus = 'active' | 'resolved' | 'abandoned' | 'expired'
 
 export interface StoryThread {
   id: number
@@ -310,6 +409,12 @@ export interface Volume {
   number: number
   title: string
   description: string
+  // 卷级库存，一行一条，不注入写作上下文，只用于体检
+  endgame_cards: string
+  power_tiers: string
+  tier_count: number
+  words_per_tier: number
+  spent_payoffs: string
   created_at: string
   updated_at: string
 }
@@ -323,7 +428,7 @@ export interface RelationshipNode {
 export interface RelationshipEdge {
   source: number
   target: number
-  labels: Array<{ from: string; desc: string; type?: 'initial' | 'current' }>
+  labels: Array<{ from: string; desc: string; type?: 'base' | 'initial' | 'current' }>
 }
 
 export interface ContextStepData {
@@ -341,6 +446,34 @@ export interface NewLocationsData {
 
 export interface NewFactionsData {
   candidates: Array<{ name: string; type: string; description: string }>
+}
+
+export interface NewThreadsData {
+  threads: Array<{
+    kind: 'foreshadowing' | 'secret'
+    title: string
+    content: string
+    importance: number
+    known_by?: string[]
+    related_entities?: string[]
+    source_chapter?: number
+  }>
+}
+
+export interface ThreadResolution {
+  thread_id: number
+  kind: 'foreshadowing' | 'secret'
+  title: string
+  content: string
+  action: 'resolve' | 'reveal'
+  resolution?: string
+  newly_known_by?: string[]
+  known_by?: string[]
+  source_chapter: number
+}
+
+export interface ThreadResolutionsData {
+  resolutions: ThreadResolution[]
 }
 
 export interface ReviewIssue {
@@ -391,10 +524,19 @@ export interface DashboardStats {
   novel_words: Record<string, number>
 }
 
+export interface NovelOverview {
+  volume_count: number
+  chapter_count: number
+  total_words: number
+  characters: { name: string; role: string }[]
+}
+
 export const novelsApi = {
   dashboard: () => api.get<DashboardStats>('/novels/dashboard').then(r => r.data),
+  genreCards: () => api.get<GenreCardList>('/novels/genre-cards').then(r => r.data),
   list: () => api.get<Novel[]>('/novels/').then(r => r.data),
   get: (id: number) => api.get<Novel>(`/novels/${id}`).then(r => r.data),
+  overview: (id: number) => api.get<NovelOverview>(`/novels/${id}/overview`).then(r => r.data),
   create: (data: Partial<Novel>) => api.post<Novel>('/novels/', data).then(r => r.data),
   update: (id: number, data: Partial<Novel>) => api.patch<Novel>(`/novels/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/novels/${id}`).then(r => r.data),
@@ -427,7 +569,7 @@ export const novelsApi = {
     const controller = new AbortController()
     fetch(`/api/novels/${novelId}/build`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ nsfw_mode }),
       signal: controller.signal,
     }).then(async (response) => {
@@ -466,6 +608,7 @@ export interface ContextPreview {
   }
   writer_messages: WriterMessage[]
   writer_model: string
+  system_source: string
   token_estimate: Record<string, number>
   context_config: Record<string, ContextConfigValue>
   dynamic_budget: {
@@ -498,6 +641,19 @@ export interface ContextPreview {
 
 // ── Chapter APIs ───────────────────────────────────────────────────────────
 
+/** 正文机械体检的一条结论。和 Critic 打回用的是同一套规则 */
+export interface ProseFinding {
+  severity: 'blocking' | 'advisory'
+  category: string
+  label: string
+  evidence: string
+}
+
+export interface ProseLintResult {
+  findings: ProseFinding[]
+  blocking_count: number
+}
+
 export const chaptersApi = {
   list: (novelId: number) => api.get<Chapter[]>(`/chapters/novel/${novelId}`).then(r => r.data),
   update: (id: number, data: Partial<Chapter>) => api.patch<Chapter>(`/chapters/${id}`, data).then(r => r.data),
@@ -515,12 +671,74 @@ export const chaptersApi = {
       techniques: Array<{ name: string; type: string; description: string }>
       factions: Array<{ name: string; type: string; description: string }>
     }>(`/chapters/${chapterId}/discover`, {}, { timeout: 60000 }).then(r => r.data),
+  lint: (text: string) =>
+    api.post<ProseLintResult>('/chapters/lint', { text }).then(r => r.data),
   backfillSummaries: (novelId: number, mode: 'missing' | 'all' = 'missing') =>
     api.post<{
       total: number
       done: number[]
       failed: Array<{ number: number; error: string }>
     }>(`/chapters/novel/${novelId}/backfill-summaries`, { mode }, { timeout: 1800000 }).then(r => r.data),
+}
+
+// ── Submission APIs ────────────────────────────────────────────────────────
+
+export interface SensitiveCategory {
+  key: string
+  label: string
+  hint: string
+  word_count: number
+}
+
+export interface SensitiveHit {
+  word: string
+  category: string
+  position: number
+  excerpt: string
+}
+
+export interface SensitiveScanResult {
+  scanned_chapters: number
+  total_hits: number
+  word_count: number
+  chapters: Array<{
+    chapter_id: number
+    number: number
+    title: string
+    hits: SensitiveHit[]
+  }>
+}
+
+export const submissionApi = {
+  /** 触发浏览器下载。导出可能是几十万字，交给 blob 而不是新窗口打开。 */
+  export: async (novelId: number, scope: 'confirmed' | 'all', split: 'single' | 'per_chapter') => {
+    const res = await api.get(`/submission/novel/${novelId}/export`, {
+      params: { scope, split },
+      responseType: 'blob',
+      timeout: 300000,
+    })
+    const disposition = String(res.headers['content-disposition'] || '')
+    const match = disposition.match(/filename\*=UTF-8''([^;]+)/)
+    const filename = match ? decodeURIComponent(match[1]) : `novel.${split === 'per_chapter' ? 'zip' : 'txt'}`
+    const url = URL.createObjectURL(res.data as Blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+  },
+  sensitiveWords: () =>
+    api.get<{ categories: SensitiveCategory[]; custom: Array<{ id: number; word: string; note: string }> }>(
+      '/submission/sensitive-words',
+    ).then(r => r.data),
+  addSensitiveWords: (text: string, note = '') =>
+    api.post<{ added: number }>('/submission/sensitive-words', { text, note }).then(r => r.data),
+  deleteSensitiveWord: (id: number) =>
+    api.delete(`/submission/sensitive-words/${id}`).then(r => r.data),
+  scan: (novelId: number, categories: string[], scope: 'confirmed' | 'all', includeCustom: boolean) =>
+    api.post<SensitiveScanResult>(`/submission/novel/${novelId}/sensitive-scan`, {
+      categories, scope, include_custom: includeCustom,
+    }, { timeout: 300000 }).then(r => r.data),
 }
 
 // ── Character APIs ─────────────────────────────────────────────────────────
@@ -579,10 +797,16 @@ export const locationsApi = {
 
 export const adminApi = {
   listMemories: (novelId: number) => api.get<Memory[]>(`/admin/novel/${novelId}/memories`).then(r => r.data),
-  updateMemory: (id: number, data: { content: string }) => api.patch<Memory>(`/admin/memories/${id}`, data).then(r => r.data),
+  updateMemory: (id: number, data: { content?: string; in_context?: boolean }) => api.patch<Memory>(`/admin/memories/${id}`, data).then(r => r.data),
   deleteMemory: (id: number) => api.delete(`/admin/memories/${id}`).then(r => r.data),
   listOutlines: (novelId: number) => api.get<OutlineEntry[]>(`/admin/novel/${novelId}/outlines`).then(r => r.data),
   updateOutline: (id: number, data: { title?: string; content?: string }) => api.patch<OutlineEntry>(`/admin/outlines/${id}`, data).then(r => r.data),
+  backfillMilestones: (novelId: number, startChapter: number, endChapter: number) =>
+    api.post<{ processed: number; extracted: number; failed: number[] }>(
+      `/admin/novel/${novelId}/backfill-milestones`,
+      { start_chapter: startChapter, end_chapter: endChapter },
+      { timeout: 600000 },
+    ).then(r => r.data),
 }
 
 // ── Corrections APIs（统一搜索 + 修正）─────────────────────────────────────
@@ -658,6 +882,201 @@ export const writerPresetsApi = {
   delete: (id: number) => api.delete(`/writer-presets/${id}`).then(r => r.data),
 }
 
+// ── Prompt Rules APIs ──────────────────────────────────────────────────────
+
+export const promptRulesApi = {
+  list: () => api.get<PromptRule[]>('/prompt-rules/').then(r => r.data),
+  create: (data: { name: string; content?: string; category?: string; enabled?: boolean; sort_order?: number }) =>
+    api.post<PromptRule>('/prompt-rules/', data).then(r => r.data),
+  update: (id: number, data: { name?: string; content?: string; category?: string; enabled?: boolean; sort_order?: number }) =>
+    api.patch<PromptRule>(`/prompt-rules/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/prompt-rules/${id}`).then(r => r.data),
+}
+
+// ── Tavern APIs（酒馆模式：与小说侧完全独立）─────────────────────────────────
+
+/** 支持 AI 生成/优化的角色卡栏位，与后端 tavern_card_agent 对齐 */
+export type TavernAssistField =
+  'personality' | 'description' | 'opening_scene' | 'creator_note'
+
+export interface TavernCard {
+  id: number
+  name: string
+  /** 除自己的世界书外，还要一起匹配的角色卡 id */
+  linked_book_card_ids: number[]
+  /** 角色卡介绍：只给创作者看，后端永不注入 prompt */
+  creator_note: string
+  personality: string
+  opening_scene: string
+  system_instruction: string
+  description: string
+  /** 对话示例：作为真实 few-shot 消息轮注入，定腔调最有效的字段 */
+  dialogue_examples: ExampleTurn[]
+  /** 勾选的酒馆规则 id（不是规则广场）。默认 [] = 不注入，没有小说侧那套 null 三态语义 */
+  enabled_rule_ids: number[]
+  avatar_url: string
+  /** 期望回复字数，0 = 不作要求。写进提示词的软约束，不是 max_tokens 那种硬截断 */
+  reply_length: number
+  /** 世界书关键词往回扫几条消息，1 = 只看玩家刚发的这句 */
+  scan_depth: number
+  context_turns: number
+  temperature: number
+  max_tokens: number
+  model_ref: string
+  session_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface TavernWorldEntry {
+  id: number
+  card_id: number
+  keywords: string
+  content: string
+  enabled: boolean
+  sort_order: number
+  /** 常驻：不看关键词，每轮都注入 */
+  constant: boolean
+  /** 0 = 拼进 system；n>0 = 并进倒数第 n 条消息开头，离当前对话越近模型越难忽略 */
+  depth: number
+  created_at: string
+  updated_at: string
+}
+
+export interface TavernSessionCardRef {
+  id: number
+  name: string
+  avatar_url: string
+}
+
+export interface TavernSession {
+  id: number
+  /** 主卡：权限和会话级操作（摘要、帮我想想）都认它 */
+  card_id: number
+  /** 参与角色，按发言顺序。长度 > 1 即群聊 */
+  cards: TavernSessionCardRef[]
+  title: string
+  persona_name: string
+  persona_desc: string
+  summary: string
+  summarized_upto_id: number
+  message_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** 酒馆写作规则：与规则广场（PromptRule）分开两张表，那批是按写小说正文调的 */
+export interface TavernRule {
+  id: number
+  name: string
+  content: string
+  enabled: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 常用系统指令：建卡时可直接取用，与小说侧 writer_presets 各存一份 */
+export interface TavernInstructionPreset {
+  id: number
+  name: string
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TavernMessage {
+  id: number
+  session_id: number
+  role: string
+  /** 说话人。null = 玩家消息，或群聊之前的老数据（回落到主卡） */
+  card_id: number | null
+  content: string
+  input_tokens: number
+  output_tokens: number
+  created_at: string
+}
+
+export const tavernApi = {
+  cards: {
+    list: () => api.get<TavernCard[]>('/tavern/cards/').then(r => r.data),
+    get: (id: number) => api.get<TavernCard>(`/tavern/cards/${id}`).then(r => r.data),
+    create: (data: Partial<TavernCard> & { name: string }) =>
+      api.post<TavernCard>('/tavern/cards/', data).then(r => r.data),
+    update: (id: number, data: Partial<TavernCard>) =>
+      api.patch<TavernCard>(`/tavern/cards/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/cards/${id}`).then(r => r.data),
+    uploadAvatar: (id: number, file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return api.post<TavernCard>(`/tavern/cards/${id}/avatar`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      }).then(r => r.data)
+    },
+    deleteAvatar: (id: number) =>
+      api.delete<TavernCard>(`/tavern/cards/${id}/avatar`).then(r => r.data),
+    // 传当前表单文本而不是 card_id：新卡还没保存时也要能用
+    assist: (data: {
+      field: TavernAssistField
+      name?: string
+      personality?: string
+      description?: string
+      opening_scene?: string
+    }) => api.post<{ text: string }>('/tavern/cards/assist', data, { timeout: 180000 })
+      .then(r => r.data),
+  },
+  worldEntries: {
+    list: (cardId: number) =>
+      api.get<TavernWorldEntry[]>(`/tavern/cards/${cardId}/world-entries`).then(r => r.data),
+    create: (cardId: number, data: Partial<Omit<TavernWorldEntry, 'id' | 'card_id' | 'created_at' | 'updated_at'>>) =>
+      api.post<TavernWorldEntry>(`/tavern/cards/${cardId}/world-entries`, data).then(r => r.data),
+    update: (id: number, data: Partial<Omit<TavernWorldEntry, 'id' | 'card_id' | 'created_at' | 'updated_at'>>) =>
+      api.patch<TavernWorldEntry>(`/tavern/world-entries/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/world-entries/${id}`).then(r => r.data),
+  },
+  sessions: {
+    list: (cardId: number) =>
+      api.get<TavernSession[]>(`/tavern/cards/${cardId}/sessions`).then(r => r.data),
+    get: (id: number) => api.get<TavernSession>(`/tavern/sessions/${id}`).then(r => r.data),
+    create: (cardId: number, data: { title?: string; persona_name?: string; persona_desc?: string }) =>
+      api.post<TavernSession>(`/tavern/cards/${cardId}/sessions`, data).then(r => r.data),
+    // 群聊：card_ids 首个为主卡
+    createGroup: (cardIds: number[], data: { title?: string; persona_name?: string; persona_desc?: string }) =>
+      api.post<TavernSession>('/tavern/sessions', { ...data, card_ids: cardIds }).then(r => r.data),
+    update: (id: number, data: { title?: string; persona_name?: string; persona_desc?: string }) =>
+      api.patch<TavernSession>(`/tavern/sessions/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/sessions/${id}`).then(r => r.data),
+  },
+  rules: {
+    list: () => api.get<TavernRule[]>('/tavern/rules/').then(r => r.data),
+    create: (data: { name: string; content?: string; enabled?: boolean; sort_order?: number }) =>
+      api.post<TavernRule>('/tavern/rules/', data).then(r => r.data),
+    update: (id: number, data: { name?: string; content?: string; enabled?: boolean; sort_order?: number }) =>
+      api.patch<TavernRule>(`/tavern/rules/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/rules/${id}`).then(r => r.data),
+  },
+  instructionPresets: {
+    list: () =>
+      api.get<TavernInstructionPreset[]>('/tavern/instruction-presets/').then(r => r.data),
+    create: (data: { name: string; content: string }) =>
+      api.post<TavernInstructionPreset>('/tavern/instruction-presets/', data).then(r => r.data),
+    update: (id: number, data: { name?: string; content?: string }) =>
+      api.patch<TavernInstructionPreset>(`/tavern/instruction-presets/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/instruction-presets/${id}`).then(r => r.data),
+  },
+  messages: {
+    list: (sessionId: number) =>
+      api.get<TavernMessage[]>(`/tavern/sessions/${sessionId}/messages`).then(r => r.data),
+    update: (id: number, content: string) =>
+      api.patch<TavernMessage>(`/tavern/messages/${id}`, { content }).then(r => r.data),
+    delete: (id: number) => api.delete(`/tavern/messages/${id}`).then(r => r.data),
+  },
+  suggest: (sessionId: number) =>
+    api.post<{ suggestions: string[] }>(
+      `/tavern/sessions/${sessionId}/suggest`, {}, { timeout: 120000 },
+    ).then(r => r.data),
+}
+
 // ── Glossary APIs ──────────────────────────────────────────────────────────
 
 export const glossaryApi = {
@@ -669,6 +1088,62 @@ export const glossaryApi = {
     api.patch<GlossaryEntry>(`/glossary/${id}`, data).then(r => r.data),
   delete: (id: number) =>
     api.delete(`/glossary/${id}`).then(r => r.data),
+}
+
+// ── Text Replace APIs（全书批量替换）────────────────────────────────────────
+
+export type ReplaceScope = 'content' | 'summary' | 'outline' | 'memory'
+
+export interface ReplaceRow {
+  table: string
+  row_id: number
+  field: string
+  label: string
+  count: number
+  snippets: string[]
+}
+
+export interface ReplacePreview {
+  find: string
+  scope: ReplaceScope[]
+  total_occurrences: number
+  affected_rows: number
+  rows: ReplaceRow[]
+  truncated: boolean
+}
+
+export interface ReplaceBackup {
+  id: number
+  find_text: string
+  replace_text: string
+  scope: ReplaceScope[]
+  affected_rows: number
+  total_occurrences: number
+  created_at: string
+  undone_at: string | null
+}
+
+export const textReplaceApi = {
+  preview: (novelId: number, find: string, scope: ReplaceScope[]) =>
+    api.get<ReplacePreview>(`/text-replace/novel/${novelId}/preview`, {
+      params: { find, scope },
+      // axios 默认把数组序列化成 scope[]=a，FastAPI 要 scope=a&scope=b
+      paramsSerializer: { indexes: null },
+    }).then(r => r.data),
+  apply: (novelId: number, find: string, replace: string, scope: ReplaceScope[]) =>
+    api.post<{ ok: boolean; backup_id: number; affected_rows: number; total_occurrences: number }>(
+      `/text-replace/novel/${novelId}/apply`,
+      { find, replace, scope },
+      { timeout: 300000 },
+    ).then(r => r.data),
+  undo: (novelId: number, backupId: number) =>
+    api.post<{ ok: boolean; restored_rows: number; missing_rows: number }>(
+      `/text-replace/novel/${novelId}/undo/${backupId}`,
+      {},
+      { timeout: 300000 },
+    ).then(r => r.data),
+  backups: (novelId: number) =>
+    api.get<ReplaceBackup[]>(`/text-replace/novel/${novelId}/backups`).then(r => r.data),
 }
 
 // ── World Rules APIs（核心规则/特殊元素）─────────────────────────────────────
@@ -734,6 +1209,16 @@ export const worldviewChangesApi = {
 
 // ── Durable Foreshadowing / Secret APIs ───────────────────────────────────
 
+export interface StaleThreadReport {
+  current_chapter: number
+  active_count: number
+  expired_count: number
+  stale_after: number
+  /** 在场条数偏多/偏少的提示，正常时为空串 */
+  density_hint: string
+  stale: Array<Pick<StoryThread, 'id' | 'kind' | 'title' | 'content' | 'source_chapter' | 'due_chapter' | 'importance'> & { reason: string }>
+}
+
 export const storyThreadsApi = {
   list: (novelId: number, kind?: StoryThreadKind, status?: StoryThreadStatus) =>
     api.get<StoryThread[]>(`/story-threads/novel/${novelId}`, {
@@ -745,6 +1230,8 @@ export const storyThreadsApi = {
     api.patch<StoryThread>(`/story-threads/${id}`, data).then(r => r.data),
   delete: (id: number) =>
     api.delete(`/story-threads/${id}`).then(r => r.data),
+  stale: (novelId: number) =>
+    api.get<StaleThreadReport>(`/story-threads/novel/${novelId}/stale`).then(r => r.data),
 }
 
 // ── Technique APIs ────────────────────────────────────────────────────────
@@ -787,9 +1274,10 @@ export const promptsApi = {
 export const volumesApi = {
   list: (novelId: number) =>
     api.get<Volume[]>(`/volumes/novel/${novelId}`).then(r => r.data),
-  create: (data: { novel_id: number; number: number; title: string; description?: string }) =>
+  create: (data: { novel_id: number; number: number; title: string; description?: string }
+    & Partial<Pick<Volume, 'endgame_cards' | 'power_tiers' | 'tier_count' | 'words_per_tier'>>) =>
     api.post<Volume>('/volumes/', data).then(r => r.data),
-  update: (id: number, data: { title?: string; description?: string }) =>
+  update: (id: number, data: Partial<Pick<Volume, 'title' | 'description' | 'endgame_cards' | 'power_tiers' | 'tier_count' | 'words_per_tier' | 'spent_payoffs'>>) =>
     api.patch<Volume>(`/volumes/${id}`, data).then(r => r.data),
   delete: (id: number) =>
     api.delete(`/volumes/${id}`).then(r => r.data),
@@ -797,17 +1285,50 @@ export const volumesApi = {
 
 // ── Outline APIs ──────────────────────────────────────────────────────────
 
+export interface HealthFinding {
+  level: 'warn' | 'info'
+  label: string
+  detail: string
+}
+
+export interface PlanOptions {
+  chapter_roles: string[]
+  emotion_tones: string[]
+  hook_types: string[]
+}
+
+export interface OutlineHealth {
+  chapter_count: number
+  total_target_words: number
+  chapters: HealthFinding[]
+  volumes: Array<{ number: number; title: string; findings: HealthFinding[] }>
+}
+
+/** 执行计划字段，创建与修改共用 */
+export type OutlinePlanFields = Partial<
+  Pick<OutlineEntry, 'chapter_role' | 'emotion_tone' | 'emotion_intensity' | 'hook_type' | 'hook_strength'>
+>
+
 export const outlinesApi = {
   list: (novelId: number) =>
     api.get<OutlineEntry[]>(`/outlines/novel/${novelId}`).then(r => r.data),
-  create: (data: { novel_id: number; start_chapter: number; end_chapter: number; title?: string; content: string; volume?: number }) =>
+  create: (data: OutlinePlanFields & { novel_id: number; start_chapter: number; end_chapter: number; title?: string; content: string; volume?: number }) =>
     api.post<OutlineEntry>('/outlines/', data).then(r => r.data),
-  update: (id: number, data: { start_chapter?: number; end_chapter?: number; title?: string; content?: string }) =>
+  update: (id: number, data: OutlinePlanFields & { start_chapter?: number; end_chapter?: number; title?: string; content?: string }) =>
     api.patch<OutlineEntry>(`/outlines/${id}`, data).then(r => r.data),
   delete: (id: number) =>
     api.delete(`/outlines/${id}`).then(r => r.data),
   expand: (id: number) =>
     api.post<OutlineEntry[]>(`/outlines/${id}/expand`).then(r => r.data),
+  health: (novelId: number) =>
+    api.get<OutlineHealth>(`/outlines/novel/${novelId}/health`).then(r => r.data),
+  planOptions: () =>
+    api.get<PlanOptions>('/outlines/plan-options').then(r => r.data),
+  /** 给单独一章补细纲：写正文前发现这章没纲时用 */
+  draftChapter: (novelId: number, chapterNumber: number) =>
+    api.post<OutlineEntry>(
+      `/outlines/novel/${novelId}/chapter/${chapterNumber}/draft`, {}, { timeout: 120000 },
+    ).then(r => r.data),
 }
 
 // ── SSE Generation ─────────────────────────────────────────────────────────
@@ -874,6 +1395,8 @@ export type SSEMessage =
   | { event: 'new_locations'; data: NewLocationsData }
   | { event: 'new_factions'; data: NewFactionsData }
   | { event: 'new_techniques'; data: NewTechniquesData }
+  | { event: 'new_threads'; data: NewThreadsData }
+  | { event: 'thread_resolutions'; data: ThreadResolutionsData }
   | { event: 'context_step'; data: ContextStepData }
   | { event: 'critic_issues'; data: CriticIssuesData }
 
@@ -903,12 +1426,17 @@ export interface ChatMessage {
 export type ChatSSEMessage =
   | { event: 'token'; data: string }
   | { event: 'done'; data: { input_tokens: number; output_tokens: number } }
+  | { event: 'warning'; data: string }
   | { event: 'error'; data: string }
 
 async function readSseStream<T>(
   response: Response,
   onMessage: (msg: T) => void,
 ) {
+  if (response.status === 401) {
+    handleUnauthorized()
+    throw new Error('未登录或登录已过期')
+  }
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     throw new Error(text || `HTTP ${response.status} ${response.statusText}`)
@@ -953,6 +1481,8 @@ export function streamChat(
     temperature?: number
     max_tokens?: number
     context_rounds?: number
+    chapter_number?: number
+    web_search?: boolean
   },
   onMessage: (msg: ChatSSEMessage) => void,
   onClose: () => void,
@@ -961,11 +1491,125 @@ export function streamChat(
 
   fetch('/api/chat/stream', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
     await readSseStream<ChatSSEMessage>(response, onMessage)
+    onClose()
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      onMessage({ event: 'error', data: String(err) })
+    }
+    onClose()
+  })
+
+  return controller
+}
+
+/** 构思对话里聊定的结论。空串/空数组 = 没聊到，前端不覆盖对应栏位 */
+export interface BrainstormExtract {
+  title: string
+  genre: string
+  writing_style: string
+  premise: string
+  plot_design: string
+  core_setting: string
+  world_rules_seed: string
+  ending: string
+  protagonist_arc: string
+  endgame_cards: Array<{ volume: number; text: string }>
+  characters: Array<{ name: string; role: string; age: string; description: string }>
+}
+
+export const brainstormApi = {
+  extract: (messages: ChatMessage[], model = '') =>
+    api.post<BrainstormExtract>('/chat/brainstorm/extract', { messages, model }, { timeout: 180000 })
+      .then(r => r.data),
+}
+
+/** 新建小说页的构思对话：还没有 novel，也不读表单（对话单向影响表单） */
+export function streamBrainstorm(
+  payload: {
+    messages: ChatMessage[]
+    model?: string
+    temperature?: number
+    max_tokens?: number
+    context_rounds?: number
+    nsfw?: boolean
+    web_search?: boolean
+    /** 向导阶段 id，留空走自由聊天 */
+    stage?: string
+    /** 向导前几步已敲定的结论，防止早期结论被轮次截断后 AI 重复提问 */
+    confirmed?: string
+  },
+  onMessage: (msg: ChatSSEMessage) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+
+  fetch('/api/chat/brainstorm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async (response) => {
+    await readSseStream<ChatSSEMessage>(response, onMessage)
+    onClose()
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      onMessage({ event: 'error', data: String(err) })
+    }
+    onClose()
+  })
+
+  return controller
+}
+
+// ── SSE Tavern ────────────────────────────────────────────────────────────
+
+export interface TavernTurnMeta {
+  system_tokens: number
+  history_count: number
+  triggered: { id: number; keywords: string; constant: boolean; depth: number }[]
+  rules_used: number
+  examples_used: number
+  speaker?: { card_id: number; name: string }
+  /** 刚落库的那条用户消息，前端要靠它才能马上编辑这句。只在本轮第一个发言人的 meta 里带 */
+  user_message_id?: number
+}
+
+/** 群聊时每个角色开口前发一次，token 归属最近的这个 speaker */
+export interface TavernSpeaker {
+  card_id: number
+  name: string
+  avatar_url: string
+}
+
+export type TavernSSEMessage =
+  | { event: 'speaker'; data: TavernSpeaker }
+  | { event: 'meta'; data: TavernTurnMeta }
+  | { event: 'token'; data: string }
+  | { event: 'warning'; data: string }
+  | { event: 'summarized'; data: { upto_id: number } }
+  | { event: 'done'; data: { input_tokens: number; output_tokens: number; message_id: number } }
+  | { event: 'error'; data: string }
+
+export function streamTavernTurn(
+  sessionId: number,
+  payload: { content: string },
+  onMessage: (msg: TavernSSEMessage) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+
+  fetch(`/api/tavern/sessions/${sessionId}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async (response) => {
+    await readSseStream<TavernSSEMessage>(response, onMessage)
     onClose()
   }).catch((err) => {
     if (err.name !== 'AbortError') {
@@ -999,7 +1643,7 @@ export function streamChapterRewrite(
 
   fetch('/api/generation/rewrite-chapter', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {
@@ -1033,7 +1677,7 @@ export function streamChapterGeneration(
 
   fetch('/api/generation/chapter', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
     signal: controller.signal,
   }).then(async (response) => {

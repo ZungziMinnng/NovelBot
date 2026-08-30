@@ -1,16 +1,16 @@
-import { useState, useMemo, useRef, useCallback } from 'react'
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info, Eye, EyeOff, Copy } from 'lucide-react'
-import { novelsApi, writerPresetsApi, type Novel, type WriterPreset, type ExampleTurn } from '@/api/client'
+import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info, Eye, EyeOff, Copy, LogOut, ArrowLeft } from 'lucide-react'
+import { novelsApi, writerPresetsApi, authApi, type Novel, type WriterPreset, type ExampleTurn } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
-import { useBuildStore } from '@/store/buildStore'
 import { useSettingsStore } from '@/store/settingsStore'
-import NovelWizard from './NovelWizard'
+import { useAuthStore } from '@/store/authStore'
 import PresetModal from './PresetModal'
+import NovelPreviewModal from './NovelPreviewModal'
 
 function getGreeting(): string {
   const h = new Date().getHours()
@@ -31,10 +31,10 @@ type Tab = 'novels' | 'presets'
 export default function Home() {
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [wizardOpen, setWizardOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('novels')
   const [presetModal, setPresetModal] = useState<{ open: boolean; preset: WriterPreset | null }>({ open: false, preset: null })
   const [copyModal, setCopyModal] = useState<{ open: boolean; novel: Novel | null }>({ open: false, novel: null })
+  const [previewNovel, setPreviewNovel] = useState<Novel | null>(null)
   const { data: novels = [], isLoading } = useQuery({
     queryKey: ['novels'],
     queryFn: novelsApi.list,
@@ -50,11 +50,60 @@ export default function Home() {
     queryFn: novelsApi.dashboard,
   })
 
+  const authUser = useAuthStore((s) => s.user)
+  const handleLogout = useCallback(async () => {
+    try {
+      await authApi.logout()
+    } catch {}
+    useAuthStore.getState().clear()
+    navigate('/login', { replace: true })
+  }, [navigate])
+
   const nsfwMode = useSettingsStore((s) => s.nsfwMode)
-  const hiddenNovelIds = useSettingsStore((s) => s.hiddenNovelIds)
-  const toggleNovelHidden = useSettingsStore((s) => s.toggleNovelHidden)
+  // 隐藏名单存在服务端（users 表）。localStorage 按源隔离，
+  // 从 localhost:5173 和 127.0.0.1:8000 打开会各存一份，换入口就"忘了"
+  const hiddenNovelIds = authUser?.hidden_novel_ids ?? []
+  const hiddenPresetIds = authUser?.hidden_preset_ids ?? []
+  const persistHidden = useMutation({
+    mutationFn: (data: { hidden_novel_ids?: number[]; hidden_preset_ids?: number[] }) =>
+      authApi.updateMe(data),
+    onSuccess: (user) => useAuthStore.getState().setUser(user),
+    onError: () => toast.error('保存隐藏状态失败'),
+  })
+  const toggleNovelHidden = useCallback((id: number) => {
+    const cur = useAuthStore.getState().user?.hidden_novel_ids ?? []
+    persistHidden.mutate({
+      hidden_novel_ids: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    })
+  }, [persistHidden])
+  const togglePresetHidden = useCallback((id: number) => {
+    const cur = useAuthStore.getState().user?.hidden_preset_ids ?? []
+    persistHidden.mutate({
+      hidden_preset_ids: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    })
+  }, [persistHidden])
   const [showHidden, setShowHidden] = useState(false)
   const greeting = useMemo(() => getGreeting(), [])
+
+  // 一次性搬迁：把旧版存在 localStorage 的隐藏名单并进服务端，然后清掉本地副本。
+  // 只在当前源确实有残留时才发请求，所以每个源最多跑一次。
+  const migratedRef = useRef(false)
+  useEffect(() => {
+    if (migratedRef.current || !authUser) return
+    const { hiddenNovelIds: oldNovels, hiddenPresetIds: oldPresets } = useSettingsStore.getState()
+    if (oldNovels.length === 0 && oldPresets.length === 0) return
+    migratedRef.current = true
+    authApi
+      .updateMe({
+        hidden_novel_ids: [...new Set([...(authUser.hidden_novel_ids ?? []), ...oldNovels])],
+        hidden_preset_ids: [...new Set([...(authUser.hidden_preset_ids ?? []), ...oldPresets])],
+      })
+      .then((user) => {
+        useAuthStore.getState().setUser(user)
+        useSettingsStore.getState().clearLegacyHidden()
+      })
+      .catch(() => { migratedRef.current = false })
+  }, [authUser])
 
   // 三击「x 本小说」数字：切换隐藏小说的显隐（复用 logo 三击彩蛋模式）
   const countClickRef = useRef<number[]>([])
@@ -67,7 +116,7 @@ export default function Home() {
       countClickRef.current = []
       setShowHidden((v) => {
         const next = !v
-        const cnt = useSettingsStore.getState().hiddenNovelIds.length
+        const cnt = (useAuthStore.getState().user?.hidden_novel_ids ?? []).length
         if (cnt > 0) toast(next ? `已显示 ${cnt} 本隐藏小说` : '已隐藏', { icon: next ? '👁️' : '🙈', duration: 1500 })
         return next
       })
@@ -75,6 +124,7 @@ export default function Home() {
   }, [])
 
   const visibleNovels = showHidden ? novels : novels.filter((n) => !hiddenNovelIds.includes(n.id))
+  const visiblePresets = showHidden ? presets : presets.filter((p) => !hiddenPresetIds.includes(p.id))
 
   const clickTimesRef = useRef<number[]>([])
   const handleLogoClick = useCallback(() => {
@@ -154,11 +204,30 @@ export default function Home() {
 
       {/* Header */}
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-2 cursor-pointer select-none" onClick={handleLogoClick}>
-          <BookOpen className="w-6 h-6 text-primary" />
-          <h1 className="text-xl font-bold">NovelBot</h1>
+        <div className="flex items-center gap-2">
+          {/* 单独的返回按钮：logo 自己带三击彩蛋，不能兼作导航 */}
+          <button
+            onClick={() => navigate('/')}
+            className="p-1.5 rounded-md hover:bg-muted transition-colors"
+            title="返回模式选择"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div className="flex items-center gap-2 cursor-pointer select-none" onClick={handleLogoClick}>
+            <BookOpen className="w-6 h-6 text-primary" />
+            <h1 className="text-xl font-bold">小说</h1>
+          </div>
         </div>
         <div className="flex items-center gap-1">
+          {authUser && (
+            <button
+              onClick={() => navigate('/account')}
+              className="text-sm text-muted-foreground mr-2 px-2 py-1 rounded-md hover:bg-muted hover:text-foreground transition-colors"
+              title="用户设置"
+            >
+              {authUser.username}
+            </button>
+          )}
           <ThemePicker />
           <button
             onClick={() => navigate('/about')}
@@ -172,6 +241,13 @@ export default function Home() {
             className="p-2 rounded-md hover:bg-muted transition-colors"
           >
             <Settings className="w-5 h-5" />
+          </button>
+          <button
+            onClick={handleLogout}
+            className="p-2 rounded-md hover:bg-muted transition-colors"
+            title="登出"
+          >
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>
@@ -225,7 +301,7 @@ export default function Home() {
           </div>
           {activeTab === 'novels' ? (
             <button
-              onClick={() => setWizardOpen(true)}
+              onClick={() => navigate('/novel/new')}
               className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:opacity-90 transition-opacity font-medium"
             >
               <Plus className="w-4 h-4" />
@@ -264,7 +340,7 @@ export default function Home() {
                     spotlightColor={nsfwMode ? 'rgba(192, 38, 211, 0.08)' : 'rgba(255, 255, 255, 0.06)'}
                   >
                     <div
-                      onClick={() => navigate(`/novel/${novel.id}`)}
+                      onClick={() => setPreviewNovel(novel)}
                       className={`group p-5 ${isHidden ? 'opacity-50' : ''}`}
                     >
                       <div className="flex items-start justify-between">
@@ -311,6 +387,13 @@ export default function Home() {
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); navigate(`/novel/${novel.id}`) }}
+                            className="p-2 rounded-md hover:bg-muted transition-colors"
+                            title="进入创作"
+                          >
+                            <PenTool className="w-4 h-4" />
+                          </button>
                           <ChevronRight className="w-4 h-4 text-muted-foreground" />
                         </div>
                       </div>
@@ -336,7 +419,9 @@ export default function Home() {
               </div>
             ) : (
               <div className="grid gap-4">
-                {presets.map((preset: WriterPreset) => (
+                {visiblePresets.map((preset: WriterPreset) => {
+                  const isHidden = hiddenPresetIds.includes(preset.id)
+                  return (
                   <SpotlightCard
                     key={preset.id}
                     className="rounded-xl border border-border/60 bg-card/80 backdrop-blur-sm cursor-pointer"
@@ -344,16 +429,30 @@ export default function Home() {
                   >
                     <div
                       onClick={() => setPresetModal({ open: true, preset })}
-                      className="group p-5"
+                      className={`group p-5 ${isHidden ? 'opacity-50' : ''}`}
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex-1 min-w-0">
-                          <h3 className="font-semibold text-lg truncate mb-1">{preset.name}</h3>
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-semibold text-lg truncate">{preset.name}</h3>
+                            {isHidden && (
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0 flex items-center gap-1">
+                                <EyeOff className="w-3 h-3" />已隐藏
+                              </span>
+                            )}
+                          </div>
                           <p className="text-muted-foreground text-sm line-clamp-3 whitespace-pre-wrap">
                             {preset.prompt || '(空提示词)'}
                           </p>
                         </div>
                         <div className="flex items-center gap-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); togglePresetHidden(preset.id) }}
+                            className="p-2 rounded-md hover:bg-muted transition-colors"
+                            title={isHidden ? '取消隐藏' : '隐藏此预设'}
+                          >
+                            {isHidden ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                          </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); setPresetModal({ open: true, preset }) }}
                             className="p-2 rounded-md hover:bg-muted transition-colors"
@@ -370,28 +469,19 @@ export default function Home() {
                       </div>
                     </div>
                   </SpotlightCard>
-                ))}
+                  )
+                })}
               </div>
             )}
           </>
         )}
       </main>
 
-      {wizardOpen && (
-        <NovelWizard
-          onClose={() => setWizardOpen(false)}
-          onComplete={(id) => {
-            setWizardOpen(false)
-            qc.invalidateQueries({ queryKey: ['novels'] })
-            navigate(`/novel/${id}`)
-          }}
-          onBuild={async (id) => {
-            setWizardOpen(false)
-            qc.invalidateQueries({ queryKey: ['novels'] })
-            const novel = await novelsApi.get(id)
-            useBuildStore.getState().startBuild(id, novel.title, useSettingsStore.getState().nsfwMode)
-            navigate(`/novel/${id}/build`)
-          }}
+      {previewNovel && (
+        <NovelPreviewModal
+          novel={previewNovel}
+          onClose={() => setPreviewNovel(null)}
+          onEnter={() => navigate(`/novel/${previewNovel.id}`)}
         />
       )}
 

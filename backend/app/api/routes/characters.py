@@ -1,6 +1,6 @@
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
@@ -10,6 +10,7 @@ from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut
 from app.agents import character_agent
 from app.services.entity_embeddings import embed_character, remove_entity_embedding
 from app.services.relevance_selector import select_character_appearance_context
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
@@ -17,7 +18,8 @@ AVATARS_DIR = Path("data/avatars")
 
 
 @router.get("/novel/{novel_id}", response_model=list[CharacterOut])
-async def list_characters(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def list_characters(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     result = await db.execute(
         select(Character).where(Character.novel_id == novel_id)
     )
@@ -25,7 +27,8 @@ async def list_characters(novel_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/novel/{novel_id}/relationship-graph")
-async def relationship_graph(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def relationship_graph(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     result = await db.execute(
         select(Character).where(Character.novel_id == novel_id)
     )
@@ -38,7 +41,7 @@ async def relationship_graph(novel_id: int, db: AsyncSession = Depends(get_db)):
 
     for char in characters:
         state = char.current_state or {}
-        for rel_type, rel_key in [("initial", "initial_relationships"), ("current", "relationship_changes")]:
+        for rel_type, rel_key in [("base", "base_relationships"), ("initial", "initial_relationships"), ("current", "relationship_changes")]:
             rels = state.get(rel_key, {})
             if not isinstance(rels, dict):
                 continue
@@ -60,15 +63,13 @@ async def relationship_graph(novel_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{character_id}", response_model=CharacterOut)
-async def get_character(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
-    return char
+async def get_character(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    return await get_owned_child(db, Character, character_id, user, "角色")
 
 
 @router.post("/", response_model=CharacterOut)
-async def create_character(data: CharacterCreate, db: AsyncSession = Depends(get_db)):
+async def create_character(data: CharacterCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     char = Character(**data.model_dump())
     db.add(char)
     await db.flush()
@@ -90,11 +91,9 @@ async def create_character(data: CharacterCreate, db: AsyncSession = Depends(get
 
 @router.patch("/{character_id}", response_model=CharacterOut)
 async def update_character(
-    character_id: int, data: CharacterUpdate, db: AsyncSession = Depends(get_db)
+    character_id: int, data: CharacterUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)
 ):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(char, k, v)
     await db.commit()
@@ -104,12 +103,13 @@ async def update_character(
 
 
 @router.delete("/{character_id}")
-async def delete_character(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+async def delete_character(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel_id = char.novel_id
     char_id = char.id
+    if char.avatar_url:
+        old_path = AVATARS_DIR / Path(char.avatar_url).name
+        old_path.unlink(missing_ok=True)
     await db.delete(char)
     await db.commit()
     await remove_entity_embedding(novel_id, "character", char_id)
@@ -119,12 +119,11 @@ async def delete_character(character_id: int, db: AsyncSession = Depends(get_db)
 @router.post("/{character_id}/avatar", response_model=CharacterOut)
 async def upload_avatar(
     character_id: int,
+    user: CurrentUser,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+    char = await get_owned_child(db, Character, character_id, user, "角色")
 
     if char.avatar_url:
         old_path = AVATARS_DIR / Path(char.avatar_url).name
@@ -145,10 +144,8 @@ async def upload_avatar(
 
 
 @router.delete("/{character_id}/avatar", response_model=CharacterOut)
-async def delete_avatar(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+async def delete_avatar(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    char = await get_owned_child(db, Character, character_id, user, "角色")
 
     if char.avatar_url:
         old_path = AVATARS_DIR / Path(char.avatar_url).name
@@ -161,13 +158,9 @@ async def delete_avatar(character_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{character_id}/refresh-appearance", response_model=CharacterOut)
-async def refresh_appearance(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+async def refresh_appearance(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel = await db.get(Novel, char.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
 
     appearance_selection = await select_character_appearance_context(
         db,
@@ -196,14 +189,11 @@ async def refresh_appearance(character_id: int, db: AsyncSession = Depends(get_d
 async def enhance_character_endpoint(
     character_id: int,
     body: EnhanceRequest,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel = await db.get(Novel, char.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
 
     updated_sheet = await character_agent.enhance_character(novel, char, body.prompt, body.scope)
     char.full_sheet = updated_sheet
@@ -214,13 +204,9 @@ async def enhance_character_endpoint(
 
 
 @router.post("/{character_id}/generate-sheet", response_model=CharacterOut)
-async def generate_sheet(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+async def generate_sheet(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel = await db.get(Novel, char.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
 
     sheet = await character_agent.generate_character_sheet(novel, char)
     char.full_sheet = sheet
@@ -234,27 +220,20 @@ async def generate_sheet(character_id: int, db: AsyncSession = Depends(get_db)):
 async def generate_image_prompt(
     character_id: int,
     body: ImagePromptRequest,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel = await db.get(Novel, char.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
 
     prompt = await character_agent.generate_image_prompt(novel, char, body.style)
     return {"prompt": prompt}
 
 
 @router.post("/{character_id}/generate-history", response_model=CharacterOut)
-async def generate_history(character_id: int, db: AsyncSession = Depends(get_db)):
-    char = await db.get(Character, character_id)
-    if not char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+async def generate_history(character_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    char = await get_owned_child(db, Character, character_id, user, "角色")
     novel = await db.get(Novel, char.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
 
     history, _in_tok, _out_tok = await character_agent.generate_character_history(db, novel, char)
     sheet = dict(char.full_sheet or {})

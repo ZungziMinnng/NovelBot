@@ -27,7 +27,8 @@ interface EditorStore {
   clearAnnotations: (novelId: number, chapterNum: number) => void
 }
 
-const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 5000 }
+// 2500 字对齐番茄/起点的单章习惯（2000-3000），日更 6000-10000 字约等于 3-4 章
+const DEFAULT_DRAFT: EditorDraft = { instruction: '', targetWords: 2500 }
 const EMPTY_ANNOTATIONS: Annotation[] = []
 
 export const useEditorStore = create<EditorStore>()(

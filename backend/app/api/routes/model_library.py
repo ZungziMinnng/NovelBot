@@ -5,16 +5,17 @@ from app.database import get_db
 from app.models.model_library import ModelEntry
 from app.models.api_provider import ApiProvider
 from app.schemas.model_library import ModelEntryCreate, ModelEntryUpdate, ModelEntryOut
+from app.api.deps import CurrentUser
 
 router = APIRouter()
 
 
-async def _fill_from_provider(entry: ModelEntry, provider_id: int | None, db: AsyncSession):
+async def _fill_from_provider(entry: ModelEntry, provider_id: int | None, db: AsyncSession, user):
     """如果提供了 provider_id，从供应商记录填充 provider 和 api_format 反规范化字段。"""
     if provider_id is None:
         return
     provider = await db.get(ApiProvider, provider_id)
-    if not provider:
+    if not provider or provider.user_id != user.id:
         raise HTTPException(status_code=400, detail=f"供应商 ID {provider_id} 不存在")
     entry.provider_id = provider_id
     entry.provider = provider.name
@@ -28,13 +29,15 @@ async def _refresh_cache(db: AsyncSession):
 
 
 @router.get("/", response_model=list[ModelEntryOut])
-async def list_models(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ModelEntry).order_by(ModelEntry.id))
+async def list_models(user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ModelEntry).where(ModelEntry.user_id == user.id).order_by(ModelEntry.id)
+    )
     return result.scalars().all()
 
 
 @router.post("/", response_model=ModelEntryOut)
-async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db)):
+async def create_model(data: ModelEntryCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     price_currency = data.price_currency.strip().upper()
     if not price_currency:
         raise HTTPException(status_code=422, detail="价格货币单位不能为空")
@@ -49,8 +52,9 @@ async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db
         output_price=data.output_price,
         price_currency=price_currency,
         currency_to_cny_rate=1.0 if price_currency == "CNY" else data.currency_to_cny_rate,
+        user_id=user.id,
     )
-    await _fill_from_provider(entry, data.provider_id, db)
+    await _fill_from_provider(entry, data.provider_id, db, user)
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
@@ -59,9 +63,9 @@ async def create_model(data: ModelEntryCreate, db: AsyncSession = Depends(get_db
 
 
 @router.patch("/{model_id}", response_model=ModelEntryOut)
-async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession = Depends(get_db)):
+async def update_model(model_id: int, data: ModelEntryUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     entry = await db.get(ModelEntry, model_id)
-    if not entry:
+    if not entry or entry.user_id != user.id:
         raise HTTPException(status_code=404, detail="模型不存在")
     if data.display_name is not None:
         entry.display_name = data.display_name
@@ -85,7 +89,7 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
     if entry.price_currency == "CNY":
         entry.currency_to_cny_rate = 1.0
     if data.provider_id is not None:
-        await _fill_from_provider(entry, data.provider_id, db)
+        await _fill_from_provider(entry, data.provider_id, db, user)
     else:
         if data.provider is not None:
             entry.provider = data.provider
@@ -98,9 +102,9 @@ async def update_model(model_id: int, data: ModelEntryUpdate, db: AsyncSession =
 
 
 @router.delete("/{model_id}")
-async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_model(model_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     entry = await db.get(ModelEntry, model_id)
-    if not entry:
+    if not entry or entry.user_id != user.id:
         raise HTTPException(status_code=404, detail="模型不存在")
     await db.delete(entry)
     await db.commit()

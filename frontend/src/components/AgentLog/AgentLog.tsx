@@ -12,6 +12,7 @@ export interface AgentLogEntry {
   id: string
   agent: string
   label: string
+  model?: string
   status: 'running' | 'done' | 'failed'
   inputTokens: number
   outputTokens: number
@@ -35,6 +36,11 @@ const AGENT_COLORS: Record<string, string> = {
   writer: 'bg-blue-500',
   critic: 'bg-purple-500',
   detail_review: 'bg-amber-500',
+  context: 'bg-teal-500',
+  summarizer: 'bg-green-500',
+  char_update: 'bg-cyan-500',
+  entity_update: 'bg-indigo-500',
+  discovery: 'bg-pink-500',
 }
 
 const STATUS_DOT: Record<AgentLogEntry['status'], string> = {
@@ -86,7 +92,7 @@ export default function AgentLog({
           {canShowReviewDiff && (
             <button
               onClick={e => { e.stopPropagation(); onShowReviewDiff?.() }}
-              className="flex items-center gap-1 text-[10px] px-1.5 py-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-1 text-[0.625rem] px-1.5 py-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
               title="查看修订前后的剧情对比"
             >
               <GitCompare className="w-3.5 h-3.5" />
@@ -116,12 +122,17 @@ export default function AgentLog({
                   <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[entry.status]}`} />
 
                   {/* Agent badge */}
-                  <span className={`px-1.5 py-0.5 rounded text-white text-[10px] shrink-0 ${AGENT_COLORS[entry.agent] || 'bg-gray-500'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-white text-[0.625rem] shrink-0 ${AGENT_COLORS[entry.agent] || 'bg-gray-500'}`}>
                     {entry.agent}
                   </span>
 
-                  {/* Label */}
-                  <span className="text-muted-foreground flex-1 truncate">{entry.label}</span>
+                  {/* Label + model */}
+                  <span className="text-muted-foreground flex-1 truncate">
+                    {entry.label}
+                    {entry.model && (
+                      <span className="ml-1.5 text-muted-foreground/50 font-mono text-[0.625rem]">{entry.model}</span>
+                    )}
+                  </span>
 
                   {/* Token counts */}
                   {showTokens && entry.status === 'done' && (entry.inputTokens > 0 || entry.outputTokens > 0) && (
@@ -133,7 +144,7 @@ export default function AgentLog({
                   {/* Passed/failed indicator for review agents */}
                   {(entry.agent === 'critic' || entry.agent === 'detail_review') && entry.status === 'done' && (
                     <span
-                      className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full cursor-pointer ${entry.passed ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}
+                      className={`shrink-0 text-[0.625rem] px-1.5 py-0.5 rounded-full cursor-pointer ${entry.passed ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}
                       onClick={hasIssues ? () => toggleIssues(entry.id) : undefined}
                     >
                       {entry.passed ? '通过' : '修改'}
@@ -151,7 +162,7 @@ export default function AgentLog({
                       (entry.issues as ReviewIssue[]).map((issue, idx) => (
                         <div key={idx} className="space-y-0.5">
                           <div className="flex items-center gap-1.5">
-                            <span className={`text-[10px] px-1 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.medium}`}>
+                            <span className={`text-[0.625rem] px-1 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.medium}`}>
                               {issue.severity === 'high' ? '严重' : issue.severity === 'medium' ? '中等' : '轻微'}
                             </span>
                             <span className="text-muted-foreground/70">{issue.type}</span>

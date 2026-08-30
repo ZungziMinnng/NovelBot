@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.database import Base
 # Novel 的 relationship 需要全部关联模型注册后才能初始化 mapper
 from app.models import novel as _novel, chapter as _chapter, character, memory as _memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, glossary_entry, llm_usage as _llm_usage  # noqa: F401
-from app.agents import orchestrator, review_agent
+from app.agents import memory_pipeline, review_agent
 from app.api.routes.novels import aggregate_usage
 from app.models.chapter import Chapter
 from app.models.llm_usage import LlmUsage
@@ -58,8 +58,8 @@ class EmitLlmCallTests(unittest.TestCase):
                     "input_tokens": 100, "output_tokens": 200, "duration_ms": 1500,
                     "payload": {"messages": []},  # 额外字段不入库
                 }
-                with patch.object(orchestrator, "AsyncSessionLocal", maker):
-                    sse = await orchestrator._emit_llm_call(7, 3, data)
+                with patch.object(memory_pipeline, "AsyncSessionLocal", maker):
+                    sse = await memory_pipeline._emit_llm_call(7, 3, data)
                 payload = json.loads(sse[len("data: "):])
                 self.assertEqual(payload["event"], "llm_call")
                 self.assertEqual(payload["data"]["agent"], "writer")
@@ -80,8 +80,8 @@ class EmitLlmCallTests(unittest.TestCase):
             def broken_maker():
                 raise RuntimeError("db down")
 
-            with patch.object(orchestrator, "AsyncSessionLocal", broken_maker):
-                sse = await orchestrator._emit_llm_call(1, 1, {"agent": "critic"})
+            with patch.object(memory_pipeline, "AsyncSessionLocal", broken_maker):
+                sse = await memory_pipeline._emit_llm_call(1, 1, {"agent": "critic"})
             self.assertIn("llm_call", sse)
 
         asyncio.run(scenario())

@@ -32,9 +32,9 @@ export default function About() {
     <div className="min-h-screen bg-background">
       <header className="border-b px-6 py-4 flex items-center gap-3">
         <button
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/novels')}
           className="p-2 rounded-md hover:bg-muted transition-colors"
-          title="返回主页"
+          title="返回小说列表"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>

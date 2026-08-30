@@ -7,9 +7,11 @@ class NovelCreate(BaseModel):
     title: str
     genre: str = ""
     premise: str = ""
+    plot_design: str = ""
     writing_style: str = "严肃厚重"
     target_length: str = "中篇"
     core_setting: str = ""
+    world_rules_seed: str = ""
     writer_model: str = ""
     fast_model: str = ""
     tags: dict = {}
@@ -18,9 +20,16 @@ class NovelCreate(BaseModel):
 class NovelUpdate(BaseModel):
     title: Optional[str] = None
     genre: Optional[str] = None
+    # '' = 按 genre 自动匹配题材卡，'none' = 不用卡，其他 = 指定卡名
+    genre_card: Optional[str] = None
+    premise: Optional[str] = None
+    plot_design: Optional[str] = None
+    ending: Optional[str] = None
+    protagonist_arc: Optional[str] = None
     writing_style: Optional[str] = None
     target_length: Optional[str] = None
     core_setting: Optional[str] = None
+    world_rules_seed: Optional[str] = None
     book_summary: Optional[str] = None
     writer_model: Optional[str] = None
     fast_model: Optional[str] = None
@@ -45,19 +54,28 @@ class NovelUpdate(BaseModel):
     full_text_chapters: Optional[int] = None
     context_config: Optional[dict] = None
     tags: Optional[dict] = None
+    blurb: Optional[str] = None
+    submission_tags: Optional[list[str]] = None
     estimated_chapters: Optional[int] = None
     enable_volume_split: Optional[bool] = None
     skip_outline: Optional[bool] = None
+    # 启用的规则广场条目。update 走 exclude_none，所以传 None 是"不改"，传 [] 才是"全关"
+    enabled_rule_ids: Optional[list[int]] = None
 
 
 class NovelOut(BaseModel):
     id: int
     title: str
     genre: str
+    genre_card: str = ""
     premise: str
+    plot_design: str
+    ending: str = ""
+    protagonist_arc: str = ""
     writing_style: str
     target_length: str
     core_setting: str
+    world_rules_seed: str
     current_volume: int
     current_chapter: int
     book_summary: str
@@ -84,9 +102,13 @@ class NovelOut(BaseModel):
     full_text_chapters: int
     context_config: dict
     tags: dict
+    blurb: str
+    submission_tags: list[str]
     estimated_chapters: int
     enable_volume_split: bool
     skip_outline: bool
+    # None = 从未配置（前端据此预勾选内置规则，不可当成空数组处理）
+    enabled_rule_ids: list[int] | None
     created_at: datetime
     updated_at: datetime
 

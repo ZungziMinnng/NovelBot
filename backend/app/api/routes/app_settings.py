@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.api_provider import ApiProvider
 from app.models.model_library import ModelEntry
+from app.api.deps import CurrentUser, require_admin
 
 router = APIRouter()
 
@@ -46,12 +47,14 @@ class SettingsUpdate(BaseModel):
     review_interval: int = 10
     https_proxy: str = ""
     http_proxy: str = ""
+    deepseek_fast_thinking: str = "off"
 
 
 class SettingsOut(BaseModel):
     default_writer_model: str
     default_fast_model: str
     max_critic_retries: int
+    max_local_retries: int
     agent_writer_model: str
     agent_critic_model: str
     agent_memory_model: str
@@ -63,14 +66,16 @@ class SettingsOut(BaseModel):
     review_interval: int
     https_proxy: str
     http_proxy: str
+    deepseek_fast_thinking: str
 
 
-@router.get("/", response_model=SettingsOut)
+@router.get("/", response_model=SettingsOut, dependencies=[Depends(require_admin)])
 async def get_settings():
     return SettingsOut(
         default_writer_model=settings.default_writer_model,
         default_fast_model=settings.default_fast_model,
         max_critic_retries=settings.max_critic_retries,
+        max_local_retries=settings.max_local_retries,
         agent_writer_model=settings.agent_writer_model,
         agent_critic_model=settings.agent_critic_model,
         agent_memory_model=settings.agent_memory_model,
@@ -82,10 +87,11 @@ async def get_settings():
         review_interval=settings.review_interval,
         https_proxy=settings.https_proxy,
         http_proxy=settings.http_proxy,
+        deepseek_fast_thinking=settings.deepseek_fast_thinking,
     )
 
 
-@router.patch("/")
+@router.patch("/", dependencies=[Depends(require_admin)])
 async def update_settings(data: SettingsUpdate):
     """更新配置，同步写入 .env 文件并更新内存"""
     # 模型配置
@@ -119,6 +125,9 @@ async def update_settings(data: SettingsUpdate):
     _write_env("NOVELBOT_HTTPS_PROXY", data.https_proxy)
     settings.http_proxy = data.http_proxy
     _write_env("NOVELBOT_HTTP_PROXY", data.http_proxy)
+    if data.deepseek_fast_thinking in ("off", "high", "max"):
+        settings.deepseek_fast_thinking = data.deepseek_fast_thinking
+        _write_env("DEEPSEEK_FAST_THINKING", data.deepseek_fast_thinking)
     return {"ok": True}
 
 
@@ -147,7 +156,7 @@ async def _probe_tcp(host: str, port: int, timeout: float = 2.0) -> tuple[bool, 
         return False, str(e) or e.__class__.__name__
 
 
-@router.get("/proxy-status", response_model=ProxyStatusOut)
+@router.get("/proxy-status", response_model=ProxyStatusOut, dependencies=[Depends(require_admin)])
 async def proxy_status():
     """探测当前代理端口是否可连通，用于设置页展示「socket 是否真的在线」。"""
     proxy = settings.https_proxy or settings.http_proxy
@@ -173,19 +182,24 @@ class TestRequest(BaseModel):
 
 
 @router.post("/test")
-async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = Depends(get_db)):
+async def test_connection(user: CurrentUser, data: TestRequest = TestRequest(), db: AsyncSession = Depends(get_db)):
     """测试连接：支持指定模型，自动按 api_format 路由到对应 SDK"""
     from app.services import llm_client
     ref = data.model or settings.default_fast_model
+    entry = None
+    model = ref
     try:
-        # data.model 可能是 ModelEntry.id（新方案）或旧 model_id 字符串
-        entry = None
+        # data.model 可能是 ModelEntry.id（新方案）或旧 model_id 字符串；只允许测自己的模型
         if data.model:
             if data.model.isdigit():
                 entry = await db.get(ModelEntry, int(data.model))
+                if entry is not None and entry.user_id != user.id:
+                    entry = None
             if entry is None:
                 result = await db.execute(
-                    select(ModelEntry).where(ModelEntry.model_id == data.model).limit(1)
+                    select(ModelEntry)
+                    .where(ModelEntry.model_id == data.model, ModelEntry.user_id == user.id)
+                    .limit(1)
                 )
                 entry = result.scalar_one_or_none()
         # 实际调用 SDK / 展示用真实模型名；dispatch 仍收 ref 以按供应商消歧
@@ -197,7 +211,7 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
             if not entry.provider_id:
                 raise ValueError("嵌入模型未绑定供应商")
             provider = await db.get(ApiProvider, entry.provider_id)
-            if not provider or not provider.api_key or not provider.base_url:
+            if not provider or provider.user_id != user.id or not provider.api_key or not provider.base_url:
                 raise ValueError("嵌入模型供应商缺少 API Key 或 Base URL")
 
             from openai import AsyncOpenAI
@@ -236,7 +250,8 @@ async def test_connection(data: TestRequest = TestRequest(), db: AsyncSession = 
             "model_type": entry.model_type if entry else "chat",
         }
     except Exception as e:
-        api_format = entry.api_format if entry else llm_client.resolve_model_ref(ref)[1]
+        # 非 admin 的无效引用会让 resolve_model_ref 抛错，异常分支不能再调它
+        api_format = entry.api_format if entry else "openai"
         return {
             "ok": False,
             "error": str(e),

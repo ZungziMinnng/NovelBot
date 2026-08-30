@@ -7,6 +7,7 @@ export interface ChatSettings {
   temperature: number
   maxTokens: number
   contextRounds: number
+  webSearch: boolean
 }
 
 export interface ChatMessage {
@@ -20,6 +21,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   temperature: 0.85,
   maxTokens: 4096,
   contextRounds: 20,
+  webSearch: false,
 }
 
 const EMPTY_MESSAGES: ChatMessage[] = []
@@ -31,6 +33,9 @@ interface ChatStore {
   resetSettings: (novelId: number) => void
   appendMessage: (novelId: number, message: ChatMessage) => void
   updateLastAssistant: (novelId: number, updater: (content: string) => string) => void
+  updateMessageAt: (novelId: number, index: number, content: string) => void
+  /** 丢掉 index 及其之后的所有消息 */
+  truncateFrom: (novelId: number, index: number) => void
   clearMessages: (novelId: number) => void
 }
 
@@ -68,6 +73,22 @@ export const useChatStore = create<ChatStore>()(
           const updated = [...msgs]
           updated[updated.length - 1] = { ...last, content: updater(last.content) }
           return { messages: { ...s.messages, [novelId]: updated } }
+        }),
+
+      updateMessageAt: (novelId, index, content) =>
+        set((s) => {
+          const msgs = s.messages[novelId] || []
+          if (index < 0 || index >= msgs.length) return s
+          const updated = [...msgs]
+          updated[index] = { ...msgs[index], content }
+          return { messages: { ...s.messages, [novelId]: updated } }
+        }),
+
+      truncateFrom: (novelId, index) =>
+        set((s) => {
+          const msgs = s.messages[novelId] || []
+          if (index < 0 || index >= msgs.length) return s
+          return { messages: { ...s.messages, [novelId]: msgs.slice(0, index) } }
         }),
 
       clearMessages: (novelId) =>

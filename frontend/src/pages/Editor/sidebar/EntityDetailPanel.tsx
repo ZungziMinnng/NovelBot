@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pencil, Plus, X, Check, Loader2, Trash2, ArrowRightLeft } from 'lucide-react'
 import { worldEntitiesApi, novelNotesApi, locationsApi, type WorldEntity } from '@/api/client'
 import ImportanceSelect from '@/components/ImportanceSelect'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 // ── KV helpers (adapted from Characters.tsx pattern) ────────────────────────
@@ -47,11 +48,11 @@ function KVEditor({ draft, setDraft, onRemove, newKey, setNewKey, onAddKey, dash
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
-          <textarea
+          <AutoTextarea
             value={v}
             onChange={e => setDraft(prev => ({ ...prev, [k]: e.target.value }))}
-            className="w-full text-sm border rounded-md p-2 bg-background resize-y min-h-[48px] focus:outline-none focus:ring-1 focus:ring-ring"
-            rows={Math.max(2, v.split('\n').length)}
+            minRows={3}
+            className="w-full text-sm border rounded-md p-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
       ))}
@@ -237,19 +238,17 @@ export default function EntityDetailPanel({ entityId, novelId, entityType, onClo
               onChange={e => setBasicForm(prev => ({ ...prev, name: e.target.value }))}
               className="w-full text-sm font-medium border rounded-lg px-3 py-2 bg-background"
             />
-            <textarea
+            <AutoTextarea
               value={basicForm.description}
               onChange={e => setBasicForm(prev => ({ ...prev, description: e.target.value }))}
-              rows={4}
               placeholder="描述"
-              className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y"
+              className="w-full text-sm border rounded-lg px-3 py-2 bg-background"
             />
-            <textarea
+            <AutoTextarea
               value={basicForm.function}
               onChange={e => setBasicForm(prev => ({ ...prev, function: e.target.value }))}
-              rows={4}
               placeholder="功能（具体能力和作用，固定内容，不会被章节更新覆盖）"
-              className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y"
+              className="w-full text-sm border rounded-lg px-3 py-2 bg-background"
             />
             <ImportanceSelect value={basicForm.importance} onChange={v => setBasicForm(prev => ({ ...prev, importance: v }))} />
             <div className="flex justify-end gap-2">
@@ -312,7 +311,7 @@ export default function EntityDetailPanel({ entityId, novelId, entityType, onClo
           </button>
           {transferOpen && (
             <div className="absolute left-0 top-full z-20 mt-1 bg-popover border rounded-lg shadow-md py-1 min-w-[100px]">
-              <p className="text-[10px] text-muted-foreground px-3 py-1">移至</p>
+              <p className="text-[0.625rem] text-muted-foreground px-3 py-1">移至</p>
               {transferTargets.map(t => (
                 <button key={t.key} onClick={() => handleTransfer(t.key)}
                   className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors">
@@ -580,8 +579,8 @@ export function LocationDetailPanel({ locationId, novelId, onClose }: LocationDe
                 {locations.filter(l => l.id !== locationId).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
             </div>
-            <textarea value={basicForm.description} onChange={e => setBasicForm(prev => ({ ...prev, description: e.target.value }))}
-              placeholder="描述" rows={4} className="w-full text-sm border rounded-lg px-3 py-2 bg-background resize-y" />
+            <AutoTextarea value={basicForm.description} onChange={e => setBasicForm(prev => ({ ...prev, description: e.target.value }))}
+              placeholder="描述" className="w-full text-sm border rounded-lg px-3 py-2 bg-background" />
             <ImportanceSelect value={basicForm.importance} onChange={v => setBasicForm(prev => ({ ...prev, importance: v }))} />
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditingBasic(false)} className="text-xs px-2 py-1 border rounded hover:bg-muted">取消</button>
@@ -594,7 +593,7 @@ export function LocationDetailPanel({ locationId, novelId, onClose }: LocationDe
           <>
             <div className="flex items-center gap-2">
               <h2 className="text-sm font-bold flex-1 truncate">{location.name}</h2>
-              <span className="text-[10px] px-1.5 py-px rounded bg-muted text-muted-foreground shrink-0">
+              <span className="text-[0.625rem] px-1.5 py-px rounded bg-muted text-muted-foreground shrink-0">
                 {LOC_TYPE_LABELS[location.type] || location.type}
               </span>
               <button onClick={() => setEditingBasic(true)} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground">

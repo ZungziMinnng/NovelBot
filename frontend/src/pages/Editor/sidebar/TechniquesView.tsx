@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Loader2, Search, ArrowRightLeft } from 'lucide-react'
 import { techniquesApi, type Technique } from '@/api/client'
 import ImportanceSelect from '@/components/ImportanceSelect'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 interface Props {
@@ -95,7 +96,7 @@ export default function TechniquesView({ novelId, onSelectTechnique, selectedTec
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-medium truncate">{t.name}</span>
                 {t.type && (
-                  <span className={`text-[10px] px-1.5 py-px rounded ${TYPE_COLORS[t.type] || 'bg-gray-500/20 text-gray-400'}`}>
+                  <span className={`text-[0.625rem] px-1.5 py-px rounded ${TYPE_COLORS[t.type] || 'bg-gray-500/20 text-gray-400'}`}>
                     {t.type}
                   </span>
                 )}
@@ -113,7 +114,7 @@ export default function TechniquesView({ novelId, onSelectTechnique, selectedTec
                 <ArrowRightLeft className="w-3 h-3" />
               </button>
               {t.power_level && (
-                <span className="text-[10px] text-muted-foreground">{t.power_level}</span>
+                <span className="text-[0.625rem] text-muted-foreground">{t.power_level}</span>
               )}
             </div>
             {transferMenuId === t.id && (
@@ -121,7 +122,7 @@ export default function TechniquesView({ novelId, onSelectTechnique, selectedTec
                 className="absolute right-0 top-full z-20 bg-popover border rounded-lg shadow-md py-1 min-w-[100px]"
                 onClick={(e) => e.stopPropagation()}
               >
-                <p className="text-[10px] text-muted-foreground px-3 py-1">移至</p>
+                <p className="text-[0.625rem] text-muted-foreground px-3 py-1">移至</p>
                 <button
                   onClick={() => handleTransferToEntity(t, 'item')}
                   className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors"
@@ -221,7 +222,7 @@ export function TechniqueDetail({ technique, novelId, onClose }: {
             </button>
             {transferOpen && (
               <div className="absolute right-0 top-full z-20 mt-1 bg-popover border rounded-lg shadow-md py-1 min-w-[100px]">
-                <p className="text-[10px] text-muted-foreground px-3 py-1">移至</p>
+                <p className="text-[0.625rem] text-muted-foreground px-3 py-1">移至</p>
                 <button
                   onClick={() => handleTransfer('item')}
                   className="w-full text-left text-xs px-3 py-1.5 hover:bg-muted transition-colors"
@@ -320,7 +321,7 @@ function Field({ label, value, onChange }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -335,7 +336,7 @@ function SelectField({ label, value, onChange, options }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -352,12 +353,11 @@ function TextareaField({ label, value, onChange }: {
 }) {
   return (
     <div>
-      <label className="text-[10px] text-muted-foreground">{label}</label>
-      <textarea
+      <label className="text-[0.625rem] text-muted-foreground">{label}</label>
+      <AutoTextarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        rows={4}
-        className="w-full border rounded px-2 py-2 text-sm bg-background resize-y"
+        className="w-full border rounded px-2 py-2 text-sm bg-background"
       />
     </div>
   )

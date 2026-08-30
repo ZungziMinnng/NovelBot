@@ -7,6 +7,7 @@ import {
 import { charactersApi, type Character, type CharacterSecret } from '@/api/client'
 import RelationshipGraphView from './RelationshipGraphView'
 import CharacterPromptDrawer from './CharacterPromptDrawer'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 type Tab = 'basic' | 'skills' | 'state' | 'history' | 'relationships'
@@ -20,6 +21,8 @@ const TABS: { key: Tab; label: string }[] = [
 ]
 
 import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
+
+const ALIVE_OPTIONS = ['存活', '死亡', '失踪']
 
 const APPEARANCE_KEYS = ['appearance', 'personality', 'speech_style', 'weaknesses']
 const BODY_KEYS = ['body_traits']
@@ -88,10 +91,16 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   const [addingRel, setAddingRel] = useState(false)
   const [relTarget, setRelTarget] = useState('')
   const [relLabel, setRelLabel] = useState('')
+  const [relBase, setRelBase] = useState('')
   const [savingRel, setSavingRel] = useState(false)
   const [editingRelName, setEditingRelName] = useState<string | null>(null)
+  const [editRelBase, setEditRelBase] = useState('')
   const [editRelInit, setEditRelInit] = useState('')
   const [editRelCurr, setEditRelCurr] = useState('')
+
+  // 存续（固定字段）editing
+  const [customAlive, setCustomAlive] = useState<string | null>(null) // 非 null = 正在输入自定义值
+  const [savingAlive, setSavingAlive] = useState(false)
 
   // Secret (信息不对称) editing
   const [editingSecretIdx, setEditingSecretIdx] = useState<number | null>(null) // -1 = 新增
@@ -116,6 +125,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     }
     setEditingKV(null)
     setShowEnhance(false)
+    setCustomAlive(null)
   }, [characterId])
 
   if (!character) return null
@@ -299,7 +309,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         >
           <div className="flex items-center gap-1 mb-1">
             <GripVertical className="w-3 h-3 text-muted-foreground/40 cursor-grab" />
-            <p className="text-[10px] text-muted-foreground uppercase">{k}</p>
+            <p className="text-[0.625rem] text-muted-foreground uppercase">{k}</p>
           </div>
           <p className="text-xs whitespace-pre-wrap">
             {data[k] === undefined || data[k] === '' ? <span className="text-muted-foreground/50">（空）</span> : Array.isArray(data[k]) ? (data[k] as string[]).join('、') : String(data[k])}
@@ -350,7 +360,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1">
               <GripVertical className="w-3 h-3 text-muted-foreground/40 cursor-grab" />
-              <p className="text-[10px] text-muted-foreground uppercase">{k}</p>
+              <p className="text-[0.625rem] text-muted-foreground uppercase">{k}</p>
             </div>
             <button onClick={() => setKvDraft(prev => { const n = { ...prev }; delete n[k]; return n })}
               className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-destructive transition-all">
@@ -376,7 +386,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <button
           onClick={() => addDraftKey(newKey)}
           disabled={!newKey.trim()}
-          className="text-[10px] px-2 py-1 border rounded hover:bg-muted disabled:opacity-40"
+          className="text-[0.625rem] px-2 py-1 border rounded hover:bg-muted disabled:opacity-40"
         >
           <Plus className="w-3 h-3" />
         </button>
@@ -406,9 +416,9 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             </button>
           ) : (
             <div className="flex items-center gap-1 ml-auto">
-              <button onClick={() => setEditingKV(null)} className="text-[10px] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
+              <button onClick={() => setEditingKV(null)} className="text-[0.625rem] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
               <button onClick={() => saveKV(field)} disabled={savingKV}
-                className="text-[10px] px-2 py-0.5 bg-primary text-primary-foreground rounded hover:opacity-90 disabled:opacity-50">
+                className="text-[0.625rem] px-2 py-0.5 bg-primary text-primary-foreground rounded hover:opacity-90 disabled:opacity-50">
                 {savingKV ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
               </button>
             </div>
@@ -427,23 +437,23 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         {/* Name / Role / Age */}
         <div className="border rounded-lg p-3 space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-muted-foreground uppercase">姓名</span>
+            <span className="text-[0.625rem] text-muted-foreground uppercase">姓名</span>
             <span className="text-xs">{character.name}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-muted-foreground uppercase">定位</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${getRoleColor(character.role)}`}>{character.role}</span>
+            <span className="text-[0.625rem] text-muted-foreground uppercase">定位</span>
+            <span className={`text-[0.625rem] px-1.5 py-0.5 rounded-full ${getRoleColor(character.role)}`}>{character.role}</span>
           </div>
           {character.age && (
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-muted-foreground uppercase">年龄</span>
+              <span className="text-[0.625rem] text-muted-foreground uppercase">年龄</span>
               <span className="text-xs">{character.age}</span>
             </div>
           )}
         </div>
         {character.description && (
           <div className="border rounded-lg p-3">
-            <p className="text-[10px] text-muted-foreground mb-1 uppercase">描述</p>
+            <p className="text-[0.625rem] text-muted-foreground mb-1 uppercase">描述</p>
             <p className="text-xs whitespace-pre-wrap">{character.description}</p>
           </div>
         )}
@@ -486,34 +496,43 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     try {
       const oldRels = (state.relationship_changes || {}) as Record<string, string>
       const newRels = { ...oldRels, [relTarget]: relLabel.trim() }
+      const nextState: Record<string, unknown> = { ...state, relationship_changes: newRels }
+      if (relBase.trim()) {
+        const oldBase = (state.base_relationships || {}) as Record<string, string>
+        nextState.base_relationships = { ...oldBase, [relTarget]: relBase.trim() }
+      }
       await charactersApi.update(characterId, {
-        current_state: { ...state, relationship_changes: newRels },
+        current_state: nextState,
       } as Partial<Character>)
       invalidate()
       qc.invalidateQueries({ queryKey: ['relationship-graph', novelId] })
       setAddingRel(false)
       setRelTarget('')
       setRelLabel('')
+      setRelBase('')
       toast.success('关系已添加')
     } catch { toast.error('添加失败') }
     finally { setSavingRel(false) }
   }
 
   const handleDeleteRelationship = async (name: string) => {
+    const oldBase = { ...(state.base_relationships || {}) } as Record<string, string>
     const oldInitial = { ...(state.initial_relationships || {}) } as Record<string, string>
     const oldCurrent = { ...(state.relationship_changes || {}) } as Record<string, string>
+    delete oldBase[name]
     delete oldInitial[name]
     delete oldCurrent[name]
     await charactersApi.update(characterId, {
-      current_state: { ...state, initial_relationships: oldInitial, relationship_changes: oldCurrent },
+      current_state: { ...state, base_relationships: oldBase, initial_relationships: oldInitial, relationship_changes: oldCurrent },
     } as Partial<Character>)
     invalidate()
     qc.invalidateQueries({ queryKey: ['relationship-graph', novelId] })
     toast.success('关系已删除')
   }
 
-  const handleStartEditRel = (name: string, init: string, curr: string) => {
+  const handleStartEditRel = (name: string, base: string, init: string, curr: string) => {
     setEditingRelName(name)
+    setEditRelBase(base)
     setEditRelInit(init)
     setEditRelCurr(curr)
   }
@@ -522,8 +541,14 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     if (!editingRelName) return
     setSavingRel(true)
     try {
+      const newBase = { ...(state.base_relationships || {}) } as Record<string, string>
       const newInitial = { ...(state.initial_relationships || {}) } as Record<string, string>
       const newCurrent = { ...(state.relationship_changes || {}) } as Record<string, string>
+      if (editRelBase.trim()) {
+        newBase[editingRelName] = editRelBase.trim()
+      } else {
+        delete newBase[editingRelName]
+      }
       if (editRelInit.trim()) {
         newInitial[editingRelName] = editRelInit.trim()
       } else {
@@ -535,7 +560,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         delete newCurrent[editingRelName]
       }
       await charactersApi.update(characterId, {
-        current_state: { ...state, initial_relationships: newInitial, relationship_changes: newCurrent },
+        current_state: { ...state, base_relationships: newBase, initial_relationships: newInitial, relationship_changes: newCurrent },
       } as Partial<Character>)
       invalidate()
       qc.invalidateQueries({ queryKey: ['relationship-graph', novelId] })
@@ -597,20 +622,20 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             </button>
           )}
         </div>
-        <p className="text-[10px] text-muted-foreground leading-relaxed">
+        <p className="text-[0.625rem] text-muted-foreground leading-relaxed">
           仅「知情者」名单中的角色知道此秘密。当本章视角角色不在名单内时，写作模型会收到"上帝视角真相·禁止表现知晓"指令。
         </p>
 
         {secrets.map((sec, idx) => (
           editingSecretIdx === idx ? (
             <div key={idx} className="border rounded-lg p-2.5 space-y-2 bg-muted/30">
-              <textarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
-                rows={2} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
-                className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
+              <AutoTextarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
+                minRows={3} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
+                className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
               <div className="flex flex-wrap gap-1">
                 {others.map((c) => (
                   <button key={c.id} onClick={() => toggleKnownBy(c.name)}
-                    className={`text-[11px] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
+                    className={`text-[0.6875rem] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
                     {c.name}
                   </button>
                 ))}
@@ -632,7 +657,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                   <button onClick={() => handleDeleteSecret(idx)} className="text-muted-foreground hover:text-destructive"><Trash2 className="w-3 h-3" /></button>
                 </div>
               </div>
-              <p className="text-[10px] text-muted-foreground">
+              <p className="text-[0.625rem] text-muted-foreground">
                 知情者：{sec.known_by && sec.known_by.length ? sec.known_by.join('、') : '无（除自己外无人知晓）'}
               </p>
             </div>
@@ -641,13 +666,13 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
 
         {editingSecretIdx === -1 && (
           <div className="border rounded-lg p-2.5 space-y-2 bg-muted/30">
-            <textarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
-              rows={2} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
-              className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
+            <AutoTextarea value={secretFact} onChange={(e) => setSecretFact(e.target.value)}
+              minRows={3} placeholder="秘密内容，如：女帝是男主前世的关门弟子"
+              className="w-full text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             <div className="flex flex-wrap gap-1">
               {others.map((c) => (
                 <button key={c.id} onClick={() => toggleKnownBy(c.name)}
-                  className={`text-[11px] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
+                  className={`text-[0.6875rem] px-1.5 py-0.5 rounded border ${secretKnownBy.includes(c.name) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground'}`}>
                   {c.name}
                 </button>
               ))}
@@ -666,6 +691,8 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
   }
 
   const renderRelationshipsTab = () => {
+    // 基础关系视角敏感（值=对方是本角色的什么人），不做反向合并，避免显示错误方向的标签
+    const myBase = (state.base_relationships || {}) as Record<string, string>
     const myInitial = (state.initial_relationships || {}) as Record<string, string>
     const myCurrent = (state.relationship_changes || {}) as Record<string, string>
     const charName = character?.name || ''
@@ -681,9 +708,9 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       if (cc[charName] && !mergedCurrent[c.name]) mergedCurrent[c.name] = cc[charName]
     }
 
-    const allTargets = [...new Set([...Object.keys(mergedInitial), ...Object.keys(mergedCurrent)])]
+    const allTargets = [...new Set([...Object.keys(myBase), ...Object.keys(mergedInitial), ...Object.keys(mergedCurrent)])]
     const availableTargets = characters.filter(
-      (c) => c.id !== characterId && !mergedInitial[c.name] && !mergedCurrent[c.name],
+      (c) => c.id !== characterId && !myBase[c.name] && !mergedInitial[c.name] && !mergedCurrent[c.name],
     )
 
     return (
@@ -698,6 +725,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           {allTargets.length > 0 && (
             <div className="space-y-1.5">
               {allTargets.map((name) => {
+                const base = myBase[name]
                 const init = mergedInitial[name]
                 const curr = mergedCurrent[name]
                 const isEditing = editingRelName === name
@@ -707,6 +735,12 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                     <div key={name} className="border rounded-lg p-2.5 space-y-2 bg-muted/30">
                       <span className="text-sm font-medium">{name}</span>
                       <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground shrink-0 w-16">基础关系</span>
+                          <input value={editRelBase} onChange={(e) => setEditRelBase(e.target.value)}
+                            placeholder="对方是本角色的什么人，如：朋友/敌人"
+                            className="flex-1 text-xs border rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+                        </div>
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground shrink-0 w-16">初始关系</span>
                           <input value={editRelInit} onChange={(e) => setEditRelInit(e.target.value)}
@@ -722,9 +756,9 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                       </div>
                       <div className="flex justify-end gap-1.5">
                         <button onClick={() => setEditingRelName(null)}
-                          className="text-[10px] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
-                        <button onClick={handleSaveEditRel} disabled={savingRel || (!editRelInit.trim() && !editRelCurr.trim())}
-                          className="text-[10px] px-2 py-0.5 bg-primary text-primary-foreground rounded disabled:opacity-50">
+                          className="text-[0.625rem] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
+                        <button onClick={handleSaveEditRel} disabled={savingRel || (!editRelBase.trim() && !editRelInit.trim() && !editRelCurr.trim())}
+                          className="text-[0.625rem] px-2 py-0.5 bg-primary text-primary-foreground rounded disabled:opacity-50">
                           {savingRel ? <Loader2 className="w-3 h-3 animate-spin" /> : '保存'}
                         </button>
                       </div>
@@ -733,16 +767,15 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                 }
 
                 const hasChange = curr && curr !== init
-                const text = init && hasChange
-                  ? `初始关系：${init} / 当前关系：${curr}`
-                  : init
-                    ? `初始关系：${init}`
-                    : curr
-                      ? `当前关系：${curr}`
-                      : ''
+                const parts: string[] = []
+                if (base) parts.push(`基础关系：${base}`)
+                if (init && hasChange) parts.push(`初始关系：${init} / 当前关系：${curr}`)
+                else if (init) parts.push(`初始关系：${init}`)
+                else if (curr) parts.push(`当前关系：${curr}`)
+                const text = parts.join(' / ')
                 return (
                   <div key={name} className="flex items-center gap-2 px-2.5 py-2 border rounded-lg group cursor-pointer hover:bg-muted/30 transition-colors"
-                    onClick={() => handleStartEditRel(name, init || '', curr || '')}>
+                    onClick={() => handleStartEditRel(name, base || '', init || '', curr || '')}>
                     <span className="text-sm font-medium shrink-0">{name}</span>
                     <span className="text-xs text-muted-foreground flex-1 truncate">{text}</span>
                     <button onClick={(e) => { e.stopPropagation(); handleDeleteRelationship(name) }}
@@ -774,6 +807,12 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                 ))}
               </select>
               <input
+                value={relBase}
+                onChange={(e) => setRelBase(e.target.value)}
+                placeholder="基础关系（可选）：对方是本角色的什么人，如：朋友/敌人"
+                className="w-full text-xs border rounded px-2 py-1.5 bg-background"
+              />
+              <input
                 value={relLabel}
                 onChange={(e) => setRelLabel(e.target.value)}
                 placeholder="关系标签"
@@ -782,7 +821,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
               <div className="flex flex-wrap gap-1">
                 {PRESET_LABELS.map((label) => (
                   <button key={label} onClick={() => setRelLabel(label)}
-                    className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                    className={`text-[0.625rem] px-2 py-0.5 rounded-full border transition-colors ${
                       relLabel === label ? 'bg-primary text-primary-foreground border-primary' : 'hover:bg-muted'
                     }`}>
                     {label}
@@ -790,10 +829,10 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
                 ))}
               </div>
               <div className="flex gap-1.5 justify-end">
-                <button onClick={() => { setAddingRel(false); setRelTarget(''); setRelLabel('') }}
-                  className="text-[10px] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
+                <button onClick={() => { setAddingRel(false); setRelTarget(''); setRelLabel(''); setRelBase('') }}
+                  className="text-[0.625rem] px-2 py-0.5 border rounded hover:bg-muted">取消</button>
                 <button onClick={handleAddRelationship} disabled={savingRel || !relTarget || !relLabel.trim()}
-                  className="text-[10px] px-2 py-0.5 bg-primary text-primary-foreground rounded disabled:opacity-50">
+                  className="text-[0.625rem] px-2 py-0.5 bg-primary text-primary-foreground rounded disabled:opacity-50">
                   {savingRel ? <Loader2 className="w-3 h-3 animate-spin" /> : '添加'}
                 </button>
               </div>
@@ -804,10 +843,62 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
     )
   }
 
+  const aliveValue = String(state['存续'] ?? '存活')
+
+  const saveAlive = async (value: string) => {
+    const next = value.trim()
+    if (!next || next === aliveValue) { setCustomAlive(null); return }
+    setSavingAlive(true)
+    try {
+      await charactersApi.update(characterId, { current_state: { ...state, 存续: next } })
+      invalidate()
+      setCustomAlive(null)
+      toast.success('已保存')
+    } finally { setSavingAlive(false) }
+  }
+
   const renderStateTab = () => {
-    const stateKeys = Object.keys(state).filter(k => k !== 'relationship_changes' && k !== 'initial_relationships' && k !== 'secrets')
+    const stateKeys = Object.keys(state).filter(k => k !== 'relationship_changes' && k !== 'initial_relationships' && k !== 'base_relationships' && k !== 'secrets' && k !== '存续')
+    const isStandardAlive = ALIVE_OPTIONS.includes(aliveValue)
+    const showCustomInput = customAlive !== null || !isStandardAlive
     return (
       <div className="space-y-4">
+        <div className="border rounded-lg p-3 flex items-center gap-2">
+          <span className="text-[0.625rem] text-muted-foreground uppercase shrink-0">存续</span>
+          <select
+            value={showCustomInput ? '__custom__' : aliveValue}
+            onChange={e => {
+              const v = e.target.value
+              if (v === '__custom__') setCustomAlive(isStandardAlive ? '' : aliveValue)
+              else saveAlive(v)
+            }}
+            disabled={savingAlive}
+            className="text-xs border rounded px-2 py-1 bg-background"
+          >
+            {ALIVE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            <option value="__custom__">自定义…</option>
+          </select>
+          {showCustomInput && (
+            <>
+              <input
+                type="text"
+                value={customAlive ?? aliveValue}
+                onChange={e => setCustomAlive(e.target.value)}
+                placeholder="如：重伤昏迷"
+                className="flex-1 min-w-0 text-xs border rounded px-2 py-1 bg-background"
+              />
+              {customAlive !== null && (
+                <button
+                  onClick={() => saveAlive(customAlive)}
+                  disabled={savingAlive || !customAlive.trim()}
+                  className="text-[0.625rem] px-2 py-1 bg-primary text-primary-foreground rounded disabled:opacity-50 shrink-0"
+                >
+                  {savingAlive ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                </button>
+              )}
+            </>
+          )}
+        </div>
         {renderKVSection('当前状态', state, stateKeys, 'state', 'current_state')}
         {stateKeys.length === 0 && (
           <p className="text-xs text-muted-foreground text-center py-4">暂无状态信息</p>
@@ -825,10 +916,10 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
         <>
           <div className="relative">
             <div className="absolute left-2.5 top-0 bottom-0 w-0.5 bg-border" />
-            {(sheet.character_history as { chapter: number; content: string }[]).map((entry, i) => (
+            {(sheet.character_history as { chapter: number; day?: number; content: string }[]).map((entry, i) => (
               <div key={i} className="relative pl-7 py-1.5">
                 <div className="absolute left-1 top-2.5 w-3 h-3 rounded-full bg-primary/80 border-2 border-background" />
-                <span className="text-[10px] font-mono text-muted-foreground">第{entry.chapter}章</span>
+                <span className="text-[0.625rem] font-mono text-muted-foreground">第{entry.chapter}章{entry.day ? `·第${entry.day}日` : ''}</span>
                 <p className="text-xs text-muted-foreground leading-relaxed">{entry.content}</p>
               </div>
             ))}
@@ -871,7 +962,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             )}
             {character.avatar_url && (
               <button onClick={handleDeleteAvatar}
-                className="absolute -top-1 -right-1 w-4 h-4 bg-destructive text-white rounded-full items-center justify-center text-[8px] hidden group-hover:flex">
+                className="absolute -top-1 -right-1 w-4 h-4 bg-destructive text-white rounded-full items-center justify-center text-[0.5rem] hidden group-hover:flex">
                 <X className="w-2.5 h-2.5" />
               </button>
             )}
@@ -879,36 +970,36 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-semibold truncate">{character.name}</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`text-[10px] px-1.5 py-px rounded-full ${getRoleColor(character.role)}`}>
+              <span className={`text-[0.625rem] px-1.5 py-px rounded-full ${getRoleColor(character.role)}`}>
                 {character.role}
               </span>
-              {character.age && <span className="text-[10px] text-muted-foreground">{character.age}岁</span>}
+              {character.age && <span className="text-[0.625rem] text-muted-foreground">{character.age}岁</span>}
             </div>
           </div>
           <div className="flex flex-col gap-1 shrink-0">
             {character.avatar_url && (
               <button onClick={() => setShowLightbox(true)}
-                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors">
+                className="flex items-center gap-1 text-[0.625rem] px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 transition-colors">
                 <Maximize2 className="w-3 h-3" /> 查看大图
               </button>
             )}
             <button onClick={() => setShowPromptDrawer(true)}
-              className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-cyan-200 text-cyan-600 hover:bg-cyan-50 dark:border-cyan-800 dark:text-cyan-400 dark:hover:bg-cyan-900/30 transition-colors">
+              className="flex items-center gap-1 text-[0.625rem] px-2 py-1 rounded-md border border-cyan-200 text-cyan-600 hover:bg-cyan-50 dark:border-cyan-800 dark:text-cyan-400 dark:hover:bg-cyan-900/30 transition-colors">
               <Wand2 className="w-3 h-3" /> 生成提示词
             </button>
           </div>
         </div>
         <div className="flex gap-1.5">
           <button onClick={() => { setBasicForm({ name: character.name, role: character.role, age: character.age, description: character.description }); setEditingBasic(true) }}
-            className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded-md border border-blue-200 text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors">
+            className="flex-1 flex items-center justify-center gap-1 py-1 text-[0.625rem] rounded-md border border-blue-200 text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors">
             <Pencil className="w-3 h-3" /> 编辑
           </button>
           <button onClick={() => setShowEnhance(!showEnhance)}
-            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[10px] rounded-md transition-colors ${showEnhance ? 'bg-violet-600 text-white border border-violet-600' : 'border border-violet-200 text-violet-600 hover:bg-violet-50 dark:border-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30'}`}>
+            className={`flex-1 flex items-center justify-center gap-1 py-1 text-[0.625rem] rounded-md transition-colors ${showEnhance ? 'bg-violet-600 text-white border border-violet-600' : 'border border-violet-200 text-violet-600 hover:bg-violet-50 dark:border-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30'}`}>
             <Sparkles className="w-3 h-3" /> AI 完善
           </button>
           <button onClick={handleDelete}
-            className="px-2 py-1 text-[10px] rounded-md border border-red-200 text-red-500 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors">
+            className="px-2 py-1 text-[0.625rem] rounded-md border border-red-200 text-red-500 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors">
             <Trash2 className="w-3 h-3" />
           </button>
         </div>
@@ -929,11 +1020,11 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
             rows={4}
           />
           <div>
-            <p className="text-[10px] text-muted-foreground mb-1">完善范围</p>
+            <p className="text-[0.625rem] text-muted-foreground mb-1">完善范围</p>
             <div className="flex flex-wrap gap-1">
               {ENHANCE_SCOPES.map(({ key, label }) => (
                 <button key={key} onClick={() => toggleScope(key)}
-                  className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                  className={`text-[0.625rem] px-2 py-0.5 rounded-full border transition-colors ${
                     enhanceScope.includes(key) ? 'bg-primary text-primary-foreground border-primary' : 'hover:bg-muted'
                   }`}>
                   {label}
@@ -953,7 +1044,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
       <div className="flex border-b shrink-0 overflow-x-auto">
         {TABS.map(({ key, label }) => (
           <button key={key} onClick={() => setActiveTab(key)}
-            className={`shrink-0 px-2.5 py-2 text-[11px] font-medium transition-colors ${
+            className={`shrink-0 px-2.5 py-2 text-[0.6875rem] font-medium transition-colors ${
               activeTab === key
                 ? 'text-primary border-b-2 border-primary'
                 : 'text-muted-foreground hover:text-foreground'
@@ -1014,7 +1105,7 @@ export default function CharacterEditPanel({ characterId, novelId, onClose }: Pr
               <label className="text-xs text-muted-foreground mb-1 block">角色定位</label>
               <div className="flex items-center gap-2">
                 {basicForm.role && (
-                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(basicForm.role)}`}>
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[0.625rem] ${getRoleColor(basicForm.role)}`}>
                     {basicForm.role}
                   </span>
                 )}

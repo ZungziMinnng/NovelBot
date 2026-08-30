@@ -93,7 +93,7 @@ export default function ReviewModal({ novelId, result, onResult, onClose }: Revi
               <div className="flex items-center gap-4 p-3 rounded-lg bg-muted/30">
                 <div className="text-center">
                   <p className="text-2xl font-bold">{result.issues.length}</p>
-                  <p className="text-[10px] text-muted-foreground">问题数</p>
+                  <p className="text-[0.625rem] text-muted-foreground">问题数</p>
                 </div>
                 <div className="flex-1 text-xs text-muted-foreground space-y-0.5">
                   <p>审查 {result.chapter_count} 章 / {result.word_count.toLocaleString()} 字</p>
@@ -129,11 +129,11 @@ export default function ReviewModal({ novelId, result, onResult, onClose }: Revi
                         {issues.map((issue, i) => (
                           <div key={i} className={`p-3 rounded-lg border ${cfg.color}`}>
                             <div className="flex items-center gap-2 mb-1">
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${SEVERITY_BADGE[issue.severity] || SEVERITY_BADGE.low}`}>
+                              <span className={`text-[0.625rem] px-1.5 py-0.5 rounded ${SEVERITY_BADGE[issue.severity] || SEVERITY_BADGE.low}`}>
                                 {issue.severity === 'high' ? '严重' : issue.severity === 'medium' ? '中等' : '轻微'}
                               </span>
                               {issue.chapters.length > 0 && (
-                                <span className="text-[10px] text-muted-foreground">
+                                <span className="text-[0.625rem] text-muted-foreground">
                                   第 {issue.chapters.join('、')} 章
                                 </span>
                               )}

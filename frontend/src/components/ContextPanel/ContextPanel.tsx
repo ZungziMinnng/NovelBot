@@ -78,7 +78,7 @@ export default function ContextPanel({ novelId, rollingStage, contextSteps }: Pr
                         <div className="flex items-center gap-1">
                           <span className="font-medium truncate">{step.label}</span>
                           {badge && !skipped && (
-                            <span className={`text-[9px] px-1 py-px rounded leading-tight ${badge.cls}`}>{badge.text}</span>
+                            <span className={`text-[0.5625rem] px-1 py-px rounded leading-tight ${badge.cls}`}>{badge.text}</span>
                           )}
                         </div>
                         <div className="text-muted-foreground truncate">
@@ -92,7 +92,9 @@ export default function ContextPanel({ novelId, rollingStage, contextSteps }: Pr
                           <p className="break-words">{items.join('、')}</p>
                         )}
                         {step.content && (
-                          <p className="break-words whitespace-pre-line">{step.content}</p>
+                          <div className="max-h-56 overflow-y-auto border rounded bg-muted/30 p-1.5 mt-0.5">
+                            <p className="break-words whitespace-pre-line">{step.content}</p>
+                          </div>
                         )}
                       </div>
                     )}

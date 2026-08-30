@@ -120,8 +120,14 @@ async def _clear_build_outputs(db: AsyncSession, novel_id: int) -> dict[str, int
     """Replace-mode cleanup for artifacts managed by the automatic build flow."""
     outline_ids = (await db.execute(select(Outline.id).where(Outline.novel_id == novel_id))).scalars().all()
     chapter_volumes = set((await db.execute(select(Chapter.volume).where(Chapter.novel_id == novel_id))).scalars().all())
+    # 第 1 卷不删：向导填的库存（留到结尾的牌、实力档位）记在它上面，
+    # 而重建时它通常还没有章节，跟着 not_in 一起被删掉就白填了。标题后面会被重新覆盖。
     volume_ids = (await db.execute(
-        select(Volume.id).where(Volume.novel_id == novel_id, Volume.number.not_in(chapter_volumes or {-1}))
+        select(Volume.id).where(
+            Volume.novel_id == novel_id,
+            Volume.number.not_in(chapter_volumes or {-1}),
+            Volume.number != 1,
+        )
     )).scalars().all()
     loc_ids = (await db.execute(select(Location.id).where(Location.novel_id == novel_id))).scalars().all()
     fac_ids = (await db.execute(select(Faction.id).where(Faction.novel_id == novel_id))).scalars().all()
@@ -157,6 +163,14 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
         yield _sse("error", "小说不存在")
         return
 
+    # 构建流程会写入大量实体向量（角色/地点/势力/功法/世界观）。必须先按小说配置装载
+    # 嵌入函数，否则缓存未命中会兜底到 384 维本地默认模型，与已建的远程模型维度集合冲突
+    # （InvalidDimensionException）。失败仅告警：嵌入是附带同步，不应打断构建。
+    try:
+        await vector_store.ensure_embedding_configured(novel_id, db)
+    except Exception:
+        logger.warning("构建流程加载嵌入模型配置失败（实体向量写入可能被跳过）: novel=%s", novel_id, exc_info=True)
+
     try:
         # ── Step 1: Config ──
         yield _step_event(STEPS[0], "running")
@@ -178,11 +192,15 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
 
         # ── Step 2: World ──
         yield _step_event(STEPS[1], "running")
-        raw_setting_parts = [p for p in [novel.core_setting, novel.premise or novel.genre] if p]
-        raw_setting = "\n\n".join(raw_setting_parts)
+        # 时代背景原始输入（用户填的 core_setting），premise/plot_design 由模板单独接收，
+        # 不再混入时代背景字段。时代背景留空时，模板会依据创作方向/剧情设计推导。
+        raw_setting = novel.core_setting or ""
         if novel.tags:
-            raw_setting += "\n" + _format_tags(novel.tags)
-        core_setting = await world_agent.expand_world_setting(novel, raw_setting, "", nsfw_mode=nsfw_mode)
+            tags_str = _format_tags(novel.tags)
+            if tags_str:
+                raw_setting = (raw_setting + "\n" + tags_str).strip()
+        core_setting = await world_agent.expand_world_setting(
+            novel, raw_setting, novel.world_rules_seed or "", nsfw_mode=nsfw_mode)
         novel.core_setting = core_setting
 
         is_placeholder = _is_placeholder_title(novel.title)
@@ -199,7 +217,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                     {"role": "system", "content": "你是小说标题编辑，只输出简洁、自然、具有吸引力的中文标题。"},
                     {"role": "user", "content": title_prompt},
                 ],
-                model=title_model, api_format=title_fmt, temperature=0.9, max_tokens=60)
+                model=title_model, api_format=title_fmt, temperature=0.9, max_tokens=512)
             clean_title = _clean_generated_title(generated_title)
             if clean_title:
                 novel.title = clean_title
@@ -296,6 +314,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
         )
         char_prompt = render("build_characters.jinja2",
                              genre=novel.genre, premise=novel.premise or "",
+                             plot_design=novel.plot_design or "",
                              core_setting=novel.core_setting[:1000],
                              outline_titles=outline_titles,
                              existing_characters=existing_characters)

@@ -5,8 +5,16 @@ from app.database import get_db
 from app.models.api_provider import ApiProvider
 from app.models.model_library import ModelEntry
 from app.schemas.api_provider import ApiProviderCreate, ApiProviderUpdate, ApiProviderOut
+from app.api.deps import CurrentUser
 
 router = APIRouter()
+
+
+async def _get_owned_provider(db: AsyncSession, provider_id: int, user) -> ApiProvider:
+    provider = await db.get(ApiProvider, provider_id)
+    if not provider or provider.user_id != user.id:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    return provider
 
 
 def _mask_key(key: str) -> str:
@@ -31,19 +39,22 @@ def _to_out(p: ApiProvider) -> ApiProviderOut:
 
 
 @router.get("/", response_model=list[ApiProviderOut])
-async def list_providers(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ApiProvider).order_by(ApiProvider.id))
+async def list_providers(user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ApiProvider).where(ApiProvider.user_id == user.id).order_by(ApiProvider.id)
+    )
     return [_to_out(p) for p in result.scalars()]
 
 
 @router.post("/", response_model=ApiProviderOut)
-async def create_provider(data: ApiProviderCreate, db: AsyncSession = Depends(get_db)):
+async def create_provider(data: ApiProviderCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     provider = ApiProvider(
         name=data.name,
         base_url=data.base_url,
         api_key=data.api_key,
         api_format=data.api_format,
         use_proxy=data.use_proxy,
+        user_id=user.id,
     )
     db.add(provider)
     await db.commit()
@@ -53,10 +64,8 @@ async def create_provider(data: ApiProviderCreate, db: AsyncSession = Depends(ge
 
 
 @router.patch("/{provider_id}", response_model=ApiProviderOut)
-async def update_provider(provider_id: int, data: ApiProviderUpdate, db: AsyncSession = Depends(get_db)):
-    provider = await db.get(ApiProvider, provider_id)
-    if not provider:
-        raise HTTPException(status_code=404, detail="供应商不存在")
+async def update_provider(provider_id: int, data: ApiProviderUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    provider = await _get_owned_provider(db, provider_id, user)
     if data.name is not None:
         provider.name = data.name
     if data.base_url is not None:
@@ -82,10 +91,8 @@ async def update_provider(provider_id: int, data: ApiProviderUpdate, db: AsyncSe
 
 
 @router.delete("/{provider_id}")
-async def delete_provider(provider_id: int, db: AsyncSession = Depends(get_db)):
-    provider = await db.get(ApiProvider, provider_id)
-    if not provider:
-        raise HTTPException(status_code=404, detail="供应商不存在")
+async def delete_provider(provider_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    provider = await _get_owned_provider(db, provider_id, user)
     # 检查是否有模型引用
     result = await db.execute(
         select(ModelEntry).where(ModelEntry.provider_id == provider_id).limit(1)

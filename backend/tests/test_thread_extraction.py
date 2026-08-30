@@ -1,3 +1,4 @@
+"""伏笔/秘密提取测试：候选不落库、规整/去重/上限、模型未输出时不影响已有条目。"""
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -70,27 +71,28 @@ class ThreadExtractionTests(unittest.TestCase):
             select(StoryThread).where(StoryThread.novel_id == novel_id)
         )).scalars().all()
 
-    def test_threads_saved_with_auto_source(self):
+    def test_candidates_returned_not_persisted(self):
         async def scenario():
             engine, session = await self._make_session()
             try:
                 novel, chapter = await self._seed(session)
-                await self._summarize(session, novel, chapter, _payload([
+                _, discovered, _, _ = await self._summarize(session, novel, chapter, _payload([
                     {"kind": "secret", "title": "月华顿悟谎言", "content": "主角实为获得系统突破，对外谎称观月华顿悟。", "importance": 9, "known_by": ["主角"]},
                     {"kind": "伏笔", "title": "逐出宗门", "content": "师尊将欺凌主角的弟子逐出宗门。", "importance": 4},
                 ]))
-                threads = await self._threads(session, novel.id)
-                self.assertEqual(len(threads), 2)
-                by_title = {t.title: t for t in threads}
+                # 候选返回给前端，但不落库
+                self.assertEqual(await self._threads(session, novel.id), [])
+                cands = discovered["threads"]
+                self.assertEqual(len(cands), 2)
+                by_title = {c["title"]: c for c in cands}
                 secret = by_title["月华顿悟谎言"]
-                self.assertEqual(secret.kind, "secret")
-                self.assertEqual(secret.source, "auto")
-                self.assertEqual(secret.source_chapter, 3)
-                self.assertEqual(secret.importance, 5)  # clamp 到 1-5
-                self.assertEqual(secret.known_by, ["主角"])
+                self.assertEqual(secret["kind"], "secret")
+                self.assertEqual(secret["importance"], 5)  # clamp 到 1-5
+                self.assertEqual(secret["known_by"], ["主角"])
+                self.assertEqual(secret["source_chapter"], 3)
                 fs = by_title["逐出宗门"]
-                self.assertEqual(fs.kind, "foreshadowing")  # 中文 kind 归一化
-                self.assertEqual(fs.known_by, [])
+                self.assertEqual(fs["kind"], "foreshadowing")  # 中文 kind 归一化
+                self.assertEqual(fs["known_by"], [])
             finally:
                 await session.close()
                 await engine.dispose()
@@ -104,40 +106,40 @@ class ThreadExtractionTests(unittest.TestCase):
                 novel, chapter = await self._seed(session, existing_threads=[
                     {"kind": "secret", "title": "月华顿悟谎言", "content": "已有条目", "source": "manual", "source_chapter": 2},
                 ])
-                await self._summarize(session, novel, chapter, _payload([
+                _, discovered, _, _ = await self._summarize(session, novel, chapter, _payload([
                     {"kind": "secret", "title": "月华顿悟谎言", "content": "重复提取的同一事实。"},
                     {"kind": "foreshadowing", "title": "事实A", "content": "事实A内容。"},
                     {"kind": "foreshadowing", "title": "事实B", "content": "事实B内容。"},
                     {"kind": "foreshadowing", "title": "事实C", "content": "超出上限的第三条。"},
                 ]))
-                threads = await self._threads(session, novel.id)
-                titles = sorted(t.title for t in threads)
-                # 1 条已有 + 每章最多 2 条新增；重复标题被去重
-                self.assertEqual(titles, ["事实A", "事实B", "月华顿悟谎言"])
+                # 重复标题被去重，每章候选最多 2 条
+                titles = sorted(c["title"] for c in discovered["threads"])
+                self.assertEqual(titles, ["事实A", "事实B"])
+                # 库内只剩原有的 1 条，未新增
+                self.assertEqual([t.title for t in await self._threads(session, novel.id)], ["月华顿悟谎言"])
             finally:
                 await session.close()
                 await engine.dispose()
 
         self._run(scenario())
 
-    def test_regen_replaces_same_chapter_auto_threads(self):
+    def test_confirmed_threads_suppress_reextraction(self):
         async def scenario():
             engine, session = await self._make_session()
             try:
+                # 用户已确认过的本章 auto 条目：重新确认时不应再作为候选弹出
                 novel, chapter = await self._seed(session, existing_threads=[
-                    {"kind": "secret", "title": "旧提取", "content": "上次生成提取的事实", "source": "auto", "source_chapter": 3},
-                    {"kind": "secret", "title": "别章提取", "content": "第2章提取的事实", "source": "auto", "source_chapter": 2},
+                    {"kind": "secret", "title": "已确认提取", "content": "上次生成已确认的事实", "source": "auto", "source_chapter": 3},
                 ])
                 captured: list[str] = []
-                await self._summarize(session, novel, chapter, _payload([
-                    {"kind": "secret", "title": "新提取", "content": "重新生成后提取的事实。"},
+                _, discovered, _, _ = await self._summarize(session, novel, chapter, _payload([
+                    {"kind": "secret", "title": "已确认提取", "content": "上次生成已确认的事实"},
+                    {"kind": "secret", "title": "新提取", "content": "重新生成后提取的新事实。"},
                 ]), captured_prompt=captured)
-                threads = await self._threads(session, novel.id)
-                titles = sorted(t.title for t in threads)
-                self.assertEqual(titles, ["别章提取", "新提取"])
-                # 本章旧 auto 条目不进提示词的已记录列表
-                self.assertNotIn("旧提取", captured[0])
-                self.assertIn("别章提取", captured[0])
+                self.assertEqual([c["title"] for c in discovered["threads"]], ["新提取"])
+                # 已确认条目保留在库中，且进提示词的已记录列表抑制重复提取
+                self.assertEqual([t.title for t in await self._threads(session, novel.id)], ["已确认提取"])
+                self.assertIn("已确认提取", captured[0])
             finally:
                 await session.close()
                 await engine.dispose()
@@ -153,9 +155,10 @@ class ThreadExtractionTests(unittest.TestCase):
                 ])
                 data = _payload([])
                 del data["threads"]
-                await self._summarize(session, novel, chapter, data)
-                threads = await self._threads(session, novel.id)
+                _, discovered, _, _ = await self._summarize(session, novel, chapter, data)
+                self.assertEqual(discovered["threads"], [])
                 # 模型未按新格式输出时不删不改
+                threads = await self._threads(session, novel.id)
                 self.assertEqual([t.title for t in threads], ["旧提取"])
             finally:
                 await session.close()
@@ -168,11 +171,12 @@ class ThreadExtractionTests(unittest.TestCase):
             engine, session = await self._make_session()
             try:
                 novel, chapter = await self._seed(session)
-                await self._summarize(session, novel, chapter, _payload([
+                _, discovered, _, _ = await self._summarize(session, novel, chapter, _payload([
                     {"kind": "无效类型", "title": "A", "content": "内容"},
                     {"kind": "secret", "title": "B", "content": ""},
                     "不是字典",
                 ]))
+                self.assertEqual(discovered["threads"], [])
                 self.assertEqual(await self._threads(session, novel.id), [])
             finally:
                 await session.close()

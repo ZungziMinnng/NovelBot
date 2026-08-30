@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Radio, RadioTower, Plus, Pencil, Trash2, X, RefreshCw } from 'lucide-react'
-import { settingsApi, modelLibraryApi, providersApi, PROVIDER_PRESETS, modelSelectValue, findModelEntry, type ModelEntry, type ApiProvider } from '@/api/client'
+import { settingsApi, modelLibraryApi, providersApi, authApi, PROVIDER_PRESETS, modelSelectValue, findModelEntry, type ModelEntry, type ApiProvider } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
+import { useAuthStore } from '@/store/authStore'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 // ── ModelSelect sub-component ─────────────────────────────────────────────
@@ -62,6 +63,14 @@ export default function Settings() {
   const qc = useQueryClient()
   const { streamingMode, toggleStreamingMode } = useSettingsStore()
 
+  // ── 当前用户：非 admin 隐藏全局 .env 配置区，改用「我的默认模型」 ──────
+  const authUser = useAuthStore((s) => s.user)
+  const setAuthUser = useAuthStore((s) => s.setUser)
+  const isAdmin = !!authUser?.is_admin
+  const [myWriterModel, setMyWriterModel] = useState(authUser?.default_writer_model || '')
+  const [myFastModel, setMyFastModel] = useState(authUser?.default_fast_model || '')
+  const [mySaving, setMySaving] = useState(false)
+
   // ── Settings state (model assignments + proxy) ─────────────────────────
   const [writerModel, setWriterModel] = useState('')
   const [fastModel, setFastModel] = useState('')
@@ -74,6 +83,7 @@ export default function Settings() {
   const [agentReviewModel, setAgentReviewModel] = useState('')
   const [enableReview, setEnableReview] = useState(false)
   const [reviewInterval, setReviewInterval] = useState(10)
+  const [deepseekFastThinking, setDeepseekFastThinking] = useState('off')
   const [httpsProxy, setHttpsProxy] = useState('')
   const [httpProxy, setHttpProxy] = useState('')
   const [saving, setSaving] = useState(false)
@@ -90,6 +100,7 @@ export default function Settings() {
     queryKey: ['proxy-status'],
     queryFn: settingsApi.proxyStatus,
     refetchOnWindowFocus: false,
+    enabled: isAdmin,
   })
   const [showProviderForm, setShowProviderForm] = useState(false)
   const [editingProviderId, setEditingProviderId] = useState<number | null>(null)
@@ -118,8 +129,10 @@ export default function Settings() {
   const [formCurrencyToCnyRate, setFormCurrencyToCnyRate] = useState(1)
   const [modelSaving, setModelSaving] = useState(false)
   const [modelFamily, setModelFamily] = useState<ModelFamily>('all')
+  const [providerFilter, setProviderFilter] = useState<string>('all')
 
   useEffect(() => {
+    if (!isAdmin) return
     let cancelled = false
     settingsApi.get().then((s: {
       default_writer_model: string
@@ -135,6 +148,7 @@ export default function Settings() {
       review_interval: number
       https_proxy: string
       http_proxy: string
+      deepseek_fast_thinking: string
     }) => {
       if (cancelled) return
       setWriterModel(s.default_writer_model)
@@ -150,9 +164,27 @@ export default function Settings() {
       setReviewInterval(s.review_interval ?? 10)
       setHttpsProxy(s.https_proxy || '')
       setHttpProxy(s.http_proxy || '')
+      setDeepseekFastThinking(s.deepseek_fast_thinking || 'off')
     }).catch(() => {})
     return () => { cancelled = true }
-  }, [])
+  }, [isAdmin])
+
+  const handleSaveMyModels = async () => {
+    setMySaving(true)
+    setTestResult(null)
+    try {
+      const u = await authApi.updateMe({
+        default_writer_model: myWriterModel,
+        default_fast_model: myFastModel,
+      })
+      setAuthUser(u)
+      setTestResult({ ok: true, msg: '已保存我的默认模型' })
+    } catch (err: any) {
+      setTestResult({ ok: false, msg: err?.response?.data?.detail || '保存失败' })
+    } finally {
+      setMySaving(false)
+    }
+  }
 
   const buildSettingsPayload = () => ({
     default_writer_model: writerModel,
@@ -168,6 +200,7 @@ export default function Settings() {
     review_interval: reviewInterval,
     https_proxy: httpsProxy,
     http_proxy: httpProxy,
+    deepseek_fast_thinking: deepseekFastThinking,
   })
 
   const handleSave = async () => {
@@ -358,7 +391,16 @@ export default function Settings() {
   }
 
   const chatModels = models.filter(m => m.model_type !== 'embedding')
-  const modelFamilyCounts = models.reduce<Record<Exclude<ModelFamily, 'all'>, number>>(
+
+  const providerCounts = models.reduce<Record<string, number>>((counts, model) => {
+    counts[model.provider] = (counts[model.provider] || 0) + 1
+    return counts
+  }, {})
+  const providerTabs = Object.keys(providerCounts).sort((a, b) => a.localeCompare(b, 'zh'))
+  const providerScoped = providerFilter === 'all'
+    ? models
+    : models.filter(model => model.provider === providerFilter)
+  const modelFamilyCounts = providerScoped.reduce<Record<Exclude<ModelFamily, 'all'>, number>>(
     (counts, model) => {
       counts[getModelFamily(model)] += 1
       return counts
@@ -366,8 +408,8 @@ export default function Settings() {
     { gemini: 0, deepseek: 0, claude: 0, qwen: 0, other: 0 },
   )
   const visibleModels = modelFamily === 'all'
-    ? models
-    : models.filter(model => getModelFamily(model) === modelFamily)
+    ? providerScoped
+    : providerScoped.filter(model => getModelFamily(model) === modelFamily)
 
   const formatBadgeColor = (apiFormat: string) => {
     if (apiFormat === 'gemini') return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
@@ -451,7 +493,7 @@ export default function Settings() {
       <div className="border-t pt-4">
         <div className="flex items-baseline justify-between gap-3 mb-3">
           <p className="text-xs font-medium">Token 价格</p>
-          <p className="text-[11px] text-muted-foreground">单价均按每 100 万 tokens 填写</p>
+          <p className="text-[0.6875rem] text-muted-foreground">单价均按每 100 万 tokens 填写</p>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <div>
@@ -638,7 +680,7 @@ export default function Settings() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-xs font-medium">经代理访问（socket）</p>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                  <p className="text-[0.6875rem] text-muted-foreground mt-0.5">
                     被墙的中转站（如 aihubmix）开启；可直连的（如 DeepSeek）关闭，即使配了全局代理也直连。
                   </p>
                 </div>
@@ -744,6 +786,39 @@ export default function Settings() {
             <div className="mb-4">{renderModelForm()}</div>
           )}
 
+          {models.length > 0 && providerTabs.length > 0 && (
+            <div className="mb-3 flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-muted-foreground shrink-0">供应商</span>
+              <button
+                type="button"
+                onClick={() => { setProviderFilter('all'); setModelFamily('all') }}
+                aria-pressed={providerFilter === 'all'}
+                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                  providerFilter === 'all'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'hover:bg-muted'
+                }`}
+              >
+                全部 <span className="tabular-nums opacity-70">{models.length}</span>
+              </button>
+              {providerTabs.map(name => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => { setProviderFilter(name); setModelFamily('all') }}
+                  aria-pressed={providerFilter === name}
+                  className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                    providerFilter === name
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  {name} <span className="tabular-nums opacity-70">{providerCounts[name]}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {models.length > 0 && (
             <div
               role="tablist"
@@ -751,7 +826,7 @@ export default function Settings() {
               className="mb-3 flex gap-1 overflow-x-auto border-b"
             >
               {MODEL_FAMILY_TABS.map(tab => {
-                const count = tab.value === 'all' ? models.length : modelFamilyCounts[tab.value]
+                const count = tab.value === 'all' ? providerScoped.length : modelFamilyCounts[tab.value]
                 const active = modelFamily === tab.value
                 return (
                   <button
@@ -781,7 +856,7 @@ export default function Settings() {
             </div>
           ) : visibleModels.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-6 border rounded-lg border-dashed">
-              该系列暂无模型
+              {providerFilter === 'all' ? '该系列暂无模型' : `${providerFilter} 下该系列暂无模型`}
             </div>
           ) : (
             <div className="space-y-2">
@@ -790,6 +865,9 @@ export default function Settings() {
                   <div className="flex items-center gap-3 border rounded-lg px-4 py-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs px-2 py-0.5 rounded-md border border-primary/30 bg-primary/10 text-primary font-medium">
+                          {m.provider}
+                        </span>
                         <span className="text-sm font-medium truncate">{m.display_name || m.model_id}</span>
                         <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${formatBadgeColor(m.api_format)}`}>
                           {m.api_format}
@@ -802,8 +880,6 @@ export default function Settings() {
                       </div>
                       <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                         <span className="text-xs text-muted-foreground font-mono">{m.model_id}</span>
-                        <span className="text-xs text-muted-foreground">·</span>
-                        <span className="text-xs text-muted-foreground">{m.provider}</span>
                         {m.model_type !== 'embedding' && (
                           <>
                             <span className="text-xs text-muted-foreground">·</span>
@@ -811,7 +887,7 @@ export default function Settings() {
                           </>
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap text-[11px] text-muted-foreground tabular-nums">
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap text-[0.6875rem] text-muted-foreground tabular-nums">
                         {(m.input_price ?? 0) > 0 || (m.output_price ?? 0) > 0 ? (
                           <>
                             <span>输入 {(m.input_price ?? 0).toLocaleString()} {m.price_currency || 'CNY'} / 1M</span>
@@ -859,6 +935,47 @@ export default function Settings() {
           )}
         </section>
 
+        {/* ── 我的默认模型（每用户，非 admin）──────────────────────────── */}
+        {!isAdmin && (
+          <section>
+            <h2 className="font-semibold text-base mb-1">我的默认模型</h2>
+            <p className="text-xs text-muted-foreground mb-4">
+              小说未单独指定模型时，将使用这里的默认模型。请先在上方添加供应商和模型。
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium mb-1 block">创作模型（Writer）</label>
+                <ModelSelect
+                  value={myWriterModel}
+                  onChange={setMyWriterModel}
+                  placeholder="请选择模型"
+                  models={chatModels}
+                />
+                <p className="text-xs text-muted-foreground mt-1">生成章节正文，建议高质量模型</p>
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-1 block">快速模型（Fast）</label>
+                <ModelSelect
+                  value={myFastModel}
+                  onChange={setMyFastModel}
+                  placeholder="请选择模型"
+                  models={chatModels}
+                />
+                <p className="text-xs text-muted-foreground mt-1">摘要/审查/规划，建议经济模型</p>
+              </div>
+            </div>
+            <button
+              onClick={handleSaveMyModels}
+              disabled={mySaving}
+              className="mt-4 flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm hover:opacity-90 disabled:opacity-50 transition-opacity font-medium"
+            >
+              {mySaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              保存我的默认模型
+            </button>
+          </section>
+        )}
+
+        {isAdmin && (<>
         {/* ── 3. 默认模型配置 ─────────────────────────────────────────── */}
         <section>
           <h2 className="font-semibold text-base mb-1">默认模型配置</h2>
@@ -886,6 +1003,21 @@ export default function Settings() {
               />
               <p className="text-xs text-muted-foreground mt-1">摘要/审查/规划，建议经济模型</p>
             </div>
+          </div>
+          <div className="mt-4">
+            <label className="text-sm font-medium mb-1 block">DeepSeek 快速任务思考档位</label>
+            <select
+              value={deepseekFastThinking}
+              onChange={e => setDeepseekFastThinking(e.target.value)}
+              className="w-full md:w-72 border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+              <option value="off">关闭（默认）</option>
+              <option value="high">开启 - high</option>
+              <option value="max">开启 - max</option>
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">
+              当摘要/审稿等快速任务使用 DeepSeek 模型时是否开启思考模式。开启后质量更好但耗时更长、输出 token 更多；仅对 DeepSeek 生效。
+            </p>
           </div>
         </section>
 
@@ -969,6 +1101,7 @@ export default function Settings() {
             )}
           </div>
         </section>
+        </>)}
 
         {/* ── 5. 生成显示模式 ─────────────────────────────────────────── */}
         <section>
@@ -999,7 +1132,8 @@ export default function Settings() {
           </button>
         </section>
 
-        {/* ── 6. 网络代理 ──────────────────────────────────────────────── */}
+        {/* ── 6. 网络代理（仅 admin）─────────────────────────────────── */}
+        {isAdmin && (
         <section>
           <div className="flex items-center justify-between mb-1">
             <h2 className="font-semibold text-base">网络代理</h2>
@@ -1086,9 +1220,10 @@ export default function Settings() {
                 <span>{proxyStatus.detail || '代理地址无法解析'}</span>
               </div>
             )}
-            <p className="text-[11px] text-muted-foreground mt-2">状态反映已保存的代理；改动输入框后需先「保存配置」再重新探测。</p>
+            <p className="text-[0.6875rem] text-muted-foreground mt-2">状态反映已保存的代理；改动输入框后需先「保存配置」再重新探测。</p>
           </div>
         </section>
+        )}
 
         {/* ── 操作按钮 ─────────────────────────────────────────────────── */}
         <div className="flex items-center gap-3 flex-wrap">
@@ -1116,14 +1251,16 @@ export default function Settings() {
             {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
             测试连接
           </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || testing}
-            className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm hover:opacity-90 disabled:opacity-50 transition-opacity font-medium"
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {saving ? '保存并测试中...' : '保存配置'}
-          </button>
+          {isAdmin && (
+            <button
+              onClick={handleSave}
+              disabled={saving || testing}
+              className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm hover:opacity-90 disabled:opacity-50 transition-opacity font-medium"
+            >
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              {saving ? '保存并测试中...' : '保存配置'}
+            </button>
+          )}
         </div>
 
         {testResult && (

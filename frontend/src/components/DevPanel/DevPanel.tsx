@@ -62,14 +62,14 @@ function LlmCallRow({ entry }: { entry: DevLogEntry }) {
         className={`px-3 py-2 text-xs flex items-center gap-2 ${hasPayload ? 'cursor-pointer hover:bg-muted/40' : ''}`}
         onClick={hasPayload ? () => setOpen(v => !v) : undefined}
       >
-        <span className="text-muted-foreground/50 shrink-0 font-mono text-[10px]">{ts}</span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 min-w-[52px] text-center ${AGENT_COLOR[agent] || 'bg-muted text-muted-foreground'}`}>
+        <span className="text-muted-foreground/50 shrink-0 font-mono text-[0.625rem]">{ts}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[0.625rem] font-medium shrink-0 min-w-[52px] text-center ${AGENT_COLOR[agent] || 'bg-muted text-muted-foreground'}`}>
           {AGENT_LABEL[agent] || agent}
         </span>
-        <span className="font-mono text-[11px] truncate text-muted-foreground max-w-[120px]">{entry.model || '-'}</span>
+        <span className="font-mono text-[0.6875rem] truncate text-muted-foreground max-w-[120px]">{entry.model || '-'}</span>
         <span className="shrink-0">{statusIcon(entry.llmStatus)}</span>
-        <span className="font-mono text-[11px] shrink-0">{fmtTokens(entry.inputTokens)}<span className="text-muted-foreground/50 mx-0.5">&rarr;</span>{fmtTokens(entry.outputTokens)}</span>
-        <span className="font-mono text-[11px] text-muted-foreground shrink-0 ml-auto">{fmtDuration(entry.durationMs)}</span>
+        <span className="font-mono text-[0.6875rem] shrink-0">{fmtTokens(entry.inputTokens)}<span className="text-muted-foreground/50 mx-0.5">&rarr;</span>{fmtTokens(entry.outputTokens)}</span>
+        <span className="font-mono text-[0.6875rem] text-muted-foreground shrink-0 ml-auto">{fmtDuration(entry.durationMs)}</span>
         {hasPayload && (
           <span className="shrink-0 text-muted-foreground">
             {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
@@ -93,14 +93,14 @@ function PayloadView({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div className="space-y-2">
       {Object.keys(params).length > 0 && (
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[0.625rem] text-muted-foreground">
           {Object.entries(params).map(([k, v]) => {
             const isObject = v !== null && typeof v === 'object'
             if (isObject) {
               return (
                 <div key={k} className="w-full">
                   <span className="font-medium text-foreground/70">{k}:</span>
-                  <pre className="mt-1 bg-muted rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed text-[10px]">
+                  <pre className="mt-1 bg-muted rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed text-[0.625rem]">
                     {formatParamValue(v)}
                   </pre>
                 </div>
@@ -115,11 +115,11 @@ function PayloadView({ payload }: { payload: Record<string, unknown> }) {
       {messages && (
         <div className="space-y-1">
           {messages.map((m, i) => (
-            <div key={i} className="text-[10px]">
+            <div key={i} className="text-[0.625rem]">
               <span className={`font-medium ${m.role === 'system' ? 'text-purple-500' : m.role === 'assistant' ? 'text-green-600' : 'text-blue-600'}`}>
                 [{m.role}]
               </span>
-              <pre className="mt-0.5 bg-muted rounded p-1.5 overflow-x-auto max-h-32 whitespace-pre-wrap break-all leading-relaxed text-[10px]">
+              <pre className="mt-0.5 bg-muted rounded p-1.5 overflow-x-auto max-h-32 whitespace-pre-wrap break-all leading-relaxed text-[0.625rem]">
                 {m.content}
               </pre>
             </div>

@@ -76,6 +76,60 @@ class SelectStoryThreadsTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
 
+class RelatedEntitiesFilterTests(unittest.TestCase):
+    def test_tagged_and_present_kept(self):
+        threads = [_thread(title="甲", related_entities=["周意"])]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意", "顾然"})
+        self.assertEqual(len(result), 1)
+
+    def test_tagged_but_absent_dropped(self):
+        threads = [_thread(title="甲", related_entities=["林予微"])]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意", "顾然"})
+        self.assertEqual(result, [])
+
+    def test_untagged_always_kept(self):
+        threads = [_thread(title="甲", related_entities=[])]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意"})
+        self.assertEqual(len(result), 1)
+
+    def test_high_importance_bypasses_filter(self):
+        threads = [_thread(title="甲", importance=4, related_entities=["林予微"])]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意"})
+        self.assertEqual(len(result), 1)
+
+    def test_none_active_names_disables_filter(self):
+        threads = [_thread(title="甲", related_entities=["林予微"])]
+        result = select_story_threads(threads, current_chapter=50)
+        self.assertEqual(len(result), 1)
+
+    def test_resolved_threads_also_filtered(self):
+        threads = [
+            _thread(status="resolved", resolved_chapter=45, related_entities=["林予微"]),
+            _thread(status="resolved", resolved_chapter=45, related_entities=["周意"]),
+        ]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意"})
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["related_entities"], ["周意"])
+
+    def test_budget_applies_after_filter(self):
+        # 4 条无关被滤掉后，剩余 5 条同预算下应全部装入（若过滤在预算后则装不满）
+        big = "字" * 900
+        threads = (
+            [_thread(importance=2, content=big, related_entities=["林予微"]) for _ in range(4)]
+            + [_thread(importance=2, content=big, related_entities=["周意"]) for _ in range(4)]
+            + [_thread(importance=2, content=big) ]
+        )
+        result = select_story_threads(
+            threads, current_chapter=50, budget_chars=4800, active_names={"周意"},
+        )
+        self.assertEqual(len(result), 5)
+
+    def test_whitespace_names_treated_as_untagged(self):
+        threads = [_thread(related_entities=["  ", ""])]
+        result = select_story_threads(threads, current_chapter=50, active_names={"周意"})
+        self.assertEqual(len(result), 1)
+
+
 class CapGlossaryTests(unittest.TestCase):
     def _entry(self, term="术语", notes="") -> dict:
         return {"term": term, "category": "", "forbidden_variants": "", "notes": notes}

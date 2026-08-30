@@ -10,6 +10,41 @@ RESOLVED_KEEP_WINDOW = 30
 GUARANTEED_IMPORTANCE = 4
 GLOSSARY_BUDGET_CHARS = 3000
 
+# 埋下超过这么多章还没回收就报警：读者早忘了，再回收要么没效果要么显得硬圆
+STALE_AFTER_CHAPTERS = 50
+# 每卷在场的活跃伏笔条数建议区间
+ACTIVE_PER_VOLUME = (3, 15)
+
+
+def find_stale_threads(
+    threads: list[dict],
+    current_chapter: int,
+    *,
+    stale_after: int = STALE_AFTER_CHAPTERS,
+) -> list[dict]:
+    """挑出该提醒作者处理的活跃伏笔/秘密，按拖得最久的排前面。
+
+    两种触发：埋下已超过 stale_after 章，或已过 due_chapter 期限。
+    只报告，不改状态——要不要标记为已过期是作者的判断。
+    """
+    stale: list[dict] = []
+    for t in threads:
+        if t.get("status") != "active":
+            continue
+        source = int(t.get("source_chapter") or 0)
+        due = int(t.get("due_chapter") or 0)
+        age = current_chapter - source if source else 0
+        overdue = bool(due and current_chapter > due)
+        if not overdue and age < stale_after:
+            continue
+        stale.append({
+            **t,
+            "age": age,
+            "reason": f"已过第{due}章的回收期限" if overdue else f"埋下已 {age} 章未回收",
+        })
+    stale.sort(key=lambda t: -t["age"])
+    return stale
+
 
 def _importance(thread: dict) -> int:
     try:
@@ -33,15 +68,29 @@ def select_story_threads(
     *,
     budget_chars: int = THREAD_BUDGET_CHARS,
     resolved_keep_window: int = RESOLVED_KEEP_WINDOW,
+    active_names: set[str] | None = None,
 ) -> list[dict]:
     """筛选进入写作上下文的伏笔/秘密条目。
 
+    - 关联过滤（active_names 非 None 时）：标注了 related_entities 的条目，
+      仅当任一关联名出现在 active_names（本章上下文选中的设定名）时保留；
+      未标注的条目全量保留；重要度 >= GUARANTEED_IMPORTANCE 的无视过滤。
     - 已回收且回收超过 resolved_keep_window 章：剔除（正文早已消化，不再占上下文）。
     - 近期已回收：保留但标记 compact=True，渲染时压成一行提醒"已回收，别再当悬念写"。
     - 活跃条目：按重要度从高到低装入 budget_chars 预算；
       重要度 >= GUARANTEED_IMPORTANCE 的无视预算永远保留。
     输入顺序（重要度降序）在返回结果中保持不变。
     """
+    if active_names is not None:
+        threads = [
+            t for t in threads
+            if not (related := [
+                str(n).strip() for n in (t.get("related_entities") or []) if str(n).strip()
+            ])
+            or _importance(t) >= GUARANTEED_IMPORTANCE
+            or any(n in active_names for n in related)
+        ]
+
     keep: dict[int, dict] = {}
 
     for idx, t in enumerate(threads):

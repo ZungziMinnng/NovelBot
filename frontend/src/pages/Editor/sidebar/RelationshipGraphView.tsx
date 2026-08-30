@@ -41,7 +41,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
 
   // Edge editing state
   const [editingEdge, setEditingEdge] = useState<number | null>(null)
-  const [editLabels, setEditLabels] = useState<Array<{ from: string; desc: string; type?: 'initial' | 'current' }>>([])
+  const [editLabels, setEditLabels] = useState<Array<{ from: string; desc: string; type?: 'base' | 'initial' | 'current' }>>([])
   const [savingEdge, setSavingEdge] = useState(false)
 
   useEffect(() => {
@@ -171,7 +171,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
         if (!fromChar) continue
         const otherName = fromChar.id === sourceNode.id ? targetNode.name : sourceNode.name
         const oldState = fromChar.current_state || {}
-        const relKey = label.type === 'initial' ? 'initial_relationships' : 'relationship_changes'
+        const relKey = label.type === 'base' ? 'base_relationships' : label.type === 'initial' ? 'initial_relationships' : 'relationship_changes'
         const oldRels = (oldState[relKey] || {}) as Record<string, string>
         const newRels = { ...oldRels, [otherName]: label.desc }
         await charactersApi.update(fromChar.id, {
@@ -229,7 +229,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
           const t = link.target as SimNode
           if (s.x == null || t.x == null) return null
           const label = link.labels.map((l) => {
-            const prefix = l.type === 'initial' ? '初始：' : l.type === 'current' ? '当前：' : ''
+            const prefix = l.type === 'base' ? '基础：' : l.type === 'initial' ? '初始：' : l.type === 'current' ? '当前：' : ''
             return `${prefix}${l.desc}`
           }).join(' / ')
           const mx = (s.x + t.x) / 2
@@ -257,7 +257,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
                 <text
                   x={mx} y={my - 6}
                   textAnchor="middle"
-                  className="text-[10px] fill-foreground pointer-events-none"
+                  className="text-[0.625rem] fill-foreground pointer-events-none"
                 >
                   {label}
                 </text>
@@ -294,14 +294,14 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
               <text
                 textAnchor="middle"
                 dominantBaseline="central"
-                className="text-[11px] fill-white font-bold pointer-events-none select-none"
+                className="text-[0.6875rem] fill-white font-bold pointer-events-none select-none"
               >
                 {node.name.length <= 2 ? node.name : node.name.slice(0, 2)}
               </text>
               <text
                 y={28}
                 textAnchor="middle"
-                className="text-[10px] fill-muted-foreground pointer-events-none select-none"
+                className="text-[0.625rem] fill-muted-foreground pointer-events-none select-none"
               >
                 {node.name}
               </text>
@@ -309,7 +309,7 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
                 <text
                   y={-26}
                   textAnchor="middle"
-                  className="text-[10px] fill-foreground pointer-events-none"
+                  className="text-[0.625rem] fill-foreground pointer-events-none"
                 >
                   {node.role}
                 </text>
@@ -335,9 +335,9 @@ export default function RelationshipGraphView({ novelId, focusCharacterId, onSel
           >
             {editLabels.map((label, li) => (
               <div key={li} className="space-y-1">
-                <p className="text-[10px] text-muted-foreground">
+                <p className="text-[0.625rem] text-muted-foreground">
                   {label.from} →
-                  {label.type && <span className="ml-1 text-[9px] opacity-60">({label.type === 'initial' ? '初始' : '当前'})</span>}
+                  {label.type && <span className="ml-1 text-[0.5625rem] opacity-60">({label.type === 'base' ? '基础' : label.type === 'initial' ? '初始' : '当前'})</span>}
                 </p>
                 <input
                   value={label.desc}

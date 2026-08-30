@@ -9,12 +9,13 @@
 ## 目录
 
 - [一、整体设计思路](#一整体设计思路)
-- [二、记忆的三处存储载体](#二记忆的三处存储载体)
+- [二、记忆的存储载体](#二记忆的存储载体)
 - [三、剧情压缩金字塔（章节 → 弧 → 全书）](#三剧情压缩金字塔章节--弧--全书)
 - [四、状态卡：角色 / 实体 / 地点的动态记忆](#四状态卡角色--实体--地点的动态记忆)
-- [五、生成时的上下文组装](#五生成时的上下文组装)
-- [六、关键工程细节](#六关键工程细节)
-- [七、相关代码文件索引](#七相关代码文件索引)
+- [五、长期事实记忆：伏笔/秘密与关系里程碑](#五长期事实记忆伏笔秘密与关系里程碑)
+- [六、生成时的上下文组装](#六生成时的上下文组装)
+- [七、关键工程细节](#七关键工程细节)
+- [八、相关代码文件索引](#八相关代码文件索引)
 
 ---
 
@@ -31,17 +32,18 @@ NovelBot 的解法是**分级压缩 + 按需检索**：
 
 ---
 
-## 二、记忆的三处存储载体
+## 二、记忆的存储载体
 
-| 载体 | 存储内容 | 用途 |
-|------|---------|------|
-| **SQLite `memories` 表** | chapter_summary（章节摘要）、arc_summary（故事弧概要）、state_snapshot（状态快照） | 分级压缩的剧情记忆 + 重新生成时的回滚锚点 |
-| **SQLite 实体表的 `current_state` 字段** | 角色 / 世界实体 / 地点的动态状态 JSON | 随章节累积合并的"状态卡" |
-| **ChromaDB（向量库）** | 章节摘要 + 世界设定的向量嵌入 | 语义检索相关历史片段 |
+| 载体                                 | 存储内容                                                                                        | 用途                        |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------- |
+| **SQLite `memories` 表**            | chapter_summary（章节摘要）、arc_summary（故事弧概要）、state_snapshot（状态快照）、relationship_milestone（关系里程碑） | 分级压缩的剧情记忆 + 回滚锚点 + 情感转折事实 |
+| **SQLite `story_threads` 表**       | 伏笔 / 秘密 / 承诺等长期事实条目（kind、known_by、status、来源章节）                                              | 跨几十章持续记住、必须遵守的剧情硬约束       |
+| **SQLite 实体表的 `current_state` 字段** | 角色 / 世界实体 / 地点的动态状态 JSON                                                                    | 随章节累积合并的"状态卡"             |
+| **ChromaDB（向量库）**                  | 章节摘要 + 世界设定的向量嵌入                                                                            | 语义检索相关历史片段                |
 
 补充说明：
 
-- `memories` 表的 `memory_type` 字段区分三种记忆；`volume` + `chapter_number` 用于按层级查询。
+- `memories` 表的 `memory_type` 字段区分记忆类型；`volume` + `chapter_number` 用于按层级查询。
 - ChromaDB 按小说分集合（collection 名 `novel_{id}`），使用余弦距离。嵌入模型可由每本小说单独配置（`novel.embedding_model`），未配置则用本地默认嵌入函数。
 - `book_summary`（全书概要）不在 `memories` 表，而是直接存在 `novels.book_summary` 字段。
 
@@ -72,10 +74,15 @@ NovelBot 的解法是**分级压缩 + 按需检索**：
             └─────────────────────────────────┘
 ```
 
-### 3.1 章节摘要（chapter_summary）
+### 3.1 章节摘要（chapter_summary）——合并调用
 
-- 每章生成完成后，`summarizer.summarize_chapter` 把正文（取前 12000 字）压缩为 500 字内的剧情梗概，并强制保留物品得失、伤势、承诺、秘密、新人物、位置移动等关键细节。
-- 摘要强制以 `【第X日】` 绝对日期标注开头（详见[时间线归一化](#64-时间线归一化)）。
+- 章节确认后，`summarizer.summarize_and_discover` 用**一次 LLM 调用**同时完成四件事：
+  1. 把正文（取前 12000 字）压缩为 500 字内的剧情梗概，强制保留物品得失、伤势、承诺、秘密、新人物、位置移动等关键细节；
+  2. 发现本章首次出现的**新设定候选**（角色 / 道具 / 地点 / 功法 / 势力），供用户确认后入库；
+  3. 提取本章产生的**伏笔/秘密**长期事实（最多 2 条，存 `story_threads` 表）；
+  4. 提取本章的**关系里程碑**（角色间情感转折，最多 3 条，存 `memories` 表，见[第五节](#五长期事实记忆伏笔秘密与关系里程碑)）。
+- 合并调用失败或摘要疑似截断时，自动降级为纯摘要路径 `summarize_chapter`（不产出后三项）。
+- 摘要通过 day_offset 机制换算为 `【第X日】` 绝对日期标注开头（详见[时间线归一化](#74-时间线归一化)）。
 - 同时写入 `memories` 表和 ChromaDB 向量库；写入前先删除同章节的旧摘要，避免多次生成产生重复行挤占滚动窗口。
 - **截断检测**：若摘要不以正常标点（。！？…」】）结尾，判定为被截断（token 耗尽或安全过滤），换用更简洁的"脱敏提示"降温重试一次。
 
@@ -97,11 +104,11 @@ NovelBot 的解法是**分级压缩 + 按需检索**：
 
 除了"剧情记忆"，NovelBot 还维护各类对象的**当前状态**，存在各自表的 `current_state`（JSON）字段中。每章生成后，由 `summarizer` 的两个函数更新：
 
-| 对象 | 更新函数 | 关注维度 |
-|------|---------|---------|
-| 角色 Character | `update_character_states` | 位置、当前目标、称谓/头衔、所属组织、已知秘密、关系变化 |
-| 世界实体 WorldEntity（道具/系统） | `update_entity_location_states`（与地点合并为单次调用） | 持有者、能力、等级/层次变化 |
-| 地点 Location | `update_entity_location_states`（与实体合并为单次调用） | 当前局势、控制方、显著变化 |
+| 对象                      | 更新函数                                        | 关注维度                         |
+| ----------------------- | ------------------------------------------- | ---------------------------- |
+| 角色 Character            | `update_character_states`                   | 位置、当前目标、称谓/头衔、所属组织、已知秘密、关系变化 |
+| 世界实体 WorldEntity（道具/系统） | `update_entity_location_states`（与地点合并为单次调用） | 持有者、能力、等级/层次变化               |
+| 地点 Location             | `update_entity_location_states`（与实体合并为单次调用） | 当前局势、控制方、显著变化                |
 
 更新流程：把"当前所有状态"+"本章正文"喂给 fast 模型，要求输出 JSON 增量，再合并回各对象。
 
@@ -126,14 +133,42 @@ LLM 输出的 JSON 常有格式问题。`_repair_json` 会处理：markdown 代�
 
 ---
 
-## 五、生成时的上下文组装
+## 五、长期事实记忆：伏笔/秘密与关系里程碑
 
-`context_builder.build_generation_context` 是记忆体系的"消费端"。它在每次生成章节前，把上述各层记忆组装成结构化上下文 dict。实际注入的区块远不止早期文档说的"6 层"：
+剧情金字塔是**有损压缩**：滚动摘要只覆盖最近几章，弧/全书概要越压越粗。有两类信息一旦丢失就会造成剧情硬伤，因此单独建了"无损、确定性注入"的长期事实层——不走向量检索碰运气，每章都完整注入。
+
+### 5.1 伏笔/秘密（story_threads 表）
+
+- 来源：合并摘要调用自动提取候选，经用户在弹窗中勾选确认后入库（source=auto，直接关闭弹窗则不添加）+ 用户手动添加（source=manual）。
+- 两类 kind：`secret`（被隐瞒的真相 + 对外说法 + 知情者名单）、`foreshadowing`（伏笔/承诺/重大处置）。
+- 注入时由 `thread_selector.select_story_threads` 按字符预算筛选：活跃条目优先，近期已回收的条目压成一行提醒（防止"已揭晓的秘密又写成悬念"）。
+- Writer 提示词中明确约束：活跃伏笔不得擅自遗忘或提前回收，秘密必须遵守知情者边界。
+
+### 5.2 关系里程碑（memories 表，memory_type=relationship_milestone）
+
+解决的问题：写到第 152 章让 AI 回忆"女主什么时候爱上男主"，摘要层早已丢失这个情感转折，AI 就会编造。
+
+- **抽取**：搭合并摘要调用的便车，每章确认时提取角色间关系转折（初见/动心/表白/决裂/和解/身份揭露/其他），每章最多 3 条。角色、类型、描述直接编码进 content 文本，不加新表：`[表白] 林砚↔苏晚 | 第37章 | 天台雨夜，林砚坦白身世后表白`。
+- **幂等**：先删本章旧条目再插入，章节重新确认不会翻倍。
+- **确定性注入**：一行一条很便宜，当前章之前的全部里程碑每章注入（超预算按 importance 优先保留），Writer 被要求"回忆感情线时以此为准，严禁编造"。
+- **回忆取证（两跳检索）**：当写作指令/大纲命中回忆类关键词（回忆、往事、当年、想起、曾经、那时、初见、重逢、旧事）时，额外做两跳检索——第一跳用 BM25+关键词匹配从里程碑定位到章，第二跳回读该章**原文**、段落级匹配捞出最相关的真实片段注入。让回忆戏有真原文细节可用，而不是凭摘要脑补。
+- **回填**：存量章节可在 Admin 页"记忆条目"标签手动触发回填（指定起止章，逐章全文抽取，单章失败跳过）。绝不自动执行。
+
+---
+
+## 六、生成时的上下文组装
+
+`context_builder.build_generation_context` 是记忆体系的"消费端"。它在每次生成章节前，把上述各层记忆组装成结构化上下文 dict：
 
 ```
 build_generation_context(novel, chapter_number, volume, scene_hint)
 │
-├─ 世界观设定 core_setting    ← RAG 检索 world_setting（top3），无命中则取字段前 500 字
+├─ 动态预算 context_budget      ← 按目标字数/上下文窗口算出总输入预算，
+│                                  再按 SECTION_RATIOS 比例分给各区块
+│
+├─ 世界观设定 core_setting      ← RAG 检索 world_setting（top3），无命中则取字段前 500 字
+├─ 世界观变更 worldview_changes ← 剧情推进中确认的设定更新，覆盖上文设定
+├─ 用词规范 glossary            ← 规范用词/禁用写法，按字符预算截断
 │
 ├─ 实体类（统一走"名称匹配 → RAG → 全量回退"策略，各 top_k 可配）
 │   ├─ 角色 characters         ← 额外支持按 role 匹配（指令写"男主"命中 role=男主）
@@ -144,16 +179,33 @@ build_generation_context(novel, chapter_number, volume, scene_hint)
 │   ├─ 功法 techniques
 │   └─ 补充设定笔记 notes      ← 按标题匹配 → RAG → 全量
 │
-├─ 本章大纲 chapter_outline    ← Outline 表精确查询
-├─ 近期滚动摘要 rolling_summary ← 最近 N 章章节摘要（默认 5，每章只取最新一条）
-├─ 故事弧概要 arc_summary       ← 当前章之前最近的一段弧摘要
-├─ RAG 历史检索 rag_context     ← 语义检索相关章节摘要，排除滚动窗口已含的章节
-├─ 上一章原文 recent_text       ← 即时上下文，保证承接连贯
-├─ 全书概要 book_summary        ← 长程记忆
+├─ 伏笔/秘密 story_threads      ← 长期事实，thread_selector 按预算筛选
+├─ 关系里程碑 relationship_milestones ← 确定性注入，全量（超预算按重要度保留）
+├─ 回忆取证 recall_evidence     ← 回忆意图触发时的两跳原文检索
+│
+├─ 本章大纲 chapter_outline     ← Outline 表精确查询
+├─ 近期滚动摘要 rolling_summary  ← 最近 N 章章节摘要（默认 8，每章只取最新一条）
+├─ 故事弧概要 arc_summary        ← 当前章之前最近的一段弧摘要
+├─ RAG 历史检索 rag_context      ← 混合检索相关章节摘要，排除滚动窗口已含的章节
+├─ 历史原文取段 rag_fulltext     ← 两跳泛化：检索命中的章回读原文，按指令+大纲捞最相关段落
+├─ 上一章原文 recent_text        ← 即时上下文，保证承接连贯
+├─ 全书概要 book_summary         ← 长程记忆
 └─ （实验性）前 N 章全文 full_text_context ← enable_full_text_context 开启时
 ```
 
-### 5.1 三段式选择策略
+### 6.0 动态上下文预算
+
+`context_budget.build_context_budget` 根据目标字数估算输出预留（含思考预留、10% 安全余量），把剩余窗口作为输入预算（18k–36k tokens），再按 `SECTION_RATIOS` 固定比例切给各区块。每个区块拿到自己的 token 预算后用 `truncate_to_token_budget` 截断（中英混排按"汉字×1.5 + 其他×0.25"估算 token）。
+
+### 6.0.1 混合检索
+
+RAG 历史检索不是单纯向量搜索，而是三路融合：**向量相似度 + BM25 关键词排名（jieba 分词）+ 中文 4-gram 精确匹配兜底**，用 RRF（名次倒数融合）合并，规避向量检索对专有名词（人名/功法名）不敏感的问题。高频 gram（主角名等）按文档频率剔除。
+
+**本地重排**：RRF 只看名次不看内容，融合后再用本地交叉编码模型（bge-reranker-v2-m3，GPU 推理）对头部 20 条候选按 (query, 摘要) 成对精读打分重排，分辨"词都对上但讲的不是这件事"的候选。模型/依赖不可用时静默降级回 RRF 顺序，绝不阻断生成；可用 `context_config.rerank` 开关关闭。
+
+**两跳原文取段（rag_fulltext）**：摘要是有损压缩，检索命中后系统会做第二跳——回读命中章节（最多 3 章）的**原文**，切自然段后按"写作指令+本章大纲"捞出每章最相关的 1-2 段（每段截 400 字）注入。补回摘要丢掉的对话、称谓、场景细节，纯本地计算不依赖嵌入服务；指令与大纲都为空时跳过。
+
+### 6.1 三段式选择策略
 
 每类实体的检索由 `relevance_selector.select_by_name_then_rag` 统一实现，优先级：
 
@@ -166,21 +218,21 @@ build_generation_context(novel, chapter_number, volume, scene_hint)
 3. 全量回退  ← 返回该类全部条目（仅当 allow_full=True，即 top_k>0）
 ```
 
-每类的 `top_k` 由 `novel.context_config` 控制，设为 0 即**关闭该类的 RAG 兜底**（此时无名称匹配就返回空）。每个区块都有独立的开关（`_on(key)`），可在小说设置中单独关闭。
+每类的 `top_k` 由 `novel.context_config` 控制，设为 0 即**关闭该类的 RAG 兜底**（此时无名称匹配就返回空）。每个区块都有独立的开关（`_on(key)`），可在小说设置中单独关闭（含 `relationship_milestones`、`recall_evidence`）。
 
-### 5.2 元信息追踪
+### 6.2 元信息追踪
 
 组装过程会为每个区块产出一条 `_meta` 记录（label / detail / source / items），通过 SSE 的 `context_step` 事件推给前端，让用户实时看到"本章用了哪些记忆、来源是名称匹配还是 RAG"。
 
-### 5.3 格式化给 Writer
+### 6.3 格式化给 Writer
 
-`format_context_for_writer` 把 dict 渲染成文本块。注意：注入给 Writer 时会通过 `_writer_reference_text` **剥除摘要中的 `【第X日】` 等时间线标注**——这些标注只用于内部排序，不应污染正文文风。
+`format_context_for_writer` 把 dict 渲染成文本块，开头注入"参考资料使用规则"声明事实优先级（世界观变更/核心规则 > 当前状态 > 伏笔秘密 > 上章正文 > 历史证据 > 摘要大纲）。注意：注入给 Writer 时会通过 `_writer_reference_text` **剥除摘要中的 `【第X日】` 等时间线标注**——这些标注只用于内部排序，不应污染正文文风。
 
 ---
 
-## 六、关键工程细节
+## 七、关键工程细节
 
-### 6.1 状态快照与回滚
+### 7.1 状态快照与回滚
 
 "重新生成某一章"是个棘手问题：如果直接重写，本章对角色/实体/地点状态的修改会**二次叠加**，造成状态污染。
 
@@ -191,35 +243,39 @@ build_generation_context(novel, chapter_number, volume, scene_hint)
 
 这样无论一章重新生成多少次，状态都从"该章生成前"的基线出发，不会叠加。
 
-### 6.2 SQLite 写锁与分步提交
+### 7.2 SQLite 写锁与分步提交
 
 记忆更新涉及多次 LLM 调用（摘要、角色、实体、地点）。若放在一个事务里，SQLite 写锁会跨越整个 LLM 调用链长期持有，阻塞其他请求。
 
-因此 orchestrator 把记忆更新**拆成独立步骤，每步单独 commit**：摘要 → 角色状态 → 实体/地点状态，任一步失败只 rollback 该步并记 warning，不影响其余步骤和已保存的章节。
+因此记忆管线把记忆更新**拆成独立步骤，每步单独 commit**：摘要 → 角色状态 → 实体/地点状态，任一步失败只 rollback 该步并记 warning，不影响其余步骤和已保存的章节。
 
-### 6.3 正文清理
+### 7.3 正文清理
 
 `strip_plot_suggestions` 去除 LLM 自行在正文末尾附加的"剧情发展选项""下一章可能的发展"等段落，避免这些元文本污染摘要和后续上下文。`_clean_summary` 则去除摘要开头 LLM 自加的"章节剧情梗概："等前缀和 markdown 加粗符号。
 
-### 6.4 时间线归一化
+### 7.4 时间线归一化
 
 为了让 AI 对"故事内时间"有连贯感知：
 
-- 章节摘要强制以绝对日期 `【第X日】`（可带时段，如 `【第12日·夜晚】`）开头。
-- `normalize_timeline_tag` 把相对时间词换算成绝对日号：参考上一章的日号，"次日/翌日/第二天" → +1 日，"当天/当晚" → 同日，"N日后" → +N 日。
-- 生成摘要时把上一章的时间标记作为上下文提示传入，引导 LLM 推算本章绝对日期，保持连续性。
-- 但如 5.3 所述，注入 Writer 时这些标注会被剥除——只服务于内部排序。
+- 摘要 LLM 输出 `day_offset`（本章相对上一章经过的天数）和 `period`（时段），系统据此换算为绝对日期 `【第X日】`（可带时段，如 `【第12日·夜晚】`）标注在摘要开头。
+- 生成摘要时把上一章的时间标记作为上下文提示传入，保持连续性。
+- 但如 6.3 所述，注入 Writer 时这些标注会被剥除——只服务于内部排序。
 
 ---
 
-## 七、相关代码文件索引
+## 八、相关代码文件索引
 
-| 文件 | 职责 |
-|------|------|
-| `backend/app/services/context_builder.py` | 上下文组装（消费端），`build_generation_context` + `format_context_for_writer` |
-| `backend/app/services/summarizer.py` | 章节摘要、弧/全书概要、角色/实体/地点状态更新、时间线归一化、JSON 修复 |
-| `backend/app/services/relevance_selector.py` | "名称匹配 → RAG → 全量"选择策略、角色外貌片段提取 |
-| `backend/app/services/vector_store.py` | ChromaDB 封装（按小说分集合、嵌入函数配置、增删查） |
-| `backend/app/agents/orchestrator.py` | 生成主流程，调度记忆更新、状态快照、自动刷新弧/全书概要 |
-| `backend/app/models/memory.py` | `Memory`（摘要/快照）+ `Outline`（大纲）表定义 |
-| `backend/app/prompts/templates/` | 摘要/状态更新/弧概要/全书概要的 Jinja2 提示词模板 |
+| 文件                                           | 职责                                                                           |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| `backend/app/services/context_builder.py`    | 上下文组装（消费端），`build_generation_context` + `format_context_for_writer`，回忆取证两跳检索 |
+| `backend/app/services/context_budget.py`     | 动态上下文预算：输入预算计算 + 区块比例分配 + token 估算/截断                                        |
+| `backend/app/services/summarizer.py`         | 合并摘要+发现+伏笔+里程碑调用、弧/全书概要、角色/实体/地点状态更新、时间线归一化、里程碑回填                            |
+| `backend/app/services/relevance_selector.py` | "名称匹配 → RAG → 全量"选择策略、BM25/4-gram/RRF 混合检索、角色外貌片段提取                          |
+| `backend/app/services/thread_selector.py`    | 伏笔/秘密按预算筛选、词库截断                                                              |
+| `backend/app/services/vector_store.py`       | ChromaDB 封装（按小说分集合、嵌入函数配置、增删查）                                               |
+| `backend/app/services/llm_json.py`           | JSON 输出的 LLM 调用封装（降温重试 + JSON 修复）                                            |
+| `backend/app/agents/orchestrator.py`         | 生成主流程调度                                                                      |
+| `backend/app/agents/memory_pipeline.py`      | 生成后记忆管线：摘要/状态更新/周期刷新/新设定候选过滤                                                 |
+| `backend/app/models/memory.py`               | `Memory`（摘要/快照/里程碑）+ `Outline`（大纲）表定义                                        |
+| `backend/app/models/story_thread.py`         | `StoryThread`（伏笔/秘密）表定义                                                      |
+| `backend/app/prompts/templates/`             | 摘要/状态更新/弧概要/全书概要/里程碑回填的 Jinja2 提示词模板                                         |

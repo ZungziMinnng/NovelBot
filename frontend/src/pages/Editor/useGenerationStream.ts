@@ -2,9 +2,9 @@ import { useState, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import {
   chaptersApi, charactersApi, worldEntitiesApi, locationsApi, techniquesApi, factionsApi,
-  streamChapterGeneration, streamChapterRewrite,
+  storyThreadsApi, streamChapterGeneration, streamChapterRewrite,
 } from '@/api/client'
-import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, NewFactionsData, LlmCallData, ContextStepData, Character } from '@/api/client'
+import type { SSEMessage, AgentDoneData, TotalUsageData, OriginalDraftData, NewCharactersData, NewEntitiesData, NewLocationsData, NewTechniquesData, NewFactionsData, NewThreadsData, ThreadResolutionsData, LlmCallData, ContextStepData, Character } from '@/api/client'
 import { type AgentLogEntry } from '@/components/AgentLog/AgentLog'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
@@ -81,6 +81,10 @@ export function useGenerationStream(
   const [addingFactions, setAddingFactions] = useState(false)
   const [isDiscovering, setIsDiscovering] = useState(false)
   const [reviewCharacters, setReviewCharacters] = useState<Character[]>([])
+  const [newThreads, setNewThreads] = useState<NewThreadsData['threads']>([])
+  const [selectedThreadIndices, setSelectedThreadIndices] = useState<Set<number>>(new Set())
+  const [addingThreads, setAddingThreads] = useState(false)
+  const [threadResolutions, setThreadResolutions] = useState<ThreadResolutionsData['resolutions']>([])
 
   const isCurrentlyGenerating = useGenerationStore((s) =>
     s.isGenerating && s.novelId === novelId && s.chapterNum === selectedChapterNum,
@@ -138,6 +142,8 @@ export function useGenerationStream(
     setNewLocationCandidates([])
     setNewTechCandidates([])
     setNewFactionCandidates([])
+    setNewThreads([])
+    setThreadResolutions([])
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map()
@@ -167,12 +173,13 @@ export function useGenerationStream(
             s.appendToken(msg.data as string)
             break
           case 'agent_start': {
-            const d = msg.data as { agent: string; label: string }
+            const d = msg.data as { agent: string; label: string; model?: string }
             const entryId = `${d.agent}-${entryCounter++}`
             const entry: AgentLogEntry = {
               id: entryId,
               agent: d.agent,
               label: d.label,
+              model: d.model,
               status: 'running',
               inputTokens: 0,
               outputTokens: 0,
@@ -190,6 +197,7 @@ export function useGenerationStream(
                 inputTokens: d.input_tokens,
                 outputTokens: d.output_tokens,
                 passed: d.passed,
+                ...(d.label ? { label: d.label } : {}),
               })
             }
             break
@@ -247,6 +255,21 @@ export function useGenerationStream(
             if (d.candidates?.length) {
               setNewFactionCandidates(d.candidates)
               setSelectedFactionIndices(new Set(d.candidates.map((_, i) => i)))
+            }
+            break
+          }
+          case 'new_threads': {
+            const d = msg.data as NewThreadsData
+            if (d.threads?.length) {
+              setNewThreads(d.threads)
+              setSelectedThreadIndices(new Set(d.threads.map((_, i) => i)))
+            }
+            break
+          }
+          case 'thread_resolutions': {
+            const d = msg.data as ThreadResolutionsData
+            if (d.resolutions?.length) {
+              setThreadResolutions(d.resolutions)
             }
             break
           }
@@ -367,12 +390,13 @@ export function useGenerationStream(
             s.appendToken(msg.data as string)
             break
           case 'agent_start': {
-            const d = msg.data as { agent: string; label: string }
+            const d = msg.data as { agent: string; label: string; model?: string }
             const entryId = `${d.agent}-${entryCounter++}`
             const entry: AgentLogEntry = {
               id: entryId,
               agent: d.agent,
               label: d.label,
+              model: d.model,
               status: 'running',
               inputTokens: 0,
               outputTokens: 0,
@@ -390,6 +414,7 @@ export function useGenerationStream(
                 inputTokens: d.input_tokens,
                 outputTokens: d.output_tokens,
                 passed: d.passed,
+                ...(d.label ? { label: d.label } : {}),
               })
             }
             break
@@ -514,18 +539,9 @@ export function useGenerationStream(
       setNewCharCandidates(remaining)
       setSelectedCharIndices(new Set())
 
-      // 为每个新角色生成角色卡
-      const reviewed: Character[] = []
-      for (const char of created) {
-        try {
-          const updated = await charactersApi.generateSheet(char.id)
-          reviewed.push(updated)
-        } catch {
-          reviewed.push(char) // 生成失败时仍保留基础角色信息
-        }
-      }
-      if (reviewed.length > 0) {
-        setReviewCharacters(reviewed)
+      // 创建接口已在后端生成过角色卡（full_sheet），直接进入审阅弹窗
+      if (created.length > 0) {
+        setReviewCharacters(created)
       }
     } finally {
       setAddingChars(false)
@@ -660,6 +676,45 @@ export function useGenerationStream(
     }
   }, [newFactionCandidates, selectedFactionIndices, addingFactions, novelId, qc])
 
+  // ── Discovery: 伏笔/秘密 ──────────────────────────────────────────────────
+  // 候选留在发现面板里，作者可以先读完正文再决定收哪几条，不像弹窗那样关掉就没了。
+  const toggleThreadSelection = useCallback((i: number) => {
+    setSelectedThreadIndices(prev => {
+      const next = new Set(prev)
+      next.has(i) ? next.delete(i) : next.add(i)
+      return next
+    })
+  }, [])
+
+  const handleAddNewThreads = useCallback(async () => {
+    if (!selectedThreadIndices.size || addingThreads) return
+    setAddingThreads(true)
+    try {
+      for (const i of selectedThreadIndices) {
+        const t = newThreads[i]
+        await storyThreadsApi.create({
+          novel_id: novelId,
+          kind: t.kind,
+          title: t.title,
+          content: t.content,
+          importance: t.importance,
+          known_by: t.known_by ?? [],
+          related_entities: t.related_entities ?? [],
+          source_chapter: t.source_chapter ?? 0,
+          source: 'auto',
+        })
+      }
+      qc.invalidateQueries({ queryKey: ['story-threads', novelId] })
+      toast.success(`已添加 ${selectedThreadIndices.size} 条`)
+      setNewThreads(newThreads.filter((_, i) => !selectedThreadIndices.has(i)))
+      setSelectedThreadIndices(new Set())
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '添加失败')
+    } finally {
+      setAddingThreads(false)
+    }
+  }, [newThreads, selectedThreadIndices, addingThreads, novelId, qc])
+
   return {
     // state
     newCharCandidates,
@@ -697,6 +752,14 @@ export function useGenerationStream(
     handleAddNewFactions,
     reviewCharacters,
     setReviewCharacters,
+    newThreads,
+    setNewThreads,
+    selectedThreadIndices,
+    addingThreads,
+    toggleThreadSelection,
+    handleAddNewThreads,
+    threadResolutions,
+    setThreadResolutions,
     setNewCharCandidates,
     setNewEntityCandidates,
     setNewLocationCandidates,

@@ -3,8 +3,18 @@ import httpx
 from openai import AsyncOpenAI
 from typing import AsyncIterator, Union
 from app.config import settings
+from app.services.auth import current_user_var
 
 logger = logging.getLogger(__name__)
+
+
+def _current_non_admin():
+    """当前请求上下文中的非 admin 用户；admin 或无上下文（启动/测试/后台任务）返回 None。
+    非 admin 用户的模型解析必须限制在其本人的模型库内，绝不回退到全局 .env 配置。"""
+    user = current_user_var.get()
+    if user is None or user.is_admin:
+        return None
+    return user
 
 # ─── 客户端字典缓存（按供应商凭据缓存，支持多个同格式供应商）──────────────
 _openai_clients: dict[tuple, AsyncOpenAI] = {}
@@ -149,6 +159,7 @@ async def refresh_model_formats(session) -> None:
             "model_id": m.model_id,
             "api_format": m.api_format,
             "provider_id": m.provider_id,
+            "user_id": m.user_id,
         }
     logger.info("LLM 模型映射缓存已刷新: models=%d provider_links=%d", len(_model_formats), len(_model_provider_map))
 
@@ -167,6 +178,7 @@ async def refresh_provider_cache(session) -> None:
             "base_url": p.base_url,
             "api_format": p.api_format,
             "use_proxy": p.use_proxy,
+            "user_id": p.user_id,
         }
     logger.info("LLM 供应商缓存已刷新，客户端缓存已清空: providers=%d", len(_providers_cache))
 
@@ -180,7 +192,16 @@ def resolve_model_ref(ref: str) -> tuple[str, str, int | None]:
     """把存储的模型引用解析为 (real_model_id, api_format, provider_id|None)。
 
     ref 优先按 ModelEntry.id 解释（新方案，唯一无歧义）；否则按旧的 model_id
-    字符串走"最早注册优先"回退（向后兼容旧数据 / 旧 .env，路由行为不变）。"""
+    字符串走"最早注册优先"回退（向后兼容旧数据 / 旧 .env，路由行为不变）。
+
+    非 admin 用户只接受本人的 ModelEntry.id：字符串引用会命中"最早注册的同名
+    模型"（可能是别人的供应商），必须拒绝，防止烧他人 API Key。"""
+    user = _current_non_admin()
+    if user is not None:
+        entry = _entry_index.get(int(ref)) if ref and ref.isdigit() else None
+        if entry is None or entry.get("user_id") != user.id:
+            raise ValueError("模型引用无效或不属于当前用户")
+        return entry["model_id"], entry["api_format"], entry["provider_id"]
     if ref and ref.isdigit() and int(ref) in _entry_index:
         e = _entry_index[int(ref)]
         return e["model_id"], e["api_format"], e["provider_id"]
@@ -188,10 +209,17 @@ def resolve_model_ref(ref: str) -> tuple[str, str, int | None]:
 
 
 def _resolve_model(agent_type: str, novel_override: str = "") -> str:
-    """按优先级解析最终使用的 model_id"""
+    """按优先级解析最终使用的 model_id。
+    非 admin 用户：小说指定 → 本人默认模型 → 报错，绝不落到全局 .env 配置。"""
     if novel_override:
         return novel_override
     setting_field, category = _AGENT_MODEL_MAP.get(agent_type, ("", "fast"))
+    user = _current_non_admin()
+    if user is not None:
+        ref = user.default_writer_model if category == "writer" else user.default_fast_model
+        if not ref:
+            raise ValueError("请先在设置页配置默认模型，或在小说设置中选择模型")
+        return ref
     agent_model = getattr(settings, setting_field, "") if setting_field else ""
     if agent_model:
         return agent_model
@@ -203,7 +231,13 @@ def _resolve_model(agent_type: str, novel_override: str = "") -> str:
 def get_fast_client(novel_fast_model: str = "") -> tuple[str, str]:
     """返回 (model_ref, api_format) 用于规划/摘要等低成本任务。
     model_ref 原样透传（可能是 ModelEntry.id 或旧 model_id），由 dispatch 消歧。"""
-    ref = novel_fast_model or settings.default_fast_model
+    user = _current_non_admin()
+    if user is not None:
+        ref = novel_fast_model or user.default_fast_model
+        if not ref:
+            raise ValueError("请先在设置页配置默认模型，或在小说设置中选择模型")
+    else:
+        ref = novel_fast_model or settings.default_fast_model
     return ref, resolve_model_ref(ref)[1]
 
 
@@ -342,18 +376,39 @@ async def dispatch_chat_stream_with_usage(
     Gemini 用 gemini_thinking_level，DeepSeek（走 openai 格式）用 deepseek_thinking_level。
     可能 yield dict 表示元信息（如 {"warning": "..."} 重试提醒）。"""
     real_model, fmt, client = _resolve_dispatch(model, api_format)
+    # 思考模型的 max_output_tokens 覆盖「思考链 + 正文」，在用户配置之上叠加思考预算，
+    # 使配置值实际作用于正文，避免正文被思考链挤占而提前截断。
+    eff_max_tokens = _effective_max_tokens(
+        real_model, fmt, max_tokens, gemini_thinking_level, deepseek_thinking_level)
     if fmt == "gemini":
         if gemini_stream:
-            async for item in _gemini_true_stream_with_usage(messages, real_model, temperature, max_tokens, gemini_thinking_level, client):
+            async for item in _gemini_true_stream_with_usage(messages, real_model, temperature, eff_max_tokens, gemini_thinking_level, client):
                 yield item
         else:
-            async for item in _gemini_stream_with_usage(messages, real_model, temperature, max_tokens, gemini_thinking_level, client):
-                yield item
+            # 假流式=非流式大请求+本地切片：在 SOCKS 代理上零字节空等整段响应，
+            # 极易被闪断（ReadError）。若在吐出任何正文前遭遇传输层网络错误，自动改走
+            # 真流式重试一次——真流式持续有字节流动，代理不掐断。此刻必然未 yield 过 str
+            # （切片在拿到完整响应之后、纯内存操作），故切换不会重复输出；produced 双保险。
+            produced = False
+            try:
+                async for item in _gemini_stream_with_usage(messages, real_model, temperature, eff_max_tokens, gemini_thinking_level, client):
+                    if isinstance(item, str):
+                        produced = True
+                    yield item
+            except _TRANSIENT_NET_ERRORS as e:
+                if produced:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Gemini 假流式网络闪断（%s: %r），自动改走真流式重试", type(e).__name__, e,
+                )
+                yield {"warning": "Gemini 非流式连接闪断，正在自动改用真实流式重试..."}
+                async for item in _gemini_true_stream_with_usage(messages, real_model, temperature, eff_max_tokens, gemini_thinking_level, client):
+                    yield item
     elif fmt == "anthropic":
-        async for item in _anthropic_stream_with_usage(messages, real_model, temperature, max_tokens, client):
+        async for item in _anthropic_stream_with_usage(messages, real_model, temperature, eff_max_tokens, client):
             yield item
     else:
-        async for item in chat_stream_with_usage(messages, real_model, client, temperature, max_tokens, deepseek_thinking_level):
+        async for item in chat_stream_with_usage(messages, real_model, client, temperature, eff_max_tokens, deepseek_thinking_level):
             yield item
 
 
@@ -386,6 +441,20 @@ def _deepseek_reasoning_effort(thinking_level: str) -> str:
     """将 DeepSeek 思考档位映射到 reasoning_effort 值。
     档位为 "high" | "max"（"off" 在上层走 thinking disabled，不会进入此函数）。"""
     return "max" if thinking_level == "max" else "high"
+
+
+def _apply_deepseek_fast_thinking(kwargs: dict) -> None:
+    """非流式快速任务按全局设置决定 DeepSeek 思考档位。
+    开启时提高 max_tokens 下限：V4 的 max_tokens 覆盖思维链+正文，过低会截断输出。"""
+    level = settings.deepseek_fast_thinking
+    if level in ("high", "max"):
+        kwargs["extra_body"] = {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": _deepseek_reasoning_effort(level),
+        }
+        kwargs["max_tokens"] = max(kwargs["max_tokens"], 8192)
+    else:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
 
 # 参考 Cherry Studio THINKING_TOKEN_MAP (config/models/reasoning.ts:775-779)
@@ -437,6 +506,38 @@ def _resolve_gemini_thinking(model_id: str, thinking_level: str = "medium"):
     ratio = ratio_map.get(thinking_level, 0.5)
     budget = int((max_budget - min_budget) * ratio + min_budget)
     return genai_types.ThinkingConfig(thinking_budget=budget)
+
+
+# Gemini 3.x 用 thinkingLevel（无显式预算），按档位估算需要额外预留的思考预算
+_GEMINI_3X_THINKING_HEADROOM = {"low": 8192, "medium": 16384, "high": 32768}
+
+
+def _gemini_thinking_headroom(model_id: str, thinking_level: str) -> int:
+    """Gemini 的 max_output_tokens 覆盖「思考链 + 正文」。为使用户配置的
+    max_tokens 实际作用于正文，这里返回需在其之上额外预留的思考预算。"""
+    if thinking_level == "off":
+        return 0
+    if _is_gemini_3x(model_id):
+        return _GEMINI_3X_THINKING_HEADROOM.get(thinking_level, 16384)
+    # Gemini 2.x：思考预算显式可算
+    min_budget, max_budget = _get_2x_thinking_limits(model_id)
+    ratio_map = {"low": 0.2, "medium": 0.5, "high": 0.85}
+    ratio = ratio_map.get(thinking_level, 0.5)
+    return int((max_budget - min_budget) * ratio + min_budget)
+
+
+def _effective_max_tokens(model_id: str, api_format: str, max_tokens: int,
+                          gemini_thinking_level: str, deepseek_thinking_level: str) -> int:
+    """在用户配置的 max_tokens 之上叠加思考预算，避免思考链挤占正文导致截断。
+    仅作上限放宽：若上游本就不把思考计入 max_output_tokens，多出的预算不会被用到。"""
+    GEMINI_HARD_CAP = 65536
+    if api_format == "gemini":
+        headroom = _gemini_thinking_headroom(model_id, gemini_thinking_level)
+        return min(max_tokens + headroom, GEMINI_HARD_CAP)
+    if _is_deepseek_model(model_id) and deepseek_thinking_level in ("high", "max"):
+        # DeepSeek max_tokens 覆盖思维链 + 正文，思维链可达数万 token
+        return min(max_tokens + 32768, GEMINI_HARD_CAP)
+    return max_tokens
 
 
 def _make_gemini_client():
@@ -520,6 +621,17 @@ def _gemini_safety_settings():
     return _cached_gemini_safety
 
 
+# 传输层瞬时网络错误：经代理调用 Gemini 时常见的闪断/超时。google-genai 自带的
+# tenacity 重试只认部分 HTTP 状态码（429/503 等），不覆盖这些 httpx 传输异常，
+# 一次闪断就会让整章生成失败并 ROLLBACK，故在非流式入口自行重试。
+_TRANSIENT_NET_ERRORS = (
+    httpx.ReadError, httpx.WriteError, httpx.ConnectError,
+    httpx.ReadTimeout, httpx.WriteTimeout, httpx.ConnectTimeout,
+    httpx.PoolTimeout, httpx.RemoteProtocolError,
+)
+_GEMINI_NET_RETRIES = 3
+
+
 async def _gemini_call(
     model: str,
     contents: list,
@@ -529,7 +641,9 @@ async def _gemini_call(
     thinking_config=None,
     client=None,
 ):
-    """使用 genai SDK 发送非流式 Gemini 请求，返回 SDK response 对象。"""
+    """使用 genai SDK 发送非流式 Gemini 请求，返回 SDK response 对象。
+    非流式调用幂等，对传输层瞬时网络错误做带退避重试（代理闪断兜底）。"""
+    import asyncio
     from google.genai import types as genai_types
 
     if client is None:
@@ -546,11 +660,24 @@ async def _gemini_call(
         config_kwargs["system_instruction"] = system_instruction
     config_kwargs["safety_settings"] = _gemini_safety_settings()
 
-    return await client.aio.models.generate_content(
-        model=model,
-        contents=contents,
-        config=genai_types.GenerateContentConfig(**config_kwargs),
-    )
+    last_exc: Exception | None = None
+    for attempt in range(_GEMINI_NET_RETRIES):
+        try:
+            return await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(**config_kwargs),
+            )
+        except _TRANSIENT_NET_ERRORS as e:
+            last_exc = e
+            if attempt < _GEMINI_NET_RETRIES - 1:
+                delay = 1.5 * (attempt + 1)
+                logger.warning(
+                    "Gemini 非流式网络闪断（%s: %r），%.1fs 后重试 (%d/%d)",
+                    type(e).__name__, e, delay, attempt + 1, _GEMINI_NET_RETRIES - 1,
+                )
+                await asyncio.sleep(delay)
+    raise last_exc
 
 
 async def _gemini_complete(
@@ -741,10 +868,15 @@ async def _gemini_true_stream_with_usage(
     thinking_config = _resolve_gemini_thinking(model, thinking_level=thinking_level)
 
     config_kwargs: dict = {"temperature": temperature}
+    if max_tokens is not None:
+        config_kwargs["max_output_tokens"] = max_tokens
     if thinking_config is not None:
         config_kwargs["thinking_config"] = thinking_config
     if system_instruction:
         config_kwargs["system_instruction"] = system_instruction
+    # 与非流式路径对齐：不加 safety_settings 时 Gemini 用默认严格过滤，
+    # 小说正文（尤其敏感描写）会被拦截并抛空异常，导致整章生成失败。
+    config_kwargs["safety_settings"] = _gemini_safety_settings()
 
     accumulated_text = ""
     in_tok = 0
@@ -780,9 +912,15 @@ async def _gemini_true_stream_with_usage(
                 await asyncio.sleep(0)
 
     except Exception as e:
-        logger.error("Gemini 真实流式调用失败: %s", e)
+        logger.error("Gemini 真实流式调用失败: %s: %r", type(e).__name__, e, exc_info=True)
         if not accumulated_text:
-            raise
+            # 尚无任何输出：回退非流式（带空响应重试与更清晰的安全拦截报错），
+            # 避免上游流式抖动/过滤直接导致整章失败 ROLLBACK。
+            logger.warning("Gemini 真实流式无输出，回退非流式重试 (model=%s)", model)
+            yield {"warning": "Gemini 流式生成失败，正在回退到非流式重试..."}
+            async for item in _gemini_stream_with_usage(messages, model, temperature, max_tokens, thinking_level, client):
+                yield item
+            return
         # 已有部分输出则不重抛，正常结束
 
     if not accumulated_text:
@@ -944,9 +1082,9 @@ async def chat_complete(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    # DeepSeek V4 默认开启 thinking，非流式结构化任务需显式关闭
+    # DeepSeek 非流式任务思考档位由全局设置控制（默认关闭）
     if _is_deepseek_model(model):
-        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        _apply_deepseek_fast_thinking(kwargs)
     response = await client.chat.completions.create(**kwargs)
     return _first_choice(response, model).message.content or ""
 
@@ -967,7 +1105,7 @@ async def chat_complete_with_usage(
     if temperature >= 0:
         kwargs["temperature"] = temperature
     if _is_deepseek_model(model):
-        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        _apply_deepseek_fast_thinking(kwargs)
     response = await client.chat.completions.create(**kwargs)
     choice = _first_choice(response, model)
     content = choice.message.content or ""
@@ -979,6 +1117,12 @@ async def chat_complete_with_usage(
     usage = response.usage
     in_tok = usage.prompt_tokens if usage else 0
     out_tok = usage.completion_tokens if usage else 0
+    if not content:
+        # 中转站常以 200 + 空正文表示内容过滤或上游故障；此处不抛错（摘要路径依赖空串走脱敏重试），只留诊断日志
+        logging.getLogger(__name__).warning(
+            "OpenAI 非流式空响应: model=%s, finish_reason=%s, input_tokens=%d",
+            model, choice.finish_reason, in_tok,
+        )
     _log_cached_tokens(usage, model)
     return content, in_tok, out_tok
 

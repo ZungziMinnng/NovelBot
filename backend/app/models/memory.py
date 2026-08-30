@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import Boolean, String, Text, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -25,6 +25,9 @@ class Memory(Base):
     # 重要性权重（1-5，默认3中性），检索时按 相似度×重要性 重排
     importance: Mapped[int] = mapped_column(Integer, default=3)
 
+    # 是否注入上下文（目前仅关系里程碑的常驻注入检查此开关）
+    in_context: Mapped[bool] = mapped_column(Boolean, default=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     novel: Mapped["Novel"] = relationship("Novel", back_populates="memories")  # noqa: F821
@@ -44,6 +47,13 @@ class Outline(Base):
     end_chapter: Mapped[int] = mapped_column(Integer, default=0)
     title: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # 执行计划（仅章级有意义）。枚举值见 services/outline_plan.py，空串=未规划
+    chapter_role: Mapped[str] = mapped_column(String(20), default="")
+    emotion_tone: Mapped[str] = mapped_column(String(20), default="")
+    emotion_intensity: Mapped[int] = mapped_column(Integer, default=0)
+    hook_type: Mapped[str] = mapped_column(String(20), default="")
+    hook_strength: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

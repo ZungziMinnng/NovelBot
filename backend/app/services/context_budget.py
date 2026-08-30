@@ -7,14 +7,17 @@ MIN_INPUT_BUDGET = 18000
 MAX_INPUT_BUDGET = 36000
 SAFETY_RATIO = 0.10
 
+# recent_text（上一章原文）强制完整注入，不参与预算分配
 SECTION_RATIOS = {
     "instructions": 0.12,
     "hard_facts": 0.18,
-    "current_state": 0.18,
-    "recent_text": 0.22,
+    "current_state": 0.15,
     "rolling_summary": 0.08,
-    "rag_context": 0.17,
+    "rag_context": 0.11,
+    "rag_fulltext": 0.05,
     "overview": 0.05,
+    "relationship_milestones": 0.04,
+    "recall_evidence": 0.06,
 }
 
 

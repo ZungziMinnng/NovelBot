@@ -13,6 +13,7 @@ from app.models.novel import Novel
 from app.models.story_thread import StoryThread
 from app.models.worldview_change import WorldviewChange
 from app.prompts.loader import render
+from app.services import fact_guard
 from app.services import llm_client, vector_store
 from app.services.context_budget import estimate_tokens
 from app.services.llm_json import JsonCallError, call_json, repair_json
@@ -156,6 +157,14 @@ def _extract_day_number(time_tag: str) -> int | None:
     if not match:
         return None
     return int(match.group(1))
+
+
+def chapter_summary_day(summary: str | None) -> int | None:
+    """从章节摘要的【第X日】前缀解析绝对天数，无标记返回 None。"""
+    match = _TIME_TAG_PATTERN.match((summary or "").strip())
+    if not match:
+        return None
+    return _extract_day_number(match.group(1))
 
 
 def normalize_timeline_tag(time_tag: str, previous_time_tag: str = "") -> str:
@@ -496,25 +505,23 @@ _THREAD_KIND_MAP = {
 _MAX_THREADS_PER_CHAPTER = 2
 
 
-async def _save_extracted_threads(
-    session: AsyncSession,
-    novel_id: int,
+def _extract_thread_candidates(
     chapter_number: int,
     raw_threads,
-    stale_auto: list[StoryThread],
     dedup_pool: list[StoryThread],
-) -> None:
-    """把合并调用里提取的长期事实写入伏笔/秘密库（source='auto'）。
+) -> list[dict]:
+    """把合并调用里提取的长期事实规整为候选条目（不落库）。
 
-    raw_threads 不是列表（模型未按新格式输出）时不做任何事；
-    是列表时视为提取已生效——先删本章旧的 auto 活跃条目（重新生成后已过期），
-    再与库内其余条目按标题/内容互含去重后插入。
+    候选经 SSE 推给前端，由用户勾选「确认添加」后才写入伏笔/秘密库；
+    直接关闭弹窗即丢弃。raw_threads 不是列表（模型未按新格式输出）时返回空。
+    与库内已有条目按标题相等/内容互含去重，每章最多 2 条。
     """
     if not isinstance(raw_threads, list):
-        return
-    saved: list[StoryThread] = []
+        return []
+    existing = [((t.title or "").strip(), (t.content or "").strip()) for t in dedup_pool]
+    candidates: list[dict] = []
     for t in raw_threads:
-        if len(saved) >= _MAX_THREADS_PER_CHAPTER:
+        if len(candidates) >= _MAX_THREADS_PER_CHAPTER:
             break
         if not isinstance(t, dict):
             continue
@@ -531,34 +538,234 @@ async def _save_extracted_threads(
             [str(n).strip() for n in (t.get("known_by") or []) if str(n).strip()]
             if kind == "secret" and isinstance(t.get("known_by"), list) else []
         )
-        dup = False
-        for e in dedup_pool + saved:
-            e_title = ((e.title or "")).strip()
-            e_content = (e.content or "").strip()
-            if (title and title == e_title) or (e_content and (content in e_content or e_content in content)):
-                dup = True
-                break
+        related_entities = (
+            [str(n).strip() for n in t["related_entities"] if str(n).strip()][:3]
+            if isinstance(t.get("related_entities"), list) else []
+        )
+        dup = any(
+            (title and title == e_title) or (e_content and (content in e_content or e_content in content))
+            for e_title, e_content in existing
+        )
         if dup:
             continue
-        saved.append(StoryThread(
-            novel_id=novel_id,
-            kind=kind,
-            title=title,
-            content=content,
-            importance=imp,
-            known_by=known_by,
-            source_chapter=chapter_number,
-            source="auto",
-        ))
-    for stale in stale_auto:
-        await session.delete(stale)
-    for thread in saved:
-        session.add(thread)
-    if saved:
+        existing.append((title, content))
+        candidates.append({
+            "kind": kind,
+            "title": title,
+            "content": content,
+            "importance": imp,
+            "known_by": known_by,
+            "related_entities": related_entities,
+            "source_chapter": chapter_number,
+        })
+    if candidates:
         logger.info(
-            "章节 %s 自动提取 %d 条长期事实: %s",
-            chapter_number, len(saved), "；".join(t.title or t.content[:20] for t in saved),
+            "章节 %s 提取 %d 条长期事实候选（待用户确认）: %s",
+            chapter_number, len(candidates),
+            "；".join(c["title"] or c["content"][:20] for c in candidates),
         )
+    return candidates
+
+
+_MAX_RESOLUTIONS_PER_CHAPTER = 3
+
+
+def _match_thread(ref: str, dedup_pool: list[StoryThread]) -> StoryThread | None:
+    """把 LLM 回传的 ref 用「标题相等 / 内容互含」匹配到库内真实 StoryThread。
+    匹配不到返回 None（防杜撰：模型指认的条目必须真实存在于清单里）。"""
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    for t in dedup_pool:  # 标题精确相等优先
+        if (t.title or "").strip() and (t.title or "").strip() == ref:
+            return t
+    for t in dedup_pool:  # 退化到内容互含（标题重名/被改写时兜底）
+        content = (t.content or "").strip()
+        if content and (ref in content or content in ref):
+            return t
+    return None
+
+
+def _extract_resolution_candidates(
+    chapter_number: int,
+    raw_resolved,
+    raw_reveals,
+    dedup_pool: list[StoryThread],
+) -> list[dict]:
+    """把合并调用里检测到的「伏笔回收 / 秘密公开」规整为候选条目（不落库）。
+
+    候选经 SSE 推给前端，由用户勾选「确认」后才 PATCH 改库（resolve/reveal），
+    直接关闭则丢弃。ref 匹配不到库内真实条目一律丢弃（防模型杜撰）。
+    resolve 与 reveal 合计每章最多 _MAX_RESOLUTIONS_PER_CHAPTER 条；
+    同一 thread_id 只保留首次出现（resolve 优先于 reveal）。
+    """
+    candidates: list[dict] = []
+    seen_ids: set[int] = set()
+
+    def _add(item: dict) -> bool:
+        if len(candidates) >= _MAX_RESOLUTIONS_PER_CHAPTER:
+            return False
+        candidates.append(item)
+        return True
+
+    if isinstance(raw_resolved, list):
+        for r in raw_resolved:
+            if not isinstance(r, dict):
+                continue
+            thread = _match_thread(str(r.get("ref") or ""), dedup_pool)
+            if thread is None or thread.id in seen_ids:
+                continue
+            resolution = str(r.get("resolution") or "").strip()[:100]
+            seen_ids.add(thread.id)
+            if not _add({
+                "thread_id": thread.id,
+                "kind": thread.kind,
+                "title": thread.title or "",
+                "content": thread.content or "",
+                "action": "resolve",
+                "resolution": resolution,
+                "source_chapter": chapter_number,
+            }):
+                break
+
+    if isinstance(raw_reveals, list):
+        for r in raw_reveals:
+            if len(candidates) >= _MAX_RESOLUTIONS_PER_CHAPTER:
+                break
+            if not isinstance(r, dict):
+                continue
+            thread = _match_thread(str(r.get("ref") or ""), dedup_pool)
+            if thread is None or thread.id in seen_ids:
+                continue
+            if thread.kind != "secret":  # reveal 只对秘密有意义
+                continue
+            newly = [
+                str(n).strip() for n in (r.get("newly_known_by") or [])
+                if str(n).strip()
+            ]
+            already = [str(n).strip() for n in (thread.known_by or []) if str(n).strip()]
+            addition = [n for n in newly if n not in already]
+            if not addition:  # 没有真正的新知情者
+                continue
+            merged_known = list(dict.fromkeys(already + addition))
+            seen_ids.add(thread.id)
+            _add({
+                "thread_id": thread.id,
+                "kind": thread.kind,
+                "title": thread.title or "",
+                "content": thread.content or "",
+                "action": "reveal",
+                "newly_known_by": addition,
+                "known_by": merged_known,
+                "source_chapter": chapter_number,
+            })
+
+    if candidates:
+        logger.info(
+            "章节 %s 检测到 %d 条伏笔回收/秘密公开候选（待用户确认）: %s",
+            chapter_number, len(candidates),
+            "；".join(f"{c['action']}:{c['title'] or c['content'][:20]}" for c in candidates),
+        )
+    return candidates
+
+
+_MILESTONE_TYPES = {"初见", "动心", "表白", "决裂", "和解", "身份揭露", "其他"}
+_MAX_MILESTONES_PER_CHAPTER = 3
+
+
+async def _load_known_milestones(session: AsyncSession, novel_id: int, exclude_chapter: int) -> str:
+    """取最近 20 条里程碑给提示词做去重参照；排除当前章（重新确认时旧条目会被删除重提）。"""
+    rows = (await session.execute(
+        select(Memory).where(
+            Memory.novel_id == novel_id,
+            Memory.memory_type == "relationship_milestone",
+            Memory.chapter_number != exclude_chapter,
+        ).order_by(Memory.chapter_number.desc()).limit(20)
+    )).scalars().all()
+    return "；".join(m.content for m in reversed(rows)) or "（暂无）"
+
+
+async def _save_milestones(session: AsyncSession, novel: Novel, chapter: Chapter, raw) -> list[dict]:
+    """把合并调用提取的关系里程碑写入 Memory 表（memory_type='relationship_milestone'）。
+
+    raw 不是列表（模型未按新格式输出）时不做任何事；是列表时视为提取已生效——
+    先删本章旧条目再插入，章节重新确认天然幂等。
+    content 编码格式：[表白] 甲↔乙 | 第37章 | 契机与结果
+    """
+    if not isinstance(raw, list):
+        return []
+    await session.execute(sql_delete(Memory).where(
+        Memory.novel_id == novel.id,
+        Memory.chapter_number == chapter.number,
+        Memory.memory_type == "relationship_milestone",
+    ))
+    saved: list[Memory] = []
+    for item in raw:
+        if len(saved) >= _MAX_MILESTONES_PER_CHAPTER:
+            break
+        if not isinstance(item, dict):
+            continue
+        mtype = str(item.get("type") or "").strip()
+        if mtype not in _MILESTONE_TYPES:
+            mtype = "其他"
+        chars = [str(c).strip() for c in (item.get("characters") or []) if str(c).strip()]
+        desc = str(item.get("description") or "").strip()[:80]
+        if not chars or not desc:
+            continue
+        try:
+            imp = max(1, min(5, int(round(float(item.get("importance", 3))))))
+        except (TypeError, ValueError):
+            imp = 3
+        saved.append(Memory(
+            novel_id=novel.id,
+            chapter_id=chapter.id,
+            memory_type="relationship_milestone",
+            content=f"[{mtype}] {'↔'.join(chars)} | 第{chapter.number}章 | {desc}",
+            volume=chapter.volume,
+            chapter_number=chapter.number,
+            importance=imp,
+        ))
+    for m in saved:
+        session.add(m)
+    if saved:
+        await session.flush()
+        logger.info(
+            "章节 %s 提取 %d 条关系里程碑: %s",
+            chapter.number, len(saved), "；".join(m.content for m in saved),
+        )
+    return [
+        {"id": m.id, "content": m.content, "importance": m.importance}
+        for m in saved
+    ]
+
+
+async def backfill_milestones_for_chapter(
+    session: AsyncSession,
+    novel: Novel,
+    chapter: Chapter,
+) -> int:
+    """对单章全文做独立的关系里程碑抽取（存量章节回填用，手动触发）。
+
+    返回本章提取的里程碑条数。调用失败抛 JsonCallError，由调用方决定跳过或中断。
+    """
+    if not (chapter.content or "").strip():
+        return 0
+    clean_content = strip_plot_suggestions(chapter.content)
+    model, api_format = llm_client.get_agent_client("memory", novel.fast_model)
+    prompt_prefix = render(
+        "backfill_milestones.jinja2",
+        known_milestones=await _load_known_milestones(session, novel.id, chapter.number),
+    )
+    messages = _build_analysis_messages(
+        prompt_prefix, clean_content[:12000],
+        render("backfill_milestones_suffix.jinja2"), api_format,
+    )
+    data, _, _ = await call_json(
+        messages, model, api_format,
+        temperatures=(0.3, 0.1), max_tokens=1000,
+    )
+    saved = await _save_milestones(session, novel, chapter, data.get("milestones"))
+    return len(saved)
 
 
 def _fmt_known(names: list[str]) -> str:
@@ -594,19 +801,14 @@ async def summarize_and_discover(
         if known_locations else "（暂无）"
     )
 
-    # 已有伏笔/秘密条目：本章旧的 auto 活跃条目（重新生成后过期，稍后删除重提）
-    # 不进提示词和去重池，否则 regen 时同一事实会被去重拦下、随删除一起丢失
-    existing_threads = (await session.execute(
+    # 已有伏笔/秘密条目：进提示词抑制重复提取，也做候选去重池。
+    # 提取结果只作为候选推给前端，用户确认后才落库，因此库内条目一律视为已确认事实。
+    dedup_pool = (await session.execute(
         select(StoryThread).where(
             StoryThread.novel_id == novel.id,
             StoryThread.status != "abandoned",
         )
     )).scalars().all()
-    stale_auto = [
-        t for t in existing_threads
-        if t.source == "auto" and t.source_chapter == chapter.number and t.status == "active"
-    ]
-    dedup_pool = [t for t in existing_threads if t not in stale_auto]
 
     prompt_prefix = render(
         "chapter_summary_discover_prefix.jinja2",
@@ -618,6 +820,7 @@ async def summarize_and_discover(
         known_threads="；".join(
             (t.title or (t.content or "")[:20]) for t in dedup_pool
         ) or "（暂无）",
+        known_milestones=await _load_known_milestones(session, novel.id, chapter.number),
     ) + _day_offset_hint(chapter.number)
     messages = _build_analysis_messages(
         prompt_prefix, clean_content[:12000],
@@ -648,10 +851,14 @@ async def summarize_and_discover(
     summary = await _persist_summary(
         session, chapter, novel, body, importance, day_offset, period, prev_day, clean_content,
     )
-    await _save_extracted_threads(
-        session, novel.id, chapter.number, data.get("threads"), stale_auto, dedup_pool,
-    )
+    await _save_milestones(session, novel, chapter, data.get("milestones"))
     discovered = {k: data.get(k) if isinstance(data.get(k), list) else [] for k in _DISCOVER_KEYS}
+    discovered["threads"] = _extract_thread_candidates(
+        chapter.number, data.get("threads"), dedup_pool,
+    )
+    discovered["resolutions"] = _extract_resolution_candidates(
+        chapter.number, data.get("resolved_threads"), data.get("secret_reveals"), dedup_pool,
+    )
     return summary, discovered, in_tok, out_tok
 
 
@@ -783,6 +990,8 @@ async def update_character_states(
     unmatched = []
     matched_count = 0
     updated_ids: list[int] = []
+    blocked: list[str] = []
+    chapter_day = chapter_summary_day(chapter.summary)
     for name, state in updates.items():
         if not isinstance(state, dict):
             continue
@@ -792,6 +1001,8 @@ async def update_character_states(
             continue
         existing = char_map[target_name].current_state or {}
         merged = dict(existing)
+        removals = state.pop("移除", None)
+        experience = state.pop("经历", None)
         # titles 直接覆盖（当前称谓列表，不累积）；其余 list 字段合并去重
         _OVERWRITE_LIST_KEYS = {"titles"}
         for key, val in state.items():
@@ -816,10 +1027,38 @@ async def update_character_states(
                         initial[tgt] = lbl
                 merged["initial_relationships"] = initial
                 merged[key] = val
+            elif key == "base_relationships" and isinstance(val, dict):
+                # 按键合并：新确立的根本关系补入/覆盖，未提及的保留（可能是手动维护的）
+                base = dict(merged.get("base_relationships", {}))
+                if not isinstance(base, dict):
+                    base = {}
+                for tgt, lbl in val.items():
+                    if lbl:
+                        base[tgt] = lbl
+                merged[key] = base
             elif val:  # 非空值才覆盖，避免清除上一章已存的信息
                 merged[key] = val
+        _apply_removals(merged, removals)
+        conflict = fact_guard.check_life_death(existing, merged)
+        if conflict and conflict["severity"] == "block":
+            merged[conflict["field"]] = conflict["corrected_value"]
+            blocked.append(f"{target_name}：{conflict['reason']}")
         char_map[target_name].current_state = merged
         flag_modified(char_map[target_name], "current_state")
+        if isinstance(experience, str) and experience.strip():
+            char = char_map[target_name]
+            sheet = dict(char.full_sheet or {})
+            # 同章条目替换（重复生成/重新确认场景），只保留合法 dict 条目
+            history = [e for e in (sheet.get("character_history") or [])
+                       if isinstance(e, dict) and e.get("chapter") != chapter.number]
+            entry: dict = {"chapter": chapter.number, "content": experience.strip()}
+            if chapter_day is not None:
+                entry["day"] = chapter_day
+            history.append(entry)
+            history.sort(key=lambda e: e.get("chapter") or 0)
+            sheet["character_history"] = history
+            char.full_sheet = sheet
+            flag_modified(char, "full_sheet")
         matched_count += 1
         updated_ids.append(char_map[target_name].id)
 
@@ -828,7 +1067,46 @@ async def update_character_states(
         warning = f"角色状态更新：以下名称未匹配到角色库 [{', '.join(unmatched)}]"
     if matched_count == 0 and not unmatched:
         warning = "角色状态更新：LLM 未返回任何角色状态数据"
+    if blocked:
+        warning = (warning + "; " if warning else "") + "事实守门员拦截：" + "；".join(blocked)
     return True, warning, total_in, total_out, unmatched, updated_ids
+
+
+def _removal_match(a, b) -> bool:
+    sa, sb = str(a).strip(), str(b).strip()
+    if not sa or not sb:
+        return False
+    return sa == sb or sa in sb or sb in sa
+
+
+def _apply_removals(merged: dict, removals) -> None:
+    """应用 LLM 输出的「移除」指令，给状态提供删除通道（否则列表字段只增不减）。
+
+    removals 形如 {"字段名": ["条目", ...]} 或 {"字段名": "全部"}：
+    - 值为 list：目标字段是 list → 删除匹配项（精确或互相包含）；是 dict → 按键
+      匹配删除；是标量 → 匹配则删整个字段
+    - 值非 list（"全部"等）→ 删除整个字段
+    字段不存在时静默跳过。调用方须在正常合并**之后**调用，保证删除优先于本章新增。"""
+    if not isinstance(removals, dict):
+        return
+    for field, targets in removals.items():
+        if field not in merged:
+            continue
+        if not isinstance(targets, list):
+            merged.pop(field, None)
+            continue
+        current = merged[field]
+        if isinstance(current, list):
+            merged[field] = [
+                item for item in current
+                if not any(_removal_match(item, t) for t in targets)
+            ]
+        elif isinstance(current, dict):
+            for k in [k for k in current if any(_removal_match(k, t) for t in targets)]:
+                current.pop(k)
+            merged[field] = current
+        elif any(_removal_match(current, t) for t in targets):
+            merged.pop(field, None)
 
 
 def _trim_entity_state(state: dict, limit: int = 300) -> None:
@@ -852,6 +1130,8 @@ def _trim_entity_state(state: dict, limit: int = 300) -> None:
 
 # 旧版每章全量重写字段已废弃（与静态描述/属性重复），落库时顺带清理
 _OBSOLETE_ENTITY_STATE_KEYS = ("description", "new_abilities", "level_changes")
+# 地点流水账字段已废弃（不进写作上下文，还挤占嵌入文本配额），落库时顺带清理
+_OBSOLETE_LOCATION_STATE_KEYS = ("notable_changes",)
 
 
 def _apply_entity_updates(entities, updates: dict) -> tuple[int, list[str], list[int]]:
@@ -877,9 +1157,11 @@ def _apply_entity_updates(entities, updates: dict) -> tuple[int, list[str], list
             continue
         existing = entity_map[target_name].current_state or {}
         merged = dict(existing)
+        removals = state.pop("移除", None)
         for key, val in state.items():
             if val:
                 merged[key] = val
+        _apply_removals(merged, removals)
         for k in _OBSOLETE_ENTITY_STATE_KEYS:
             merged.pop(k, None)
         _trim_entity_state(merged)
@@ -893,6 +1175,14 @@ def _apply_entity_updates(entities, updates: dict) -> tuple[int, list[str], list
 def _apply_location_updates(locations, updates: dict) -> tuple[int, list[str], list[int]]:
     """将 LLM 输出的地点状态合并入库，返回 (matched_count, unmatched_names, updated_ids)。"""
     location_map = {l.name: l for l in locations}
+    for l in locations:
+        st = l.current_state or {}
+        if any(k in st for k in _OBSOLETE_LOCATION_STATE_KEYS):
+            for k in _OBSOLETE_LOCATION_STATE_KEYS:
+                st.pop(k, None)
+            l.current_state = st
+            flag_modified(l, "current_state")
+
     unmatched = []
     matched_count = 0
     updated_ids: list[int] = []
@@ -905,6 +1195,7 @@ def _apply_location_updates(locations, updates: dict) -> tuple[int, list[str], l
             continue
         existing = location_map[target_name].current_state or {}
         merged = dict(existing)
+        removals = state.pop("移除", None)
         for key, val in state.items():
             if isinstance(val, list):
                 old_val = existing.get(key, [])
@@ -912,6 +1203,9 @@ def _apply_location_updates(locations, updates: dict) -> tuple[int, list[str], l
                 merged[key] = list(dict.fromkeys(old_list + val))[-20:]
             elif val:
                 merged[key] = val
+        _apply_removals(merged, removals)
+        for k in _OBSOLETE_LOCATION_STATE_KEYS:
+            merged.pop(k, None)
         location_map[target_name].current_state = merged
         flag_modified(location_map[target_name], "current_state")
         matched_count += 1

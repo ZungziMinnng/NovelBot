@@ -130,6 +130,10 @@ async def call_json(
             total_in += in_tok
             total_out += out_tok
             last_raw = raw
+            if not raw.strip():
+                last_error = ValueError("模型返回空内容，通常是供应商内容过滤或上游故障（详见后台日志 finish_reason），可稍后重试或更换快速模型")
+                logger.warning("call_json 收到空响应 (temp=%s, model=%s)", temperature, model)
+                continue
             parsed = json.loads(repair_json(raw, expect))
             if isinstance(parsed, expected_type):
                 return parsed, total_in, total_out

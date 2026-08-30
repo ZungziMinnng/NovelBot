@@ -1,15 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, FlaskConical, AlertTriangle } from 'lucide-react'
-import { novelsApi, modelLibraryApi, writerPresetsApi, modelSelectValue, type Novel, type ModelEntry, type ExampleTurn } from '@/api/client'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, FlaskConical, AlertTriangle, ListChecks, ExternalLink, Palette } from 'lucide-react'
+import { novelsApi, modelLibraryApi, writerPresetsApi, promptRulesApi, modelSelectValue, type Novel, type ModelEntry, type ExampleTurn } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
+import { WRITING_STYLES } from '@/constants/writingStyles'
 
-type CreationSection = 'prompt' | 'models' | 'review' | 'fulltext' | null
+type CreationSection = 'prompt' | 'rules' | 'genreCard' | 'models' | 'review' | 'fulltext' | null
 
 const CREATION_SECTIONS: { key: CreationSection & string; label: string; desc: string; icon: typeof FileText }[] = [
   { key: 'prompt', label: '提示词与示例', desc: 'Writer 自定义提示词、示例轮', icon: FileText },
+  { key: 'rules', label: '写作规则', desc: '选择本书启用的规则广场条目', icon: ListChecks },
+  { key: 'genreCard', label: '题材腔调卡', desc: '默认按题材自动匹配，可手动指定或关闭', icon: Palette },
   { key: 'models', label: '模型与生成参数', desc: '模型覆盖、温度、Token、摘要、RAG、Thinking', icon: Cpu },
   { key: 'fulltext', label: '全文上下文（实验）', desc: '将前 N 章正文全量传入上下文', icon: FlaskConical },
 ]
@@ -23,7 +26,7 @@ interface Props {
 }
 
 const GENRES = ['古代权谋', '现代都市', '玄幻', '悬疑推理', '言情', '科幻', '历史', '其他']
-const STYLES = ['严肃厉重', '轻快幽默', '悬念紧张', '细腻文艺', '热血激昂']
+const STYLES = WRITING_STYLES
 const LENGTHS = ['短篇', '中篇', '长篇']
 const RANK_SEPARATOR = '\n\n---等级体系---\n\n'
 
@@ -125,6 +128,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   // ── Novel content fields ──
   const [title, setTitle] = useState(novel.title)
   const [genre, setGenre] = useState(novel.genre)
+  const [genreCard, setGenreCard] = useState(novel.genre_card || '')
   const [writingStyle, setWritingStyle] = useState(novel.writing_style)
   const [targetLength, setTargetLength] = useState(novel.target_length)
   const [coreSetting, setCoreSetting] = useState(novel.core_setting)
@@ -154,21 +158,24 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
   const [deepseekThinking, setDeepseekThinking] = useState(novel.deepseek_thinking_level || 'high')
   const [geminiThinking, setGeminiThinking] = useState(novel.gemini_thinking_level || 'medium')
-  const [geminiStream, setGeminiStream] = useState(novel.gemini_stream ?? false)
+  const [geminiStream, setGeminiStream] = useState(novel.gemini_stream ?? true)
   const [enableFullTextContext, setEnableFullTextContext] = useState(novel.enable_full_text_context ?? false)
   const [fullTextChapters, setFullTextChapters] = useState(novel.full_text_chapters ?? 20)
+  const [enabledRuleIds, setEnabledRuleIds] = useState<number[] | null>(novel.enabled_rule_ids)
 
   // ── UI state ──
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
   const [showPromptPreview, setShowPromptPreview] = useState(false)
+  const [showCardPreview, setShowCardPreview] = useState(false)
   const [generatingBookSummary, setGeneratingBookSummary] = useState(false)
   const [activeSection, setActiveSection] = useState<CreationSection>(null)
 
   useEffect(() => {
     setTitle(novel.title)
     setGenre(novel.genre)
+    setGenreCard(novel.genre_card || '')
     setWritingStyle(novel.writing_style)
     setTargetLength(novel.target_length)
     setCoreSetting(novel.core_setting)
@@ -194,15 +201,61 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setChatContextRounds(novel.chat_context_rounds ?? 20)
     setDeepseekThinking(novel.deepseek_thinking_level || 'high')
     setGeminiThinking(novel.gemini_thinking_level || 'medium')
-    setGeminiStream(novel.gemini_stream ?? false)
+    setGeminiStream(novel.gemini_stream ?? true)
     setEnableFullTextContext(novel.enable_full_text_context ?? false)
     setFullTextChapters(novel.full_text_chapters ?? 20)
+    setEnabledRuleIds(novel.enabled_rule_ids)
   }, [novel.id])
 
   const { data: writerPresets = [] } = useQuery({
     queryKey: ['writer-presets'],
     queryFn: writerPresetsApi.list,
   })
+
+  const { data: promptRules = [], isSuccess: rulesLoaded } = useQuery({
+    queryKey: ['prompt-rules'],
+    queryFn: promptRulesApi.list,
+  })
+
+  const { data: genreCardData } = useQuery({
+    queryKey: ['genre-cards'],
+    queryFn: novelsApi.genreCards,
+    staleTime: Infinity,
+  })
+  const genreCards = genreCardData?.cards ?? []
+  const genreCardOff = genreCardData?.off_value ?? 'none'
+  // 镜像后端 match_card_name：先按正式卡名（长名优先），再按别名（长名优先）。
+  // 少了别名这一步，前端会说"匹配不到卡"而后端其实命中了
+  const autoMatched = (() => {
+    if (!genre) return ''
+    const byName = [...genreCards]
+      .sort((a, b) => b.name.length - a.name.length)
+      .find(c => genre.includes(c.name))
+    if (byName) return byName.name
+    const byAlias = genreCards
+      .flatMap(c => c.aliases.map(alias => ({ alias, name: c.name })))
+      .sort((a, b) => b.alias.length - a.alias.length)
+      .find(x => genre.includes(x.alias))
+    return byAlias?.name ?? ''
+  })()
+  const activeCardName = genreCard === genreCardOff
+    ? ''
+    : (genreCards.some(c => c.name === genreCard) ? genreCard : autoMatched)
+  const activeCardBody = genreCards.find(c => c.name === activeCardName)?.body ?? ''
+
+  // null 表示本书从未配置过规则，后端据此走内置默认。这里保留 null 而不是塌成 []，
+  // 否则规则还没加载完就点保存会把 [] 写进库，本书的护栏被静默清空
+  const builtinDefaultIds = promptRules.filter(r => r.is_builtin && r.enabled).map(r => r.id)
+  const effectiveRuleIds = enabledRuleIds ?? builtinDefaultIds
+  const ruleSelectionReady = enabledRuleIds !== null || rulesLoaded
+
+  const toggleRule = (id: number) => {
+    setEnabledRuleIds(
+      effectiveRuleIds.includes(id)
+        ? effectiveRuleIds.filter(x => x !== id)
+        : [...effectiveRuleIds, id]
+    )
+  }
 
   // ── World-setting split toggle ──
   const handleToggleSplit = () => {
@@ -260,6 +313,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
       await novelsApi.update(novel.id, {
         title,
         genre,
+        genre_card: genreCard,
         writing_style: writingStyle,
         target_length: targetLength,
         core_setting: getFinalCoreSetting(),
@@ -284,6 +338,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         gemini_stream: geminiStream,
         enable_full_text_context: enableFullTextContext,
         full_text_chapters: fullTextChapters,
+        // 用户没动过勾选就不提交，让库里继续保持 null（走内置默认）
+        ...(enabledRuleIds !== null ? { enabled_rule_ids: enabledRuleIds } : {}),
       })
       qc.invalidateQueries({ queryKey: ['novel', novel.id] })
       setSaved(true)
@@ -638,6 +694,167 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                 </>
               )}
 
+              {/* ── 写作规则 ── */}
+              {activeSection === 'rules' && (
+                <div className="space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">
+                      勾选的规则会拼进本书 Writer 的系统提示词。规则内容在规则广场里改，改完立刻生效。
+                    </p>
+                    <a
+                      href="/rules"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-primary hover:underline flex items-center gap-1 shrink-0"
+                    >
+                      管理规则库 <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  {enabledRuleIds === null && (
+                    <p className="text-xs px-3 py-2 rounded-lg bg-muted/60 text-muted-foreground">
+                      本书未配置，当前默认启用全部内置规则。改动勾选后才会写入本书。
+                    </p>
+                  )}
+
+                  {!ruleSelectionReady ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground py-6">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> 加载规则库...
+                    </div>
+                  ) : promptRules.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-6">规则库是空的，先去规则广场新建规则。</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {promptRules.map(rule => (
+                        <label
+                          key={rule.id}
+                          className={`flex items-start gap-2.5 px-3 py-2.5 border rounded-lg cursor-pointer hover:bg-muted/40 transition-colors ${rule.enabled ? '' : 'opacity-50'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={effectiveRuleIds.includes(rule.id)}
+                            onChange={() => toggleRule(rule.id)}
+                            className="mt-0.5 shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm">{rule.name}</span>
+                              {rule.is_builtin && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">内置</span>
+                              )}
+                              {!rule.enabled && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                  规则库已停用，不会注入
+                                </span>
+                              )}
+                            </div>
+                            {rule.content && (
+                              <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2 whitespace-pre-wrap">{rule.content}</p>
+                            )}
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {enabledRuleIds !== null && effectiveRuleIds.length === 0 && (
+                    <p className="text-xs px-3 py-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-500">
+                      一条都没勾选，保存后本书将不带任何写作规则（包括去 AI 味护栏）。
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── 题材腔调卡 ── */}
+              {activeSection === 'genreCard' && (
+                <div className="space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    题材卡给写手校准场景选择、对话声线和爽点落法，作为参考资料注入，不会出现在正文里。
+                    默认按「类型」（当前：{genre || '未设置'}）自动匹配。
+                  </p>
+
+                  <div className="space-y-1.5">
+                    <label className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg border cursor-pointer hover:bg-muted/60 transition-colors">
+                      <input
+                        type="radio"
+                        checked={genreCard === ''}
+                        onChange={() => setGenreCard('')}
+                        className="mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">自动匹配（推荐）</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {autoMatched
+                            ? `按当前类型命中「${autoMatched}」，改类型时跟着变`
+                            : `当前类型匹配不到卡，本书不会注入题材卡`}
+                        </p>
+                      </div>
+                    </label>
+
+                    {genreCards.map(card => (
+                      <label
+                        key={card.name}
+                        className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg border cursor-pointer hover:bg-muted/60 transition-colors"
+                      >
+                        <input
+                          type="radio"
+                          checked={genreCard === card.name}
+                          onChange={() => setGenreCard(card.name)}
+                          className="mt-0.5"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium">{card.name}</p>
+                          {card.aliases.length > 0 && (
+                            <p className="text-[0.625rem] text-muted-foreground mt-0.5">
+                              也涵盖：{card.aliases.join('、')}
+                            </p>
+                          )}
+                          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2 whitespace-pre-wrap">
+                            {card.body.replace(/\*\*/g, '')}
+                          </p>
+                        </div>
+                      </label>
+                    ))}
+
+                    <label className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg border cursor-pointer hover:bg-muted/60 transition-colors">
+                      <input
+                        type="radio"
+                        checked={genreCard === genreCardOff}
+                        onChange={() => setGenreCard(genreCardOff)}
+                        className="mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">不使用题材卡</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          本书完全不注入，适合自定义提示词里已经写了腔调要求
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+
+                  {activeCardBody && (
+                    <div>
+                      <button
+                        onClick={() => setShowCardPreview(!showCardPreview)}
+                        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        {showCardPreview ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                        查看「{activeCardName}」注入的完整内容
+                      </button>
+                      {showCardPreview && (
+                        <pre className="mt-2 text-xs bg-muted/50 rounded-lg p-3 whitespace-pre-wrap max-h-64 overflow-y-auto">
+                          {activeCardBody}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+
+                  <p className="text-xs px-3 py-2 rounded-lg bg-muted/60 text-muted-foreground">
+                    上下文配置页的「题材腔调卡」开关是临时调整这一次的上下文，这里选的是作品长期设定。
+                  </p>
+                </div>
+              )}
+
               {/* ── 模型选择 ── */}
               {activeSection === 'models' && (
                 <div className="space-y-4">
@@ -724,7 +941,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                     <div className="flex items-center justify-between">
                       <div className="flex-1 mr-4">
                         <p className="text-sm font-medium">Gemini 真实流式</p>
-                        <p className="text-xs text-muted-foreground mt-1">启用后 Gemini 模型逐字输出，减少等待时间（实验性）</p>
+                        <p className="text-xs text-muted-foreground mt-1">逐字输出、减少等待。关闭时为一次性大请求，在不稳定代理上易被闪断导致整章失败；建议保持开启</p>
                       </div>
                       <button
                         onClick={() => setGeminiStream(!geminiStream)}

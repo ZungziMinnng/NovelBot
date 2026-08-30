@@ -2,6 +2,10 @@
 
 小说类型：{{ genre }}
 故事前提：{{ premise }}
+{% if plot_design %}
+剧情设计（用户指定的核心情节/走向，角色应服务于此主线）：
+{{ plot_design }}
+{% endif %}
 世界观设定：{{ core_setting }}
 {% if outline_titles %}
 大纲章节：{{ outline_titles }}

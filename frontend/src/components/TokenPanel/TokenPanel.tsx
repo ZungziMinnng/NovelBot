@@ -12,6 +12,7 @@ const formatCny = (value: number) => {
 }
 
 const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'full' | 'field' | 'name' | 'mixed' }> = [
+  { key: 'genre_card', label: '题材腔调卡', source: 'field' },
   { key: 'core_setting', label: '世界观设定', source: 'mixed' },
   { key: 'book_summary', label: '全书概要', source: 'field' },
   { key: 'arc_summary', label: '故事弧概要', source: 'full' },
@@ -19,6 +20,10 @@ const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'ful
   { key: 'chapter_outline', label: '本章大纲', source: 'full' },
   { key: 'rolling_summary', label: '近期摘要', source: 'full' },
   { key: 'rag_context', label: 'RAG 历史检索', source: 'rag' },
+  { key: 'rerank', label: '检索重排（本地模型）', source: 'rag' },
+  { key: 'rag_fulltext', label: '历史原文取段', source: 'rag' },
+  { key: 'relationship_milestones', label: '关系里程碑', source: 'field' },
+  { key: 'recall_evidence', label: '回忆取证', source: 'rag' },
   { key: 'notes_context', label: '补充设定', source: 'mixed' },
   { key: 'recent_text', label: '上一章原文', source: 'full' },
   { key: 'characters', label: '角色状态', source: 'name' },
@@ -62,7 +67,7 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
 
   const maxChapterNum = chapters.length > 0 ? Math.max(...chapters.map(c => c.number)) : 0
   const [chapterNum, setChapterNum] = useState(() => maxChapterNum + 1)
-  const [targetWords, setTargetWords] = useState(5000)
+  const [targetWords, setTargetWords] = useState(2500)
   const [config, setConfig] = useState<Record<string, ContextConfigValue>>({})
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -121,6 +126,10 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
   const metaSourceMap: Record<string, string> = Object.fromEntries(
     (preview?.meta || []).map((m: any) => [m.key, m.source])
   )
+  // 后端一直在算 detail（如题材卡命中了哪张），过去被丢掉，这里显示出来
+  const metaDetailMap: Record<string, string> = Object.fromEntries(
+    (preview?.meta || []).map((m: any) => [m.key, m.detail || ''])
+  )
 
   return (
     <div className="space-y-4">
@@ -162,7 +171,7 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
       ) : !priceConfigured ? (
         <div className="border border-amber-200 bg-amber-50/70 dark:border-amber-900 dark:bg-amber-950/30 rounded-lg px-3 py-2.5">
           <p className="text-xs font-medium text-amber-800 dark:text-amber-300">当前 Writer 未配置 Token 价格</p>
-          <p className="text-[11px] text-muted-foreground mt-1">
+          <p className="text-[0.6875rem] text-muted-foreground mt-1">
             {pricing?.model_name || '未解析 Writer 模型'} · 当前上下文约 {totalTokens.toLocaleString()} tokens
           </p>
         </div>
@@ -171,16 +180,16 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <p className="text-xs text-muted-foreground truncate">{pricing?.model_name || 'Writer 模型'}</p>
-              <p className="text-[11px] text-muted-foreground mt-1">
+              <p className="text-[0.6875rem] text-muted-foreground mt-1">
                 输入 {formatCny(pricing?.input_cost_cny || 0)} + 预计输出 {formatCny(pricing?.output_cost_cny || 0)}
               </p>
             </div>
             <div className="text-right shrink-0">
-              <p className="text-[11px] text-muted-foreground">预计本章</p>
+              <p className="text-[0.6875rem] text-muted-foreground">预计本章</p>
               <p className="text-base font-semibold tabular-nums">{formatCny(pricing?.total_cost_cny || 0)}</p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 pt-2 border-t text-[11px] text-muted-foreground tabular-nums">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 pt-2 border-t text-[0.6875rem] text-muted-foreground tabular-nums">
             <span>输入约 {totalTokens.toLocaleString()} tokens</span>
             <span>输出预留 {(pricing?.expected_output_tokens || 0).toLocaleString()} tokens</span>
             {preview?.dynamic_budget?.input_budget ? (
@@ -210,11 +219,16 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
                 onChange={() => toggle(key)}
                 className="rounded border-gray-300 text-primary focus:ring-primary/50 h-3.5 w-3.5"
               />
-              <span className="text-xs flex-1">{label}</span>
-              {badge && <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
+              <span className="text-xs flex-1 min-w-0">
+                {label}
+                {metaDetailMap[key] && (
+                  <span className="block text-[0.625rem] text-muted-foreground truncate">{metaDetailMap[key]}</span>
+                )}
+              </span>
+              {badge && <span className={`text-[0.625rem] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
               <span className={`w-24 text-right tabular-nums ${tok > 0 ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}>
                 <span className="block text-xs">{priceConfigured ? formatCny(sectionCost(tok)) : '未计价'}</span>
-                <span className="block text-[10px]">{tok > 0 ? `~${tok.toLocaleString()} tokens` : '0 tokens'}</span>
+                <span className="block text-[0.625rem]">{tok > 0 ? `~${tok.toLocaleString()} tokens` : '0 tokens'}</span>
               </span>
             </label>
           )
@@ -232,7 +246,7 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
             <span className="text-xs flex-1 text-muted-foreground">{label}</span>
             <span className="text-right tabular-nums text-muted-foreground">
               <span className="block text-xs">{priceConfigured ? formatCny(sectionCost(tok)) : '未计价'}</span>
-              <span className="block text-[10px]">~{tok.toLocaleString()} tokens</span>
+              <span className="block text-[0.625rem]">~{tok.toLocaleString()} tokens</span>
             </span>
           </div>
         ))}
@@ -243,14 +257,14 @@ export function ContextConfigContent({ novelId, novel }: ContextConfigContentPro
         <div>
           <span className="text-xs font-medium">上下文输入合计</span>
           {priceConfigured && pricing && (
-            <p className="text-[10px] text-muted-foreground mt-0.5">
+            <p className="text-[0.625rem] text-muted-foreground mt-0.5">
               不含预计输出 {formatCny(pricing.output_cost_cny)}
             </p>
           )}
         </div>
         <div className="text-right tabular-nums">
           <span className="block text-xs font-medium">{priceConfigured ? formatCny(pricing?.input_cost_cny || 0) : '未计价'}</span>
-          <span className="block text-[10px] text-muted-foreground">~{totalTokens.toLocaleString()} tokens</span>
+          <span className="block text-[0.625rem] text-muted-foreground">~{totalTokens.toLocaleString()} tokens</span>
         </div>
       </div>
 

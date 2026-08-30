@@ -17,9 +17,9 @@ from app.models.chapter import Chapter
 from app.models.character import Character
 from app.models.location import Location
 from app.models.memory import Memory, Outline
-from app.models.novel import Novel
 from app.services import vector_store
 from app.services.entity_embeddings import embed_character, embed_location
+from app.api.deps import CurrentUser, get_owned_novel
 
 router = APIRouter()
 
@@ -46,12 +46,11 @@ def _contains(text, q_lower) -> bool:
 @router.get("/novel/{novel_id}/search")
 async def unified_search(
     novel_id: int,
+    user: CurrentUser,
     q: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
 ):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    await get_owned_novel(db, novel_id, user)
 
     q_lower = q.lower()
     pattern = f"%{q}%"
@@ -205,7 +204,8 @@ async def _sync_summary_vector(chapter: Chapter, value: str) -> None:
 
 
 @router.post("/novel/{novel_id}/apply")
-async def apply_edit(novel_id: int, req: ApplyEditRequest, db: AsyncSession = Depends(get_db)):
+async def apply_edit(novel_id: int, req: ApplyEditRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     # WAL 模式下若本事务的读快照期间有其他连接提交（如后台生成），写升级会立即
     # 报 database is locked 且不等待 busy_timeout；回滚拿新快照重试即可。
     for attempt in range(3):

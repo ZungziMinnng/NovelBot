@@ -7,6 +7,53 @@ from app.prompts.loader import render
 CIRCLED_NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
+OPENING_CHAPTERS = 3  # 黄金三章：前这么多章注入开篇要求
+
+
+def _opening_block(chapter_number) -> str:
+    """前三章的开篇要求。章号缺失或超出范围返回空串。
+
+    章号来自 ctx["chapter_number"]（context_builder 写入）。重写/预览路径同样
+    走这里，所以三个 render 调用点不必各自处理。
+    """
+    if not isinstance(chapter_number, int) or isinstance(chapter_number, bool):
+        return ""
+    if not 1 <= chapter_number <= OPENING_CHAPTERS:
+        return ""
+    return render("writer_opening.jinja2", chapter_number=chapter_number).strip()
+
+
+def _compose_system_prompt(
+    custom: str,
+    base_system: str,
+    ctx: dict,
+) -> tuple[str, str]:
+    """自定义提示词替换人设与文风，但规则广场的规则块与开篇要求始终追加。
+
+    自定义提示词整体替换模板会连带丢掉伏笔边界、姓名一致、时间标注等硬约束，
+    模型随即回退到套式句和现编设定，因此规则与自定义内容拼接而非二选一。
+    规则块由 build_generation_context 解析进 ctx["_rules_block"]，解析不出来时
+    prompt_rules 已经兜底到模板，所以这里为空只可能是用户显式全关。
+    开篇要求同理：黄金三章是平台硬要求而非文风偏好，不能被自定义提示词覆盖掉。
+    返回 (system_content, system_source)。
+    """
+    parts = [custom] if custom else [base_system.rstrip()]
+    if custom:
+        writing_style = (ctx.get("writing_style") or "").strip()
+        if writing_style:
+            parts.append(f"【文章风格】\n{writing_style}")
+    rules_block = (ctx.get("_rules_block") or "").strip()
+    if rules_block:
+        parts.append(rules_block)
+    opening_block = _opening_block(ctx.get("chapter_number"))
+    if opening_block:
+        parts.append(opening_block)
+    source = ("custom" if custom else "template") + ("+rules" if rules_block else "+norules")
+    if opening_block:
+        source += "+opening"
+    return "\n\n".join(p for p in parts if p), source
+
+
 def _preview_text(text: str, max_len: int = 1200) -> str:
     if not text:
         return ""
@@ -112,14 +159,11 @@ async def stream_chapter(
         genre=ctx.get("genre", ""),
         writing_style=ctx.get("writing_style", ""),
         target_words=target_words,
+        chapter_number=ctx.get("chapter_number"),
     )
-    custom = writer_system_prompt.strip()
-    system_source = "custom" if custom else "template"
-    if custom:
-        writing_style = (ctx.get("writing_style") or "").strip()
-        system_content = f"{custom}\n\n【文章风格】\n{writing_style}" if writing_style else custom
-    else:
-        system_content = base_system
+    system_content, system_source = _compose_system_prompt(
+        writer_system_prompt.strip(), base_system, ctx,
+    )
     context_block, chars_block, task_instruction = format_context_for_writer(ctx, instruction, target_words)
     recent_text = ctx.get("recent_text", "")
 
@@ -313,14 +357,11 @@ async def stream_chapter_revision(
         genre=ctx.get("genre", ""),
         writing_style=ctx.get("writing_style", ""),
         target_words=target_words,
+        chapter_number=ctx.get("chapter_number"),
     )
-    custom = writer_system_prompt.strip()
-    system_source = "custom" if custom else "template"
-    if custom:
-        writing_style = (ctx.get("writing_style") or "").strip()
-        system_content = f"{custom}\n\n【文章风格】\n{writing_style}" if writing_style else custom
-    else:
-        system_content = base_system
+    system_content, system_source = _compose_system_prompt(
+        writer_system_prompt.strip(), base_system, ctx,
+    )
 
     constraints = _build_revision_constraints(ctx)
     directive_parts = [
@@ -431,13 +472,9 @@ async def stream_chapter_rewrite(
         writing_style=ctx.get("writing_style", ""),
         target_words=target_words,
     )
-    custom = writer_system_prompt.strip()
-    system_source = "custom" if custom else "template"
-    if custom:
-        writing_style = (ctx.get("writing_style") or "").strip()
-        system_content = f"{custom}\n\n【文章风格】\n{writing_style}" if writing_style else custom
-    else:
-        system_content = base_system
+    system_content, system_source = _compose_system_prompt(
+        writer_system_prompt.strip(), base_system, ctx,
+    )
     context_block, chars_block, _ = format_context_for_writer(ctx, "", target_words)
 
     numbered_text = _number_paragraphs(original_text)

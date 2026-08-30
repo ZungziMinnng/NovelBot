@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
@@ -8,6 +8,7 @@ from app.models.technique import Technique
 from app.schemas.world_entity import WorldEntityCreate, WorldEntityUpdate, WorldEntityOut
 from app.schemas.technique import TechniqueOut
 from app.services.entity_embeddings import embed_world_entity, embed_technique, remove_entity_embedding
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
@@ -15,9 +16,11 @@ router = APIRouter()
 @router.get("/novel/{novel_id}", response_model=list[WorldEntityOut])
 async def list_entities(
     novel_id: int,
+    user: CurrentUser,
     type: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
+    await get_owned_novel(db, novel_id, user)
     query = select(WorldEntity).where(WorldEntity.novel_id == novel_id)
     if type:
         query = query.where(WorldEntity.type == type)
@@ -27,15 +30,13 @@ async def list_entities(
 
 
 @router.get("/{entity_id}", response_model=WorldEntityOut)
-async def get_entity(entity_id: int, db: AsyncSession = Depends(get_db)):
-    entity = await db.get(WorldEntity, entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="实体不存在")
-    return entity
+async def get_entity(entity_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    return await get_owned_child(db, WorldEntity, entity_id, user, "实体")
 
 
 @router.post("/", response_model=WorldEntityOut)
-async def create_entity(data: WorldEntityCreate, db: AsyncSession = Depends(get_db)):
+async def create_entity(data: WorldEntityCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     entity = WorldEntity(**data.model_dump())
     db.add(entity)
     await db.commit()
@@ -45,10 +46,8 @@ async def create_entity(data: WorldEntityCreate, db: AsyncSession = Depends(get_
 
 
 @router.patch("/{entity_id}", response_model=WorldEntityOut)
-async def update_entity(entity_id: int, data: WorldEntityUpdate, db: AsyncSession = Depends(get_db)):
-    entity = await db.get(WorldEntity, entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="实体不存在")
+async def update_entity(entity_id: int, data: WorldEntityUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    entity = await get_owned_child(db, WorldEntity, entity_id, user, "实体")
     old_type_key = f"entity_{entity.type}"
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(entity, k, v)
@@ -62,10 +61,8 @@ async def update_entity(entity_id: int, data: WorldEntityUpdate, db: AsyncSessio
 
 
 @router.delete("/{entity_id}")
-async def delete_entity(entity_id: int, db: AsyncSession = Depends(get_db)):
-    entity = await db.get(WorldEntity, entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="实体不存在")
+async def delete_entity(entity_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    entity = await get_owned_child(db, WorldEntity, entity_id, user, "实体")
     novel_id = entity.novel_id
     type_key = f"entity_{entity.type}"
     entity_id_val = entity.id
@@ -76,10 +73,8 @@ async def delete_entity(entity_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{entity_id}/convert-to-technique", response_model=TechniqueOut)
-async def convert_to_technique(entity_id: int, db: AsyncSession = Depends(get_db)):
-    entity = await db.get(WorldEntity, entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="实体不存在")
+async def convert_to_technique(entity_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    entity = await get_owned_child(db, WorldEntity, entity_id, user, "实体")
     novel_id = entity.novel_id
     old_type_key = f"entity_{entity.type}"
     old_id = entity.id

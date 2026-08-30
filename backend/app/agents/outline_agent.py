@@ -6,7 +6,7 @@ from app.models.novel import Novel
 from app.models.character import Character
 from app.models.memory import Outline
 from app.models.volume import Volume
-from app.services import llm_client
+from app.services import llm_client, outline_plan
 from app.prompts.loader import render
 
 TARGET_LENGTH_PLAN = {
@@ -41,6 +41,11 @@ async def generate_chapter_outlines(
         f"- {c.name}（{c.role}）：{c.description}" for c in characters
     )
 
+    # 留到结尾的牌记在第 1 卷上（向导写入），这里当"哪些牌现在还不能揭"的约束喂给模型
+    first_volume = (await session.execute(
+        select(Volume).where(Volume.novel_id == novel.id, Volume.number == 1)
+    )).scalar_one_or_none()
+
     default_volumes, default_chapters = TARGET_LENGTH_PLAN.get(novel.target_length, (3, 30))
     total_chapters = novel.estimated_chapters if novel.estimated_chapters > 0 else default_chapters
     volume_count = default_volumes if novel.enable_volume_split else 1
@@ -55,7 +60,11 @@ async def generate_chapter_outlines(
         target_length=novel.target_length,
         writing_style=novel.writing_style,
         premise=novel.premise,
-        core_setting=novel.core_setting[:500],
+        plot_design=novel.plot_design or "",
+        ending=novel.ending or "",
+        protagonist_arc=novel.protagonist_arc or "",
+        endgame_cards=(first_volume.endgame_cards if first_volume else "") or "",
+        core_setting=novel.core_setting[:1000],
         characters_summary=chars_summary or "（角色待定）",
         volume_count=volume_count,
         chapter_count=chapter_count,
@@ -92,7 +101,16 @@ async def generate_chapter_outlines(
         if volume:
             volume.title = title
         else:
-            session.add(Volume(novel_id=novel.id, number=number, title=title))
+            # 库存（留到结尾的牌、实力档位）是全书级的，从第 1 卷抄给新卷。
+            # 不抄的话每卷体检都会报"没登记牌"，而作者只在向导里填过一次。
+            # spent_payoffs 不抄：那是各卷自己用掉的，本来就该从空开始。
+            session.add(Volume(
+                novel_id=novel.id, number=number, title=title,
+                endgame_cards=first_volume.endgame_cards if first_volume else "",
+                power_tiers=first_volume.power_tiers if first_volume else "",
+                tier_count=first_volume.tier_count if first_volume else 0,
+                words_per_tier=first_volume.words_per_tier if first_volume else 0,
+            ))
     for o in outlines:
         session.add(o)
     return outlines
@@ -108,6 +126,9 @@ def _parse_chapters(block: str, novel_id: int, volume: int, last_chapter: int) -
         if chapter_num <= last_chapter:
             chapter_num = last_chapter + 1
         last_chapter = chapter_num
+        # 计划字段进独立列，content 只留剧情（计划行留在正文里会被 prose_lint 当工程词泄漏）
+        plan = outline_plan.parse_plan(content)
+        body = outline_plan.strip_plan_lines(content)
         outlines.append(Outline(
             novel_id=novel_id,
             level="chapter",
@@ -116,7 +137,8 @@ def _parse_chapters(block: str, novel_id: int, volume: int, last_chapter: int) -
             start_chapter=chapter_num,
             end_chapter=chapter_num,
             title=title.strip(),
-            content=f"{title.strip()}\n{content.strip()}",
+            content=f"{title.strip()}\n{body}",
+            **plan,
         ))
     return outlines, last_chapter
 

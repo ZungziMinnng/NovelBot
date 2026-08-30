@@ -5,6 +5,10 @@ import type { Chapter } from '@/api/client'
 
 const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
 
+// LLM 输出的段落分隔不统一（单换行/空行/多空行混用），阅读视图统一为段间一个空行；不改动存库原文
+const normalizeSpacing = (text: string) =>
+  text.split(/\n+/).filter(p => p.trim()).join('\n\n')
+
 interface ChapterContentAreaProps {
   displayText: string
   isEditing: boolean
@@ -74,7 +78,7 @@ export default function ChapterContentArea({
               <span className="flex-1 novel-content whitespace-pre-wrap">{p}</span>
               <button
                 onClick={() => onAddParagraphAnnotation(i + 1)}
-                className="shrink-0 opacity-0 group-hover:opacity-100 ml-2 mt-0.5 flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-all"
+                className="shrink-0 opacity-0 group-hover:opacity-100 ml-2 mt-0.5 flex items-center gap-0.5 text-[0.625rem] text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-all"
               >
                 <Plus className="w-3 h-3" />批注
               </button>
@@ -113,7 +117,7 @@ export default function ChapterContentArea({
             </div>
           ) : (
             <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
-              {displayText}
+              {normalizeSpacing(displayText)}
             </div>
           )}
         </div>
@@ -150,7 +154,7 @@ export default function ChapterContentArea({
             </div>
           ) : (
             <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
-              {displayText || (
+              {displayText ? normalizeSpacing(displayText) : (
                 <span className="text-muted-foreground/50">
                   {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
                 </span>

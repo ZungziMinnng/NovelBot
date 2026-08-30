@@ -1,21 +1,30 @@
 以 JSON 格式输出，只输出本章发生变化的角色和字段。未变化字段请省略，系统会保留旧值。
 
 字段规则：
-- 推荐字段：location、current_goal、titles、affiliation、known_secrets、relationship_changes、personality
+- 推荐字段：location、存续、current_goal、titles、affiliation、known_secrets、relationship_changes、base_relationships、personality
 - 可以继续使用“当前已跟踪的状态字段”中的任意字段
 - 可以新增有明确文本证据的新字段，如 realm、injury、artifact、identity、curse、cultivation、power_status
 - titles、known_secrets 等列表字段输出数组；relationship_changes 输出对象；其余字段通常输出简短字符串
-- 空字符串、空数组、空对象不要输出
+- base_relationships 仅在本章**确立或揭示了根本关系**时输出（拜师、认亲、结拜、血缘揭露、婚姻缔结等），日常互动、情感起伏不要写进这里，写 relationship_changes
+- base_relationships 的视角规则：键为对方角色名，值为「对方是该角色的什么人」。例如给"裴云霁"输出 {"沈放": "弟子和儿子"}，同时给"沈放"输出 {"裴云霁": "师尊/娘亲"}——双方都要各写一份，措辞按各自视角
+- 存续：角色的生死状态，标准值为 存活/死亡/失踪，也可按剧情写"重伤垂死""假死""封印沉睡"等描述。仅在本章有明确剧情证据（死亡场面、尸体确认、失踪事件）时才更新；角色死亡是重大事件，无明确证据严禁输出"死亡"
+- 状态需要**删除**时（物品损毁/消耗、伤势痊愈、诅咒解除、目标已完成等），在该角色下输出保留键"移除"，值为对象：{"字段名": ["要移除的条目", ...]} 从列表中删指定条目，{"字段名": "全部"} 删除整个字段。仅在本章有明确剧情证据时才移除，不确定就不动
+- 对本章**实际出场**（有行动、对话或遭遇）的角色，额外输出保留键"经历"：一句话（60字内）概括该角色本章的关键行动与遭遇，第三人称事实语言；仅被他人提及而未出场的角色不要输出"经历"
+- 空字符串、空数组、空对象不要输出；删除必须走"移除"键，不要用空值清空字段
 
 示例格式：
 {
   "角色名": {
     "location": "新的当前位置",
+    "存续": "死亡",
     "realm": "新的境界/修为状态",
     "injury": "新的伤势或身体状态",
     "personality": "当前性格倾向，如：由骄横转为对核心伙伴柔软",
     "known_secrets": ["本章新增或确认的关键秘密"],
-    "relationship_changes": {"其他角色名": "本章关系变化"}
+    "relationship_changes": {"其他角色名": "本章关系变化"},
+    "base_relationships": {"其他角色名": "对方是该角色的什么人，如：师尊/娘亲"},
+    "移除": {"artifact": ["本章已消耗的回魂丹"], "injury": "全部"},
+    "经历": "为救同门独闯魔窟，重伤夺回本命剑，识破长老通魔"
   }
 }
 

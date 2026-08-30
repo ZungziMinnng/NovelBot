@@ -6,11 +6,12 @@ import {
   ArrowLeft, List, Zap, Check, Edit3, Trash2,
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, AlertTriangle, Radio, RadioTower, MessageSquare,
-  Terminal, BookOpen, ClipboardCheck, Gauge, Search, GitCompare,
+  Terminal, BookOpen, ClipboardCheck, Gauge, Search, GitCompare, ScrollText, Send,
+  LayoutDashboard,
 } from 'lucide-react'
 import {
   novelsApi, chaptersApi, modelLibraryApi, charactersApi, worldEntitiesApi,
-  locationsApi, factionsApi, techniquesApi, findModelEntry,
+  locationsApi, factionsApi, techniquesApi, outlinesApi, findModelEntry,
   type Chapter, type ReviewResult,
 } from '@/api/client'
 import AgentLog from '@/components/AgentLog/AgentLog'
@@ -21,18 +22,23 @@ import DevPanel from '@/components/DevPanel/DevPanel'
 import ReviewModal from '@/components/ReviewModal/ReviewModal'
 import OutlineModal from '@/components/OutlineModal/OutlineModal'
 import CharacterCardModal from '@/components/CharacterCardModal/CharacterCardModal'
+import { ThreadResolutionsModal } from '@/components/ThreadsModal/ThreadResolutionsModal'
+import SubmissionModal from '@/components/SubmissionModal/SubmissionModal'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useGenerationStore } from '@/store/generationStore'
 import { useEditorStore } from '@/store/editorStore'
 import { useGenerationStream } from './useGenerationStream'
+import { useAutosave } from './useAutosave'
 import EditorSidebar from './EditorSidebar'
 import ChapterContentArea from './ChapterContentArea'
 import GenerationBar, { type BarMode } from './GenerationBar'
+import DiscoveryPanel from './DiscoveryPanel'
+import ChapterDashboard from './ChapterDashboard'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const novelId = Number(id)
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -40,8 +46,11 @@ export default function Editor() {
   const genStore = useGenerationStore()
 
   // ── Chapter Selection ────────────────────────────────────────────────────
+  const setLastChapter = useEditorStore((s) => s.setLastChapter)
+  // 初始章节优先级：URL ?chapter= > 上次浏览的章节（持久化）> 第 1 章。
+  // 从大纲/数据等页面用裸 /novel/:id 返回（丢了 query）时，靠持久化恢复而非跳回第 1 章。
   const [selectedChapterNum, setSelectedChapterNum] = useState<number>(
-    Number(searchParams.get('chapter')) || 1,
+    () => Number(searchParams.get('chapter')) || useEditorStore.getState().getLastChapter(novelId) || 1,
   )
   useEffect(() => {
     const chapterFromUrl = Number(searchParams.get('chapter'))
@@ -49,6 +58,16 @@ export default function Editor() {
       setSelectedChapterNum(chapterFromUrl)
     }
   }, [searchParams])
+  // 将当前章节回写 URL + 持久化：离开编辑器再返回时恢复到原章节，而非默认跳回第 1 章
+  // （避免误在第 1 章重新生成）。URL 用 replace 不污染浏览器历史；持久化兜底裸 URL 返回。
+  useEffect(() => {
+    setLastChapter(novelId, selectedChapterNum)
+    if (Number(searchParams.get('chapter')) !== selectedChapterNum) {
+      const next = new URLSearchParams(searchParams)
+      next.set('chapter', String(selectedChapterNum))
+      setSearchParams(next, { replace: true })
+    }
+  }, [selectedChapterNum])
 
   // ── Editor Mode ───────────────────────────────────────────────────────────
   const [editorMode, setEditorMode] = useState<'generate' | 'chat'>('generate')
@@ -67,7 +86,43 @@ export default function Editor() {
 
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
+  // editContent 当前属于哪一章。切章时它会晚一帧才被覆盖，自动保存靠这个避免存错章。
+  const [editContentChapterId, setEditContentChapterId] = useState<number | undefined>(undefined)
   const [showContext, setShowContext] = useState(true)
+  // 本章仪表盘默认收起：它和上下文状态抢横向空间，别一进来就把正文挤窄
+  const [showDashboard, setShowDashboard] = useState(
+    () => localStorage.getItem('novel_show_dashboard') === '1',
+  )
+  useEffect(() => {
+    localStorage.setItem('novel_show_dashboard', showDashboard ? '1' : '0')
+  }, [showDashboard])
+  const [dashboardWidth, setDashboardWidth] = useState(
+    () => Number(localStorage.getItem('novel_dashboard_width')) || 340,
+  )
+  useEffect(() => {
+    localStorage.setItem('novel_dashboard_width', String(dashboardWidth))
+  }, [dashboardWidth])
+  const dashDragRef = useRef({ startX: 0, startW: 0 })
+
+  // 这一列在最右侧，把手在左边缘：鼠标往左拖是变宽，位移和 EditorSidebar 相反
+  const handleDashboardResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    dashDragRef.current = { startX: e.clientX, startW: e.currentTarget.parentElement!.offsetWidth }
+    const onMove = (ev: MouseEvent) => {
+      const { startX, startW } = dashDragRef.current
+      setDashboardWidth(Math.max(240, Math.min(880, startW + startX - ev.clientX)))
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [])
   const [rightTab, setRightTab] = useState<'context' | 'agent'>('context')
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false)
   const [settingsDrawerTab, setSettingsDrawerTab] = useState<'content' | 'creation' | 'context'>('content')
@@ -78,6 +133,7 @@ export default function Editor() {
   const [showReviewModal, setShowReviewModal] = useState(false)
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
   const [showOutlineModal, setShowOutlineModal] = useState(false)
+  const [showSubmissionModal, setShowSubmissionModal] = useState(false)
   const [confirmQueue, setConfirmQueue] = useState<number[]>([])
   const [confirmingId, setConfirmingId] = useState<number | null>(null)
   const confirmWorkerBusy = useRef(false)
@@ -125,6 +181,11 @@ export default function Editor() {
     queryKey: ['techniques', novelId],
     queryFn: () => techniquesApi.list(novelId),
   })
+  // 和 ChapterDashboard 共用同一个 query key，不会多发一次请求
+  const { data: outlines = [] } = useQuery({
+    queryKey: ['outlines', novelId],
+    queryFn: () => outlinesApi.list(novelId),
+  })
 
   const entityList = useMemo(() => {
     const items: Array<{ name: string; type: string; typeLabel: string; description: string }> = []
@@ -136,12 +197,35 @@ export default function Editor() {
     return items
   }, [characters, worldEntities, locations, factions, techniques])
 
+  // 只认单章细纲：范围大纲太粗，写这一章时等于没纲
+  const hasChapterOutline = outlines.some(
+    o => o.start_chapter === selectedChapterNum && o.end_chapter === selectedChapterNum,
+  )
+  const [draftingOutline, setDraftingOutline] = useState(false)
+  const handleDraftOutline = useCallback(async () => {
+    setDraftingOutline(true)
+    try {
+      await outlinesApi.draftChapter(novelId, selectedChapterNum)
+      qc.invalidateQueries({ queryKey: ['outlines', novelId] })
+      qc.invalidateQueries({ queryKey: ['outline-health', novelId] })
+      toast.success(`第${selectedChapterNum}章细纲已生成，可在右侧「本章」里改`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '生成细纲失败')
+    } finally {
+      setDraftingOutline(false)
+    }
+  }, [novelId, selectedChapterNum, qc])
+
   const currentChapter = chapters.find((c: Chapter) => c.number === selectedChapterNum) || null
-  const selectedVolume = currentChapter?.volume ?? novel?.current_volume ?? 1
+  // 新章节继承最新一章的卷号（chapters 按 number 升序）；novel.current_volume 可能停在过时值
+  const selectedVolume = currentChapter?.volume ?? chapters[chapters.length - 1]?.volume ?? 1
 
   // Sync editContent when chapter changes
   useEffect(() => {
-    if (currentChapter) setEditContent(currentChapter.content)
+    if (currentChapter) {
+      setEditContent(currentChapter.content)
+      setEditContentChapterId(currentChapter.id)
+    }
   }, [currentChapter?.id])
 
   // ── Generation Stream ─────────────────────────────────────────────────────
@@ -260,20 +344,49 @@ export default function Editor() {
     }
   }, [currentChapter, chapters, refetchChapters])
 
+  // 自动保存会带着自己的快照调用（可能是上一章的 id），所以内容和 id 都由参数传入，
+  // 不从闭包读 currentChapter/editContent。
+  const persistChapter = useCallback(async (chapterId: number, content: string) => {
+    const updated = await chaptersApi.update(chapterId, { content })
+    qc.setQueryData<Chapter[]>(['chapters', novelId], (old = []) =>
+      old.map(ch => ch.id === updated.id ? updated : ch),
+    )
+  }, [novelId, qc])
+
+  const autosave = useAutosave({
+    // 生成中一律停掉自动保存：生成结束会把新正文写进 currentChapter，此时若还在编辑态，
+    // 自动保存会拿编辑框里的旧正文盖掉刚生成的内容。
+    enabled: isEditing && !gen.isCurrentlyGenerating,
+    chapterId: currentChapter?.id,
+    contentChapterId: editContentChapterId,
+    content: editContent,
+    baseline: currentChapter?.content,
+    onSave: persistChapter,
+  })
+
   const handleSaveEdit = useCallback(async () => {
     if (!currentChapter) return
     try {
-      const updated = await chaptersApi.update(currentChapter.id, { content: editContent, title: currentChapter.title })
-      qc.setQueryData<Chapter[]>(['chapters', novelId], (old = []) =>
-        old.map(ch => ch.id === updated.id ? updated : ch),
-      )
-      setEditContent(updated.content)
+      await persistChapter(currentChapter.id, editContent)
       await refetchChapters()
       setIsEditing(false)
     } catch {
       toast.error('保存章节失败')
     }
-  }, [currentChapter, editContent, novelId, qc, refetchChapters])
+  }, [currentChapter, editContent, persistChapter, refetchChapters])
+
+  // Ctrl+S 是写作时的肌肉记忆，不接的话浏览器会弹「保存网页」
+  useEffect(() => {
+    if (!isEditing) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void handleSaveEdit()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isEditing, handleSaveEdit])
 
   const handleNewChapter = useCallback(() => {
     setSelectedChapterNum(
@@ -315,15 +428,37 @@ export default function Editor() {
     }
   }, [novelId, novel?.enable_detail_review, qc])
 
+  const handleQuickParamsChange = useCallback(async (patch: Partial<{
+    writer_temperature: number
+    writer_use_custom_temperature: boolean
+    gemini_thinking_level: string
+    deepseek_thinking_level: string
+  }>) => {
+    // 乐观更新，避免拖动温度滑块时因请求往返而卡顿
+    qc.setQueryData<typeof novel>(['novel', novelId], (old) => old ? { ...old, ...patch } : old)
+    try {
+      await novelsApi.update(novelId, patch)
+      qc.invalidateQueries({ queryKey: ['novel', novelId] })
+    } catch {
+      toast.error('保存生成参数失败')
+      qc.invalidateQueries({ queryKey: ['novel', novelId] })
+    }
+  }, [novelId, qc])
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
       {/* Header */}
       <header className="border-b px-4 py-3 flex items-center gap-3 shrink-0">
-        <button onClick={() => navigate('/')} className="p-1.5 rounded-md hover:bg-muted">
+        <button onClick={() => navigate('/novels')} className="p-1.5 rounded-md hover:bg-muted">
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-semibold text-sm truncate max-w-48">{novel?.title}</h1>
+        <button onClick={() => navigate('/rules')}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
+          title="规则广场">
+          <ScrollText className="w-3.5 h-3.5" /> 规则广场
+        </button>
         <div className="flex items-center gap-1 ml-auto">
           {novel && !novel.core_setting && (
             <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-800 mr-1">
@@ -346,6 +481,11 @@ export default function Editor() {
           <button onClick={() => setShowReviewModal(true)}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-colors">
             <ClipboardCheck className="w-3.5 h-3.5" /> 审查
+          </button>
+          <button onClick={() => setShowSubmissionModal(true)}
+            title="书名简介、导出稿件、过审预检"
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30 transition-colors">
+            <Send className="w-3.5 h-3.5" /> 投稿
           </button>
           <div className="w-px h-4 bg-border mx-0.5" />
           <button onClick={() => { setSettingsDrawerTab('context'); setShowSettingsDrawer(true) }}
@@ -371,6 +511,13 @@ export default function Editor() {
             title={streamingMode ? '流式显示已开启（点击关闭）' : '流式显示已关闭（点击开启）'}
           >
             {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
+          </button>
+          <button
+            onClick={() => setShowDashboard(v => !v)}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDashboard ? 'text-primary bg-primary/10' : 'text-muted-foreground'}`}
+            title="本章仪表盘"
+          >
+            <LayoutDashboard className="w-3.5 h-3.5" /> 本章
           </button>
           <ThemePicker size="sm" />
           <button onClick={() => setShowContext(!showContext)}
@@ -490,7 +637,7 @@ export default function Editor() {
                 {fontColor && (
                   <button
                     onClick={() => { setFontColor(''); localStorage.removeItem('novel_font_color') }}
-                    className="text-[10px] text-muted-foreground hover:text-foreground px-0.5"
+                    className="text-[0.625rem] text-muted-foreground hover:text-foreground px-0.5"
                     title="重置为默认颜色"
                   >
                     ×
@@ -522,15 +669,24 @@ export default function Editor() {
                 {currentChapter?.content && !gen.isCurrentlyGenerating && (
                   <>
                     {!isEditing ? (
-                      <button onClick={() => { setIsEditing(true); setEditContent(currentChapter.content) }}
+                      <button onClick={() => { setIsEditing(true); setEditContent(currentChapter.content); setEditContentChapterId(currentChapter.id) }}
                         className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors">
                         <Edit3 className="w-3 h-3" /> 手动编辑
                       </button>
                     ) : (
-                      <button onClick={handleSaveEdit}
-                        className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors">
-                        <Check className="w-3 h-3" /> 保存编辑
-                      </button>
+                      <>
+                        <span className="text-xs text-muted-foreground px-1" title="编辑会在停手 2 秒后自动保存，切换章节也会先保存">
+                          {autosave.state === 'saving' ? '保存中…'
+                            : autosave.state === 'error' ? <span className="text-destructive">自动保存失败</span>
+                            : autosave.state === 'dirty' ? '未保存'
+                            : autosave.state === 'saved' ? '已自动保存' : '自动保存已开'}
+                        </span>
+                        <button onClick={handleSaveEdit}
+                          title="保存并退出编辑（Ctrl+S）"
+                          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors">
+                          <Check className="w-3 h-3" /> 保存编辑
+                        </button>
+                      </>
                     )}
                     <button onClick={handleConfirm}
                       disabled={confirmQueue.includes(currentChapter.id)}
@@ -579,7 +735,7 @@ export default function Editor() {
           {/* Chat Mode */}
           {editorMode === 'chat' && novel && (
             <div className="flex-1 overflow-hidden">
-              <ChatPanel novelId={novelId} novel={novel} />
+              <ChatPanel novelId={novelId} novel={novel} chapterNumber={selectedChapterNum} />
             </div>
           )}
 
@@ -638,6 +794,9 @@ export default function Editor() {
               povOptions={characters.map((c) => c.name)}
               onGenerate={gen.handleGenerate}
               onAbortOrGenerate={barMode === 'rewrite' ? gen.handleRewriteOrAbort : gen.handleAbortOrGenerate}
+              hasChapterOutline={hasChapterOutline}
+              draftingOutline={draftingOutline}
+              onDraftOutline={handleDraftOutline}
               annotations={annotations}
               onRemoveAnnotation={(id) => removeAnnotation(novelId, selectedChapterNum, id)}
               onClearAnnotations={() => clearAnnotations(novelId, selectedChapterNum)}
@@ -655,83 +814,127 @@ export default function Editor() {
               enableDetailReview={novel?.enable_detail_review ?? false}
               onToggleCritic={handleToggleCritic}
               onToggleDetailReview={handleToggleDetailReview}
-
-              newCharCandidates={gen.newCharCandidates}
-              selectedCharIndices={gen.selectedCharIndices}
-              addingChars={gen.addingChars}
-              onToggleChar={gen.toggleCharSelection}
-              onAddChars={gen.handleAddNewChars}
-              onDismissChars={() => gen.setNewCharCandidates([])}
-              newEntityCandidates={gen.newEntityCandidates}
-              selectedEntityIndices={gen.selectedEntityIndices}
-              addingEntities={gen.addingEntities}
-              onToggleEntity={gen.toggleEntitySelection}
-              onAddEntities={gen.handleAddNewEntities}
-              onDismissEntities={() => gen.setNewEntityCandidates([])}
-              newLocationCandidates={gen.newLocationCandidates}
-              selectedLocationIndices={gen.selectedLocationIndices}
-              addingLocations={gen.addingLocations}
-              onToggleLocation={gen.toggleLocationSelection}
-              onAddLocations={gen.handleAddNewLocations}
-              onDismissLocations={() => gen.setNewLocationCandidates([])}
-              newTechCandidates={gen.newTechCandidates}
-              selectedTechIndices={gen.selectedTechIndices}
-              addingTechs={gen.addingTechs}
-              onToggleTech={gen.toggleTechSelection}
-              onAddTechs={gen.handleAddNewTechs}
-              onDismissTechs={() => gen.setNewTechCandidates([])}
-              newFactionCandidates={gen.newFactionCandidates}
-              selectedFactionIndices={gen.selectedFactionIndices}
-              addingFactions={gen.addingFactions}
-              onToggleFaction={gen.toggleFactionSelection}
-              onAddFactions={gen.handleAddNewFactions}
-              onDismissFactions={() => gen.setNewFactionCandidates([])}
+              writerTemperature={novel?.writer_temperature ?? 0.85}
+              writerUseCustomTemperature={novel?.writer_use_custom_temperature ?? true}
+              geminiThinkingLevel={novel?.gemini_thinking_level || 'medium'}
+              deepseekThinkingLevel={novel?.deepseek_thinking_level || 'high'}
+              onQuickParamsChange={handleQuickParamsChange}
               entities={entityList}
             />
           </>}
         </div>
 
-        {/* Right Sidebar: Context + Agent Log tabs */}
+        {/* 本章仪表盘：写这一章时要盯的东西，排在上下文状态左边 */}
+        {showDashboard && (
+          <div className="relative border-l flex flex-col shrink-0" style={{ width: dashboardWidth }}>
+            <div
+              onMouseDown={handleDashboardResize}
+              className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors z-10"
+            />
+            <div className="px-3 py-2 border-b shrink-0 text-xs font-medium">本章仪表盘</div>
+            <div className="p-2 flex-1 overflow-auto">
+              <ChapterDashboard
+                novelId={novelId}
+                chapterNum={selectedChapterNum}
+                displayText={displayText}
+                targetWords={targetWords}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Right Sidebar: top half = Context + Agent Log tabs, bottom half = entity discovery */}
         {showContext && (
           <div className="w-72 border-l flex flex-col shrink-0">
-            <div className="flex border-b shrink-0">
-              <button
-                onClick={() => setRightTab('context')}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === 'context' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                上下文状态
-              </button>
-              <button
-                onClick={() => setRightTab('agent')}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === 'agent' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Agent 日志{agentLogEntries.length > 0 ? ` (${agentLogEntries.length})` : ''}
-              </button>
+            <div className="basis-1/2 min-h-0 flex flex-col">
+              <div className="flex border-b shrink-0">
+                <button
+                  onClick={() => setRightTab('context')}
+                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                    rightTab === 'context' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  上下文状态
+                </button>
+                <button
+                  onClick={() => setRightTab('agent')}
+                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                    rightTab === 'agent' ? 'text-foreground border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Agent 日志{agentLogEntries.length > 0 ? ` (${agentLogEntries.length})` : ''}
+                </button>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                {rightTab === 'context' ? (
+                  <div className="p-3 h-full overflow-auto">
+                    <ContextPanel novelId={novelId} rollingStage={hasGenDataHere ? genStore.agentStage : ''} contextSteps={hasGenDataHere ? genStore.contextSteps : []} />
+                  </div>
+                ) : (
+                  <div className="p-3 h-full overflow-auto">
+                    <AgentLog
+                      entries={agentLogEntries}
+                      totalInputTokens={totalInputTokens}
+                      totalOutputTokens={totalOutputTokens}
+                      showTokens={showTokens}
+                      onToggleTokens={() => setShowTokens(v => !v)}
+                      canShowReviewDiff={canShowReviewDiff}
+                      onShowReviewDiff={() => setShowDiff(true)}
+                      collapsed={logCollapsed}
+                      onToggleCollapse={() => setLogCollapsed(v => !v)}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="flex-1 overflow-hidden">
-              {rightTab === 'context' ? (
-                <div className="p-3 h-full overflow-auto">
-                  <ContextPanel novelId={novelId} rollingStage={hasGenDataHere ? genStore.agentStage : ''} contextSteps={hasGenDataHere ? genStore.contextSteps : []} />
-                </div>
-              ) : (
-                <div className="p-3 h-full overflow-auto">
-                  <AgentLog
-                    entries={agentLogEntries}
-                    totalInputTokens={totalInputTokens}
-                    totalOutputTokens={totalOutputTokens}
-                    showTokens={showTokens}
-                    onToggleTokens={() => setShowTokens(v => !v)}
-                    canShowReviewDiff={canShowReviewDiff}
-                    onShowReviewDiff={() => setShowDiff(true)}
-                    collapsed={logCollapsed}
-                    onToggleCollapse={() => setLogCollapsed(v => !v)}
-                  />
-                </div>
-              )}
+            <div className="basis-1/2 min-h-0 border-t flex flex-col">
+              <div className="px-3 py-2 border-b shrink-0 text-xs font-medium">
+                待确认发现
+                {(() => {
+                  const total = gen.newCharCandidates.length + gen.newEntityCandidates.length + gen.newLocationCandidates.length + gen.newTechCandidates.length + gen.newFactionCandidates.length + gen.newThreads.length
+                  return total > 0 ? ` (${total})` : ''
+                })()}
+              </div>
+              <div className="p-3 flex-1 overflow-auto">
+                <DiscoveryPanel
+                  newCharCandidates={gen.newCharCandidates}
+                  selectedCharIndices={gen.selectedCharIndices}
+                  addingChars={gen.addingChars}
+                  onToggleChar={gen.toggleCharSelection}
+                  onAddChars={gen.handleAddNewChars}
+                  onDismissChars={() => gen.setNewCharCandidates([])}
+                  newEntityCandidates={gen.newEntityCandidates}
+                  selectedEntityIndices={gen.selectedEntityIndices}
+                  addingEntities={gen.addingEntities}
+                  onToggleEntity={gen.toggleEntitySelection}
+                  onAddEntities={gen.handleAddNewEntities}
+                  onDismissEntities={() => gen.setNewEntityCandidates([])}
+                  newLocationCandidates={gen.newLocationCandidates}
+                  selectedLocationIndices={gen.selectedLocationIndices}
+                  addingLocations={gen.addingLocations}
+                  onToggleLocation={gen.toggleLocationSelection}
+                  onAddLocations={gen.handleAddNewLocations}
+                  onDismissLocations={() => gen.setNewLocationCandidates([])}
+                  newTechCandidates={gen.newTechCandidates}
+                  selectedTechIndices={gen.selectedTechIndices}
+                  addingTechs={gen.addingTechs}
+                  onToggleTech={gen.toggleTechSelection}
+                  onAddTechs={gen.handleAddNewTechs}
+                  onDismissTechs={() => gen.setNewTechCandidates([])}
+                  newFactionCandidates={gen.newFactionCandidates}
+                  selectedFactionIndices={gen.selectedFactionIndices}
+                  addingFactions={gen.addingFactions}
+                  onToggleFaction={gen.toggleFactionSelection}
+                  onAddFactions={gen.handleAddNewFactions}
+                  onDismissFactions={() => gen.setNewFactionCandidates([])}
+                  newThreads={gen.newThreads}
+                  selectedThreadIndices={gen.selectedThreadIndices}
+                  addingThreads={gen.addingThreads}
+                  onToggleThread={gen.toggleThreadSelection}
+                  onAddThreads={gen.handleAddNewThreads}
+                  onDismissThreads={() => gen.setNewThreads([])}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -770,9 +973,15 @@ export default function Editor() {
         />
       )}
 
+      {/* Submission Modal：书名简介 / 导出 / 过审预检 */}
+      {showSubmissionModal && novel && (
+        <SubmissionModal novel={novel} onClose={() => setShowSubmissionModal(false)} />
+      )}
+
       {/* Character Card Review Modal (after confirming discovered characters) */}
       {gen.reviewCharacters.length > 0 && (
         <CharacterCardModal
+          key={gen.reviewCharacters[gen.reviewCharacters.length - 1].id}
           character={gen.reviewCharacters[gen.reviewCharacters.length - 1]}
           onClose={() => {
             const remaining = gen.reviewCharacters.slice(0, -1)
@@ -791,6 +1000,16 @@ export default function Editor() {
             gen.setReviewCharacters(prev => prev.filter(c => c.id !== charId))
             qc.invalidateQueries({ queryKey: ['characters', novelId] })
           }}
+        />
+      )}
+
+      {/* 本章检测到的伏笔回收/秘密公开候选（需确认更新） */}
+      {gen.threadResolutions.length > 0 && (
+        <ThreadResolutionsModal
+          novelId={novelId}
+          resolutions={gen.threadResolutions}
+          currentChapter={selectedChapterNum}
+          onClose={() => gen.setThreadResolutions([])}
         />
       )}
 

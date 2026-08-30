@@ -20,7 +20,10 @@ class StoryThread(Base):
     kind: Mapped[str] = mapped_column(String(20), nullable=False)  # foreshadowing | secret
     title: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="active")  # active | resolved | abandoned
+    # active | resolved | abandoned | expired
+    # expired = 埋太久没回收，读者已经忘了。与 abandoned 的区别：abandoned 是作者主动弃用，
+    # expired 是过期失效，仍算作者欠着的账，要在体检里报出来。
+    status: Mapped[str] = mapped_column(String(20), default="active")
     source_chapter: Mapped[int] = mapped_column(Integer, default=0)
     due_chapter: Mapped[int] = mapped_column(Integer, default=0)
     resolved_chapter: Mapped[int] = mapped_column(Integer, default=0)

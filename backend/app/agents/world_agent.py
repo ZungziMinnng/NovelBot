@@ -16,7 +16,9 @@ async def expand_world_setting(
         raw_setting=raw_setting,
         raw_rules=raw_rules,
         premise=novel.premise,
+        plot_design=novel.plot_design or "",
         genre=novel.genre,
+        has_rules=bool((raw_rules or "").strip()),
     )
 
     model, api_format = llm_client.get_agent_client("world", novel.fast_model)

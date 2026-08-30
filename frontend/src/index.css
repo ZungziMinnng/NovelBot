@@ -368,6 +368,11 @@
     @apply border-border;
   }
 
+  /* 全局字号基准：默认 16px 偏小，整体放大约 6%（rem 单位随之缩放） */
+  html {
+    font-size: 17px;
+  }
+
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;

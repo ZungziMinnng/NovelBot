@@ -2,14 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, delete as sql_delete, update as sql_update
 from openai import AuthenticationError as OpenAIAuthError
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
 from app.models.novel import Novel
 from app.models.memory import Outline, Memory
 from app.models.chapter import Chapter
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelOut, WizardStep2, WizardStep3, WizardStep4, WorldOptimizeRequest
 from app.agents import world_agent, outline_agent, character_agent, build_agent
+from app.agents.writer import _compose_system_prompt
+from app.prompts.loader import render
+from app.prompts import genre_cards
 from app.services import summarizer, context_builder, llm_client, entity_embeddings
 from app.services.llm_json import repair_json
 from app.services.world_rules_sync import seed_or_sync
@@ -26,6 +29,7 @@ from app.models.llm_usage import LlmUsage
 from app.models.model_library import ModelEntry
 from app.services import vector_store
 from app.models.memory import Memory
+from app.api.deps import CurrentUser, get_owned_novel
 
 router = APIRouter()
 
@@ -68,19 +72,28 @@ async def _reindex_after_embedding_change(db, novel):
 
 
 @router.get("/dashboard")
-async def dashboard(db: AsyncSession = Depends(get_db)):
-    novels = (await db.execute(select(Novel))).scalars().all()
+async def dashboard(user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    novels = (await db.execute(select(Novel).where(Novel.user_id == user.id))).scalars().all()
     total_novels = len(novels)
+    novel_ids = [n.id for n in novels]
 
     word_rows = (await db.execute(
         select(Chapter.novel_id, func.coalesce(func.sum(Chapter.word_count), 0))
+        .where(Chapter.novel_id.in_(novel_ids))
         .group_by(Chapter.novel_id)
-    )).all()
+    )).all() if novel_ids else []
     novel_words = {row[0]: row[1] for row in word_rows}
     total_words = sum(novel_words.values())
 
-    entity_count = (await db.execute(select(func.count(WorldEntity.id)))).scalar() or 0
-    technique_count = (await db.execute(select(func.count(Technique.id)))).scalar() or 0
+    if novel_ids:
+        entity_count = (await db.execute(
+            select(func.count(WorldEntity.id)).where(WorldEntity.novel_id.in_(novel_ids))
+        )).scalar() or 0
+        technique_count = (await db.execute(
+            select(func.count(Technique.id)).where(Technique.novel_id.in_(novel_ids))
+        )).scalar() or 0
+    else:
+        entity_count = technique_count = 0
     total_entities = entity_count + technique_count
 
     return {
@@ -91,15 +104,26 @@ async def dashboard(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/genre-cards")
+async def list_genre_cards(user: CurrentUser):
+    """可选的题材腔调卡（卡名 + 正文），供设置页选择与预览。
+
+    路由声明必须在 /{novel_id} 之前，否则 "genre-cards" 会被当成 novel_id。
+    """
+    return {"off_value": genre_cards.OFF, "cards": genre_cards.list_cards()}
+
+
 @router.get("/", response_model=list[NovelOut])
-async def list_novels(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Novel).order_by(Novel.updated_at.desc()))
+async def list_novels(user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Novel).where(Novel.user_id == user.id).order_by(Novel.updated_at.desc())
+    )
     return result.scalars().all()
 
 
 @router.post("/", response_model=NovelOut)
-async def create_novel(data: NovelCreate, db: AsyncSession = Depends(get_db)):
-    novel = Novel(**data.model_dump())
+async def create_novel(data: NovelCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    novel = Novel(**data.model_dump(), user_id=user.id)
     db.add(novel)
     await db.commit()
     await db.refresh(novel)
@@ -107,18 +131,55 @@ async def create_novel(data: NovelCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{novel_id}", response_model=NovelOut)
-async def get_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
-    return novel
+async def get_novel(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    return await get_owned_novel(db, novel_id, user)
+
+
+@router.get("/{novel_id}/overview")
+async def novel_overview(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """预览用轻量聚合：卷数/章节数/总字数/角色名单，不带章节正文。"""
+    novel = await get_owned_novel(db, novel_id, user)
+
+    volume_count = (await db.execute(
+        select(func.count(Volume.id)).where(Volume.novel_id == novel_id)
+    )).scalar() or 0
+    if volume_count == 0:
+        # 未建卷数据的老书：按章节表里出现过的卷号计数
+        volume_count = (await db.execute(
+            select(func.count(func.distinct(Chapter.volume)))
+            .where(Chapter.novel_id == novel_id)
+        )).scalar() or 0
+
+    chapter_count = (await db.execute(
+        select(func.count(Chapter.id)).where(Chapter.novel_id == novel_id)
+    )).scalar() or 0
+    total_words = (await db.execute(
+        select(func.coalesce(func.sum(Chapter.word_count), 0))
+        .where(Chapter.novel_id == novel_id)
+    )).scalar() or 0
+
+    char_rows = (await db.execute(
+        select(Character.name, Character.role)
+        .where(Character.novel_id == novel_id)
+        .order_by(Character.id)
+    )).all()
+    role_order = {"主角": 0, "反派": 1, "配角": 2}
+    characters = sorted(
+        ({"name": name, "role": role} for name, role in char_rows),
+        key=lambda c: role_order.get(c["role"], 3),
+    )
+
+    return {
+        "volume_count": volume_count,
+        "chapter_count": chapter_count,
+        "total_words": total_words,
+        "characters": characters,
+    }
 
 
 @router.patch("/{novel_id}", response_model=NovelOut)
-async def update_novel(novel_id: int, data: NovelUpdate, db: AsyncSession = Depends(get_db)):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+async def update_novel(novel_id: int, data: NovelUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    novel = await get_owned_novel(db, novel_id, user)
     updates = data.model_dump(exclude_none=True)
     core_setting_changed = "core_setting" in updates and updates["core_setting"] != novel.core_setting
     embedding_changed = "embedding_model" in updates and updates["embedding_model"] != novel.embedding_model
@@ -139,13 +200,23 @@ async def update_novel(novel_id: int, data: NovelUpdate, db: AsyncSession = Depe
 
 
 @router.delete("/{novel_id}")
-async def delete_novel(novel_id: int, db: AsyncSession = Depends(get_db)):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
-    vector_store.delete_novel_collection(novel_id)
+async def delete_novel(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    novel = await get_owned_novel(db, novel_id, user)
+    # llm_usage 无外键无 relationship，级联删不到，手动清理
+    await db.execute(sql_delete(LlmUsage).where(LlmUsage.novel_id == novel_id))
+    # locations.parent_id 自引用，ORM 级联删除顺序不保证父先子后，先置空避免外键违规
+    await db.execute(
+        sql_update(Location).where(Location.novel_id == novel_id).values(parent_id=None)
+    )
+    # memories.chapter_id 指向 chapters，但 Memory 与 Chapter 之间没有 relationship，
+    # ORM 看不出两个集合的先后依赖，会先删 chapters 撞上外键。同样先置空
+    await db.execute(
+        sql_update(Memory).where(Memory.novel_id == novel_id).values(chapter_id=None)
+    )
     await db.delete(novel)
     await db.commit()
+    # SQL 提交成功后再删向量，避免 SQL 失败时向量已丢
+    vector_store.delete_novel_collection(novel_id)
     return {"ok": True}
 
 
@@ -164,15 +235,13 @@ def _clone_cols(obj, exclude: set[str], **overrides) -> dict:
 
 
 @router.post("/{novel_id}/duplicate", response_model=NovelOut)
-async def duplicate_novel(novel_id: int, body: _DuplicateBody, db: AsyncSession = Depends(get_db)):
+async def duplicate_novel(novel_id: int, body: _DuplicateBody, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """深拷贝整本小说：SQL 行重映射 id + 直接复制向量（不重嵌入）。
     mode=full 含章节与对应记忆；mode=settings 仅复制设定并重置写作进度。"""
     import re, logging
     log = logging.getLogger(__name__)
 
-    src = await db.get(Novel, novel_id)
-    if not src:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    src = await get_owned_novel(db, novel_id, user)
 
     full = body.mode != "settings"
     CHILD_EXCLUDE = {"id", "novel_id", "created_at", "updated_at"}
@@ -339,13 +408,12 @@ async def duplicate_novel(novel_id: int, body: _DuplicateBody, db: AsyncSession 
 @router.get("/{novel_id}/search")
 async def search_novel(
     novel_id: int,
+    user: CurrentUser,
     q: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
 ):
     """全文搜索：向量语义检索 + SQL 模糊匹配"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    await get_owned_novel(db, novel_id, user)
 
     import asyncio
     pattern = f"%{q}%"
@@ -454,11 +522,9 @@ async def search_novel(
 # ── 向导接口 ──────────────────────────────────────────────────────────────
 
 @router.post("/{novel_id}/optimize-world")
-async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, db: AsyncSession = Depends(get_db)):
+async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """使用 fast 模型优化世界观设定（使用前端传入的当前文本，而非 DB 中的旧值）"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, novel_id, user)
 
     # 分区块模式：针对单个区块生成（空内容）或优化（有内容），只返回文本、不入库、不重建向量。
     # 由前端「保存世界观」统一合并落库。
@@ -493,11 +559,9 @@ async def optimize_world_setting(novel_id: int, data: WorldOptimizeRequest, db: 
 
 
 @router.post("/{novel_id}/book-summary")
-async def refresh_book_summary(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def refresh_book_summary(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """从所有已确认章节的摘要重新生成全书概要，存入 novel.book_summary"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, novel_id, user)
     try:
         book_summary = await summarizer.generate_book_summary(db, novel)
     except Exception as e:
@@ -507,11 +571,9 @@ async def refresh_book_summary(novel_id: int, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/wizard/world")
-async def wizard_expand_world(data: WizardStep2, db: AsyncSession = Depends(get_db)):
+async def wizard_expand_world(data: WizardStep2, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """Step 2: 扩写世界观"""
-    novel = await db.get(Novel, data.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, data.novel_id, user)
     try:
         core_setting = await world_agent.expand_world_setting(
             novel, data.raw_world_setting, data.raw_world_rules
@@ -531,11 +593,9 @@ async def wizard_expand_world(data: WizardStep2, db: AsyncSession = Depends(get_
 
 
 @router.post("/wizard/characters")
-async def wizard_generate_characters(data: WizardStep3, db: AsyncSession = Depends(get_db)):
+async def wizard_generate_characters(data: WizardStep3, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """Step 3: 批量创建并生成角色卡"""
-    novel = await db.get(Novel, data.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, data.novel_id, user)
 
     created = []
     for char_data in data.characters:
@@ -548,8 +608,14 @@ async def wizard_generate_characters(data: WizardStep3, db: AsyncSession = Depen
         )
         db.add(char)
         await db.flush()
+        # 作者在向导里填了的栏位当硬要求传下去，AI 据此扩写而不是另起一套
+        given = {
+            k: str(char_data.get(k, "")).strip()
+            for k in ("personality", "appearance", "speech_style")
+            if str(char_data.get(k, "")).strip()
+        }
         try:
-            sheet = await character_agent.generate_character_sheet(novel, char)
+            sheet = await character_agent.generate_character_sheet(novel, char, given=given)
         except OpenAIAuthError as e:
             await db.rollback()
             raise HTTPException(
@@ -568,11 +634,9 @@ async def wizard_generate_characters(data: WizardStep3, db: AsyncSession = Depen
 
 
 @router.post("/wizard/outline")
-async def wizard_generate_outline(data: WizardStep4, db: AsyncSession = Depends(get_db)):
+async def wizard_generate_outline(data: WizardStep4, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """Step 4: 生成章节大纲"""
-    novel = await db.get(Novel, data.novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, data.novel_id, user)
 
     # 清除旧大纲
     result = await db.execute(select(Outline).where(Outline.novel_id == novel.id))
@@ -617,15 +681,14 @@ async def wizard_generate_outline(data: WizardStep4, db: AsyncSession = Depends(
 @router.get("/{novel_id}/context-preview")
 async def get_context_preview(
     novel_id: int,
+    user: CurrentUser,
     chapter_number: int | None = None,
     instruction: str = "",
-    target_words: int = 5000,
+    target_words: int = 2500,
     db: AsyncSession = Depends(get_db),
 ):
     """预览 Writer 在生成指定章节时收到的完整上下文（JSON 结构化）。"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, novel_id, user)
 
     if chapter_number is None:
         chapter_number = (novel.current_chapter or 0) + 1
@@ -712,7 +775,19 @@ async def get_context_preview(
     factions_tokens = _est_tokens(_factions_text(ctx.get("factions", [])))
     techniques_tokens = _est_tokens(_techniques_text(ctx.get("techniques", [])))
     task_tokens = _est_tokens(task_instruction)
-    system_tokens = 150
+    # 与 writer.stream_chapter 同一套组装逻辑，预览才能当规则是否注入的验证面
+    system_content, system_source = _compose_system_prompt(
+        (novel.writer_system_prompt or "").strip(),
+        render(
+            "writer.jinja2",
+            genre=ctx.get("genre", ""),
+            writing_style=ctx.get("writing_style", ""),
+            target_words=target_words,
+            chapter_number=ctx.get("chapter_number"),
+        ),
+        ctx,
+    )
+    system_tokens = _est_tokens(system_content)
     total_est_tokens = (
         sum(section_tokens.values())
         + chars_tokens + items_tokens + systems_tokens + locations_tokens + factions_tokens + techniques_tokens
@@ -782,12 +857,13 @@ async def get_context_preview(
             "budget_input_cost_cny": budget_input_tokens * input_price_cny / 1_000_000,
         },
         "writer_messages": [
-            {"role": "system", "content": f"（系统提示由 writer.jinja2 渲染，genre={ctx.get('genre')}, writing_style={ctx.get('writing_style')}）"},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": context_block or "（无上下文区块）"},
             {"role": "assistant", "content": chars_block or "（无角色/实体数据）"},
             {"role": "user", "content": task_instruction},
         ],
         "writer_model": novel.writer_model or "（使用全局默认 Writer 模型）",
+        "system_source": system_source,
     }
 
 
@@ -796,47 +872,46 @@ class _BuildBody(BaseModel):
 
 
 @router.post("/{novel_id}/build")
-async def build_novel(novel_id: int, body: _BuildBody, db: AsyncSession = Depends(get_db)):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+async def build_novel(novel_id: int, body: _BuildBody, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    # 所有权校验用请求级 db；SSE 流内另开独立会话，避免长流式期间连接悬空。
+    await get_owned_novel(db, novel_id, user)
+
+    async def event_stream():
+        async with AsyncSessionLocal() as gen_db:
+            async for chunk in build_agent.run_novel_build(gen_db, novel_id, nsfw_mode=body.nsfw_mode):
+                yield chunk
+
     return StreamingResponse(
-        build_agent.run_novel_build(db, novel_id, nsfw_mode=body.nsfw_mode),
+        event_stream(),
         media_type="text/event-stream",
     )
 
 
 @router.post("/{novel_id}/reindex-entities")
-async def reindex_entities(novel_id: int, db: AsyncSession = Depends(get_db)):
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+async def reindex_entities(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     counts = await entity_embeddings.reindex_all_entities(db, novel_id)
     return counts
 
 
 @router.post("/{novel_id}/rebuild-vectors")
-async def rebuild_vectors(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def rebuild_vectors(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """删除并按当前嵌入模型重建整本书的向量集合。
     用于修复历史集合维度与当前模型不一致（如 384 vs 1536）导致的写入失败。"""
-    novel = await db.get(Novel, novel_id)
-    if not novel:
-        raise HTTPException(status_code=404, detail="小说不存在")
+    novel = await get_owned_novel(db, novel_id, user)
     await _reindex_after_embedding_change(db, novel)
     await db.commit()
     return {"ok": True}
 
 
 @router.post("/{novel_id}/reindex-timeline")
-async def reindex_timeline(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def reindex_timeline(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     """批量重标注所有章节摘要的时间标记为绝对日期计数格式。"""
     import re, json as _json, logging, traceback
     log = logging.getLogger(__name__)
 
     try:
-        novel = await db.get(Novel, novel_id)
-        if not novel:
-            raise HTTPException(status_code=404, detail="小说不存在")
+        novel = await get_owned_novel(db, novel_id, user)
 
         result = await db.execute(
             select(Chapter)
@@ -998,10 +1073,12 @@ def aggregate_usage(rows: list[tuple], price_map: dict, group_by: str) -> dict:
 @router.get("/{novel_id}/usage")
 async def get_llm_usage(
     novel_id: int,
+    user: CurrentUser,
     group_by: str = Query("agent"),
     db: AsyncSession = Depends(get_db),
 ):
     """LLM 用量账本汇总：按环节/模型/章节分组，折算成人民币成本（未配置单价的模型计 0）。"""
+    await get_owned_novel(db, novel_id, user)
     if group_by not in ("agent", "model", "chapter"):
         raise HTTPException(status_code=400, detail="group_by 只支持 agent / model / chapter")
     key_col = {
@@ -1022,7 +1099,9 @@ async def get_llm_usage(
     )
     rows = result.all()
 
-    entries = (await db.execute(select(ModelEntry))).scalars().all()
+    entries = (await db.execute(
+        select(ModelEntry).where(ModelEntry.user_id == user.id)
+    )).scalars().all()
     price_map = {
         e.model_id: (
             float(e.input_price or 0) * float(e.currency_to_cny_rate or 1),

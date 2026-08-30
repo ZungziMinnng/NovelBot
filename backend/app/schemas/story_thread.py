@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 ThreadKind = Literal["foreshadowing", "secret"]
-ThreadStatus = Literal["active", "resolved", "abandoned"]
+ThreadStatus = Literal["active", "resolved", "abandoned", "expired"]
 
 
 class StoryThreadCreate(BaseModel):

@@ -2,9 +2,11 @@ import unittest
 from types import SimpleNamespace
 
 from app.services.relevance_selector import (
+    bm25_rank,
     keyword_hits,
     recency_factor,
     rerank_by_importance,
+    rrf_fuse,
     select_by_name_then_rag,
     select_notes_by_title_then_rag,
 )
@@ -157,6 +159,74 @@ class KeywordHitsTests(unittest.TestCase):
         hits = keyword_hits("再提师尊把那弟子逐出宗门废其修为的旧事", summaries, top_k=1)
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["chapter_number"], 2)
+
+
+class Bm25RankTests(unittest.TestCase):
+    def _candidates(self, *contents):
+        return [
+            {"text": c, "metadata": {"chapter_number": i + 1, "importance": 3}}
+            for i, c in enumerate(contents)
+        ]
+
+    def test_proper_noun_ranks_matching_chapter_first(self):
+        candidates = self._candidates(
+            "主角在坊市购买丹药，与摊主讨价还价。",
+            "主角于秘境中拔出玄天剑，剑身雷光大盛。",
+            "主角与同门切磋获胜，赢得彩头。",
+        )
+        hits = bm25_rank("玄天剑再度出鞘", candidates, top_k=3)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["metadata"]["chapter_number"], 2)
+        self.assertIn("bm25_score", hits[0])
+
+    def test_empty_inputs_return_empty(self):
+        candidates = self._candidates("主角观月华顿悟。")
+        self.assertEqual(bm25_rank("", candidates, top_k=3), [])
+        self.assertEqual(bm25_rank("玄天剑", [], top_k=3), [])
+        self.assertEqual(bm25_rank("玄天剑", candidates, top_k=0), [])
+
+    def test_all_empty_docs_return_empty(self):
+        candidates = [{"text": "", "metadata": {"chapter_number": 1}}]
+        self.assertEqual(bm25_rank("玄天剑", candidates, top_k=3), [])
+
+    def test_top_k_truncation(self):
+        # 查询词出现在部分（而非全部）文档中，IDF 才为正、得分>0
+        candidates = self._candidates(
+            "玄天剑出鞘。", "玄天剑折断。", "玄天剑重铸。",
+            "主角在坊市购买丹药。", "主角与同门切磋。",
+        )
+        hits = bm25_rank("玄天剑", candidates, top_k=2)
+        self.assertEqual(len(hits), 2)
+
+
+class RrfFuseTests(unittest.TestCase):
+    _key = staticmethod(lambda h: (h.get("metadata") or {}).get("chapter_number"))
+
+    def test_double_hit_ranks_first_and_keeps_vector_fields(self):
+        vector_ranked = [
+            {"text": "A", "distance": 0.1, "metadata": {"chapter_number": 1}},
+            {"text": "B", "distance": 0.2, "metadata": {"chapter_number": 2}},
+        ]
+        bm25_ranked = [
+            {"text": "B'", "bm25_score": 9.0, "metadata": {"chapter_number": 2}},
+            {"text": "C", "bm25_score": 5.0, "metadata": {"chapter_number": 3}},
+        ]
+        fused = rrf_fuse(vector_ranked, bm25_ranked, key=self._key)
+        # 两路都命中的第2章融合分最高；去重保留向量侧 dict（带 distance）
+        self.assertEqual([self._key(h) for h in fused], [2, 1, 3])
+        self.assertIn("distance", fused[0])
+        self.assertNotIn("bm25_score", fused[0])
+
+    def test_single_list_passthrough(self):
+        ranked = [
+            {"text": "A", "metadata": {"chapter_number": 1}},
+            {"text": "B", "metadata": {"chapter_number": 2}},
+        ]
+        fused = rrf_fuse(ranked, [], key=self._key)
+        self.assertEqual([self._key(h) for h in fused], [1, 2])
+
+    def test_both_empty(self):
+        self.assertEqual(rrf_fuse([], [], key=self._key), [])
 
 
 if __name__ == "__main__":

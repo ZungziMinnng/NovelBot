@@ -1,28 +1,58 @@
 import { Plus, Trash2, Sparkles } from 'lucide-react'
 import type { ExampleTurn } from '@/api/client'
+import AutoTextarea from '@/components/AutoTextarea'
 
 interface Props {
   value: ExampleTurn[]
   onChange: (v: ExampleTurn[]) => void
+  /** dialogue = 酒馆角色卡的对话示例，措辞按"玩家说 / 角色回"来 */
+  variant?: 'novel' | 'dialogue'
 }
 
-const TEMPLATE: ExampleTurn = {
-  user: '写作方向：写主角初入门派、被长老当众考验的一场戏，约 500 字，突出紧张感与人物心理。',
-  assistant: '（在此粘贴一段你满意的范文片段，模型会模仿其叙事节奏、用词与文风。把上面的「写作方向」换成与这段范文对应的任务描述，效果最好。）',
-}
+const COPY = {
+  novel: {
+    title: '示例轮（few-shot，可空）',
+    hint: '以「输入 → 期望输出」成对提供范例，生成时作为真实对话轮注入，比写在提示词里更能稳定文风。留空则不注入。',
+    userLabel: '输入（用户）',
+    assistantLabel: '输出（范文）',
+    userPlaceholder: '示例的写作方向 / 任务描述...',
+    assistantPlaceholder: '期望模型模仿的范文片段...',
+    userRows: 4,
+    assistantRows: 6,
+    template: {
+      user: '写作方向：写主角初入门派、被长老当众考验的一场戏，约 500 字，突出紧张感与人物心理。',
+      assistant: '（在此粘贴一段你满意的范文片段，模型会模仿其叙事节奏、用词与文风。把上面的「写作方向」换成与这段范文对应的任务描述，效果最好。）',
+    },
+  },
+  dialogue: {
+    title: '对话示例（可空）',
+    hint: '写两三组「玩家说什么 → 角色怎么答」，作为真实对话轮注入。这是定角色腔调最有效的一招，比在性格里用文字描述管用。留空则不注入。',
+    userLabel: '玩家说',
+    assistantLabel: '角色回',
+    userPlaceholder: '你怎么还在这儿？',
+    assistantPlaceholder: '角色的回答，语气、句长、口头禅、动作描写都按你想要的样子写...',
+    userRows: 2,
+    assistantRows: 4,
+    template: {
+      user: '你叫什么名字？',
+      assistant: '（在此写下角色会怎么回答，连带神态和小动作。模型会照这段的语气、句长和描写密度来演。上面那句换成对应的玩家台词。）',
+    },
+  },
+} as const
 
-export default function ExampleTurnsEditor({ value, onChange }: Props) {
+export default function ExampleTurnsEditor({ value, onChange, variant = 'novel' }: Props) {
+  const copy = COPY[variant]
   const update = (i: number, patch: Partial<ExampleTurn>) => {
     onChange(value.map((ex, idx) => (idx === i ? { ...ex, ...patch } : ex)))
   }
   const remove = (i: number) => onChange(value.filter((_, idx) => idx !== i))
   const addEmpty = () => onChange([...value, { user: '', assistant: '' }])
-  const addTemplate = () => onChange([...value, { ...TEMPLATE }])
+  const addTemplate = () => onChange([...value, { ...copy.template }])
 
   return (
     <div className="mt-4 border-t pt-4">
       <div className="flex items-center justify-between mb-2">
-        <label className="text-sm font-medium">示例轮（few-shot，可空）</label>
+        <label className="text-sm font-medium">{copy.title}</label>
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -42,9 +72,7 @@ export default function ExampleTurnsEditor({ value, onChange }: Props) {
       </div>
 
       {value.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          以「输入 → 期望输出」成对提供范例，生成时作为真实对话轮注入，比写在提示词里更能稳定文风。留空则不注入。
-        </p>
+        <p className="text-xs text-muted-foreground">{copy.hint}</p>
       ) : (
         <div className="space-y-3">
           {value.map((ex, i) => (
@@ -60,19 +88,21 @@ export default function ExampleTurnsEditor({ value, onChange }: Props) {
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
-              <label className="block text-xs text-muted-foreground mb-1">输入（用户）</label>
-              <textarea
+              <label className="block text-xs text-muted-foreground mb-1">{copy.userLabel}</label>
+              <AutoTextarea
                 value={ex.user}
                 onChange={e => update(i, { user: e.target.value })}
-                placeholder="示例的写作方向 / 任务描述..."
-                className="w-full border rounded-md px-2.5 py-1.5 text-sm bg-background resize-y min-h-[3rem] focus:outline-none focus:ring-1 focus:ring-ring mb-2"
+                minRows={copy.userRows}
+                placeholder={copy.userPlaceholder}
+                className="w-full border rounded-md px-2.5 py-1.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring mb-2"
               />
-              <label className="block text-xs text-muted-foreground mb-1">输出（范文）</label>
-              <textarea
+              <label className="block text-xs text-muted-foreground mb-1">{copy.assistantLabel}</label>
+              <AutoTextarea
                 value={ex.assistant}
                 onChange={e => update(i, { assistant: e.target.value })}
-                placeholder="期望模型模仿的范文片段..."
-                className="w-full border rounded-md px-2.5 py-1.5 text-sm bg-background resize-y min-h-[5rem] focus:outline-none focus:ring-1 focus:ring-ring"
+                minRows={copy.assistantRows}
+                placeholder={copy.assistantPlaceholder}
+                className="w-full border rounded-md px-2.5 py-1.5 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
           ))}

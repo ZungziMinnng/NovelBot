@@ -9,8 +9,10 @@ import {
 import {
   novelsApi, locationsApi, worldEntitiesApi, novelNotesApi, chaptersApi, worldviewChangesApi, glossaryApi, worldRulesApi, storyThreadsApi,
   type Novel, type Location, type Chapter, type GlossaryEntry, type WorldRule, type StoryThread, type StoryThreadKind, type StoryThreadStatus,
+  type StaleThreadReport,
 } from '@/api/client'
 import ImportanceSelect from '@/components/ImportanceSelect'
+import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
 // group: 按内容性质分组；badge: 生成时的注入行为（每章注入/检索注入/按需选取/视图）
@@ -53,7 +55,7 @@ export default function WorldTab({ onOpenDetail, activeDetailKey }: Props) {
       <div className="space-y-4">
         {WORLD_GROUPS.map(({ key: groupKey, title }) => (
           <div key={groupKey}>
-            <p className="text-[11px] text-muted-foreground mb-1.5">{title}</p>
+            <p className="text-[0.6875rem] text-muted-foreground mb-1.5">{title}</p>
             <div className="grid grid-cols-2 gap-2">
               {WORLD_CATEGORIES.filter((c) => c.group === groupKey).map(({ key, label, icon: Icon, color, badge }) => (
                 <button
@@ -65,7 +67,7 @@ export default function WorldTab({ onOpenDetail, activeDetailKey }: Props) {
                 >
                   <Icon className={`w-5 h-5 ${color}`} />
                   <span className="text-xs font-medium">{label}</span>
-                  <span className="text-[10px] text-muted-foreground">{badge}</span>
+                  <span className="text-[0.625rem] text-muted-foreground">{badge}</span>
                 </button>
               ))}
             </div>
@@ -196,16 +198,16 @@ export function WorldSettingView({ novel, onEdit }: { novel: Novel | undefined; 
             {sections.background.trim() ? 'AI 优化' : 'AI 生成'}
           </button>
         </div>
-        <textarea
+        <AutoTextarea
           value={sections.background}
           onChange={e => updateSection('background', e.target.value)}
           placeholder="描述时代与地理、政治格局、社会阶层..."
-          className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[80px] focus:outline-none focus:ring-1 focus:ring-ring"
+          className="w-full border rounded-md p-2 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
         />
       </div>
 
       {/* 核心规则 / 特殊元素已迁至独立结构化列表（左侧「核心规则」「特殊元素」类目管理） */}
-      <p className="text-[11px] text-muted-foreground px-1">
+      <p className="text-[0.6875rem] text-muted-foreground px-1">
         核心规则、特殊元素现由左侧「核心规则」「特殊元素」类目以条目形式管理。
       </p>
 
@@ -220,11 +222,11 @@ export function WorldSettingView({ novel, onEdit }: { novel: Novel | undefined; 
         </button>
         {notesExpanded && (
           <div className="px-3 pb-3">
-            <textarea
+            <AutoTextarea
               value={sections.notes}
               onChange={e => updateSection('notes', e.target.value)}
               placeholder="其他需要补充的设定信息..."
-              className="w-full border rounded-md p-2 text-xs bg-background resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
+              className="w-full border rounded-md p-2 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
         )}
@@ -318,11 +320,11 @@ function LocationTreeNode({ node, depth, onSelect, selectedId, onDelete }: {
         )}
         <MapPin className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
         <span className="text-sm truncate flex-1 min-w-0">{node.name}</span>
-        <span className={`text-[10px] px-1.5 py-px rounded shrink-0 ${LOC_TYPE_COLORS[node.type] || LOC_TYPE_COLORS.other}`}>
+        <span className={`text-[0.625rem] px-1.5 py-px rounded shrink-0 ${LOC_TYPE_COLORS[node.type] || LOC_TYPE_COLORS.other}`}>
           {LOC_TYPE_LABELS[node.type] || node.type}
         </span>
         {hasChildren && (
-          <span className="text-[10px] text-muted-foreground shrink-0">({node.children.length})</span>
+          <span className="text-[0.625rem] text-muted-foreground shrink-0">({node.children.length})</span>
         )}
         <button
           onClick={(e) => onDelete(e, node.id)}
@@ -420,12 +422,11 @@ export function LocationsView({ novelId, onSelectLocation, selectedLocationId }:
                 <option key={l.id} value={l.id}>{l.name}</option>
               ))}
             </select>
-            <textarea
+            <AutoTextarea
               placeholder="描述"
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
-              rows={3}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             />
             <div className="flex justify-end gap-2">
               <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
@@ -521,12 +522,11 @@ export function EntitiesView({ novelId, type, onSelectEntity, selectedEntityId }
               className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               autoFocus
             />
-            <textarea
+            <AutoTextarea
               placeholder="描述"
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
-              rows={3}
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
             />
             <div className="flex justify-end gap-2">
               <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
@@ -701,10 +701,10 @@ export function GlossaryView({ novelId }: { novelId: number }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="text-sm font-medium truncate">{entry.term}</span>
-              <span className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground shrink-0">{entry.category}</span>
+              <span className="text-[0.625rem] px-1 py-0.5 rounded bg-muted text-muted-foreground shrink-0">{entry.category}</span>
             </div>
             {entry.forbidden_variants && (
-              <p className="text-[11px] text-red-600 dark:text-red-400 mt-0.5">
+              <p className="text-[0.6875rem] text-red-600 dark:text-red-400 mt-0.5">
                 禁止：{entry.forbidden_variants}
               </p>
             )}
@@ -810,9 +810,9 @@ export function WorldRulesView({ novelId, kind }: { novelId: number; kind: 'rule
           <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })}
             placeholder="标题（可选，如：飞行禁制）"
             className="w-full border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
-          <textarea value={form.content} onChange={e => setForm({ ...form, content: e.target.value })}
+          <AutoTextarea value={form.content} onChange={e => setForm({ ...form, content: e.target.value })}
             placeholder={placeholder}
-            className="w-full border rounded px-2 py-1.5 text-xs bg-background resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring" />
+            className="w-full border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
           <div className="flex items-center gap-2">
             <ImportanceSelect value={form.importance} onChange={v => setForm({ ...form, importance: v })} className="flex-1" />
             <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer">
@@ -888,10 +888,53 @@ const splitNames = (value: string) => value
   .map((item) => item.trim())
   .filter(Boolean)
 
+function StaleThreadAlert({ report, onExpire }: {
+  report: StaleThreadReport | undefined
+  onExpire: (id: number) => void
+}) {
+  const [open, setOpen] = useState(false)
+  if (!report || (!report.stale.length && !report.density_hint)) return null
+  return (
+    <div className="border border-amber-500/40 bg-amber-500/5 rounded-md p-2 space-y-1.5">
+      {report.density_hint && (
+        <p className="text-[0.625rem] text-amber-700 dark:text-amber-400">{report.density_hint}</p>
+      )}
+      {report.stale.length > 0 && (
+        <>
+          <button onClick={() => setOpen((v) => !v)}
+            className="text-xs text-amber-700 dark:text-amber-400 hover:underline">
+            {report.stale.length} 条埋了很久还没回收（已写到第{report.current_chapter}章）
+          </button>
+          {open && report.stale.map((thread) => (
+            <div key={thread.id} className="flex items-start gap-2 text-[0.625rem] pl-1">
+              <div className="flex-1 min-w-0">
+                <div className="truncate">{thread.title || thread.content.slice(0, 20)}</div>
+                <div className="text-muted-foreground">{thread.reason}</div>
+              </div>
+              <button onClick={() => onExpire(thread.id)}
+                className="shrink-0 px-1.5 py-0.5 border rounded hover:bg-muted">
+                标为已过期
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+const THREAD_STATUS_LABEL: Record<StoryThreadStatus, string> = {
+  active: '活跃',
+  resolved: '已回收',
+  abandoned: '已废弃',
+  expired: '已过期',
+}
+
 export function StoryThreadsView({ novelId }: { novelId: number }) {
   const qc = useQueryClient()
   const [kind, setKind] = useState<StoryThreadKind>('foreshadowing')
   const [statusFilter, setStatusFilter] = useState<'all' | StoryThreadStatus>('all')
+  const [charFilter, setCharFilter] = useState<string>('all')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -903,8 +946,22 @@ export function StoryThreadsView({ novelId }: { novelId: number }) {
     queryFn: () => storyThreadsApi.list(novelId),
   })
 
+  // 长期没回收的伏笔只提醒，标不标记为已过期由作者定
+  const { data: staleReport } = useQuery({
+    queryKey: ['story-threads-stale', novelId],
+    queryFn: () => storyThreadsApi.stale(novelId),
+  })
+
+  // 一条伏笔/秘密的关联人物 = 知情者 + 涉及实体；两者都空则归入"未分类"
+  const threadNames = (thread: StoryThread) =>
+    [...new Set([...thread.known_by, ...thread.related_entities])]
+  const allNames = [...new Set(threads.flatMap(threadNames))].sort((a, b) => a.localeCompare(b, 'zh'))
+
   const visible = threads.filter((thread) =>
-    thread.kind === kind && (statusFilter === 'all' || thread.status === statusFilter)
+    thread.kind === kind &&
+    (statusFilter === 'all' || thread.status === statusFilter) &&
+    (charFilter === 'all' ||
+      (charFilter === 'unassigned' ? threadNames(thread).length === 0 : threadNames(thread).includes(charFilter)))
   )
   const counts = {
     foreshadowing: threads.filter((thread) => thread.kind === 'foreshadowing' && thread.status === 'active').length,
@@ -1020,8 +1077,26 @@ export function StoryThreadsView({ novelId }: { novelId: number }) {
           <option value="active">活跃</option>
           <option value="resolved">已回收</option>
           <option value="abandoned">已废弃</option>
+          <option value="expired">已过期</option>
+        </select>
+        <select value={charFilter} onChange={(event) => setCharFilter(event.target.value)}
+          className="h-8 border rounded-md px-2 text-xs bg-background max-w-[7.5rem]">
+          <option value="all">全部人物</option>
+          <option value="unassigned">未分类</option>
+          {allNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
         </select>
       </div>
+
+      <StaleThreadAlert
+        report={staleReport}
+        onExpire={async (id) => {
+          await storyThreadsApi.update(id, { status: 'expired' })
+          invalidate()
+          qc.invalidateQueries({ queryKey: ['story-threads-stale', novelId] })
+        }}
+      />
 
       {isLoading && <div className="flex justify-center py-6"><Loader2 className="w-4 h-4 animate-spin text-muted-foreground" /></div>}
       {!isLoading && visible.map((thread) => {
@@ -1033,15 +1108,16 @@ export function StoryThreadsView({ novelId }: { novelId: number }) {
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-medium truncate">{thread.title || (thread.kind === 'foreshadowing' ? '未命名伏笔' : '未命名秘密')}</span>
-                <span className={`text-[10px] px-1 py-0.5 rounded shrink-0 ${thread.status === 'active' ? 'bg-green-500/10 text-green-600' : 'bg-muted text-muted-foreground'}`}>
-                  {thread.status === 'active' ? '活跃' : thread.status === 'resolved' ? '已回收' : '已废弃'}
+                <span className={`text-[0.625rem] px-1 py-0.5 rounded shrink-0 ${thread.status === 'active' ? 'bg-green-500/10 text-green-600' : 'bg-muted text-muted-foreground'}`}>
+                  {THREAD_STATUS_LABEL[thread.status]}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{thread.content}</p>
-              <div className="flex flex-wrap gap-x-2 mt-1 text-[10px] text-muted-foreground">
+              <div className="flex flex-wrap gap-x-2 mt-1 text-[0.625rem] text-muted-foreground">
                 {thread.source_chapter > 0 && <span>来源 第{thread.source_chapter}章</span>}
                 {thread.kind === 'foreshadowing' && thread.due_chapter > 0 && <span>预计 第{thread.due_chapter}章</span>}
                 {thread.kind === 'secret' && thread.known_by.length > 0 && <span>知情者 {thread.known_by.join('、')}</span>}
+                {thread.related_entities.length > 0 && <span>涉及 {thread.related_entities.join('、')}</span>}
                 <span>重要度 {thread.importance}</span>
               </div>
             </div>
@@ -1070,17 +1146,17 @@ export function StoryThreadsView({ novelId }: { novelId: number }) {
             </div>
             <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })}
               placeholder="标题（便于识别）" className="w-full border rounded px-3 py-2 text-sm bg-background" />
-            <textarea value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })}
+            <AutoTextarea value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })}
               placeholder={form.kind === 'foreshadowing' ? '伏笔的事实内容、已经出现的迹象及不可遗忘的约束' : '秘密的真实内容'}
-              rows={5} autoFocus className="w-full border rounded px-3 py-2 text-sm bg-background resize-y" />
+              autoFocus className="w-full border rounded px-3 py-2 text-sm bg-background" />
             <div className="grid grid-cols-2 gap-2">
-              <label className="text-[10px] text-muted-foreground">来源章节
+              <label className="text-[0.625rem] text-muted-foreground">来源章节
                 <input type="number" min={0} value={form.source_chapter}
                   onChange={(event) => setForm({ ...form, source_chapter: Number(event.target.value) })}
                   className="mt-1 w-full border rounded px-2 py-2 text-sm bg-background" />
               </label>
               {form.kind === 'foreshadowing' ? (
-                <label className="text-[10px] text-muted-foreground">预计回收章节
+                <label className="text-[0.625rem] text-muted-foreground">预计回收章节
                   <input type="number" min={0} value={form.due_chapter}
                     onChange={(event) => setForm({ ...form, due_chapter: Number(event.target.value) })}
                     className="mt-1 w-full border rounded px-2 py-2 text-sm bg-background" />
@@ -1101,23 +1177,24 @@ export function StoryThreadsView({ novelId }: { novelId: number }) {
               placeholder="关联角色/地点/道具（用逗号或顿号分隔）"
               className="w-full border rounded px-3 py-2 text-sm bg-background" />
             <div className="grid grid-cols-2 gap-2">
-              <label className="text-[10px] text-muted-foreground">状态
+              <label className="text-[0.625rem] text-muted-foreground">状态
                 <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as StoryThreadStatus })}
                   className="mt-1 w-full border rounded px-2 py-2 text-sm bg-background">
                   <option value="active">活跃</option>
                   <option value="resolved">已回收</option>
                   <option value="abandoned">已废弃</option>
+                  <option value="expired">已过期</option>
                 </select>
               </label>
-              <label className="text-[10px] text-muted-foreground">回收章节
+              <label className="text-[0.625rem] text-muted-foreground">回收章节
                 <input type="number" min={0} value={form.resolved_chapter}
                   onChange={(event) => setForm({ ...form, resolved_chapter: Number(event.target.value) })}
                   className="mt-1 w-full border rounded px-2 py-2 text-sm bg-background" />
               </label>
             </div>
             {form.status === 'resolved' && (
-              <textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })}
-                placeholder="如何回收或揭晓" rows={2} className="w-full border rounded px-3 py-2 text-sm bg-background resize-y" />
+              <AutoTextarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })}
+                placeholder="如何回收或揭晓" minRows={3} className="w-full border rounded px-3 py-2 text-sm bg-background" />
             )}
             <div className="flex justify-end gap-2">
               <button onClick={closeForm} className="px-3 py-1.5 text-sm border rounded hover:bg-muted">取消</button>
@@ -1207,20 +1284,20 @@ export function WorldviewChangesView({ novelId }: { novelId: number }) {
       {/* AI 待确认 */}
       {pending.length > 0 && (
         <div className="space-y-1">
-          <p className="text-[10px] font-medium text-amber-500 px-1 uppercase tracking-wide">AI 待确认 · {pending.length}</p>
+          <p className="text-[0.625rem] font-medium text-amber-500 px-1 uppercase tracking-wide">AI 待确认 · {pending.length}</p>
           {pending.map((c) => (
             <div key={c.id} className="border border-amber-500/40 bg-amber-500/5 rounded-lg p-2 space-y-1.5">
               <p className="text-xs">{c.fact}</p>
-              {c.supersedes && <p className="text-[11px] text-muted-foreground">原设定：{c.supersedes}</p>}
+              {c.supersedes && <p className="text-[0.6875rem] text-muted-foreground">原设定：{c.supersedes}</p>}
               <div className="flex items-center gap-2">
                 {c.effective_chapter > 0 && (
-                  <span className="text-[10px] text-muted-foreground">第{c.effective_chapter}章起</span>
+                  <span className="text-[0.625rem] text-muted-foreground">第{c.effective_chapter}章起</span>
                 )}
                 <div className="flex-1" />
-                <button onClick={() => handleConfirm(c.id)} className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-primary text-primary-foreground hover:opacity-90">
+                <button onClick={() => handleConfirm(c.id)} className="flex items-center gap-1 text-[0.6875rem] px-2 py-0.5 rounded bg-primary text-primary-foreground hover:opacity-90">
                   <Check className="w-3 h-3" /> 确认
                 </button>
-                <button onClick={() => handleDelete(c.id)} className="text-[11px] px-2 py-0.5 rounded border hover:bg-muted">忽略</button>
+                <button onClick={() => handleDelete(c.id)} className="text-[0.6875rem] px-2 py-0.5 rounded border hover:bg-muted">忽略</button>
               </div>
             </div>
           ))}
@@ -1230,13 +1307,13 @@ export function WorldviewChangesView({ novelId }: { novelId: number }) {
       {/* 已生效 */}
       {confirmed.length > 0 && (
         <div className="space-y-1">
-          <p className="text-[10px] font-medium text-muted-foreground px-1 uppercase tracking-wide">已生效 · {confirmed.length}</p>
+          <p className="text-[0.625rem] font-medium text-muted-foreground px-1 uppercase tracking-wide">已生效 · {confirmed.length}</p>
           {confirmed.map((c) => (
             <div key={c.id} className="group flex items-start gap-2 px-2 py-2 rounded-lg hover:bg-muted">
               <History className="w-3.5 h-3.5 mt-0.5 text-teal-500 shrink-0" />
               <div className="flex-1 min-w-0">
                 <p className="text-xs">{c.fact}</p>
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-[0.625rem] text-muted-foreground">
                   {c.effective_chapter > 0 ? `第${c.effective_chapter}章起` : '全程生效'}
                 </span>
               </div>
@@ -1274,7 +1351,7 @@ export function WorldviewChangesView({ novelId }: { novelId: number }) {
                 className="w-20 border rounded-lg px-2 py-1.5 text-sm bg-background"
               />
             </div>
-            <p className="text-[11px] text-muted-foreground">0 = 全程生效；填 N 则仅第 N 章及之后注入。</p>
+            <p className="text-[0.6875rem] text-muted-foreground">0 = 全程生效；填 N 则仅第 N 章及之后注入。</p>
             <div className="flex justify-end gap-2">
               <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted">取消</button>
               <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
@@ -1339,11 +1416,11 @@ export function TimelineView({ novelId }: { novelId: number }) {
             <div key={entry.chapter} className="relative pl-8 py-2">
               <div className="absolute left-1.5 top-3.5 w-3 h-3 rounded-full bg-primary border-2 border-background" />
               <div className="flex items-baseline gap-1.5 mb-0.5">
-                <span className="text-[10px] font-mono text-muted-foreground">第{entry.chapter}章</span>
+                <span className="text-[0.625rem] font-mono text-muted-foreground">第{entry.chapter}章</span>
                 {entry.time ? (
-                  <span className="text-[10px] font-medium bg-primary/10 text-primary px-1.5 py-px rounded-full">{entry.time}</span>
+                  <span className="text-[0.625rem] font-medium bg-primary/10 text-primary px-1.5 py-px rounded-full">{entry.time}</span>
                 ) : (
-                  <span className="text-[10px] text-muted-foreground/50 italic">无标注</span>
+                  <span className="text-[0.625rem] text-muted-foreground/50 italic">无标注</span>
                 )}
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed line-clamp-3">{entry.summary}</p>

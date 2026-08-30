@@ -11,6 +11,7 @@ class MemoryOut(BaseModel):
     content: str
     volume: int
     chapter_number: int
+    in_context: bool = True
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -18,6 +19,7 @@ class MemoryOut(BaseModel):
 
 class MemoryUpdate(BaseModel):
     content: Optional[str] = None
+    in_context: Optional[bool] = None
 
 
 class OutlineOut(BaseModel):

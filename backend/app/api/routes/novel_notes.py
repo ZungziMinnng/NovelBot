@@ -1,11 +1,12 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models.novel_note import NovelNote
 from app.schemas.novel_note import NoteCreate, NoteUpdate, NoteOut
 from app.services import vector_store
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
@@ -35,7 +36,8 @@ async def _embed_note(note: NovelNote, db: AsyncSession) -> None:
 
 
 @router.get("/novel/{novel_id}", response_model=list[NoteOut])
-async def list_notes(novel_id: int, db: AsyncSession = Depends(get_db)):
+async def list_notes(novel_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     result = await db.execute(
         select(NovelNote).where(NovelNote.novel_id == novel_id).order_by(NovelNote.created_at)
     )
@@ -43,7 +45,8 @@ async def list_notes(novel_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/", response_model=NoteOut)
-async def create_note(data: NoteCreate, db: AsyncSession = Depends(get_db)):
+async def create_note(data: NoteCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     note = NovelNote(**data.model_dump())
     db.add(note)
     await db.commit()
@@ -54,10 +57,8 @@ async def create_note(data: NoteCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{note_id}", response_model=NoteOut)
-async def update_note(note_id: int, data: NoteUpdate, db: AsyncSession = Depends(get_db)):
-    note = await db.get(NovelNote, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="笔记不存在")
+async def update_note(note_id: int, data: NoteUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    note = await get_owned_child(db, NovelNote, note_id, user, "笔记")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(note, k, v)
     await db.commit()
@@ -70,10 +71,8 @@ async def update_note(note_id: int, data: NoteUpdate, db: AsyncSession = Depends
 
 
 @router.delete("/{note_id}")
-async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)):
-    note = await db.get(NovelNote, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="笔记不存在")
+async def delete_note(note_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    note = await get_owned_child(db, NovelNote, note_id, user, "笔记")
     novel_id = note.novel_id
     await db.delete(note)
     await db.commit()

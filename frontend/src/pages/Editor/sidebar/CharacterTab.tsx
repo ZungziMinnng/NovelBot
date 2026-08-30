@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { GripVertical, Plus, Trash2, User, Loader2, ListPlus } from 'lucide-react'
 import { charactersApi, type Character } from '@/api/client'
 import toast from 'react-hot-toast'
+import AutoTextarea from '@/components/AutoTextarea'
 import BulkCharacterStateDrawer from './BulkCharacterStateDrawer'
 
 interface Props {
@@ -157,7 +158,7 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-medium truncate">{c.name}</span>
-                <span className={`text-[10px] px-1.5 py-px rounded-full leading-tight ${getRoleColor(c.role)}`}>
+                <span className={`text-[0.625rem] px-1.5 py-px rounded-full leading-tight ${getRoleColor(c.role)}`}>
                   {c.role}
                 </span>
               </div>
@@ -237,42 +238,41 @@ export default function CharacterTab({ novelId, onOpenCharacter, activeCharacter
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
-              <textarea
+              <AutoTextarea
                 placeholder="一句话简介"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                rows={2}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                minRows={2}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">外貌</label>
-              <textarea
+              <AutoTextarea
                 placeholder="外貌特征"
                 value={form.appearance}
                 onChange={(e) => setForm({ ...form, appearance: e.target.value })}
-                rows={2}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                minRows={3}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">性格（初始底色）</label>
-              <textarea
+              <AutoTextarea
                 placeholder="初始性格倾向"
                 value={form.personality}
                 onChange={(e) => setForm({ ...form, personality: e.target.value })}
-                rows={2}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                minRows={3}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">背景故事</label>
-              <textarea
+              <AutoTextarea
                 placeholder="角色来历、经历"
                 value={form.background}
                 onChange={(e) => setForm({ ...form, background: e.target.value })}
-                rows={3}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background resize-y"
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background"
               />
             </div>
             <div className="flex justify-end gap-2">

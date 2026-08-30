@@ -8,6 +8,7 @@ class WriterPreset(Base):
     __tablename__ = "writer_presets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, default="")
     examples: Mapped[list] = mapped_column(JSON, default=list)

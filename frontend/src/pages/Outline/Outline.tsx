@@ -533,7 +533,7 @@ export default function Outline() {
                       spellCheck={false}
                     />
                     {promptContent !== promptOriginal && (
-                      <p className="text-[10px] text-amber-600 dark:text-amber-400">有未保存的修改</p>
+                      <p className="text-[0.625rem] text-amber-600 dark:text-amber-400">有未保存的修改</p>
                     )}
                   </div>
                 )}

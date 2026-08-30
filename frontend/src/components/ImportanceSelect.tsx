@@ -16,7 +16,7 @@ interface Props {
 export default function ImportanceSelect({ value, onChange, className }: Props) {
   return (
     <div className={className}>
-      <label className="text-[10px] text-muted-foreground">重要性</label>
+      <label className="text-[0.625rem] text-muted-foreground">重要性</label>
       <select
         value={value ?? 3}
         onChange={(e) => onChange(Number(e.target.value))}

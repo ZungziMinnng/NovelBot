@@ -9,6 +9,7 @@ from app.models.world_entity import WorldEntity
 from app.schemas.technique import TechniqueCreate, TechniqueUpdate, TechniqueOut
 from app.schemas.world_entity import WorldEntityOut
 from app.services.entity_embeddings import embed_technique, embed_world_entity, remove_entity_embedding
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
@@ -16,9 +17,11 @@ router = APIRouter()
 @router.get("/novel/{novel_id}", response_model=list[TechniqueOut])
 async def list_techniques(
     novel_id: int,
+    user: CurrentUser,
     type: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
+    await get_owned_novel(db, novel_id, user)
     query = select(Technique).where(Technique.novel_id == novel_id)
     if type:
         query = query.where(Technique.type == type)
@@ -28,7 +31,8 @@ async def list_techniques(
 
 
 @router.post("/", response_model=TechniqueOut)
-async def create_technique(data: TechniqueCreate, db: AsyncSession = Depends(get_db)):
+async def create_technique(data: TechniqueCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     technique = Technique(**data.model_dump())
     db.add(technique)
     await db.commit()
@@ -39,11 +43,9 @@ async def create_technique(data: TechniqueCreate, db: AsyncSession = Depends(get
 
 @router.patch("/{technique_id}", response_model=TechniqueOut)
 async def update_technique(
-    technique_id: int, data: TechniqueUpdate, db: AsyncSession = Depends(get_db),
+    technique_id: int, data: TechniqueUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db),
 ):
-    technique = await db.get(Technique, technique_id)
-    if not technique:
-        raise HTTPException(status_code=404, detail="功法不存在")
+    technique = await get_owned_child(db, Technique, technique_id, user, "功法")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(technique, k, v)
     await db.commit()
@@ -53,10 +55,8 @@ async def update_technique(
 
 
 @router.delete("/{technique_id}")
-async def delete_technique(technique_id: int, db: AsyncSession = Depends(get_db)):
-    technique = await db.get(Technique, technique_id)
-    if not technique:
-        raise HTTPException(status_code=404, detail="功法不存在")
+async def delete_technique(technique_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    technique = await get_owned_child(db, Technique, technique_id, user, "功法")
     novel_id = technique.novel_id
     tech_id = technique.id
     await db.delete(technique)
@@ -71,13 +71,11 @@ class ConvertToEntityBody(BaseModel):
 
 @router.post("/{technique_id}/convert-to-entity", response_model=WorldEntityOut)
 async def convert_technique_to_entity(
-    technique_id: int, body: ConvertToEntityBody, db: AsyncSession = Depends(get_db),
+    technique_id: int, body: ConvertToEntityBody, user: CurrentUser, db: AsyncSession = Depends(get_db),
 ):
     if body.type not in ("item", "system"):
         raise HTTPException(status_code=400, detail="type 必须是 item 或 system")
-    technique = await db.get(Technique, technique_id)
-    if not technique:
-        raise HTTPException(status_code=404, detail="功法不存在")
+    technique = await get_owned_child(db, Technique, technique_id, user, "功法")
     novel_id = technique.novel_id
     old_tech_id = technique.id
     entity = WorldEntity(

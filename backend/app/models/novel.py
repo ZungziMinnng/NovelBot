@@ -8,9 +8,21 @@ class Novel(Base):
     __tablename__ = "novels"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     genre: Mapped[str] = mapped_column(String(50), default="")
+    # 题材腔调卡：'' = 按 genre 自动匹配，'none' = 本书不用卡，其他 = 指定卡名
+    genre_card: Mapped[str] = mapped_column(String(50), default="")
     premise: Mapped[str] = mapped_column(Text, default="")
+    # 剧情设计：用户提供的核心情节/走向参考，喂给大纲与角色生成（选填）
+    plot_design: Mapped[str] = mapped_column(Text, default="")
+    # 结局一句话：主角最后走到哪、跟谁、什么状态。喂给大纲生成，让模型知道往哪收
+    ending: Mapped[str] = mapped_column(Text, default="")
+    # 主角起点→终点：身份地位从什么变成什么
+    protagonist_arc: Mapped[str] = mapped_column(Text, default="")
+    # 核心规则/特殊设定原始输入：与合并后的 core_setting 分开保存，
+    # 用于世界观扩写时判断该段是否由用户提供（空则不自动编造）
+    world_rules_seed: Mapped[str] = mapped_column(Text, default="")
     writing_style: Mapped[str] = mapped_column(String(50), default="严肃厚重")
     target_length: Mapped[str] = mapped_column(String(20), default="中篇")
 
@@ -51,11 +63,18 @@ class Novel(Base):
     deepseek_thinking_level: Mapped[str] = mapped_column(String(20), default="high")
     # Gemini 思考档位：off | low | medium | high
     gemini_thinking_level: Mapped[str] = mapped_column(String(20), default="medium")
-    gemini_stream: Mapped[bool] = mapped_column(Boolean, default=False)
+    gemini_stream: Mapped[bool] = mapped_column(Boolean, default=True)
     enable_full_text_context: Mapped[bool] = mapped_column(Boolean, default=False)
     full_text_chapters: Mapped[int] = mapped_column(Integer, default=20)
     context_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 启用的规则广场条目 id。None = 从未配置（走内置默认）；[] = 用户显式全关。
+    # 默认必须留 None 而非 []，否则新建的书开局就没护栏
+    enabled_rule_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     tags: Mapped[dict] = mapped_column(JSON, default=dict)
+    # ── 投稿元数据 ────────────────────────────────────────────────────────────
+    # 番茄/起点开书必填。tags 字段是喂给设定生成的题材字典，与这里的平台标签不是一回事。
+    blurb: Mapped[str] = mapped_column(Text, default="")
+    submission_tags: Mapped[list] = mapped_column(JSON, default=list)
     estimated_chapters: Mapped[int] = mapped_column(Integer, default=0)
     enable_volume_split: Mapped[bool] = mapped_column(Boolean, default=False)
     skip_outline: Mapped[bool] = mapped_column(Boolean, default=False)

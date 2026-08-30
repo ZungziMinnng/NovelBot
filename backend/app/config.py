@@ -43,15 +43,28 @@ class Settings(BaseSettings):
     # ── 可选剧情细节审查超时（秒）：上游失去响应时保留已生成/修订正文 ─────────
     detail_review_timeout: float = 180.0
 
+    # ── DeepSeek 快速任务思考档位（off/high/max）：摘要、审稿等非流式调用 ─────
+    deepseek_fast_thinking: str = "off"
+
     # ── 数据路径 ──────────────────────────────────────────────────────────────
     data_dir: str = str(_DATA_DIR)
     database_url: str = f"sqlite+aiosqlite:///{(_DATA_DIR / 'novelbot.db').as_posix()}"
     chroma_path: str = str(_DATA_DIR / "chroma")
+    log_dir: str = str(_DATA_DIR / "logs")
+
+    # ── 日志 ──────────────────────────────────────────────────────────────────
+    log_level: str = "INFO"
+    log_to_file: bool = True
 
     # ── 应用 ──────────────────────────────────────────────────────────────────
     app_title: str = "NovelBot"
     debug: bool = True
-    max_critic_retries: int = 1  # 1 = Writer 最多执行两次（初次 + 1 次修改）
+    # SQL 回显独立于 debug：开着会把每条语句连章节全文参数一起打进日志文件
+    sql_echo: bool = False
+    max_critic_retries: int = 1  # LLM 审稿意见的修订次数：1 = 初稿 + 1 次修改
+    # 本地机械检查（字数、禁用词、时间标注泄漏、结尾截断）的修订次数，与上面分开算。
+    # 合在一起时字数不达标会吃掉唯一的审稿额度，等于设定一致性根本没审。
+    max_local_retries: int = 2
     enable_review: bool = False
     review_interval: int = 10
 

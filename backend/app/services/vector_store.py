@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 import chromadb
 import httpx
@@ -10,8 +11,36 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client: chromadb.ClientAPI | None = None
-_default_ef = embedding_functions.DefaultEmbeddingFunction()
 _novel_ef_cache: dict[int, chromadb.EmbeddingFunction] = {}
+# 本地默认嵌入函数的惰性状态：实例 = 可用，字符串 = 不可用及原因，None = 还没探测
+_default_ef_state: "chromadb.EmbeddingFunction | str | None" = None
+
+
+def _local_default_ef() -> chromadb.EmbeddingFunction:
+    """未配置嵌入模型时的兜底：chromadb 自带的本地小模型，仅在已下载过时可用。
+
+    chromadb 的 DefaultEmbeddingFunction 首次调用会去 AWS S3 拉 167MB onnx 包，
+    没代理的机器上必然失败，且失败发生在用户正在生成章节的时候。这里改成只用
+    已存在的本地缓存，缺失就立刻抛出"请配置嵌入模型"，不联网。
+    """
+    global _default_ef_state
+    if _default_ef_state is not None:
+        if isinstance(_default_ef_state, str):
+            raise ValueError(_default_ef_state)
+        return _default_ef_state
+
+    from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
+
+    onnx_dir = Path(ONNXMiniLM_L6_V2.DOWNLOAD_PATH) / ONNXMiniLM_L6_V2.EXTRACTED_FOLDER_NAME
+    if not (onnx_dir / "model.onnx").exists():
+        _default_ef_state = (
+            "这本小说还没有配置嵌入模型。请在小说设置里选一个嵌入模型（模型库中"
+            "标记为 embedding 的条目），否则无法建立和检索向量索引。"
+        )
+        raise ValueError(_default_ef_state)
+
+    _default_ef_state = embedding_functions.DefaultEmbeddingFunction()
+    return _default_ef_state
 
 
 def _build_embedding_http_client(use_proxy: bool = True) -> httpx.Client:
@@ -48,10 +77,19 @@ class _FastOpenAIEmbeddingFunction:
         return [d.embedding for d in data]
 
 
+# chromadb 0.5.23 按老签名调 posthog.capture(id, event, props)，posthog 7.x 只收一个位置参数，
+# 于是每次建 collection / 每次检索都刷一条 ERROR。anonymized_telemetry=False 只设了 posthog.disabled，
+# 新版 posthog 不认这个属性，抛错发生在检查之前，所以还得把这个 logger 静音才真正干净。
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
+
 def _get_client() -> chromadb.ClientAPI:
     global _client
     if _client is None:
-        _client = chromadb.PersistentClient(path=settings.chroma_path)
+        _client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=chromadb.Settings(anonymized_telemetry=False),
+        )
     return _client
 
 
@@ -126,7 +164,7 @@ async def ensure_embedding_configured(novel_id: int, db) -> None:
 
 def _get_collection(novel_id: int):
     client = _get_client()
-    ef = _novel_ef_cache.get(novel_id, _default_ef)
+    ef = _novel_ef_cache.get(novel_id) or _local_default_ef()
     return client.get_or_create_collection(
         name=f"novel_{novel_id}",
         embedding_function=ef,
@@ -162,7 +200,10 @@ def store_text(
 def embed_query(novel_id: int, query: str) -> list | None:
     """预计算查询向量，供同一查询的多路检索复用（避免重复调用嵌入端点）。
     失败返回 None，调用方回退到 query_texts 由 Chroma 内部嵌入。"""
-    ef = _novel_ef_cache.get(novel_id, _default_ef)
+    try:
+        ef = _novel_ef_cache.get(novel_id) or _local_default_ef()
+    except ValueError:
+        return None
     try:
         return ef([query])[0]
     except Exception:
@@ -178,8 +219,8 @@ def search_similar(
     query_embedding: list | None = None,
 ) -> list[str]:
     """语义检索，返回相关文本列表"""
-    collection = _get_collection(novel_id)
     try:
+        collection = _get_collection(novel_id)
         results = collection.query(
             **(
                 {"query_embeddings": [query_embedding]}
@@ -210,8 +251,8 @@ def search_similar_with_meta(
     query_embedding: list | None = None,
 ) -> list[dict]:
     """语义检索，返回 [{text, metadata, distance}]"""
-    collection = _get_collection(novel_id)
     try:
+        collection = _get_collection(novel_id)
         results = collection.query(
             **(
                 {"query_embeddings": [query_embedding]}
@@ -267,8 +308,8 @@ def store_texts_batch(
 
 def update_metadata(novel_id: int, doc_id: str, metadata: dict) -> None:
     """仅更新已有文档的 metadata，不重新嵌入文本（回填重要性等场景）。"""
-    collection = _get_collection(novel_id)
     try:
+        collection = _get_collection(novel_id)
         collection.update(ids=[doc_id], metadatas=[metadata])
     except Exception:
         logger.warning(
@@ -284,8 +325,8 @@ def delete_docs(novel_id: int, doc_ids: list[str]) -> None:
     """按 ID 列表删除向量库中的文档"""
     if not doc_ids:
         return
-    collection = _get_collection(novel_id)
     try:
+        collection = _get_collection(novel_id)
         collection.delete(ids=doc_ids)
     except Exception:
         logger.warning(
@@ -298,8 +339,8 @@ def delete_docs(novel_id: int, doc_ids: list[str]) -> None:
 
 def get_all_docs(novel_id: int) -> dict:
     """读取整个集合的 ids/embeddings/documents/metadatas（复制小说用）。"""
-    collection = _get_collection(novel_id)
     try:
+        collection = _get_collection(novel_id)
         res = collection.get(include=["embeddings", "documents", "metadatas"])
         return {
             "ids": res.get("ids", []) or [],

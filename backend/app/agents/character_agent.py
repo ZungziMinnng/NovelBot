@@ -9,7 +9,7 @@ from app.models.chapter import Chapter
 from app.models.character import Character
 from app.services import llm_client
 from app.services.llm_json import JsonCallError, call_json, repair_json
-from app.services.summarizer import _build_analysis_messages, strip_plot_suggestions
+from app.services.summarizer import _build_analysis_messages, chapter_summary_day, strip_plot_suggestions
 from app.prompts.loader import render
 
 logger = logging.getLogger(__name__)
@@ -45,8 +45,13 @@ def _normalize_character_sheet(sheet: dict, character: Character) -> dict:
 async def generate_character_sheet(
     novel: Novel,
     character: Character,
+    given: dict[str, str] | None = None,
 ) -> dict:
-    """使用 LLM 生成完整角色卡"""
+    """使用 LLM 生成完整角色卡。
+
+    given 是作者已经填好的栏位（personality/appearance/speech_style），当硬要求传进
+    提示词让 AI 据此扩写，而不是另起一套。
+    """
     prompt = render(
         "character.jinja2",
         core_setting=novel.core_setting[:2000],
@@ -57,6 +62,7 @@ async def generate_character_sheet(
         premise=novel.premise,
         genre=novel.genre,
         writing_style=novel.writing_style,
+        given=given or {},
     )
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)
@@ -91,8 +97,10 @@ def init_character_state(character: Character) -> dict:
     """初始化角色状态（故事开始前）"""
     return {
         "location": "故事起点",
+        "存续": "存活",
         "current_goal": "",
         "known_secrets": [],
+        "base_relationships": {},
         "initial_relationships": {},
         "relationship_changes": {},
     }
@@ -187,7 +195,7 @@ async def generate_character_history(
 
     if len(batches) == 1:
         history, in_tok, out_tok = await _history_batch(character, batches[0], model, api_format)
-        return history, in_tok, out_tok
+        return _attach_days(history, chapters), in_tok, out_tok
 
     tasks = [_history_batch(character, batch, model, api_format) for batch in batches]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -203,7 +211,18 @@ async def generate_character_history(
         total_in += in_tok
         total_out += out_tok
 
-    return all_history, total_in, total_out
+    return _attach_days(all_history, chapters), total_in, total_out
+
+
+def _attach_days(history: list[dict], chapters: list[Chapter]) -> list[dict]:
+    """按章节摘要的【第X日】标记给经历条目补绝对天数。"""
+    day_by_chapter = {ch.number: day for ch in chapters
+                      if (day := chapter_summary_day(ch.summary)) is not None}
+    for entry in history:
+        day = day_by_chapter.get(entry.get("chapter"))
+        if day is not None:
+            entry["day"] = day
+    return history
 
 
 async def _history_batch(

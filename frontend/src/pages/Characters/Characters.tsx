@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Plus, Trash2, User, Loader2, Pencil, X, Check, Package, Cog, RefreshCw, ImagePlus } from 'lucide-react'
 import { charactersApi, worldEntitiesApi, novelsApi, type Character, type WorldEntity } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import AutoTextarea from '@/components/AutoTextarea'
 import { ROLE_OPTIONS, getRoleColor } from '@/constants/roles'
 
 type Tab = 'character' | 'item' | 'system'
@@ -252,11 +253,11 @@ export default function Characters() {
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
-          <textarea
+          <AutoTextarea
             value={v}
             onChange={e => setDraft(prev => ({ ...prev, [k]: e.target.value }))}
-            className="w-full text-sm border rounded-md p-2 bg-background resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-            rows={Math.max(2, v.split('\n').length)}
+            minRows={3}
+            className="w-full text-sm border rounded-md p-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
       ))}
@@ -563,7 +564,7 @@ export default function Characters() {
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
               <div className="flex items-center gap-2">
                 {newChar.role && (
-                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(newChar.role)}`}>{newChar.role}</span>
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[0.625rem] ${getRoleColor(newChar.role)}`}>{newChar.role}</span>
                 )}
                 <input list="role-options-chars-new" value={newChar.role} onChange={e => setNewChar({...newChar, role: e.target.value})}
                   className="flex-1 border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
@@ -574,8 +575,8 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
-              <textarea value={newChar.description} onChange={e => setNewChar({...newChar, description: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background resize-none h-16 focus:outline-none focus:ring-1 focus:ring-ring" />
+              <AutoTextarea value={newChar.description} onChange={e => setNewChar({...newChar, description: e.target.value})}
+                minRows={3} className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setAdding(false)} className="px-4 py-2 text-sm border rounded-lg hover:bg-muted">取消</button>
@@ -599,8 +600,8 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
-              <textarea value={newEntity.description} onChange={e => setNewEntity({...newEntity, description: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background resize-none h-24 focus:outline-none focus:ring-1 focus:ring-ring" />
+              <AutoTextarea value={newEntity.description} onChange={e => setNewEntity({...newEntity, description: e.target.value})}
+                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setAdding(false)} className="px-4 py-2 text-sm border rounded-lg hover:bg-muted">取消</button>
@@ -633,7 +634,7 @@ export default function Characters() {
               <label className="text-xs text-muted-foreground mb-1 block">定位</label>
               <div className="flex items-center gap-2">
                 {editForm.role && (
-                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${getRoleColor(editForm.role)}`}>{editForm.role}</span>
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[0.625rem] ${getRoleColor(editForm.role)}`}>{editForm.role}</span>
                 )}
                 <input list="role-options-chars-edit" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}
                   className="flex-1 border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" placeholder="角色定位" />
@@ -644,8 +645,8 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
-              <textarea value={editForm.description} onChange={e => setEditForm({...editForm, description: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background resize-none h-24 focus:outline-none focus:ring-1 focus:ring-ring" />
+              <AutoTextarea value={editForm.description} onChange={e => setEditForm({...editForm, description: e.target.value})}
+                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setEditing(null)} className="px-4 py-2 text-sm border rounded-lg hover:bg-muted">取消</button>
@@ -669,8 +670,8 @@ export default function Characters() {
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">描述</label>
-              <textarea value={entityEditForm.description} onChange={e => setEntityEditForm({...entityEditForm, description: e.target.value})}
-                className="w-full border rounded-md p-2 text-sm bg-background resize-none h-24 focus:outline-none focus:ring-1 focus:ring-ring" />
+              <AutoTextarea value={entityEditForm.description} onChange={e => setEntityEditForm({...entityEditForm, description: e.target.value})}
+                className="w-full border rounded-md p-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setEditingEntity(null)} className="px-4 py-2 text-sm border rounded-lg hover:bg-muted">取消</button>

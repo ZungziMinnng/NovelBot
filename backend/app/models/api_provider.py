@@ -8,6 +8,7 @@ class ApiProvider(Base):
     __tablename__ = "api_providers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     api_key: Mapped[str] = mapped_column(String(500), nullable=False, default="")

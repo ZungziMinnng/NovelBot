@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
@@ -8,6 +8,7 @@ from app.models.world_rule import WorldRule
 from app.schemas.world_rule import WorldRuleCreate, WorldRuleUpdate, WorldRuleOut
 from app.services.world_rules_sync import sync_core_setting
 from app.services.entity_embeddings import embed_world_element, remove_entity_embedding
+from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
 
@@ -19,7 +20,8 @@ async def _sync_novel(db: AsyncSession, novel_id: int) -> None:
 
 
 @router.get("/novel/{novel_id}", response_model=list[WorldRuleOut])
-async def list_rules(novel_id: int, kind: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+async def list_rules(novel_id: int, user: CurrentUser, kind: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, novel_id, user)
     stmt = select(WorldRule).where(WorldRule.novel_id == novel_id)
     if kind:
         stmt = stmt.where(WorldRule.kind == kind)
@@ -29,7 +31,8 @@ async def list_rules(novel_id: int, kind: Optional[str] = None, db: AsyncSession
 
 
 @router.post("/", response_model=WorldRuleOut)
-async def create_rule(data: WorldRuleCreate, db: AsyncSession = Depends(get_db)):
+async def create_rule(data: WorldRuleCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    await get_owned_novel(db, data.novel_id, user)
     rule = WorldRule(**data.model_dump())
     db.add(rule)
     await db.flush()
@@ -42,10 +45,8 @@ async def create_rule(data: WorldRuleCreate, db: AsyncSession = Depends(get_db))
 
 
 @router.patch("/{rule_id}", response_model=WorldRuleOut)
-async def update_rule(rule_id: int, data: WorldRuleUpdate, db: AsyncSession = Depends(get_db)):
-    rule = await db.get(WorldRule, rule_id)
-    if not rule:
-        raise HTTPException(status_code=404, detail="条目不存在")
+async def update_rule(rule_id: int, data: WorldRuleUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    rule = await get_owned_child(db, WorldRule, rule_id, user, "条目")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(rule, k, v)
     await db.flush()
@@ -60,10 +61,8 @@ async def update_rule(rule_id: int, data: WorldRuleUpdate, db: AsyncSession = De
 
 
 @router.delete("/{rule_id}")
-async def delete_rule(rule_id: int, db: AsyncSession = Depends(get_db)):
-    rule = await db.get(WorldRule, rule_id)
-    if not rule:
-        raise HTTPException(status_code=404, detail="条目不存在")
+async def delete_rule(rule_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    rule = await get_owned_child(db, WorldRule, rule_id, user, "条目")
     novel_id = rule.novel_id
     was_element = rule.kind == "element"
     rule_id_val = rule.id

@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Plus, Pencil, Trash2, X, Loader2, Map as MapIcon, Globe, Building, Landmark } from 'lucide-react'
 import { novelsApi, locationsApi, type Location } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import AutoTextarea from '@/components/AutoTextarea'
 
 const LOCATION_TYPES = ['continent', 'region', 'city', 'building', 'landmark', 'other'] as const
 const TYPE_LABELS: Record<string, string> = {
@@ -142,9 +143,9 @@ export default function Locations() {
             </div>
             <div>
               <label className="text-xs font-medium mb-1 block">描述</label>
-              <textarea value={formDesc} onChange={e => setFormDesc(e.target.value)} rows={2}
+              <AutoTextarea value={formDesc} onChange={e => setFormDesc(e.target.value)}
                 placeholder="地理位置、气候、政治归属、重要性等"
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -216,7 +217,7 @@ export default function Locations() {
                           </div>
                         </div>
                         <div className="mt-2 pt-2 border-t border-dashed">
-                          <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">当前状态</span>
+                          <span className="text-[0.625rem] text-muted-foreground/60 uppercase tracking-wide">当前状态</span>
                           {stateEntries.length > 0 ? (
                             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
                               {stateEntries.map(([k, v]) => (

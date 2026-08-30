@@ -42,7 +42,7 @@ export default function BuildMode() {
 
   const handleCancel = () => {
     abortBuild()
-    navigate('/')
+    navigate('/novels')
   }
 
   const handleEnterEditor = () => {
@@ -62,7 +62,7 @@ export default function BuildMode() {
     <div className="h-screen flex flex-col bg-background text-foreground">
       <div className="border-b px-6 py-3 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          <Link to="/" className="text-muted-foreground hover:text-foreground">
+          <Link to="/novels" className="text-muted-foreground hover:text-foreground">
             <ArrowLeft className="w-4 h-4" />
           </Link>
           <h1 className="font-semibold">
@@ -118,8 +118,8 @@ export default function BuildMode() {
 
       <div className="border-t px-6 py-3 flex justify-end shrink-0">
         {phase === 'error' ? (
-          <button onClick={() => navigate('/')} className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90">
-            返回首页
+          <button onClick={() => navigate('/novels')} className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90">
+            返回小说列表
           </button>
         ) : (
           <button onClick={handleCancel} className="px-4 py-2 rounded-lg border text-sm text-muted-foreground hover:text-foreground transition-colors">

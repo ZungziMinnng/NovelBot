@@ -9,11 +9,21 @@
 角色基本信息：
 - 姓名：{{ name }}
 - 角色定位：{{ role }}
-- 年龄：{{ age }}
+- 年龄：{{ age }}（出生至今的实际岁数，非修行年限）
 - 简述：{{ description }}
 
 故事前提：
 {{ premise }}
+{% if given %}
+
+作者已经定下来的栏位（硬要求，必须全部体现，不许改掉或漏掉其中任何一点）：
+{% if given.personality %}- 性格：{{ given.personality }}
+{% endif %}{% if given.appearance %}- 外貌：{{ given.appearance }}
+{% endif %}{% if given.speech_style %}- 语言风格：{{ given.speech_style }}
+{% endif %}
+作者常用关键词列举（比如「拜金、虚伪」），你要把每个词都展开成有画面感的具体描述，可以补细节让它更丰满，
+但不能替换、削弱或写出与之矛盾的内容，一个要点都不能丢。作者没列出来的栏位照常自由发挥。
+{% endif %}
 
 请生成详细人物卡，严格以 JSON 格式输出：
 {

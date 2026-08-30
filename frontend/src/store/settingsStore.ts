@@ -5,11 +5,13 @@ interface SettingsStore {
   theme: string
   streamingMode: boolean
   nsfwMode: boolean
+  /** 隐藏名单已迁到服务端 users 表；这两个字段只为把老数据搬上去，搬完清空 */
   hiddenNovelIds: number[]
+  hiddenPresetIds: number[]
   setTheme: (id: string) => void
   toggleStreamingMode: () => void
   toggleNsfwMode: () => void
-  toggleNovelHidden: (id: number) => void
+  clearLegacyHidden: () => void
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -19,15 +21,11 @@ export const useSettingsStore = create<SettingsStore>()(
       streamingMode: true,
       nsfwMode: false,
       hiddenNovelIds: [],
+      hiddenPresetIds: [],
       setTheme: (id) => set({ theme: id }),
       toggleStreamingMode: () => set((s) => ({ streamingMode: !s.streamingMode })),
       toggleNsfwMode: () => set((s) => ({ nsfwMode: !s.nsfwMode })),
-      toggleNovelHidden: (id) =>
-        set((s) => ({
-          hiddenNovelIds: s.hiddenNovelIds.includes(id)
-            ? s.hiddenNovelIds.filter((x) => x !== id)
-            : [...s.hiddenNovelIds, id],
-        })),
+      clearLegacyHidden: () => set({ hiddenNovelIds: [], hiddenPresetIds: [] }),
     }),
     {
       name: 'novelbot-settings',
@@ -35,6 +33,7 @@ export const useSettingsStore = create<SettingsStore>()(
         theme: state.theme,
         streamingMode: state.streamingMode,
         hiddenNovelIds: state.hiddenNovelIds,
+        hiddenPresetIds: state.hiddenPresetIds,
       }),
     }
   )
