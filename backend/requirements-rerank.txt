@@ -1,0 +1,20 @@
+# 可选功能：本地交叉编码重排（app/services/reranker.py）
+#
+# 不装这些依赖，检索照旧工作，只是少一层精排（自动降级回 RRF 排序）。
+# 装了大约占 4.6GB 磁盘，有 NVIDIA 显卡才值得装（CPU 上每章要多等几秒）。
+#
+# 装法（不能只用清华源——清华不代理 PyTorch 官方索引）：
+#
+#   1) 先装 CUDA 版 torch，走 PyTorch 官方索引：
+#      pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+#   2) 再装本文件其余部分，走清华源：
+#      pip install -r requirements-rerank.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+#   3) 预下载模型（reranker.py 用 local_files_only=True，不会自己联网下载）：
+#      set HF_ENDPOINT=https://hf-mirror.com
+#      huggingface-cli download BAAI/bge-reranker-v2-m3
+#
+# 装完在小说的上下文设置里打开 rerank 开关才生效。
+
+sentence-transformers>=5.6.0

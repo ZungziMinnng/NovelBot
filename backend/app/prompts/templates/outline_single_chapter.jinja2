@@ -1,0 +1,44 @@
+你是一位小说大纲策划师。请为第 {{ chapter_number }} 章写一份细纲。
+
+小说类型：{{ genre }}
+核心设定：{{ core_setting }}
+{% if ending %}
+全书结局（走向要朝这里推进，但本章不必抵达）：
+{{ ending }}
+{% endif %}
+{% if range_outline %}
+覆盖本章的范围大纲（第 {{ range_start }}-{{ range_end }} 章，本章细纲必须落在它的框架内）：
+{{ range_outline }}
+{% endif %}
+{% if book_summary %}
+故事已经写到的地方（全书概要）：
+{{ book_summary }}
+{% endif %}
+{% if recent_summaries %}
+前几章都发生了什么：
+{{ recent_summaries }}
+{% endif %}
+{% if characters_summary %}
+在场角色：
+{{ characters_summary }}
+{% endif %}
+{% if endgame_cards %}
+留到后面才揭的牌（每行标了最早能揭的卷号，本章是第 {{ volume }} 卷）：
+{{ endgame_cards }}
+还没到解锁卷的牌，本章只能埋线索，不准揭开。
+{% endif %}
+
+要求：
+1. content 写 80-200 字，说清本章的核心事件、目标和推进到哪
+2. 要接得上前几章，不要重复已经发生过的事
+3. 执行计划四项取值只能从清单里选：
+   chapter_role（本章定位）：{{ chapter_roles }}
+   emotion_tone（情绪基调）：{{ emotion_tones }}
+   hook_type（章尾钩子）：{{ hook_types }}
+   emotion_intensity、hook_strength 为 1-5 的整数
+{% if avoid_hook %}
+4. 上一章的章尾钩子是「{{ avoid_hook }}」，本章换一种，别连着用
+{% endif %}
+
+只返回一个 JSON 对象，不要其他文字：
+{"title": "章节标题", "content": "...", "chapter_role": "推进", "emotion_tone": "紧张", "emotion_intensity": 3, "hook_type": "突然揭示", "hook_strength": 3}
