@@ -23,6 +23,7 @@ class TavernCard(Base):
     opening_scene: Mapped[str] = mapped_column(Text, default="")
     system_instruction: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    profile_sections: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 对话示例：[{user, assistant}]，转成真实的 few-shot 消息轮。
     # 决定角色说话腔调最有效的字段，比在 personality 里用文字描述强一档。
@@ -53,6 +54,7 @@ class TavernCard(Base):
     temperature: Mapped[float] = mapped_column(Float, default=0.9)
     max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
     model_ref: Mapped[str] = mapped_column(String(100), default="")
+    summary_model_ref: Mapped[str] = mapped_column(String(100), default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

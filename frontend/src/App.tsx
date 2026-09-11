@@ -18,6 +18,9 @@ import Tavern from '@/pages/Tavern/Tavern'
 import TavernCard from '@/pages/Tavern/TavernCard'
 import TavernChat from '@/pages/Tavern/TavernChat'
 import TavernSettings from '@/pages/Tavern/TavernSettings'
+import Rpg from '@/pages/Rpg/Rpg'
+import RpgModule from '@/pages/Rpg/RpgModule'
+import RpgPlay from '@/pages/Rpg/RpgPlay'
 import BuildMode from '@/pages/Build/BuildMode'
 import Login from '@/pages/Auth/Login'
 import RequireAuth from '@/components/RequireAuth'
@@ -63,6 +66,9 @@ export default function App() {
           <Route path="/tavern/settings" element={<TavernSettings />} />
           <Route path="/tavern/card/:id" element={<TavernCard />} />
           <Route path="/tavern/chat/:sessionId" element={<TavernChat />} />
+          <Route path="/rpg" element={<Rpg />} />
+          <Route path="/rpg/module/:id" element={<RpgModule />} />
+          <Route path="/rpg/play/:sessionId" element={<RpgPlay />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/account" element={<Account />} />
           <Route path="/about" element={<About />} />

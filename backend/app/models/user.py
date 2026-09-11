@@ -18,6 +18,8 @@ class User(Base):
     # localhost:5173 和 127.0.0.1:8000 两个源打开，localStorage 按源隔离会看不到彼此
     hidden_novel_ids: Mapped[list] = mapped_column(JSON, default=list)
     hidden_preset_ids: Mapped[list] = mapped_column(JSON, default=list)
+    tavern_prompts: Mapped[dict] = mapped_column(JSON, default=dict)
+    rpg_prompts: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

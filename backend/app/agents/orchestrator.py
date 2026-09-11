@@ -2,23 +2,18 @@
 Orchestrator: LangGraph 风格的状态机，协调所有 Agent。
 以 AsyncIterator 形式输出 SSE 事件，支持流式渲染。
 """
-import json
 import logging
 import time
 from typing import AsyncIterator, TypedDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete as sql_delete
-from sqlalchemy.orm.attributes import flag_modified
 from app.models.memory import Memory
 
 from app.models.novel import Novel
 from app.models.chapter import Chapter
-from app.models.character import Character
-from app.models.world_entity import WorldEntity
-from app.models.location import Location
 from app.services.context_builder import build_generation_context
 from app.services.sse import sse_event
-from app.services import summarizer, llm_client, entity_embeddings
+from app.services import summarizer, llm_client, entity_embeddings, state_snapshot
 from app.agents import writer
 from app.agents.draft_loop import run_draft_loop
 from app.agents.memory_pipeline import (
@@ -51,67 +46,10 @@ _sse = sse_event
 _sse_json = sse_event
 
 
-async def _create_state_snapshot(
-    session: AsyncSession, novel: Novel, chapter_number: int, volume: int,
-) -> None:
-    """捕获本章生成前的状态快照：角色/实体/地点 current_state。"""
-    chars = (await session.execute(
-        select(Character).where(Character.novel_id == novel.id)
-    )).scalars().all()
-    ents = (await session.execute(
-        select(WorldEntity).where(WorldEntity.novel_id == novel.id)
-    )).scalars().all()
-    locs = (await session.execute(
-        select(Location).where(Location.novel_id == novel.id)
-    )).scalars().all()
-    snap_content = json.dumps({
-        "characters": {str(c.id): c.current_state for c in chars},
-        "entities": {str(e.id): e.current_state for e in ents},
-        "locations": {str(l.id): l.current_state for l in locs},
-    }, ensure_ascii=False)
-    session.add(Memory(
-        novel_id=novel.id, chapter_number=chapter_number, volume=volume,
-        memory_type="state_snapshot", content=snap_content,
-    ))
-
-
-async def _restore_state_snapshot(
-    session: AsyncSession, novel: Novel, snapshot: Memory,
-) -> None:
-    """从快照恢复角色/实体/地点的 current_state。"""
-    try:
-        snap_data = json.loads(snapshot.content)
-    except Exception:
-        logger.warning("状态快照解析失败", exc_info=True)
-        return
-
-    for cid_str, cstate in snap_data.get("characters", {}).items():
-        char = await session.get(Character, int(cid_str))
-        if char:
-            char.current_state = cstate
-            flag_modified(char, "current_state")
-    for eid_str, estate in snap_data.get("entities", {}).items():
-        ent = await session.get(WorldEntity, int(eid_str))
-        if ent:
-            ent.current_state = estate
-            flag_modified(ent, "current_state")
-    for lid_str, lstate in snap_data.get("locations", {}).items():
-        loc = await session.get(Location, int(lid_str))
-        if loc:
-            loc.current_state = lstate
-            flag_modified(loc, "current_state")
-
-    logger.info("已从快照回滚章节 %s 的状态", snapshot.chapter_number)
-
-
 async def _prepare_regen_rollback(
     session: AsyncSession, novel: Novel, chapter_number: int, volume: int,
 ) -> None:
-    """生成/重写前回滚：删除旧章节摘要，恢复已有快照或首次创建快照。
-
-    快照「不存在才创建、存在只恢复不覆盖」，确保它始终代表本章第一次生成之前的干净状态，
-    从而根除「批注重写把已污染状态写进快照」「快照保存失败导致零回滚」等问题。
-    """
+    """生成/重写前回滚：删除旧章节摘要，恢复已有快照或首次创建快照。"""
     await session.execute(
         sql_delete(Memory).where(
             Memory.novel_id == novel.id,
@@ -120,20 +58,7 @@ async def _prepare_regen_rollback(
             Memory.memory_type == "chapter_summary",
         )
     )
-    snapshot = (await session.execute(
-        select(Memory)
-        .where(
-            Memory.novel_id == novel.id,
-            Memory.chapter_number == chapter_number,
-            Memory.volume == volume,
-            Memory.memory_type == "state_snapshot",
-        )
-        .order_by(Memory.id.desc())
-    )).scalars().first()
-    if snapshot:
-        await _restore_state_snapshot(session, novel, snapshot)
-    else:
-        await _create_state_snapshot(session, novel, chapter_number, volume)
+    await state_snapshot.rollback_or_create(session, novel.id, chapter_number, volume)
     await _retry_on_lock(lambda: session.commit(), "pregen_rollback")
 
 

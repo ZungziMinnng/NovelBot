@@ -181,6 +181,8 @@ async def _run_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS idx_tavern_rules_user ON tavern_rules(user_id)",
         # 世界书关键词扫描深度。默认 3 = 保持加这个开关之前的行为
         "ALTER TABLE tavern_cards ADD COLUMN scan_depth INTEGER DEFAULT 3",
+        "ALTER TABLE tavern_cards ADD COLUMN profile_sections JSON DEFAULT '{}'",
+        "ALTER TABLE tavern_cards ADD COLUMN summary_model_ref VARCHAR(100) DEFAULT ''",
         # 群聊：故事线的参与角色（表由 create_all 建，这里只补索引）
         "CREATE INDEX IF NOT EXISTS idx_tavern_session_cards_session ON tavern_session_cards(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_tavern_session_cards_card ON tavern_session_cards(card_id)",
@@ -214,9 +216,34 @@ async def _run_migrations() -> None:
         # 隐藏的小说 / 写手预设。原来存 localStorage，换个入口（5173 vs 8000）就丢
         "ALTER TABLE users ADD COLUMN hidden_novel_ids JSON DEFAULT '[]'",
         "ALTER TABLE users ADD COLUMN hidden_preset_ids JSON DEFAULT '[]'",
+        "ALTER TABLE users ADD COLUMN tavern_prompts JSON DEFAULT '{}'",
         # 开书就要定下来的收尾方向：结局一句话 + 主角起点→终点
         "ALTER TABLE novels ADD COLUMN ending TEXT DEFAULT ''",
         "ALTER TABLE novels ADD COLUMN protagonist_arc TEXT DEFAULT ''",
+        # RPG 文字冒险（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_rpg_modules_user ON rpg_modules(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_world_entries_module ON rpg_world_entries(module_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_npcs_module ON rpg_npcs(module_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_sessions_module ON rpg_sessions(module_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_messages_session ON rpg_messages(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_saves_session ON rpg_saves(session_id, id)",
+        "ALTER TABLE users ADD COLUMN rpg_prompts JSON DEFAULT '{}'",
+        # RPG 换成数值驱动：数值定义 + 游戏类型 + 判定的两个开关
+        "ALTER TABLE rpg_modules ADD COLUMN genre VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN stat_defs JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_modules ADD COLUMN relation_stat_defs JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_modules ADD COLUMN random_check BOOLEAN DEFAULT 1",
+        # 世界书的数值门槛。空 = 无条件，老行拿到 '{}' 行为不变
+        "ALTER TABLE rpg_world_entries ADD COLUMN trigger_condition JSON DEFAULT '{}'",
+        # 角色卡字段（照抄酒馆卡的结构）
+        "ALTER TABLE rpg_npcs ADD COLUMN role VARCHAR(20) DEFAULT 'npc'",
+        "ALTER TABLE rpg_npcs ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE rpg_npcs ADD COLUMN profile_sections JSON DEFAULT '{}'",
+        "ALTER TABLE rpg_npcs ADD COLUMN dialogue_examples JSON DEFAULT '[]'",
+        # 道具 / 地点 / 动作按钮（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_rpg_items_module ON rpg_items(module_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_locations_module ON rpg_locations(module_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_actions_module ON rpg_actions(module_id)",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -388,7 +415,7 @@ async def seed_builtin_rules(user_ids: list[int] | None = None) -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word, rpg  # noqa: F401
     async with engine.begin() as conn:
         existing = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).has_table("world_rules")

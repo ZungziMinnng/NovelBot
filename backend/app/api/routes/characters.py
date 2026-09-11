@@ -9,6 +9,7 @@ from app.models.novel import Novel
 from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut, EnhanceRequest, ImagePromptRequest
 from app.agents import character_agent
 from app.services.entity_embeddings import embed_character, remove_entity_embedding
+from app.services import state_snapshot
 from app.services.relevance_selector import select_character_appearance_context
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
@@ -94,8 +95,14 @@ async def update_character(
     character_id: int, data: CharacterUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)
 ):
     char = await get_owned_child(db, Character, character_id, user, "角色")
-    for k, v in data.model_dump(exclude_none=True).items():
+    fields = data.model_dump(exclude_none=True)
+    for k, v in fields.items():
         setattr(char, k, v)
+    # 手改的状态同步进最新快照，否则重新确认时的回滚会把它一起冲掉
+    if "current_state" in fields:
+        await state_snapshot.patch_latest(
+            db, char.novel_id, "characters", char.id, char.current_state,
+        )
     await db.commit()
     await db.refresh(char)
     await embed_character(char.novel_id, char)

@@ -910,6 +910,7 @@ export interface TavernCard {
   opening_scene: string
   system_instruction: string
   description: string
+  profile_sections: { appearance?: string; background?: string; abilities?: string; relationships?: string }
   /** 对话示例：作为真实 few-shot 消息轮注入，定腔调最有效的字段 */
   dialogue_examples: ExampleTurn[]
   /** 勾选的酒馆规则 id（不是规则广场）。默认 [] = 不注入，没有小说侧那套 null 三态语义 */
@@ -923,6 +924,7 @@ export interface TavernCard {
   temperature: number
   max_tokens: number
   model_ref: string
+  summary_model_ref: string
   session_count: number
   created_at: string
   updated_at: string
@@ -1021,6 +1023,7 @@ export const tavernApi = {
       name?: string
       personality?: string
       description?: string
+      profile_sections?: TavernCard['profile_sections']
       opening_scene?: string
     }) => api.post<{ text: string }>('/tavern/cards/assist', data, { timeout: 180000 })
       .then(r => r.data),
@@ -1075,6 +1078,339 @@ export const tavernApi = {
     api.post<{ suggestions: string[] }>(
       `/tavern/sessions/${sessionId}/suggest`, {}, { timeout: 120000 },
     ).then(r => r.data),
+}
+
+// ── RPG APIs ───────────────────────────────────────────────────────────────
+
+/** 判定难度档位。模型只能从这五档里挑，成功率由模组的 rate_table 定 */
+export type RpgBand = 'trivial' | 'easy' | 'medium' | 'hard' | 'extreme'
+
+/** 一项数值的定义。玩家数值和关系数值共用这个形状 */
+export interface RpgStatDef {
+  name: string
+  initial: number
+  min: number
+  /** null = 无上限（钱、声望这种） */
+  max: number | null
+  /** 能不能拿来判定。资金不行，敏捷可以 */
+  for_check?: boolean
+  /** 无 / 死亡 / 标记 */
+  on_zero?: string
+  /** 条 / 数字 / 隐藏 */
+  display?: string
+}
+
+/** 统一条件格式。世界书触发、动作按钮可用性、地点进入条件共用 */
+export interface RpgCondition {
+  stats?: Record<string, { op: string; value: number }>
+  relations?: { npc: string; stat: string; op: string; value: number }[]
+  /** 「!xxx」表示这条 flag 不能立着 */
+  flags?: string[]
+  items?: string[]
+}
+
+/** 模组（剧本）：一份可反复开局的世界设定，对应酒馆的角色卡 */
+export interface RpgModule {
+  id: number
+  name: string
+  /** 只给作者看，后端永不注入 prompt */
+  creator_note: string
+  /** 游戏类型（都市 / 魔法学院 / 互动养成…），进 GM 提示词 */
+  genre: string
+  worldview: string
+  /** 开局旁白，建局时落成首条 assistant 消息 */
+  opening_scene: string
+  system_instruction: string
+  /** 叙事腔调样例，作为文字引用进 system，不做真实 few-shot 轮 */
+  narration_sample: string
+  cover_url: string
+  /** 玩家数值定义 */
+  stat_defs: RpgStatDef[]
+  /** 关系数值定义。定义一次，每个角色各持一份 */
+  relation_stat_defs: RpgStatDef[]
+  default_inventory: RpgInvItem[]
+  default_location: string
+  /** 档位 → 成功率(%)。绝对难度由模组作者锁定，模型只管相对档位 */
+  rate_table: Record<RpgBand, number>
+  /** 整体难度旋钮，加到成功率上。-10 轻松 / +10 手软 */
+  difficulty_bias: number
+  /** never = 纯叙事（默认）/ smart = AI 判断要不要判 / always = 每轮都判 */
+  check_mode: 'smart' | 'always' | 'never'
+  /** 开了判定之后，掷不掷随机数。关掉则同一存档重玩结果一样 */
+  random_check: boolean
+  scan_depth: number
+  context_turns: number
+  temperature: number
+  max_tokens: number
+  reply_length: number
+  model_ref: string
+  /** 裁决 / 结算 / 摘要 / 建议共用的便宜模型 */
+  fast_model_ref: string
+  session_count: number
+  npc_count: number
+  entry_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** 背包里的一行。和模组的道具定义 RpgItem 是两回事 */
+export interface RpgInvItem {
+  name: string
+  qty: number
+  note?: string
+}
+
+/** 模组定义的道具。「使用」时由引擎按 effects 精确增减，AI 碰不到 */
+export interface RpgItem {
+  id: number
+  module_id: number
+  name: string
+  description: string
+  category: string
+  usable: boolean
+  consumable: boolean
+  /** 数值增减 {"精力": 20, "资金": -50} */
+  effects: Record<string, number>
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 地点。connections 存名字不存 id——NPC.location 本来就是字符串 */
+export interface RpgLocation {
+  id: number
+  module_id: number
+  name: string
+  description: string
+  connections: string[]
+  enter_requires: RpgCondition
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 动作按钮。点一次数值由引擎算死，AI 只负责写成画面 */
+export interface RpgAction {
+  id: number
+  module_id: number
+  name: string
+  /** 点了等于玩家说了这句话 */
+  prompt_hint: string
+  effects: Record<string, number>
+  /** 对目标角色的关系数值增减 */
+  relation_effects: Record<string, number>
+  requires: RpgCondition
+  /** 要不要先选一个在场角色 */
+  needs_target: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RpgWorldEntry {
+  id: number
+  module_id: number
+  keywords: string
+  content: string
+  enabled: boolean
+  sort_order: number
+  /** 常驻：不看关键词，每轮都注入 */
+  constant: boolean
+  /** 0 = 拼进 system；n>0 = 并进倒数第 n 条消息开头 */
+  depth: number
+  /** 附加条件。空 = 无条件。常驻 + 条件 = 跨过某条线就解锁 */
+  trigger_condition: RpgCondition
+  created_at: string
+  updated_at: string
+}
+
+export interface RpgNpc {
+  id: number
+  module_id: number
+  name: string
+  /** protagonist = 主角模板，开局时预填玩家角色 */
+  role: 'npc' | 'protagonist'
+  avatar_url: string
+  description: string
+  persona: string
+  /** 只在首次见面时注入，之后省掉这段 token */
+  appearance: string
+  /** 常驻地点。等于当前局的 location 即视为在场 */
+  location: string
+  /** 额外触发词：人不在场但被提到也注入 */
+  keywords: string
+  /** 分栏档案，照抄酒馆卡：外貌身材 / 背景故事 / … */
+  profile_sections: Record<string, string>
+  dialogue_examples: { user: string; assistant: string }[]
+  /** 覆盖这个角色的关系数值起点（青梅竹马开局好感就该更高） */
+  initial_state: Record<string, number | boolean>
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 一局存档。世界的权威状态（数值/背包/地点）就在这上面 */
+export interface RpgSession {
+  id: number
+  module_id: number
+  title: string
+  /** 数值按 on_zero=死亡 归零后端置 dead，前端据此拦输入 */
+  status: 'alive' | 'dead' | 'ended'
+  char_name: string
+  char_desc: string
+  /** 玩家数值，键由模组的 stat_defs 决定 */
+  stats: Record<string, number>
+  inventory: RpgInvItem[]
+  location: string
+  flags: Record<string, string | number | boolean | null>
+  /** {"3": {"好感": 62, "met": true}}，键是 npc_id 的字符串 */
+  npc_states: Record<string, Record<string, number | boolean>>
+  summary: string
+  summarized_upto_id: number
+  turn_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** 一张存档。存的是「这一回合发生之前」的干净状态 */
+export interface RpgSave {
+  id: number
+  session_id: number
+  /** auto 每回合自动拍、只留最近 30 张；manual 永不自动清 */
+  kind: 'auto' | 'manual'
+  label: string
+  turn_index: number
+  before_message_id: number
+  created_at: string
+}
+
+/** 本回合判定，只挂在 user 行上。null = 这轮没判定 */
+export interface RpgRoll {
+  need_check: boolean
+  attr: string
+  band: RpgBand
+  intent: string
+  reason: string
+  /** 成功率(%)。玩家看得懂这个，看不懂「D20+2 对抗 16」 */
+  rate?: number
+  /** 掷点 1~100，越低越好。0 = 关了随机，前端只显示成功率 */
+  dice?: number
+  outcome?: RpgOutcome
+}
+
+/** 五档结果。narrow = 险胜：做成了但付出看得见的代价 */
+export type RpgOutcome = 'crit_success' | 'success' | 'narrow' | 'fail' | 'crit_fail'
+
+export interface RpgMessage {
+  id: number
+  session_id: number
+  role: 'user' | 'assistant'
+  content: string
+  roll: RpgRoll | null
+  state_delta: Record<string, unknown> | null
+  suggestions: string[] | null
+  /** 叙事那次调用的消耗 */
+  input_tokens: number
+  output_tokens: number
+  /** 裁决 + 结算 + 建议的合计，和叙事分开显示 */
+  aux_input_tokens: number
+  aux_output_tokens: number
+  created_at: string
+}
+
+type RpgEntryInput = Partial<Omit<RpgWorldEntry, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgNpcInput = Partial<Omit<RpgNpc, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgItemInput = Partial<Omit<RpgItem, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgLocationInput = Partial<Omit<RpgLocation, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgActionInput = Partial<Omit<RpgAction, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+
+/** 道具 / 地点 / 动作三套 CRUD 形状完全一样，和后端的路由工厂一一对应 */
+function moduleChild<T, I>(prefix: string) {
+  return {
+    list: (moduleId: number) =>
+      api.get<T[]>(`/rpg/modules/${moduleId}/${prefix}/`).then(r => r.data),
+    create: (moduleId: number, data: I & { name: string }) =>
+      api.post<T>(`/rpg/modules/${moduleId}/${prefix}/`, data).then(r => r.data),
+    update: (id: number, data: I) =>
+      api.patch<T>(`/rpg/${prefix}/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/${prefix}/${id}`).then(r => r.data),
+  }
+}
+
+export const rpgApi = {
+  modules: {
+    list: () => api.get<RpgModule[]>('/rpg/modules/').then(r => r.data),
+    get: (id: number) => api.get<RpgModule>(`/rpg/modules/${id}`).then(r => r.data),
+    create: (data: Partial<RpgModule> & { name: string }) =>
+      api.post<RpgModule>('/rpg/modules/', data).then(r => r.data),
+    update: (id: number, data: Partial<RpgModule>) =>
+      api.patch<RpgModule>(`/rpg/modules/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/modules/${id}`).then(r => r.data),
+    uploadCover: (id: number, file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return api.post<RpgModule>(`/rpg/modules/${id}/cover`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      }).then(r => r.data)
+    },
+    deleteCover: (id: number) =>
+      api.delete<RpgModule>(`/rpg/modules/${id}/cover`).then(r => r.data),
+  },
+  worldEntries: {
+    list: (moduleId: number) =>
+      api.get<RpgWorldEntry[]>(`/rpg/modules/${moduleId}/entries/`).then(r => r.data),
+    create: (moduleId: number, data: RpgEntryInput) =>
+      api.post<RpgWorldEntry>(`/rpg/modules/${moduleId}/entries/`, data).then(r => r.data),
+    update: (id: number, data: RpgEntryInput) =>
+      api.patch<RpgWorldEntry>(`/rpg/entries/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/entries/${id}`).then(r => r.data),
+  },
+  npcs: {
+    list: (moduleId: number) =>
+      api.get<RpgNpc[]>(`/rpg/modules/${moduleId}/npcs/`).then(r => r.data),
+    create: (moduleId: number, data: RpgNpcInput & { name: string }) =>
+      api.post<RpgNpc>(`/rpg/modules/${moduleId}/npcs/`, data).then(r => r.data),
+    update: (id: number, data: RpgNpcInput) =>
+      api.patch<RpgNpc>(`/rpg/npcs/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/npcs/${id}`).then(r => r.data),
+    uploadAvatar: (id: number, file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return api.post<RpgNpc>(`/rpg/npcs/${id}/avatar`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      }).then(r => r.data)
+    },
+    deleteAvatar: (id: number) =>
+      api.delete<RpgNpc>(`/rpg/npcs/${id}/avatar`).then(r => r.data),
+  },
+  items: moduleChild<RpgItem, RpgItemInput>('items'),
+  locations: moduleChild<RpgLocation, RpgLocationInput>('locations'),
+  actions: moduleChild<RpgAction, RpgActionInput>('actions'),
+  sessions: {
+    list: (moduleId: number) =>
+      api.get<RpgSession[]>(`/rpg/modules/${moduleId}/sessions/`).then(r => r.data),
+    get: (id: number) => api.get<RpgSession>(`/rpg/sessions/${id}`).then(r => r.data),
+    create: (moduleId: number, data: { char_name: string; char_desc?: string; title?: string; stats?: Record<string, number>; location?: string }) =>
+      api.post<RpgSession>(`/rpg/modules/${moduleId}/sessions/`, data).then(r => r.data),
+    update: (id: number, data: { title?: string }) =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/sessions/${id}`).then(r => r.data),
+  },
+  messages: {
+    list: (sessionId: number) =>
+      api.get<RpgMessage[]>(`/rpg/sessions/${sessionId}/messages/`).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/messages/${id}`).then(r => r.data),
+  },
+  saves: {
+    list: (sessionId: number) =>
+      api.get<RpgSave[]>(`/rpg/sessions/${sessionId}/saves/`).then(r => r.data),
+    create: (sessionId: number, label: string) =>
+      api.post<RpgSave>(`/rpg/sessions/${sessionId}/saves/`, { label }).then(r => r.data),
+    /** 读档：返回回溯之后的局。比这张更晚的存档会一并作废 */
+    restore: (id: number) =>
+      api.post<RpgSession>(`/rpg/saves/${id}/restore`).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/saves/${id}`).then(r => r.data),
+  },
 }
 
 // ── Glossary APIs ──────────────────────────────────────────────────────────
@@ -1538,6 +1874,8 @@ export function streamBrainstorm(
     context_rounds?: number
     nsfw?: boolean
     web_search?: boolean
+    /** 构思目标：market = 投稿向，indulge = 自娱自乐。决定后端用哪套提示词 */
+    purpose?: string
     /** 向导阶段 id，留空走自由聊天 */
     stage?: string
     /** 向导前几步已敲定的结论，防止早期结论被轮次截断后 AI 重复提问 */
@@ -1610,6 +1948,77 @@ export function streamTavernTurn(
     signal: controller.signal,
   }).then(async (response) => {
     await readSseStream<TavernSSEMessage>(response, onMessage)
+    onClose()
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      onMessage({ event: 'error', data: String(err) })
+    }
+    onClose()
+  })
+
+  return controller
+}
+
+// ── SSE RPG ───────────────────────────────────────────────────────────────
+
+/** 后端发两次 meta：第一次只带 user_message_id（模型没配好时也要送出去），
+ *  上下文拼完再补发一次带诊断的。前端必须合并而不是覆盖 */
+export interface RpgTurnMeta {
+  user_message_id?: number
+  system_tokens?: number
+  state_tokens?: number
+  npc_tokens?: number
+  history_count?: number
+  triggered?: { id: number; keywords: string; constant: boolean; depth: number }[]
+  npcs_onstage?: { id: number; name: string }[]
+  /** 裁决归一化出来的意图，它也参与了世界书关键词扫描 */
+  intent_used?: string
+}
+
+/** 引擎/AI 结算完的权威状态，直接替换前端那份 */
+export interface RpgStatePatch {
+  stats: Record<string, number>
+  inventory: RpgInvItem[]
+  flags: Record<string, string | number | boolean | null>
+  location: string
+  npc_states: Record<string, Record<string, number | boolean>>
+  status: 'alive' | 'dead' | 'ended'
+}
+
+export type RpgSSEMessage =
+  | { event: 'meta'; data: RpgTurnMeta }
+  | { event: 'adjudicate'; data: { need_check: boolean; attr: string; band: RpgBand; intent: string; reason: string } }
+  | { event: 'roll'; data: { rate: number; dice: number; outcome: RpgOutcome; attr: string } }
+  | { event: 'token'; data: string }
+  | { event: 'warning'; data: string }
+  | { event: 'state'; data: RpgStatePatch }
+  | { event: 'suggestions'; data: string[] }
+  | { event: 'done'; data: { message_id: number; input_tokens: number; output_tokens: number; aux_input_tokens: number; aux_output_tokens: number } }
+  | { event: 'error'; data: string }
+
+export function streamRpgTurn(
+  sessionId: number,
+  payload: {
+    content: string
+    attr?: string
+    /** 「点出来的」行动。给了任意一个就走引擎，数字由模组定义算死 */
+    action_id?: number | null
+    item_name?: string
+    move_to?: string
+    target_npc?: string
+  },
+  onMessage: (msg: RpgSSEMessage) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+
+  fetch(`/api/rpg/sessions/${sessionId}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async (response) => {
+    await readSseStream<RpgSSEMessage>(response, onMessage)
     onClose()
   }).catch((err) => {
     if (err.name !== 'AbortError') {

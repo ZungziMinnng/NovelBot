@@ -8,6 +8,7 @@ from app.models.technique import Technique
 from app.schemas.world_entity import WorldEntityCreate, WorldEntityUpdate, WorldEntityOut
 from app.schemas.technique import TechniqueOut
 from app.services.entity_embeddings import embed_world_entity, embed_technique, remove_entity_embedding
+from app.services import state_snapshot
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
@@ -49,8 +50,14 @@ async def create_entity(data: WorldEntityCreate, user: CurrentUser, db: AsyncSes
 async def update_entity(entity_id: int, data: WorldEntityUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     entity = await get_owned_child(db, WorldEntity, entity_id, user, "实体")
     old_type_key = f"entity_{entity.type}"
-    for k, v in data.model_dump(exclude_none=True).items():
+    fields = data.model_dump(exclude_none=True)
+    for k, v in fields.items():
         setattr(entity, k, v)
+    # 手改的状态同步进最新快照，否则重新确认时的回滚会把它一起冲掉
+    if "current_state" in fields:
+        await state_snapshot.patch_latest(
+            db, entity.novel_id, "entities", entity.id, entity.current_state,
+        )
     await db.commit()
     await db.refresh(entity)
     new_type_key = f"entity_{entity.type}"

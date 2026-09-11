@@ -327,6 +327,15 @@ export default function TavernChat() {
     }
   }
 
+  const changeSummaryModel = async (value: string) => {
+    if (!card) return
+    try {
+      await tavernApi.cards.update(card.id, { summary_model_ref: value })
+      qc.invalidateQueries({ queryKey: ['tavern-card', card.id] })
+      toast.success('总结模型已保存')
+    } catch { toast.error('切换总结模型失败') }
+  }
+
   const params = { ...(card as Partial<TavernParams> | undefined), ...paramPatch }
 
   const applyParams = (patch: Partial<TavernParams>) => {
@@ -361,7 +370,7 @@ export default function TavernChat() {
     members.find(m => m.id === cardId) || members[0]
 
   return (
-    <div className="h-screen flex flex-col bg-background relative">
+    <div className="mode-tavern h-screen flex flex-col bg-background relative">
       <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
         <Silk speed={1.5} scale={1.6} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
       </div>
@@ -380,7 +389,7 @@ export default function TavernChat() {
             onClick={() => setPanel(p => (p === 'card' ? null : 'card'))}
             className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
               panel === 'card'
-                ? 'bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40'
+                ? 'bg-primary/15 text-primary ring-1 ring-primary/40'
                 : 'hover:bg-muted text-muted-foreground'
             }`}
           >
@@ -390,7 +399,7 @@ export default function TavernChat() {
             onClick={() => setPanel(p => (p === 'sessions' ? null : 'sessions'))}
             className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
               panel === 'sessions'
-                ? 'bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40'
+                ? 'bg-primary/15 text-primary ring-1 ring-primary/40'
                 : 'hover:bg-muted text-muted-foreground'
             }`}
           >
@@ -439,6 +448,18 @@ export default function TavernChat() {
               </optgroup>
             ))}
           </select>
+          <select
+            value={modelSelectValue(modelLibrary, card?.summary_model_ref || '')}
+            onChange={e => changeSummaryModel(e.target.value)}
+            disabled={streaming || !card}
+            title="上下文总结模型"
+            className="text-xs border rounded-lg px-2 py-1.5 bg-background/60 focus:outline-none max-w-[150px] truncate disabled:opacity-50"
+          >
+            <option value="">总结跟随对话</option>
+            {groupModelsByProvider(modelLibrary).map(g => <optgroup key={`summary-${g.provider}`} label={g.provider}>
+              {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
+            </optgroup>)}
+          </select>
           <ThemePicker />
         </div>
       </header>
@@ -450,7 +471,7 @@ export default function TavernChat() {
             ? (
               <span className="truncate">
                 生效词条：
-                <span className="text-pink-300">
+                <span className="text-primary">
                   {meta.triggered
                     .map(t => (t.constant ? `常驻${t.keywords ? `（${t.keywords}）` : ''}` : t.keywords) || `#${t.id}`)
                     .join(' / ')}
@@ -499,7 +520,7 @@ export default function TavernChat() {
                       onClick={saveEdit}
                       disabled={!draft.trim()}
                       className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg
-                        bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                        bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
                     >
                       <Check className="w-3 h-3" />
                       {b.role === 'user' ? '保存并重发' : '保存'}
@@ -528,7 +549,7 @@ export default function TavernChat() {
                   >
                     {/* 群聊里几个人的气泡长得一样，光靠头像分不清谁在说 */}
                     {isGroup && b.role === 'assistant' && (
-                      <p className="text-xs font-medium text-pink-300 mb-1">
+                      <p className="text-xs font-medium text-primary mb-1">
                         {speakerOf(b.cardId)?.name}
                       </p>
                     )}
@@ -631,7 +652,7 @@ export default function TavernChat() {
               onClick={() => setShowParams(v => !v)}
               title="回复长度与生成参数"
               className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 border transition-colors ${
-                showParams ? 'bg-pink-500/20 text-pink-200 border-pink-500/40' : 'hover:bg-muted'
+                showParams ? 'bg-primary/15 text-primary border-primary/40' : 'hover:bg-muted'
               }`}
             >
               <SlidersHorizontal className="w-4 h-4" />
@@ -650,7 +671,7 @@ export default function TavernChat() {
                 onClick={stop}
                 title="停止生成（已输出的部分会保留）"
                 className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0
-                  bg-red-500/15 text-red-300 ring-1 ring-red-500/40 hover:bg-red-500/25"
+                  bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/40 hover:bg-rose-500/25"
               >
                 <Square className="w-3.5 h-3.5" fill="currentColor" />
               </button>
@@ -659,7 +680,7 @@ export default function TavernChat() {
                 onClick={handleSend}
                 disabled={!input.trim()}
                 className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0
-                  bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                  bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
               >
                 <Send className="w-4 h-4" />
               </button>
@@ -694,7 +715,7 @@ function ThinkingDots() {
       {[0, 1, 2].map(i => (
         <span
           key={i}
-          className="w-1.5 h-1.5 rounded-full bg-pink-400/70 animate-bounce"
+          className="w-1.5 h-1.5 rounded-full bg-primary/70 animate-bounce"
           style={{ animationDelay: `${i * 0.15}s` }}
         />
       ))}
@@ -732,7 +753,10 @@ function SidePanel({
 function CardPreview({ card, onEdit }: { card: TavernCard; onEdit: () => void }) {
   const fields: Array<[string, string]> = [
     ['角色性格', card.personality],
-    ['详细描述', card.description],
+    ['外貌身材', card.profile_sections?.appearance || ''],
+    ['背景故事', card.profile_sections?.background || ''],
+    ['能力特长', card.profile_sections?.abilities || ''],
+    ['关系网络', card.profile_sections?.relationships || ''],
     ['开场环境', card.opening_scene],
     ['系统指令', card.system_instruction],
     ['我的备注（AI 看不到）', card.creator_note],

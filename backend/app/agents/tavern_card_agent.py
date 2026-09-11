@@ -3,7 +3,7 @@
 安全底线与 tavern_context 一致：creator_note 是"AI 不会看到的介绍"，
 它只能作为本模块的**产出**，绝不能作为输入进任何 prompt。
 """
-from app.prompts.loader import render
+from app.services.tavern_prompts import render
 from app.services import llm_client
 
 # 可辅助的栏位 → (界面上的名字, 这一栏该写什么, 字数上限)
@@ -42,10 +42,11 @@ async def assist_field(
     personality: str,
     description: str,
     model_ref: str,
+    profile_sections: dict | None = None,
 ) -> str:
     """生成（content 为空）或优化（content 非空）单栏内容，只返回该栏正文。"""
     label, guidance, max_chars = FIELD_SPECS[field]
-    available = {"personality": personality, "description": description}
+    available = {"personality": personality, "description": description, **(profile_sections or {})}
     context_blocks = [
         {"label": FIELD_SPECS[key][0], "content": available[key].strip()}
         for key in _CONTEXT_FIELDS[field]

@@ -38,7 +38,7 @@ export default function TavernParamFields({ value, onChange, onCommit }: Props) 
               onClick={() => { onChange({ reply_length: p.value }); onCommit?.() }}
               className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
                 replyLength === p.value
-                  ? 'bg-pink-500/20 text-pink-200 border-pink-500/40'
+                  ? 'bg-primary/15 text-primary border-primary/40'
                   : 'hover:bg-muted text-muted-foreground'
               }`}
             >

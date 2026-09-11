@@ -11,21 +11,28 @@ import {
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
+import TavernPrompts from './TavernPrompts'
 
-type Tab = 'rules' | 'instructions'
+type Tab = 'rules' | 'instructions' | 'prompts'
 
 export default function TavernSettings() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('rules')
+  const [promptsDirty, setPromptsDirty] = useState(false)
+
+  const goBack = async () => {
+    if (promptsDirty && !await confirmDialog({ title: '提示词尚未保存，仍要离开？', confirmText: '离开' })) return
+    navigate('/tavern')
+  }
 
   return (
-    <div className="min-h-screen bg-background relative">
+    <div className="mode-tavern min-h-screen bg-background relative">
       <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
         <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
       </div>
 
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
-        <button onClick={() => navigate('/tavern')} className="p-2 rounded-md hover:bg-muted" title="返回酒馆">
+        <button onClick={goBack} className="p-2 rounded-md hover:bg-muted" title="返回酒馆">
           <ArrowLeft className="w-4 h-4" />
         </button>
         <Settings2 className="w-5 h-5 text-pink-500" />
@@ -36,17 +43,18 @@ export default function TavernSettings() {
       </header>
 
       <main className="relative z-10 max-w-3xl mx-auto px-6 py-8 space-y-6">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {([
             { id: 'rules' as Tab, label: '写作规则', icon: ScrollText },
             { id: 'instructions' as Tab, label: '常用指令', icon: Quote },
+            { id: 'prompts' as Tab, label: '提示词', icon: Pencil },
           ]).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setTab(id)}
               className={`flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg transition-colors ${
                 tab === id
-                  ? 'bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40'
+                  ? 'bg-primary/15 text-primary ring-1 ring-primary/40'
                   : 'border hover:bg-muted text-muted-foreground'
               }`}
             >
@@ -55,7 +63,9 @@ export default function TavernSettings() {
           ))}
         </div>
 
-        {tab === 'rules' ? <RulesPane /> : <InstructionsPane />}
+        {tab === 'rules' && <RulesPane />}
+        {tab === 'instructions' && <InstructionsPane />}
+        <div hidden={tab !== 'prompts'}><TavernPrompts onDirtyChange={setPromptsDirty} /></div>
       </main>
     </div>
   )
@@ -147,7 +157,7 @@ function RulesPane() {
           <button
             onClick={() => setShowForm(true)}
             className="flex items-center gap-1.5 text-sm rounded-lg px-3 py-1.5 shrink-0
-              bg-pink-500/15 text-pink-300 ring-1 ring-pink-500/30 hover:bg-pink-500/25 transition-colors"
+              bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
           >
             <Plus className="w-3.5 h-3.5" /> 新建规则
           </button>
@@ -186,7 +196,7 @@ function RulesPane() {
               onClick={submit}
               disabled={!name.trim() || saving}
               className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
-                bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
             >
               {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               {editingId ? '保存修改' : '创建'}
@@ -330,7 +340,7 @@ function InstructionsPane() {
           <button
             onClick={() => setShowForm(true)}
             className="flex items-center gap-1.5 text-sm rounded-lg px-3 py-1.5 shrink-0
-              bg-pink-500/15 text-pink-300 ring-1 ring-pink-500/30 hover:bg-pink-500/25 transition-colors"
+              bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
           >
             <Plus className="w-3.5 h-3.5" /> 新建指令
           </button>
@@ -369,7 +379,7 @@ function InstructionsPane() {
               onClick={submit}
               disabled={!name.trim() || !content.trim() || saving}
               className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
-                bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
             >
               {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               {editingId ? '保存修改' : '创建'}

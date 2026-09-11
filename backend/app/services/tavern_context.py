@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.tavern import (
     TavernCard, TavernMessage, TavernRule, TavernSession, TavernWorldEntry,
 )
-from app.prompts.loader import render
+from app.services.tavern_prompts import render
 from app.services import llm_client
 from app.services.context_budget import estimate_tokens, truncate_to_token_budget
 
@@ -240,7 +240,12 @@ async def build_tavern_messages(
         role_lines.append(sub(card.personality.strip()))
     sections.append("\n".join(role_lines))
 
-    if (card.description or "").strip():
+    profile = getattr(card, "profile_sections", None) or {}
+    labels = [("appearance", "外貌身材"), ("background", "背景故事"), ("abilities", "能力特长"), ("relationships", "关系网络")]
+    blocks = [f"【{label}】\n{sub(str(profile[key]).strip())}" for key, label in labels if str(profile.get(key, "")).strip()]
+    if blocks:
+        sections.append("\n\n".join(blocks))
+    elif (card.description or "").strip():
         sections.append("【角色详细设定】\n" + sub(card.description.strip()))
 
     # 同场角色只给名字和性格，不给详细设定：省 token，也免得模型拿着别人的
@@ -449,7 +454,7 @@ async def maybe_summarize(
     transcript = _transcript(overflow, persona, card, cards)
 
     try:
-        model, api_format = llm_client.get_agent_client("memory", card.model_ref)
+        model, api_format = llm_client.get_agent_client("memory", card.summary_model_ref or card.model_ref)
         prompt = render(
             "tavern_summary.jinja2",
             previous_summary=(sess.summary or "").strip(),

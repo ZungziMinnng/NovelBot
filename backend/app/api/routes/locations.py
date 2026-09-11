@@ -6,6 +6,7 @@ from app.models.location import Location
 from app.models.faction import Faction
 from app.schemas.location import LocationCreate, LocationUpdate, LocationOut
 from app.services.entity_embeddings import embed_location, remove_entity_embedding
+from app.services import state_snapshot
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
@@ -46,8 +47,14 @@ async def create_location(data: LocationCreate, user: CurrentUser, db: AsyncSess
 @router.patch("/{location_id}", response_model=LocationOut)
 async def update_location(location_id: int, data: LocationUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     loc = await get_owned_child(db, Location, location_id, user, "地点")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    fields = data.model_dump(exclude_unset=True)
+    for k, v in fields.items():
         setattr(loc, k, v)
+    # 手改的状态同步进最新快照，否则重新确认时的回滚会把它一起冲掉
+    if "current_state" in fields:
+        await state_snapshot.patch_latest(
+            db, loc.novel_id, "locations", loc.id, loc.current_state,
+        )
     await db.commit()
     await db.refresh(loc)
     await embed_location(loc.novel_id, loc)

@@ -18,6 +18,7 @@ class TavernCardCreate(BaseModel):
     opening_scene: str = ""
     system_instruction: str = ""
     description: str = ""
+    profile_sections: dict = {}
     dialogue_examples: list[ExampleTurn] = []
     enabled_rule_ids: list[int] = []
     avatar_url: str = ""
@@ -27,6 +28,7 @@ class TavernCardCreate(BaseModel):
     temperature: float = 0.9
     max_tokens: int = 2048
     model_ref: str = ""
+    summary_model_ref: str = ""
 
 
 class TavernCardUpdate(BaseModel):
@@ -37,6 +39,7 @@ class TavernCardUpdate(BaseModel):
     opening_scene: Optional[str] = None
     system_instruction: Optional[str] = None
     description: Optional[str] = None
+    profile_sections: Optional[dict] = None
     dialogue_examples: Optional[list[ExampleTurn]] = None
     enabled_rule_ids: Optional[list[int]] = None
     avatar_url: Optional[str] = None
@@ -46,6 +49,7 @@ class TavernCardUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     model_ref: Optional[str] = None
+    summary_model_ref: Optional[str] = None
 
 
 class TavernCardOut(BaseModel):
@@ -57,6 +61,7 @@ class TavernCardOut(BaseModel):
     opening_scene: str
     system_instruction: str
     description: str
+    profile_sections: dict
     dialogue_examples: list[ExampleTurn]
     enabled_rule_ids: list[int]
     avatar_url: str
@@ -66,6 +71,7 @@ class TavernCardOut(BaseModel):
     temperature: float
     max_tokens: int
     model_ref: str
+    summary_model_ref: str
     session_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -237,6 +243,7 @@ class TavernCardAssistRequest(BaseModel):
     name: str = ""
     personality: str = ""
     description: str = ""
+    profile_sections: dict = {}
     opening_scene: str = ""
     model_ref: str = ""
 

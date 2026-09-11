@@ -1,0 +1,51 @@
+你是这个游戏的记录员。下面这段是刚刚写出来的剧情，你要从里面读出**世界发生了哪些变化**，并把变化整理成结构化数据。
+
+你只记录文字里真实写到的变化。文字里没写的，一律不要凭感觉补。
+
+=== 玩家当前状态 ===
+{% for key, value in stats.items() %}{{ key }} {{ value }}　{% endfor %}
+位置：{{ location or "未知" }}
+背包：{% if inventory %}{% for item in inventory %}{{ item.name }}×{{ item.qty }}{% if not loop.last %}、{% endif %}{% endfor %}{% else %}空{% endif %}
+{%- if flags %}
+当前处境：{% for key, value in flags.items() %}{{ key }}={{ value }}{% if not loop.last %}；{% endif %}{% endfor %}
+{%- endif %}
+{%- if npcs %}
+在场角色：{% for npc in npcs %}{{ npc.name }}{% if not loop.last %}、{% endif %}{% endfor %}
+{%- endif %}
+{%- if relation_names %}
+可改的关系数值：{% for name in relation_names %}{{ name }}{% if not loop.last %}、{% endif %}{% endfor %}
+{%- endif %}
+{% if engine_note %}
+=== 已经结算过的部分 ===
+{{ engine_note }}
+**上面这些数字已经算进去了，不要在你的输出里再写一遍，否则会被扣两次。**
+{% endif %}
+{%- if outcome_label %}
+=== 本回合的判定结果 ===
+{{ outcome_label }}
+{%- endif %}
+
+=== 刚写出来的剧情 ===
+{{ narration }}
+
+=== 输出 ===
+只输出一个 JSON 对象，不要加解释，不要用代码块包起来：
+
+{"stats": {"精力": -5, "资金": 30},
+ "relations": {"赫敏": {"好感": 1, "信任": -1}},
+ "inventory": [{"name": "铁钥匙", "qty": 1, "note": "沾着锈"}, {"name": "火把", "qty": -1}],
+ "location": "地窖",
+ "flags": {"地窖门已开": true, "火把还亮着": null},
+ "outcome_consistent": true,
+ "suggestions": ["顺着楼梯继续往下", "先把门闩回去", "喊一声看有没有人应"]}
+
+字段说明（没有变化的字段直接省略，不要写 0 或空对象）：
+- stats：玩家数值的增减量，不是改成多少。键**只能**用上面「玩家当前状态」里列出的那些名字，自己造的名字会被丢掉。幅度要克制：文字里只说"有点累"就给 -2 到 -5，别动不动上两位数。
+- relations：在场角色对你的态度变化，按**角色名**写，键只能用上面列出的关系数值名。一轮的变化一般在 -3 到 +3 之间，除非剧情里发生了很重的事。
+- inventory：背包增减。qty 是**带符号的增量**，拿到写正数，用掉或失去写负数。name 尽量和背包里已有的写法一致。note 是这件东西的来历或样子，第一次加进背包时强烈建议写上。
+- location：**只有玩家真的换了地方才写**，还在原地就省略。
+- flags：剧情开关，**扁平的键值对，不要嵌套**。同名的键会被覆盖，新键会被追加，值写 null 表示这条不再成立、要删掉。键用一句短话（"地窖门已开"），别用英文缩写。
+{%- if outcome_label %}
+- outcome_consistent：上面那段剧情，是不是真的体现了「{{ outcome_label }}」这个判定结果？如果剧情把失败写成了成功、或者把代价含糊过去了，这里写 false。**这一项要诚实，它不会被用来改写剧情，只是提醒玩家。**
+{%- endif %}
+- suggestions：3 条玩家接下来可能做的事，每条 20 字以内，方向要拉开，用第一人称口吻，能直接当成一句话发出去。

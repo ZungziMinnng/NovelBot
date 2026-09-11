@@ -47,7 +47,7 @@ const MODES = [
     detail: '带状态与判定的回合制叙事，你出招、AI 接着往下讲。',
     features: ['属性与判定', '状态逐轮推进', '存档回溯'],
     icon: Dices,
-    path: null,
+    path: '/rpg',
     bar: 'bg-violet-500',
     iconWrap: 'bg-violet-500/15 text-violet-400',
     glow: 'rgba(167, 139, 250, 0.10)',

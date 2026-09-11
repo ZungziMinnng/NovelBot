@@ -2,12 +2,15 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ChatSurfaceMessage } from '@/components/ChatSurface/types'
 import type { BrainstormExtract } from '@/api/client'
+import type { BrainstormPurpose } from '@/pages/Home/wizardStages'
 
 export type BrainstormMode = 'wizard' | 'free'
 
 interface BrainstormState {
   mode: BrainstormMode
-  /** WIZARD_STAGES 的下标，-1 = 向导还没开始 */
+  /** 构思目标，决定用哪套提示词和哪套步骤。与「设置」里的全局 nsfwMode 无关 */
+  purpose: BrainstormPurpose
+  /** 当前目标那套步骤的下标，-1 = 向导还没开始 */
   stage: number
   messages: ChatSurfaceMessage[]
   /** 各步抽出来的结论，回灌给模型防止它重复问已经定过的事 */
@@ -16,6 +19,8 @@ interface BrainstormState {
 
 interface BrainstormStore extends BrainstormState {
   setMode: (mode: BrainstormMode) => void
+  /** 两套步骤对不上，换目标必须连对话和进度一起清掉 */
+  setPurpose: (purpose: BrainstormPurpose) => void
   setStage: (stage: number) => void
   setMessages: (
     next: ChatSurfaceMessage[] | ((prev: ChatSurfaceMessage[]) => ChatSurfaceMessage[]),
@@ -29,6 +34,7 @@ interface BrainstormStore extends BrainstormState {
 
 const EMPTY: BrainstormState = {
   mode: 'wizard',
+  purpose: 'market',
   stage: -1,
   messages: [],
   confirmed: {},
@@ -41,6 +47,8 @@ export const useBrainstormStore = create<BrainstormStore>()(
 
       setMode: (mode) => set({ mode }),
 
+      setPurpose: (purpose) => set({ purpose, stage: -1, messages: [], confirmed: {} }),
+
       setStage: (stage) => set({ stage }),
 
       setMessages: (next) =>
@@ -50,7 +58,8 @@ export const useBrainstormStore = create<BrainstormStore>()(
 
       clearConversation: () => set({ stage: -1, messages: [], confirmed: {} }),
 
-      reset: () => set(EMPTY),
+      // purpose 是作者的偏好，不跟着建完书一起归零
+      reset: () => set((s) => ({ ...EMPTY, purpose: s.purpose })),
     }),
     { name: 'novelbot-brainstorm' },
   ),

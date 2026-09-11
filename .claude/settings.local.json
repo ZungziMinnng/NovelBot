@@ -32,7 +32,13 @@
       "Bash(./.venv/Scripts/python.exe -m unittest tests.test_memory_pipeline_characterization -v)",
       "Read(//Users/n2okjm/GitHubProject/**)",
       "Bash(ls -d /Volumes/*/GitHubProject/NovelBot)",
-      "Bash(mdfind -name NovelBot)"
+      "Bash(mdfind -name NovelBot)",
+      "Bash(npx vite *)",
+      "Bash(sed -n 44,62p app/api/routes/locations.py)",
+      "Bash(sed -n 46,64p app/api/routes/world_entities.py)",
+      "Bash(sed -n 1,15p app/api/routes/world_entities.py)",
+      "Bash(sed -n 1,15p app/api/routes/locations.py)",
+      "Bash(claude --version)"
     ]
   }
 }

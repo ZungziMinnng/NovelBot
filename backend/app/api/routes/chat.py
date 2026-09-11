@@ -178,8 +178,16 @@ def _stream_response(
     )
 
 
-# 向导阶段 id，须与前端 wizardStages.ts 和 brainstorm.jinja2 的分支保持一致
-_WIZARD_STAGES = ["warmup", "idea", "characters", "opening", "plot", "world", "wrapup"]
+# 向导阶段 id，须与前端 wizardStages.ts 和对应模板的 stage 分支保持一致。
+# 两套目标的步骤不同，切换目标时前端会清空对话，进度不沿用
+_WIZARD_STAGES = {
+    "market": ["warmup", "idea", "characters", "opening", "plot", "world", "wrapup"],
+    "indulge": ["warmup", "taste", "world", "characters", "scenes", "opening"],
+}
+_BRAINSTORM_TEMPLATES = {
+    "market": "brainstorm.jinja2",
+    "indulge": "brainstorm_indulge.jinja2",
+}
 
 
 @router.post("/brainstorm")
@@ -193,11 +201,12 @@ async def brainstorm_stream(
 
     和 /stream 的区别是这里还没有 novel，也不读表单草稿，不做 RAG。
     stage 为空走自由聊天，给了合法阶段 id 则按向导那一步的指令提问。
-    事件类型同 /stream。
+    purpose 决定用哪套提示词与哪套阶段 id。事件类型同 /stream。
     """
-    stage = req.stage if req.stage in _WIZARD_STAGES else ""
+    purpose = req.purpose if req.purpose in _BRAINSTORM_TEMPLATES else "market"
+    stage = req.stage if req.stage in _WIZARD_STAGES[purpose] else ""
     system_prompt = render(
-        "brainstorm.jinja2",
+        _BRAINSTORM_TEMPLATES[purpose],
         nsfw=req.nsfw,
         stage=stage,
         confirmed=req.confirmed if stage else "",

@@ -315,6 +315,11 @@ export default function Editor() {
         } else {
           toast.success(`第${chapterNum}章已确认，摘要和角色状态已更新`)
         }
+        // 状态没能回滚（后面还有已确认章节、缺快照、更新失败）时要让作者知道，
+        // 否则他以为改完正文状态就跟着干净了
+        if (result.char_warning) {
+          toast(result.char_warning, { duration: 8000, icon: '⚠' })
+        }
       } catch {
         toast.error(`第${chapterNum}章确认失败`)
       } finally {

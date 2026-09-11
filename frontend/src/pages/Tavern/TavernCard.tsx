@@ -8,7 +8,7 @@ import {
   MessagesSquare, Pin, BookmarkPlus, Eraser, Check, Sparkles,
 } from 'lucide-react'
 import {
-  tavernApi, type TavernAssistField, type TavernCard as Card, type TavernWorldEntry,
+  tavernApi, modelLibraryApi, modelSelectValue, type ModelEntry, type TavernAssistField, type TavernCard as Card, type TavernWorldEntry,
 } from '@/api/client'
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
@@ -56,11 +56,6 @@ const SECTIONS: Array<{
         placeholder: '基本特质、情感表现、人际关系、价值观、行为模式、优点和缺点、成长潜力……',
         hint: '复杂而有矛盾的性格往往更有深度和真实感，尽量避免完美无缺或过于单一的描述。',
       },
-      {
-        key: 'description', label: '详细描述', multiline: true, assist: 'description',
-        placeholder: '外貌形象、背景故事、重要经历、能力特长、关系网络……',
-        hint: '角色的事实性设定，AI 需要靠它保持前后一致。',
-      },
     ],
   },
   {
@@ -104,6 +99,8 @@ const EMPTY: Partial<Card> & { name: string } = {
   enabled_rule_ids: [], avatar_url: '', linked_book_card_ids: [],
   context_turns: 20, temperature: 0.9, max_tokens: 2048, reply_length: 0,
   scan_depth: 3,
+  summary_model_ref: '',
+  profile_sections: { appearance: '', background: '', abilities: '', relationships: '' },
 }
 
 export default function TavernCard() {
@@ -150,7 +147,7 @@ export default function TavernCard() {
   }
 
   return (
-    <div className="min-h-screen bg-background relative">
+    <div className="mode-tavern min-h-screen bg-background relative">
       <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
         <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
       </div>
@@ -167,8 +164,8 @@ export default function TavernCard() {
             onClick={handleSave}
             disabled={!form.name.trim() || saving}
             className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors
-              bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30
-              disabled:opacity-40 disabled:hover:bg-pink-500/20"
+              bg-primary text-primary-foreground hover:opacity-90
+              disabled:opacity-40"
           >
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isNew ? '创建' : '保存'}
@@ -176,7 +173,7 @@ export default function TavernCard() {
         </div>
       </header>
 
-      <main className="relative z-10 max-w-3xl mx-auto px-6 py-10 space-y-6">
+      <main className="relative z-10 max-w-[1440px] mx-auto px-8 py-12 space-y-8">
         <IdentityHeader
           name={form.name}
           avatarUrl={form.avatar_url || ''}
@@ -185,71 +182,93 @@ export default function TavernCard() {
           onAvatarChange={url => set('avatar_url', url)}
         />
 
-        {SECTIONS.map(section => (
-          <Section key={section.id} title={section.title} desc={section.desc} icon={section.icon}>
-            <div className="space-y-5">
-              {section.fields.map(f => (
-                <FieldInput key={f.key} field={f} form={form} set={set} />
-              ))}
-            </div>
-          </Section>
-        ))}
+        {/* 宽屏分两栏：左边是"这个人是谁"，右边是参数与数据。
+            窄屏（<1280px）自动落回单列，顺序和以前一样 */}
+        <div className="grid gap-8 xl:grid-cols-2 items-start">
+          <div className="space-y-8">
+            {SECTIONS.slice(0, 1).map(section => (
+              <Section key={section.id} title={section.title} desc={section.desc} icon={section.icon}>
+                <div className="space-y-5">
+                  {section.fields.map(f => (
+                    <FieldInput key={f.key} field={f} form={form} set={set} />
+                  ))}
+                </div>
+              </Section>
+            ))}
 
-        <Section
-          title="他怎么说话"
-          desc="给两三组问答样例，角色的腔调会立刻贴上去。"
-          icon={MessagesSquare}
-        >
-          <ExampleTurnsEditor
-            variant="dialogue"
-            value={form.dialogue_examples || []}
-            onChange={v => set('dialogue_examples', v)}
-          />
-        </Section>
+            <Section title="角色详细设定" desc="分别填写后，AI 会按板块注入提示词，更容易保持设定清晰。" icon={ScrollText}>
+              <ProfileSections form={form} set={set} />
+            </Section>
 
-        <Collapsible title="进阶：系统指令与生成参数" icon={Settings2}>
-          <div className="space-y-6">
-            <div>
-              <FieldInput field={ADVANCED_FIELD} form={form} set={set} />
-              <InstructionPresets
-                current={form.system_instruction || ''}
-                onPick={async text => {
-                  const existing = (form.system_instruction || '').trim()
-                  // 空文本 = 取消/清空，那本来就是明确的意图，不要再问一遍
-                  if (text.trim() && existing && existing !== text.trim()
-                      && !await confirmDialog({
-                        title: '覆盖已经写好的系统指令？',
-                        detail: '上面输入框里的内容会被这条常用指令替换掉。',
-                        confirmText: '覆盖',
-                      })) return
-                  set('system_instruction', text)
-                }}
+            {SECTIONS.slice(1).map(section => (
+              <Section key={section.id} title={section.title} desc={section.desc} icon={section.icon}>
+                <div className="space-y-5">
+                  {section.fields.map(f => (
+                    <FieldInput key={f.key} field={f} form={form} set={set} />
+                  ))}
+                </div>
+              </Section>
+            ))}
+
+            <Section
+              title="他怎么说话"
+              desc="给两三组问答样例，角色的腔调会立刻贴上去。"
+              icon={MessagesSquare}
+            >
+              <ExampleTurnsEditor
+                variant="dialogue"
+                value={form.dialogue_examples || []}
+                onChange={v => set('dialogue_examples', v)}
               />
-            </div>
-            <GenerationSettings form={form} set={set} />
-            <RulesSection
-              selected={form.enabled_rule_ids || []}
-              onChange={ids => set('enabled_rule_ids', ids)}
-            />
+            </Section>
           </div>
-        </Collapsible>
 
-        {isNew ? (
-          <p className="text-xs text-muted-foreground border-t pt-6">
-            创建角色卡之后，这里会出现世界书和故事线。
-          </p>
-        ) : (
-          <>
-            <WorldBookSection
-              cardId={cardId}
-              scanDepth={form.scan_depth ?? 3}
-              onScanDepthChange={v => set('scan_depth', v)}
-              linkedIds={form.linked_book_card_ids || []}
-              onLinkedChange={ids => set('linked_book_card_ids', ids)}
-            />
-            <SessionsSection cardId={cardId} />
-          </>
-        )}
+          <div className="space-y-8">
+            <Collapsible title="进阶：系统指令与生成参数" icon={Settings2}>
+              <div className="space-y-6">
+                <div>
+                  <FieldInput field={ADVANCED_FIELD} form={form} set={set} />
+                  <InstructionPresets
+                    current={form.system_instruction || ''}
+                    onPick={async text => {
+                      const existing = (form.system_instruction || '').trim()
+                      // 空文本 = 取消/清空，那本来就是明确的意图，不要再问一遍
+                      if (text.trim() && existing && existing !== text.trim()
+                          && !await confirmDialog({
+                            title: '覆盖已经写好的系统指令？',
+                            detail: '上面输入框里的内容会被这条常用指令替换掉。',
+                            confirmText: '覆盖',
+                          })) return
+                      set('system_instruction', text)
+                    }}
+                  />
+                </div>
+                <GenerationSettings form={form} set={set} />
+                <RulesSection
+                  selected={form.enabled_rule_ids || []}
+                  onChange={ids => set('enabled_rule_ids', ids)}
+                />
+              </div>
+            </Collapsible>
+
+            {isNew ? (
+              <p className="text-xs text-muted-foreground border-t pt-6">
+                创建角色卡之后，这里会出现世界书和故事线。
+              </p>
+            ) : (
+              <>
+                <WorldBookSection
+                  cardId={cardId}
+                  scanDepth={form.scan_depth ?? 3}
+                  onScanDepthChange={v => set('scan_depth', v)}
+                  linkedIds={form.linked_book_card_ids || []}
+                  onLinkedChange={ids => set('linked_book_card_ids', ids)}
+                />
+                <SessionsSection cardId={cardId} />
+              </>
+            )}
+          </div>
+        </div>
       </main>
     </div>
   )
@@ -268,7 +287,7 @@ function Section({
   return (
     <section className="rounded-xl border bg-card/50 backdrop-blur-sm p-6">
       <div className="flex items-start gap-3 mb-5">
-        <div className="p-2 rounded-lg bg-pink-500/15 text-pink-400 shrink-0">
+        <div className="p-2 rounded-lg bg-primary/10 text-primary shrink-0">
           <Icon className="w-4 h-4" />
         </div>
         <div>
@@ -328,6 +347,7 @@ function FieldInput({
         name: form.name,
         personality: form.personality || '',
         description: form.description || '',
+        profile_sections: form.profile_sections || {},
         opening_scene: form.opening_scene || '',
       })
       if (!text.trim()) {
@@ -355,7 +375,7 @@ function FieldInput({
             onClick={runAssist}
             disabled={busy}
             className="ml-auto flex items-center gap-1 text-xs font-normal px-2 py-1 rounded-md
-              text-pink-300 hover:bg-pink-500/10 transition-colors disabled:opacity-50"
+              text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
           >
             {busy
               ? <Loader2 className="w-3 h-3 animate-spin" />
@@ -369,7 +389,7 @@ function FieldInput({
           value={(form[field.key] as string) || ''}
           onChange={e => set(field.key, e.target.value)}
           placeholder={field.placeholder}
-          className="w-full border rounded-lg px-4 py-3 text-sm bg-background/60 resize-y min-h-[9rem]
+          className="w-full border rounded-lg px-4 py-3 text-sm bg-background/60 resize-y min-h-[12rem]
             focus:outline-none focus:ring-1 focus:ring-pink-500/50 leading-relaxed"
         />
       ) : (
@@ -396,6 +416,27 @@ function FieldInput({
   )
 }
 
+function ProfileSections({ form, set }: { form: Partial<Card> & { name: string }; set: <K extends keyof Card>(key: K, value: Card[K]) => void }) {
+  const sections = [
+    ['appearance', '外貌身材', '身高体型、五官、发色、服饰、气质、身体特征……'],
+    ['background', '背景故事', '出身、成长经历、重要事件、当前身份、人生转折……'],
+    ['abilities', '能力特长', '战斗、职业、知识、特殊能力、弱点和限制……'],
+    ['relationships', '关系网络', '与其他角色的关系、矛盾、依赖、秘密和当前状态……'],
+  ] as const
+  const values = form.profile_sections || {}
+  return <div className="grid gap-7">{sections.map(([key, label, placeholder]) => (
+    <div key={key}>
+      <label className="text-sm font-medium mb-2 block">{label}</label>
+      <textarea
+        value={values[key] || ''}
+        onChange={event => set('profile_sections', { ...values, [key]: event.target.value })}
+        placeholder={placeholder}
+        className="w-full border rounded-lg px-4 py-4 text-sm bg-background/60 resize-y min-h-[18rem] focus:outline-none focus:ring-1 focus:ring-pink-500/50 leading-relaxed"
+      />
+    </div>
+  ))}</div>
+}
+
 /** AI 结果就地展开在输入框下面，确认后才替换原文。
  *
  * 不用浮层：这是"对着原文挑一段"的活，盖住原文反而碍事，
@@ -419,8 +460,8 @@ function AssistDraft({
   return (
     <div className="mt-2 rounded-lg border border-pink-500/30 bg-pink-500/[0.04] overflow-hidden">
       <div className="px-3 py-2 flex items-center gap-1.5 border-b border-pink-500/20">
-        <Sparkles className="w-3.5 h-3.5 text-pink-400 shrink-0" />
-        <span className="text-xs font-medium text-pink-200">AI 写的版本</span>
+        <Sparkles className="w-3.5 h-3.5 text-primary shrink-0" />
+        <span className="text-xs font-medium text-primary">AI 写的版本</span>
         <span className="text-xs text-muted-foreground">
           {original.trim() ? '确认后替换上面的内容' : '确认后填进上面的输入框'}
         </span>
@@ -454,8 +495,8 @@ function AssistDraft({
           <button
             onClick={() => onApply(text)}
             disabled={!text.trim()}
-            className="text-xs px-3 py-1.5 rounded-md transition-colors bg-pink-500/20 text-pink-200
-              ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+            className="text-xs px-3 py-1.5 rounded-md transition-colors
+              bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
           >
             {original.trim() ? '替换原文' : '用这段'}
           </button>
@@ -561,9 +602,22 @@ function GenerationSettings({
           for (const [k, v] of Object.entries(patch)) set(k as keyof Card, v as never)
         }}
       />
+      <SummaryModelSelect form={form} set={set} />
       <p className="text-xs text-muted-foreground mt-3">对话页右上角也能随时调这几项，改完立即生效。</p>
     </div>
   )
+}
+
+function SummaryModelSelect({ form, set }: { form: Partial<Card> & { name: string }; set: <K extends keyof Card>(key: K, value: Card[K]) => void }) {
+  const { data: models = [] } = useQuery({ queryKey: ['model-library'], queryFn: modelLibraryApi.list })
+  return <div className="mt-5">
+    <label className="text-xs font-medium mb-1 block">上下文总结模型</label>
+    <select value={modelSelectValue(models, form.summary_model_ref || '')} onChange={event => set('summary_model_ref', event.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60">
+      <option value="">跟随对话模型（默认）</option>
+      {models.filter((model: ModelEntry) => model.model_type !== 'embedding').map((model: ModelEntry) => <option key={model.id} value={String(model.id)}>{model.display_name || model.model_id}</option>)}
+    </select>
+    <p className="text-xs text-muted-foreground mt-1.5">上下文超过保留轮数时，用这个模型压缩早期对话；留空则使用当前对话模型。</p>
+  </div>
 }
 
 /** 常用系统指令：存起来给别的卡复用。存的是当下输入框里的文本，之后各卡独立不联动 */
@@ -609,10 +663,10 @@ function InstructionPresets({
             onClick={() => (active ? onPick('') : onPick(p.content))}
             title={active ? `点一下取消：\n\n${p.content}` : p.content}
             className={`inline-flex items-center rounded-full border text-xs px-2.5 py-1
-              max-w-[12rem] truncate hover:bg-pink-500/15 ${
+              max-w-[12rem] truncate hover:bg-primary/15 ${
               active
-                ? 'border-pink-500/60 bg-pink-500/20 text-pink-200'
-                : 'border-pink-500/25 bg-pink-500/[0.06]'
+                ? 'border-primary/60 bg-primary/15 text-primary'
+                : 'border-primary/25 bg-primary/[0.06]'
             }`}
           >
             {active && <Check className="w-3 h-3 inline mr-1 -mt-0.5" />}
@@ -659,8 +713,8 @@ function InstructionPresets({
           <button
             onClick={save}
             disabled={!name.trim()}
-            className="text-xs px-3 py-1.5 rounded-lg bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40
-              hover:bg-pink-500/30 disabled:opacity-40"
+            className="text-xs px-3 py-1.5 rounded-lg bg-primary text-primary-foreground
+              hover:opacity-90 disabled:opacity-40"
           >
             保存
           </button>
@@ -871,7 +925,7 @@ function WorldBookSection({
               <div className="flex-1 min-w-0">
                 <div className="flex flex-wrap items-center gap-1.5">
                   {entry.constant && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 flex items-center gap-1">
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 flex items-center gap-1">
                       <Pin className="w-2.5 h-2.5" /> 常驻
                     </span>
                   )}
@@ -879,7 +933,7 @@ function WorldBookSection({
                     // 分隔符必须与后端 tavern_context._KEYWORD_SEP 一致，
                     // 否则这里显示成两个词、实际却当成一个来匹配
                     ? entry.keywords.split(/[,，、;；\n]+/).filter(Boolean).map((kw, i) => (
-                        <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-pink-500/15 text-pink-300">
+                        <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
                           {kw}
                         </span>
                       ))
@@ -969,7 +1023,7 @@ function WorldBookSection({
               <button
                 onClick={submit}
                 disabled={(!form.constant && !form.keywords.trim()) || !form.content.trim()}
-                className="text-sm px-4 py-1.5 rounded-lg bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
               >
                 {editingId ? '保存' : '添加'}
               </button>
@@ -1057,7 +1111,7 @@ function SessionsSection({ cardId }: { cardId: number }) {
             <button
               onClick={() => navigate(`/tavern/chat/${sess.id}`)}
               className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg shrink-0
-                bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30"
+                bg-primary text-primary-foreground hover:opacity-90"
             >
               <Play className="w-3 h-3" /> 继续
             </button>
@@ -1109,7 +1163,7 @@ function SessionsSection({ cardId }: { cardId: number }) {
                 onClick={create}
                 disabled={creating}
                 className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
-                  bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                  bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
               >
                 {creating && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 开始

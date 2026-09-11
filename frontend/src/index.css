@@ -364,6 +364,21 @@
     --ring: 290 80% 60%;
   }
 
+  /* 酒馆和 RPG 各自的主色。套在这两个模式的页面根节点上，覆盖当前主题的
+     --primary，于是模式的粉/紫身份保住了，而按钮文字仍由 --primary-foreground
+     保证对比度——不用再往类名里写死 text-pink-200 那种在浅色主题下看不清的值 */
+  .mode-tavern {
+    --primary: 330 81% 60%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 330 81% 60%;
+  }
+
+  .mode-rpg {
+    --primary: 258 90% 66%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 258 90% 66%;
+  }
+
   * {
     @apply border-border;
   }

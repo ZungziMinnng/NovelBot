@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, Globe, ArrowLeftToLine, Loader2, Wand2, MessageSquare, ChevronRight, SkipForward } from 'lucide-react'
+import { Bot, Globe, ArrowLeftToLine, Loader2, Wand2, MessageSquare, ChevronRight, SkipForward, Target, Flame } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
   streamBrainstorm, modelLibraryApi, brainstormApi,
@@ -8,11 +8,12 @@ import {
 } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useBrainstormStore, formatConfirmed } from '@/store/brainstormStore'
+import type { BrainstormPurpose } from './wizardStages'
 import ChatSurface from '@/components/ChatSurface/ChatSurface'
 import type { ChatSurfaceMessage } from '@/components/ChatSurface/types'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ApplyExtractModal, { LABELS, TEXT_KEYS, type FormSnapshot } from './ApplyExtractModal'
-import { WIZARD_STAGES } from './wizardStages'
+import { STAGES_BY_PURPOSE, PURPOSE_LABELS } from './wizardStages'
 
 interface Props {
   /** 读左边表单当前值。向导用它判断哪些栏位还空着，预览用它显示"会被换掉什么" */
@@ -21,22 +22,32 @@ interface Props {
   onApply: (picked: Partial<BrainstormExtract>) => void
 }
 
-const STARTERS = [
-  '我还没想好写什么，帮我出三个能开起来的点子',
-  '按现在填的内容，第一章该怎么开场',
-  '这个金手指够不够撑一本长篇',
-  '帮我把结局和主角变化定下来',
-]
-
-const LAST_STAGE = WIZARD_STAGES.length - 1
+const STARTERS: Record<BrainstormPurpose, string[]> = {
+  market: [
+    '我还没想好写什么，帮我出三个能开起来的点子',
+    '按现在填的内容，第一章该怎么开场',
+    '这个金手指够不够撑一本长篇',
+    '帮我把结局和主角变化定下来',
+  ],
+  indulge: [
+    '我就想看某个桥段，帮我把它周围的设定补出来',
+    '这两个人之间的张力还能怎么加',
+    '帮我把力量体系和风俗禁忌聊厚一点',
+    '给我几个现在就能动笔的场景',
+  ],
+}
 
 export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
   const nsfwMode = useSettingsStore((s) => s.nsfwMode)
   const mode = useBrainstormStore((s) => s.mode)
+  const purpose = useBrainstormStore((s) => s.purpose)
   const stage = useBrainstormStore((s) => s.stage)
   const messages = useBrainstormStore((s) => s.messages)
   const confirmed = useBrainstormStore((s) => s.confirmed)
-  const { setMode, setStage, setMessages, mergeConfirmed, clearConversation } = useBrainstormStore.getState()
+  const { setMode, setPurpose, setStage, setMessages, mergeConfirmed, clearConversation } = useBrainstormStore.getState()
+
+  const stages = STAGES_BY_PURPOSE[purpose]
+  const lastStage = stages.length - 1
 
   const [isStreaming, setIsStreaming] = useState(false)
   const [waiting, setWaiting] = useState(false)
@@ -61,7 +72,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
     setIsStreaming(true)
     setWaiting(true)
 
-    const stageId = mode === 'wizard' && stageIndex >= 0 ? WIZARD_STAGES[stageIndex].id : ''
+    const stageId = mode === 'wizard' && stageIndex >= 0 ? stages[stageIndex].id : ''
 
     abortRef.current = streamBrainstorm(
       {
@@ -69,6 +80,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
         model,
         nsfw: nsfwMode,
         web_search: webSearch,
+        purpose,
         stage: stageId,
         confirmed: stageId ? formatConfirmed(confirmed) : '',
       },
@@ -86,7 +98,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       },
       () => { setIsStreaming(false); setWaiting(false) },
     )
-  }, [mode, model, nsfwMode, webSearch, confirmed, setMessages])
+  }, [mode, model, nsfwMode, webSearch, purpose, stages, confirmed, setMessages])
 
   // base 显式传入：从中间某句重发时，闭包里的 messages 还是截断前的旧值
   const send = useCallback((text: string, base?: ChatSurfaceMessage[]) => {
@@ -96,7 +108,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
 
   /** 切到第 index 步：插一条分隔消息（它同时就是发给模型的引导语），让 AI 提这步的第一个问题 */
   const goToStage = useCallback((index: number, base?: ChatSurfaceMessage[]) => {
-    const target = WIZARD_STAGES[index]
+    const target = stages[index]
     setStage(index)
     run([
       ...(base ?? messages),
@@ -107,7 +119,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
         label: `第 ${index + 1} 步 · ${target.label}`,
       },
     ], index)
-  }, [messages, run, setStage])
+  }, [messages, stages, run, setStage])
 
   const stop = useCallback(() => {
     abortRef.current?.abort()
@@ -183,7 +195,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
 
   /** 这步聊定的东西先落进表单和已确认清单，再进下一步 */
   const handleNext = useCallback(async () => {
-    if (isStreaming || extracting || stage >= LAST_STAGE) return
+    if (isStreaming || extracting || stage >= lastStage) return
     setExtracting(true)
     try {
       const result = await brainstormApi.extract(toTranscript(messages), model)
@@ -196,12 +208,12 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       setExtracting(false)
     }
     goToStage(stage + 1)
-  }, [isStreaming, extracting, stage, messages, model, fillEmptyFields, mergeConfirmed, goToStage])
+  }, [isStreaming, extracting, stage, lastStage, messages, model, fillEmptyFields, mergeConfirmed, goToStage])
 
   const handleSkip = useCallback(() => {
-    if (isStreaming || extracting || stage >= LAST_STAGE) return
+    if (isStreaming || extracting || stage >= lastStage) return
     goToStage(stage + 1)
-  }, [isStreaming, extracting, stage, goToStage])
+  }, [isStreaming, extracting, stage, lastStage, goToStage])
 
   /** 回到走过的某一步重聊：截掉那条分隔消息之后的所有对话，重新提问 */
   const handleRewind = useCallback(async (index: number) => {
@@ -209,7 +221,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
     const cut = stageMessageIndex(messages, index)
     if (cut < 0) return
     const ok = await confirmDialog({
-      title: `回到「${WIZARD_STAGES[index].label}」重聊`,
+      title: `回到「${stages[index].label}」重聊`,
       detail: `会删掉后面 ${messages.length - cut} 条对话。已经填进左边表单的内容不会撤销，需要的话自己改。`,
       confirmText: '回去重聊',
       danger: true,
@@ -217,16 +229,33 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
     if (!ok) return
     stop()
     goToStage(index, messages.slice(0, cut))
-  }, [isStreaming, extracting, stage, messages, stop, goToStage])
+  }, [isStreaming, extracting, stage, stages, messages, stop, goToStage])
 
   const handleClear = useCallback(() => {
     stop()
     clearConversation()
   }, [stop, clearConversation])
 
+  /** 两套向导的步骤对不上，进度没法沿用，所以有对话时要先跟作者确认 */
+  const handleSwitchPurpose = useCallback(async () => {
+    if (extracting) return
+    const next: BrainstormPurpose = purpose === 'market' ? 'indulge' : 'market'
+    if (messages.length > 0) {
+      const ok = await confirmDialog({
+        title: `切换到「${PURPOSE_LABELS[next]}」会清空当前对话`,
+        detail: '两套向导的步骤不一样，进度无法沿用。已经填进左边表单的内容不受影响。',
+        confirmText: '切换并清空',
+        danger: true,
+      })
+      if (!ok) return
+    }
+    stop()
+    setPurpose(next)
+  }, [purpose, extracting, messages.length, stop, setPurpose])
+
   const isWizard = mode === 'wizard'
   const busy = isStreaming || extracting
-  const current = stage >= 0 ? WIZARD_STAGES[stage] : null
+  const current = stage >= 0 ? stages[stage] : null
 
   return (
     <>
@@ -246,6 +275,23 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       }
       headerExtra={
         <>
+          <button
+            onClick={handleSwitchPurpose}
+            disabled={extracting}
+            title={
+              purpose === 'market'
+                ? '当前按投稿标准聊：黄金三章、追读钩子、平台审核。点击切成自娱自乐'
+                : '当前按自娱自乐聊：不管平台和审核，重点把设定和口味聊厚。点击切回投稿向'
+            }
+            className={`flex items-center gap-1 text-xs border rounded px-2 py-1 transition-colors disabled:opacity-40 ${
+              purpose === 'indulge'
+                ? 'border-primary text-primary bg-primary/10'
+                : 'hover:border-primary'
+            }`}
+          >
+            {purpose === 'market' ? <Target className="w-3.5 h-3.5" /> : <Flame className="w-3.5 h-3.5" />}
+            {PURPOSE_LABELS[purpose]}
+          </button>
           <button
             onClick={() => setMode(isWizard ? 'free' : 'wizard')}
             title={isWizard ? '切成自由聊天：不分步骤，想聊什么聊什么' : '切回向导：AI 带着你一步步定'}
@@ -293,7 +339,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       belowHeader={isWizard && current && (
         <div className="px-4 py-2.5 border-b bg-muted/30 shrink-0 space-y-2">
           <div className="flex items-center gap-1">
-            {WIZARD_STAGES.map((s, i) => (
+            {stages.map((s, i) => (
               <button
                 key={s.id}
                 onClick={() => handleRewind(i)}
@@ -310,12 +356,12 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
           <div className="flex items-end justify-between gap-3">
             <div className="min-w-0">
               <p className="text-xs font-medium">
-                第 {stage + 1}/{WIZARD_STAGES.length} 步 · {current.label}
+                第 {stage + 1}/{stages.length} 步 · {current.label}
               </p>
               <p className="text-xs text-muted-foreground truncate">{current.hint}</p>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
-              {stage < LAST_STAGE && (
+              {stage < lastStage && (
                 <button
                   onClick={handleSkip}
                   disabled={busy}
@@ -327,15 +373,15 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
                 </button>
               )}
               <button
-                onClick={stage < LAST_STAGE ? handleNext : handleExtract}
+                onClick={stage < lastStage ? handleNext : handleExtract}
                 disabled={busy}
-                title={stage < LAST_STAGE ? '把这步聊定的填进表单，然后进下一步' : '把整套方案核对一遍写回表单'}
+                title={stage < lastStage ? '把这步聊定的填进表单，然后进下一步' : '把整套方案核对一遍写回表单'}
                 className="flex items-center gap-1 text-xs rounded px-2.5 py-1 bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
               >
                 {extracting
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <ChevronRight className="w-3.5 h-3.5" />}
-                {stage < LAST_STAGE ? '下一步' : '完成并核对'}
+                {stage < lastStage ? '下一步' : '完成并核对'}
               </button>
             </div>
           </div>
@@ -356,7 +402,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
               开始构思
             </button>
             <ol className="mt-4 space-y-1">
-              {WIZARD_STAGES.map((s, i) => (
+              {stages.map((s, i) => (
                 <li key={s.id} className="text-xs text-muted-foreground/70">
                   {i + 1}. {s.label}
                   <span className="text-muted-foreground/50">　{s.hint}</span>
@@ -371,7 +417,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
               <p>边填边聊，聊定的用「写回表单」收进左边。</p>
             </div>
             <div className="mt-6 space-y-2">
-              {STARTERS.map(s => (
+              {STARTERS[purpose].map(s => (
                 <button
                   key={s}
                   onClick={() => send(s)}

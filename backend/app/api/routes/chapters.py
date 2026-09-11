@@ -14,7 +14,7 @@ from app.models.faction import Faction
 from app.models.memory import Memory
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
 from app.agents import character_agent
-from app.services import summarizer, vector_store, entity_embeddings, prose_lint
+from app.services import summarizer, vector_store, entity_embeddings, prose_lint, state_snapshot
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
@@ -112,6 +112,36 @@ async def confirm_chapter(req: ChapterConfirmRequest, user: CurrentUser, db: Asy
         "location_state": "pending",
     }
 
+    # 状态更新是累积的（只有非空值才覆盖），重复确认同一章会把上次的结论一直留着——
+    # 作者删掉的设定洗不掉。先回滚到本章生成前，再按当前正文重新累积。
+    # 但回滚是全量恢复，后面几章累积的状态会一起被抹掉，所以只在本章是最新已确认章时才做。
+    rollback_note = ""
+    latest_confirmed = (await db.execute(
+        select(func.max(Chapter.number)).where(
+            Chapter.novel_id == novel_id,
+            Chapter.status == "confirmed",
+        )
+    )).scalar()
+    if latest_confirmed is not None and latest_confirmed > chapter.number:
+        rollback_note = (
+            f"第 {chapter.number} 章之后还有已确认章节（最新第 {latest_confirmed} 章），"
+            "本次没有回滚状态：删掉的设定可能仍留在角色状态里，需要的话手动改。"
+        )
+    else:
+        try:
+            rolled_back = await state_snapshot.rollback_or_create(
+                db, novel_id, chapter.number, chapter.volume or 1,
+            )
+            await db.commit()
+            if not rolled_back:
+                rollback_note = "本章没有状态快照，已按当前状态建立基线，这次不回滚。"
+        except Exception as e:
+            logging.getLogger(__name__).warning("确认章节时状态回滚失败: %s", e)
+            rollback_note = f"状态回滚失败（{type(e).__name__}），本次在现有状态上累积。"
+            await db.rollback()
+            chapter = await db.get(Chapter, chapter_id)
+            novel = await db.get(Novel, novel_id)
+
     try:
         summary, _, _ = await summarizer.summarize_chapter(db, chapter, novel)
         projection_status["summary"] = "done" if summary else "skipped"
@@ -197,7 +227,7 @@ async def confirm_chapter(req: ChapterConfirmRequest, user: CurrentUser, db: Asy
             import logging
             logging.getLogger(__name__).warning("自动刷新全书概要失败", exc_info=True)
 
-    warnings = [w for w in (char_warning, ent_warning, loc_warning) if w]
+    warnings = [w for w in (char_warning, ent_warning, loc_warning, rollback_note) if w]
     return {
         "summary": summary,
         "status": "confirmed",

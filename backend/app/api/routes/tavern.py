@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser
+from app.api.routes.tavern_prompts import router as prompts_router
 from app.database import AsyncSessionLocal, get_db
 from app.models.tavern import (
     TavernCard, TavernInstructionPreset, TavernMessage, TavernRule, TavernSession,
@@ -33,6 +34,7 @@ from app.services.sse import sse_event as _sse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+router.include_router(prompts_router)
 
 # 强引用池：asyncio 只弱引用 task，不留着可能在跑完前被 GC 掉
 _detached_tasks: set[asyncio.Task] = set()
@@ -300,6 +302,7 @@ async def assist_card_field(data: TavernCardAssistRequest, user: CurrentUser):
                 data.personality,
                 data.description,
                 data.model_ref,
+                data.profile_sections,
             )
         else:
             raise HTTPException(status_code=400, detail=f"不支持的栏位：{data.field}")

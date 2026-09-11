@@ -41,7 +41,7 @@ export default function Tavern() {
   const totalSessions = cards.reduce((n, c) => n + c.session_count, 0)
 
   return (
-    <div className="min-h-screen bg-background relative">
+    <div className="mode-tavern min-h-screen bg-background relative">
       {/* 和 Landing 那张紫粉色酒馆卡呼应，进来不至于像换了个软件 */}
       <div className="fixed inset-0 z-0 opacity-[0.13] pointer-events-none">
         <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
@@ -79,7 +79,7 @@ export default function Tavern() {
           <button
             onClick={() => navigate('/tavern/card/new')}
             className="flex items-center gap-1.5 text-sm rounded-lg px-4 py-2 shrink-0
-              bg-pink-500/15 text-pink-300 ring-1 ring-pink-500/30 hover:bg-pink-500/25 transition-colors"
+              bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
           >
             <Plus className="w-4 h-4" /> 新建角色卡
           </button>
@@ -149,7 +149,7 @@ export default function Tavern() {
 
                   <div
                     className="mt-auto text-sm px-3 py-2 rounded-lg text-center
-                      bg-pink-500/15 text-pink-300 ring-1 ring-pink-500/25 transition-colors"
+                      bg-primary/10 text-primary ring-1 ring-primary/25 transition-colors"
                   >
                     开始对话
                   </div>
@@ -242,7 +242,7 @@ function StartDialog({ card, onClose }: { card: TavernCard; onClose: () => void 
               <summary className="text-xs cursor-pointer select-none">
                 再叫几个人同场
                 {others.length > 0 && (
-                  <span className="text-pink-300 ml-1">已选 {others.length} 人</span>
+                  <span className="text-primary ml-1">已选 {others.length} 人</span>
                 )}
               </summary>
               <div className="mt-2.5 space-y-2">
@@ -277,7 +277,7 @@ function StartDialog({ card, onClose }: { card: TavernCard; onClose: () => void 
               onClick={start}
               disabled={creating}
               className="w-full text-sm px-4 py-2 rounded-lg flex items-center justify-center gap-1.5
-                bg-pink-500/20 text-pink-200 ring-1 ring-pink-500/40 hover:bg-pink-500/30 disabled:opacity-40"
+                bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
             >
               {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
               开始新故事线

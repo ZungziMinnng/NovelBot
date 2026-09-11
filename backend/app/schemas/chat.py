@@ -28,6 +28,9 @@ class BrainstormRequest(BaseModel):
     context_rounds: int = 20
     nsfw: bool = False
     web_search: bool = False     # 开启后先联网搜一次，结果作为参考资料拼进 system prompt
+    # "market" = 投稿向（番茄/起点那套判断标准），"indulge" = 自娱自乐（无平台约束、重设定）。
+    # 与 nsfw 是两个独立的轴：辣但要过审、干净的自嗨，都是合法组合
+    purpose: str = "market"
     stage: str = ""              # 向导阶段 id，空 = 自由聊天模式
     # 向导前几步抽出来的结论，不是作者手填的表单——上面"不带表单草稿"的原则仍然成立。
     # 必须回灌是因为 context_rounds 截断后早期结论会掉出窗口，AI 会重复问已经定过的事
