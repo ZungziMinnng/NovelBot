@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { Loader2, Sparkles, X } from 'lucide-react'
 import { rpgApi, type RpgModule, type RpgSession } from '@/api/client'
-import { INPUT } from './rpgUi'
+import { INPUT, splitList } from './rpgUi'
 
 /** 开局：角色属于这一局而不是模组，所以每次开局都重填一遍。
  *  数值起点从模组的定义拷过来，模组里有主角卡的话名字和出身也预填好。
@@ -25,6 +25,8 @@ export default function CharacterForm({
     Object.fromEntries(defs.map(d => [d.name, d.initial])),
   )
   const [creating, setCreating] = useState(false)
+  // 时段表建局时改一份自己的，模组之后改了不追溯这一局
+  const [slotText, setSlotText] = useState((module.time_slots || []).join('，'))
 
   const { data: npcs = [] } = useQuery({
     queryKey: ['rpg-npcs', module.id],
@@ -47,6 +49,7 @@ export default function CharacterForm({
         char_name: charName,
         char_desc: desc.trim(),
         stats,
+        time_slots: splitList(slotText),
       }))
     } catch {
       toast.error('开局失败')
@@ -127,6 +130,23 @@ export default function CharacterForm({
               </div>
               <p className="text-xs text-muted-foreground mt-1.5">
                 默认就是模组定的起点，想开个高难度局就自己往下调。
+              </p>
+            </div>
+          )}
+
+          {module.time_slots?.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium mb-1.5">这一局的时间怎么走</label>
+              <input
+                value={slotText}
+                onChange={e => setSlotText(e.target.value)}
+                placeholder="早，中，晚"
+                className={INPUT}
+              />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                已经照模组的填好了，想改就改，逗号隔开（中英文逗号都行）。
+                <b className="font-medium">留空 = 跟模组一样</b>。
+                玩的时候按「结束这个时段」往后推一格，推完最后一格算过了一天。
               </p>
             </div>
           )}

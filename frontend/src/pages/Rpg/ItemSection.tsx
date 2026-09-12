@@ -4,7 +4,7 @@ import toast from 'react-hot-toast'
 import { Package, X } from 'lucide-react'
 import { rpgApi, type RpgItem, type RpgStatDef } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
-import { AddRow, DeleteButton, INPUT, Section } from './rpgUi'
+import { ACCENT, AddRow, DeleteButton, INPUT, Section } from './rpgUi'
 import EffectEditor from './EffectEditor'
 
 const CATEGORIES = ['消耗品', '装备', '关键道具'] as const
@@ -86,6 +86,7 @@ export default function ItemSection({
       title="道具"
       desc="定义了效果的道具，用起来数字是死的，AI 改不了。没定义的东西也能进背包，只是没有精确效果。"
       icon={Package}
+      accent={ACCENT.bag}
     >
       <div className="space-y-2">
         {items.map(item => (

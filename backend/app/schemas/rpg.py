@@ -18,6 +18,7 @@ class RpgModuleCreate(BaseModel):
     relation_stat_defs: list = []
     default_inventory: list = []
     default_location: str = ""
+    time_slots: list = []
     rate_table: dict = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
     difficulty_bias: int = 0
     check_mode: str = "never"
@@ -44,6 +45,7 @@ class RpgModuleUpdate(BaseModel):
     relation_stat_defs: Optional[list] = None
     default_inventory: Optional[list] = None
     default_location: Optional[str] = None
+    time_slots: Optional[list] = None
     rate_table: Optional[dict] = None
     difficulty_bias: Optional[int] = None
     check_mode: Optional[str] = None
@@ -71,6 +73,7 @@ class RpgModuleOut(BaseModel):
     relation_stat_defs: list
     default_inventory: list
     default_location: str
+    time_slots: list
     rate_table: dict
     difficulty_bias: int
     check_mode: str
@@ -228,6 +231,10 @@ class RpgLocationCreate(BaseModel):
     connections: list = []
     enter_requires: dict = {}
     sort_order: int = 0
+    # 地图坐标，百分比。默认 0 是必须的：前端新建地点时把整个表单铺开传过来，
+    # 里面没有 x/y（坐标只由拖拽写）
+    x: int = 0
+    y: int = 0
 
 
 class RpgLocationUpdate(BaseModel):
@@ -236,6 +243,8 @@ class RpgLocationUpdate(BaseModel):
     connections: Optional[list] = None
     enter_requires: Optional[dict] = None
     sort_order: Optional[int] = None
+    x: Optional[int] = None
+    y: Optional[int] = None
 
 
 class RpgLocationOut(BaseModel):
@@ -246,6 +255,8 @@ class RpgLocationOut(BaseModel):
     connections: list
     enter_requires: dict
     sort_order: int
+    x: int
+    y: int
     created_at: datetime
     updated_at: datetime
 
@@ -299,10 +310,18 @@ class RpgSessionCreate(BaseModel):
     title: str = ""
     stats: Optional[dict] = None
     location: Optional[str] = None
+    # 时段表。不给或给空列表都是「跟模组走」（而且是活的，模组后来改了会跟着变）。
+    # 「这一局不要时钟」没法在这里表达，只有模组本身不设时段才是那个意思
+    time_slots: Optional[list] = None
 
 
 class RpgSessionUpdate(BaseModel):
     title: Optional[str] = None
+
+
+class RpgNoteDeleteIn(BaseModel):
+    """要删掉的那条近况的键名。GM 记错了，玩家自己划掉。"""
+    key: str
 
 
 class RpgSessionOut(BaseModel):
@@ -315,8 +334,14 @@ class RpgSessionOut(BaseModel):
     stats: dict
     inventory: list
     location: str
+    time_slots: list
+    slot: str
+    day: int
     flags: dict
     npc_states: dict
+    npc_notes: dict
+    chronicle: list
+    visited: list
     summary: str
     summarized_upto_id: int
     turn_count: int
@@ -326,6 +351,12 @@ class RpgSessionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RpgAdvanceOut(BaseModel):
+    """结束一个时段之后的新状态，外加给玩家看的那几句话。"""
+    session: RpgSessionOut
+    facts: list[str] = []
+
+
 # ── 消息与回合 ────────────────────────────────────────────────────────────
 
 class RpgMessageOut(BaseModel):
@@ -333,6 +364,9 @@ class RpgMessageOut(BaseModel):
     session_id: int
     role: str
     content: str
+    # 这条消息属于哪条对话线，值是 NPC 的 id；null = 场面线。
+    # 前端按它分组就有线了，不需要单独的线程列表端点
+    thread_id: Optional[int] = None
     roll: Optional[dict] = None
     state_delta: Optional[dict] = None
     suggestions: Optional[list] = None
@@ -355,6 +389,25 @@ class RpgTurnRequest(BaseModel):
     item_name: str = ""
     move_to: str = ""
     target_npc: str = ""
+    # 这一轮归哪条对话线，值是 NPC 的 id；不给 = 场面线。
+    # 和 target_npc 是两件事：它管「这段叙事归哪条历史」，target_npc 管
+    # 「这个动作用在谁身上」。在老兵线里对老板娘用动作是合法的
+    thread_id: Optional[int] = None
+
+
+class RpgMoveIn(BaseModel):
+    """瞬移的目标地点名。存名字不存 id，同 sessions.location 那一套。"""
+    target: str
+
+
+class RpgMoveOut(BaseModel):
+    """瞬移之后的新状态，外加给玩家看的那句话（被拦时是拒绝的理由）。"""
+    session: RpgSessionOut
+    message: str = ""
+
+
+class RpgSuggestOut(BaseModel):
+    suggestions: list[str]
 
 
 # ── 存档 ──────────────────────────────────────────────────────────────────

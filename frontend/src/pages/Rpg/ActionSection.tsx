@@ -25,12 +25,13 @@ const EMPTY: ActionForm = {
 
 /** 动作按钮。点一次数值由引擎算死，AI 完全碰不到，只拿到「已经发生的事实」去写文字。 */
 export default function ActionSection({
-  moduleId, statDefs, relationDefs, npcs,
+  moduleId, statDefs, relationDefs, npcs, slotNames,
 }: {
   moduleId: number
   statDefs: RpgStatDef[]
   relationDefs: RpgStatDef[]
   npcs: RpgNpc[]
+  slotNames: string[]
 }) {
   const qc = useQueryClient()
   const { data: actions = [] } = useQuery({
@@ -183,6 +184,7 @@ export default function ActionSection({
                 statDefs={statDefs}
                 relationDefs={relationDefs}
                 npcs={npcs}
+                slotNames={slotNames}
               />
               <p className="text-xs text-muted-foreground mt-1.5">
                 不满足时按钮置灰，鼠标移上去会写明差在哪。

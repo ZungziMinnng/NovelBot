@@ -23,6 +23,31 @@ DISPLAY_BAR, DISPLAY_NUMBER, DISPLAY_HIDDEN = "条", "数字", "隐藏"
 # 不设上限迟早把 system 撑爆
 FLAG_LIMIT = 40
 
+# 大事记最多留这么多条。同 FLAG_LIMIT：不分线之后它要撑起跨线的记忆，
+# 塞满了小事就把真正传开的事挤出去了
+CHRONICLE_LIMIT = 40
+
+# 去过的地点最多记这么多个。同 FLAG_LIMIT 的理由：结算模型能把玩家「移动」到
+# 任何一个它现编的地名上，不设上限就没边了
+VISITED_LIMIT = 100
+
+# 每个 NPC 最多记几条近况、每条最长多少字。比 FLAG_LIMIT 紧得多：这些行会
+# 原样画在玩家盯着看的角色卡上，也会每轮注入那个人的设定块（预算只有
+# NPC_TOKEN_BUDGET，全体在场角色分）。模型很爱记「情绪：有点紧张」
+NOTE_LIMIT = 10
+NOTE_CHARS = 60
+
+# 数值的「影响」那几段最长多少字。同 NOTE_CHARS 的理由，而且更紧：说明每轮
+# 发一遍，档位标签还要跟在每个数字后面画在侧栏上，长了就换行
+EFFECT_CHARS = 30
+TIER_LABEL_CHARS = 6
+TIER_NOTE_CHARS = 20
+
+# 引擎自己写进大事记的两类行。前缀是**合并的判据**——认不出「上一行也是
+# 移动」的话，玩家在镇上连点五个地点就会刷出五条「你去了 X」
+MOVE_TAG = "〔移动〕"
+DAY_TAG = "〔日期〕"
+
 # 背包里同名道具的模糊匹配：去空格后比对。模型写「铁 钥匙」很常见
 _NORMALIZE_TABLE = str.maketrans("", "", " 　\t")
 
@@ -76,6 +101,50 @@ def clamp(spec: dict | None, value) -> int:
     return num
 
 
+def tier_list(spec: dict | None) -> list[dict]:
+    """一个数值的分档表，洗干净并按下界排好序：[{at, label, note}]。
+
+    只写一个下界 at、不写区间：区间让作者留得出空隙和重叠，落进空隙就是
+    「没有档」、落进重叠就是「两个档」，而且都不报错。单下界让这两件事不可能。
+
+    这里排序而不是信作者填的顺序——编辑器不强制排序，而「取第一个够得上的」
+    会让乱序的表匹配到错的档。字数在这儿就截掉，读的人不必各自记上限。
+    """
+    out = []
+    for tier in (spec or {}).get("tiers") or []:
+        if not isinstance(tier, dict):
+            continue
+        # 一行填歪了（at 还空着）不该把整张档表废掉，跳过它就行。必须用 None
+        # 兜底而不是 0：0 是个合法的下界，拿 0 兜底会把没填完的那一行变成一个
+        # 永远匹配得上的最低档
+        at = _num(tier.get("at"), None)
+        if at is None:
+            continue
+        out.append({
+            "at": at,
+            "label": str(tier.get("label") or "").strip()[:TIER_LABEL_CHARS],
+            "note": str(tier.get("note") or "").strip()[:TIER_NOTE_CHARS],
+        })
+    out.sort(key=lambda t: t["at"])
+    return out
+
+
+def tier_of(spec: dict | None, value) -> dict | None:
+    """当前落在哪一档。at <= value 里 at 最大的那一档，都不够就 None。
+
+    值低于最低档返回 None：无上限的钱、下界是负数的数值、只填了一档的表全都
+    走这条路，不需要各自特例。
+    """
+    num = _num(value)
+    hit = None
+    for tier in tier_list(spec):
+        if tier["at"] <= num:
+            hit = tier
+        else:
+            break
+    return hit
+
+
 def init_stats(defs) -> dict[str, int]:
     """按定义生成开局数值表。"""
     return {
@@ -119,6 +188,28 @@ def check_condition(cond, sess, npcs=None) -> tuple[bool, str]:
     """
     if not isinstance(cond, dict) or not cond:
         return True, ""
+
+    # 时段：列出来的就是「允许的时段」，! 前缀取反（同 flags 的写法）。
+    # 没设时段时判不成立而不是放行——放行会让「只有晚上开」的门永远开着，
+    # 而作者根本查不出来。同 relations 分支「名字对不上就算不成立」的理由
+    slots = cond.get("slots")
+    if slots:
+        now = str(getattr(sess, "slot", "") or "").strip()
+        if not now:
+            return False, "这个模组没有设定时段"
+        allow = [str(s).strip() for s in slots if not str(s).startswith("!")]
+        deny = [str(s)[1:].strip() for s in slots if str(s).startswith("!")]
+        if now in deny:
+            return False, f"{now}不能做这件事"
+        if allow and now not in allow:
+            return False, f"只有{'、'.join(allow)}能做这件事（现在是{now}）"
+
+    day_rule = cond.get("day")
+    if isinstance(day_rule, dict) and day_rule:
+        op = _OPS.get(str(day_rule.get("op") or ">=").strip())
+        have = _num(getattr(sess, "day", 1), 1)
+        if op is not None and not op(have, _num(day_rule.get("value"), 1)):
+            return False, f"第 {have} 天不满足（需要 {day_rule.get('op')} {day_rule.get('value')}）"
 
     stats = sess.stats or {}
     for name, rule in (cond.get("stats") or {}).items():
@@ -219,6 +310,59 @@ def apply_relations(module, sess, npc_id: int, delta) -> list[str]:
         state[stat] = got
     states[key] = state
     sess.npc_states = states
+    return warnings
+
+
+def apply_npc_notes(sess, npc_id: int, delta) -> list[str]:
+    """GM 这一局记下的某个人的近况。自由键值，作者没定义过任何一个键。
+
+    合并语义同 flags：同键覆盖、新键追加、值为 null 表示这条不再成立、删掉。
+    整份 delta 是 null 表示把这个人的记录全清掉。
+
+    值一律转成字符串：模型迟早会写 {"伤势": ["左肩","右腿"]} 或者塞个嵌套
+    字典进来（flags 上就常年如此），而一个裸字典交给 React 当子节点会把
+    整页白屏——NpcSheet 上面没有 error boundary。
+
+    满了淘汰**最久没被改过的那条**：删掉再追加，让刚写的移到末尾，同
+    note_visited。照 apply_flags 那种「按插入顺序砍最早的」在这里正好反了——
+    dict 重新赋值不会挪动键的位置，于是每轮都在刷新的「伤势」永远停在
+    下标 0，先被砍掉的正是唯一要紧的那条。
+    """
+    table = {k: dict(v) for k, v in (sess.npc_notes or {}).items() if isinstance(v, dict)}
+    key = str(npc_id)
+    if delta is None:
+        table.pop(key, None)
+        sess.npc_notes = table
+        return []
+    if not isinstance(delta, dict):
+        # 静默吞掉会让「她左肩还在流血」这句话落空，而且没人知道
+        return ["角色近况格式不对，没能记下"]
+
+    notes = table.get(key) or {}
+    warnings: list[str] = []
+    for name, value in delta.items():
+        field = str(name or "").strip()
+        if not field:
+            continue
+        notes.pop(field, None)      # 先删：写回去时它会落到末尾，见上面
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) > NOTE_CHARS:
+            text = text[:NOTE_CHARS] + "…"
+        notes[field] = text
+
+    if len(notes) > NOTE_LIMIT:
+        drop = list(notes)[:len(notes) - NOTE_LIMIT]
+        for field in drop:
+            notes.pop(field, None)
+        warnings.append(f"这个人的近况超过 {NOTE_LIMIT} 条，清掉了最久没更新的 {len(drop)} 条")
+
+    table[key] = notes
+    # 整个赋回去才会被标脏，原地改 JSON 列不会触发更新
+    sess.npc_notes = table
     return warnings
 
 
@@ -329,15 +473,152 @@ def check_zero(module, sess) -> list[str]:
     return notes
 
 
-def apply_state_delta(module, sess, delta, npcs=None) -> list[str]:
+# ── 大事记：跨对话线共享的「已经传开的事」──────────────────────────────────
+
+def chronicle_lines(sess) -> list[str]:
+    """这一局的大事记，滤掉空串。"""
+    return [str(x).strip() for x in (sess.chronicle or []) if str(x).strip()]
+
+
+def push_chronicle(sess, lines) -> None:
+    """追加若干条大事记，超上限砍最早的（同 flags）。
+
+    整个列表赋回去才标脏——原地 append JSON 列不会触发更新。
+    """
+    if isinstance(lines, str):
+        items = [lines]
+    elif isinstance(lines, list):
+        items = lines
+    else:
+        items = []
+    now = chronicle_lines(sess)
+    for line in items:
+        text = str(line or "").strip()
+        if text:
+            now.append(text)
+    sess.chronicle = now[-CHRONICLE_LIMIT:]
+
+
+def _move_line(sess, to_name: str) -> str:
+    stamp = f"第 {max(1, _num(sess.day, 1))} 天"
+    slot = str(sess.slot or "").strip()
+    return f"{MOVE_TAG}{stamp}{'·' + slot if slot else ''} 你去了{to_name}"
+
+
+def note_move(sess, to_name: str) -> None:
+    """移动记一笔，**但和上一条移动合并**。
+
+    不合并的话大事记会变成流水账：玩家在镇上逛十个地方，十条「你去了 X」
+    把真正传开的那件事挤没了。上一条不是移动行（比如中间跨了天）才新起一行。
+    """
+    line = _move_line(sess, to_name)
+    now = chronicle_lines(sess)
+    if now and now[-1].startswith(MOVE_TAG):
+        now[-1] = line
+    else:
+        now.append(line)
+    sess.chronicle = now[-CHRONICLE_LIMIT:]
+
+
+def note_visited(sess, name) -> None:
+    """去过的地方记一笔（地图的迷雾读它）。
+
+    整个列表赋回去才标脏，同 push_chronicle。去重时把重复的那个挪到末尾，
+    于是满了淘汰的是「最久没回去过的」——模型现编的一次性地名会先出局，
+    起点那个镇子不会被挤掉。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return
+    key = norm_name(text)
+    now = [x for x in (sess.visited or []) if norm_name(x) != key]
+    now.append(text)
+    sess.visited = now[-VISITED_LIMIT:]
+
+
+# ── 时间：玩家自己拨的时钟 ────────────────────────────────────────────────
+
+def reset_daily(module, sess) -> list[str]:
+    """跨天回满。定义里勾了 reset_daily 的数值回到 max。
+
+    是回 max 不是回 initial：「回满」这件事只在有上限时才成立，而且这样
+    绕开了「建局时玩家把初始值改过」的归属问题。没上限的项（资金）跳过。
+    """
+    specs = def_map(module.stat_defs)
+    stats = dict(sess.stats or {})
+    notes: list[str] = []
+    for name, spec in specs.items():
+        if not spec.get("reset_daily") or spec.get("max") is None:
+            continue
+        full = clamp(spec, spec.get("max"))
+        if _num(stats.get(name)) != full:
+            stats[name] = full
+            notes.append(f"{name}回到 {full}")
+    # 整个赋回去才会被标脏，原地改 JSON 列不会触发更新
+    sess.stats = stats
+    return notes
+
+
+def slot_table(module, sess) -> list[str]:
+    """这一局实际用的时段表：玩家建局时改过就用他改的那份，否则跟模组走。
+
+    会话自己那一列为空 = 没定制过（老局、或建局时没动）。**「跟模组走」必须是活的**：
+    模组后来把「早中晚」拆成三格，还没定制的局该跟着变，否则作者改了模组却发现
+    已经开的局纹丝不动。定过的局仍然冻住，理由同 default_location。
+    """
+    raw = sess.time_slots or getattr(module, "time_slots", None) or []
+    return [str(s).strip() for s in raw if str(s).strip()]
+
+
+def advance_slot(module, sess) -> list[str]:
+    """结束当前时段。走到最后一格就翻篇：回到第一格、天数 +1、跨天回满。
+
+    返回给玩家看的话。模组没设时段时什么都不做——时钟不存在，
+    按一下不该有任何后果。
+    """
+    names = slot_table(module, sess)
+    if not names:
+        return []
+
+    now = str(sess.slot or "").strip()
+    # 当前时段不在表里（刚建局、或建局后改过时段表）就从第一格重新数起
+    index = names.index(now) + 1 if now in names else 0
+    if index < len(names):
+        sess.slot = names[index]
+        return [f"现在是{names[index]}"]
+
+    sess.slot = names[0]
+    sess.day = _num(sess.day, 1) + 1
+    # 只在翻篇这一格写大事记。每推一格都写的话，时钟噪音会把真正传开的
+    # 事挤出去；一行都不写则换个地点就不知道过了几天
+    push_chronicle(sess, f"{DAY_TAG}第 {sess.day} 天开始了")
+    return [f"第 {sess.day} 天，{names[0]}"] + reset_daily(module, sess)
+
+
+def apply_state_delta(
+    module, sess, delta, npcs=None, allow_move: bool = True, note_npcs=None,
+) -> list[str]:
     """把模型提议的一整份改动落到 session 上，返回给玩家看的 warning。
 
     每一项独立 try：背包格式写错不该让数值一起丢。
+
+    allow_move=False 时丢掉 location：分线之后「在老兵线里被叙述走到别处」
+    会变成看得见的 bug——老兵不在了，他的输入框永久置灰。场面线照旧放行，
+    「自由打字绕过地图」这个决定（见文档 §13）的边界正好画在这里。
+
+    note_npcs 是**允许被记近况的人**，默认就是 npcs。调用方传的是这一轮真的
+    摆在模型眼前的那几个（在场的 + 线主），比关系数值那一路窄。理由是两者
+    的代价不对称：关系是个数字，写错了下一轮就被盖掉；近况是长期事实，会
+    原样画在角色卡上、每轮注入那个人的设定块，而剧情里随口提一句「老板」
+    就足以让隔壁镇的老板凭空多出一条伤。
     """
     if not isinstance(delta, dict):
         return []
     warnings: list[str] = []
     by_name = {norm_name(n.name): n.id for n in (npcs or [])}
+    # 同名的人（模组里常有三个「村民」）在这里会被折叠成最后一个——既有行为，
+    # relations 一直如此，近况沿用同一套映射
+    note_ids = {n.id for n in ((npcs or []) if note_npcs is None else note_npcs)}
 
     steps = [
         ("数值", lambda: apply_stats(module, sess, delta.get("stats"))),
@@ -361,9 +642,26 @@ def apply_state_delta(module, sess, delta, npcs=None) -> list[str]:
         except Exception:
             warnings.append(f"{name}的关系变化没能应用")
 
+    # 近况同样按角色名提议，但只认这一轮在模型眼前的人
+    for name, changes in (delta.get("npc_notes") or {}).items():
+        npc_id = by_name.get(norm_name(name))
+        if npc_id is None:
+            warnings.append(f"找不到角色「{name}」，近况没能记下")
+            continue
+        if npc_id not in note_ids:
+            warnings.append(f"「{name}」这一轮不在场，关于他的近况没有记下")
+            continue
+        try:
+            warnings.extend(apply_npc_notes(sess, npc_id, changes))
+        except Exception:
+            warnings.append(f"{name}的近况没能记下")
+
     location = str(delta.get("location") or "").strip()
-    if location:
+    if location and not allow_move:
+        warnings.append("这一轮的地点变化被忽略了（你正在和人单独说话）")
+    elif location:
         sess.location = location
+        note_visited(sess, location)
 
     try:
         warnings.extend(check_zero(module, sess))

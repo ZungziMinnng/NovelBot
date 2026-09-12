@@ -1085,6 +1085,17 @@ export const tavernApi = {
 /** 判定难度档位。模型只能从这五档里挑，成功率由模组的 rate_table 定 */
 export type RpgBand = 'trivial' | 'easy' | 'medium' | 'hard' | 'extreme'
 
+/** 数值的一档。只写下界 `at`，不写区间——见 rpg_state.tier_list */
+export interface RpgStatTier {
+  /** 到多少算这一档（含）。生效的是 at <= 值 里最大的那个。
+   *  没填的行会被后端跳过，所以这里允许缺省——作者刚点「添加一档」就是这状态 */
+  at?: number
+  /** 短标签，画在数字后面给玩家看。如「亲近」 */
+  label?: string
+  /** 这一档什么表现。只给模型看，不进玩家侧 */
+  note?: string
+}
+
 /** 一项数值的定义。玩家数值和关系数值共用这个形状 */
 export interface RpgStatDef {
   name: string
@@ -1098,6 +1109,12 @@ export interface RpgStatDef {
   on_zero?: string
   /** 条 / 数字 / 隐藏 */
   display?: string
+  /** 跨天回满（回到 max）。只在有上限的项上有意义 */
+  reset_daily?: boolean
+  /** 这个数值影响什么。每轮发给模型一句，作者不写就没有 */
+  effect?: string
+  /** 分档。空数组和没写是一回事 */
+  tiers?: RpgStatTier[]
 }
 
 /** 统一条件格式。世界书触发、动作按钮可用性、地点进入条件共用 */
@@ -1107,6 +1124,10 @@ export interface RpgCondition {
   /** 「!xxx」表示这条 flag 不能立着 */
   flags?: string[]
   items?: string[]
+  /** 当前时段必须是其中之一，「!晚」表示不能在晚上。模组没设时段时一律不成立 */
+  slots?: string[]
+  /** 天数门槛，形状同 stats */
+  day?: { op: string; value: number }
 }
 
 /** 模组（剧本）：一份可反复开局的世界设定，对应酒馆的角色卡 */
@@ -1130,6 +1151,8 @@ export interface RpgModule {
   relation_stat_defs: RpgStatDef[]
   default_inventory: RpgInvItem[]
   default_location: string
+  /** 默认时段表，如 ["早","中","晚"]。空 = 这个模组不用时段 */
+  time_slots: string[]
   /** 档位 → 成功率(%)。绝对难度由模组作者锁定，模型只管相对档位 */
   rate_table: Record<RpgBand, number>
   /** 整体难度旋钮，加到成功率上。-10 轻松 / +10 手软 */
@@ -1185,6 +1208,9 @@ export interface RpgLocation {
   connections: string[]
   enter_requires: RpgCondition
   sort_order: number
+  /** 地图上的位置，百分比 0..100。两个都是 0 = 作者还没摆过，落兜底网格 */
+  x: number
+  y: number
   created_at: string
   updated_at: string
 }
@@ -1262,9 +1288,21 @@ export interface RpgSession {
   stats: Record<string, number>
   inventory: RpgInvItem[]
   location: string
+  /** 这一局自己的时段表，建局时从模组拷来。空 = 不用时段 */
+  time_slots: string[]
+  /** 当前时段，存的是名字。空 = 没有时钟 */
+  slot: string
+  day: number
   flags: Record<string, string | number | boolean | null>
   /** {"3": {"好感": 62, "met": true}}，键是 npc_id 的字符串 */
   npc_states: Record<string, Record<string, number | boolean>>
+  /** GM 这一局边玩边记下的 NPC 近况。{"3": {"伤势": "左肩中刀"}}，值一律是字符串。
+   *  和 npc_states 分开存：那边的值是关系数字，合在一起会被字符串盖掉 */
+  npc_notes: Record<string, Record<string, string>>
+  /** 大事记：已经「传开」的事，跨对话线共享。注入时排在【外场】 */
+  chronicle: string[]
+  /** 去过的地点名。地图的迷雾按它散开 */
+  visited: string[]
   summary: string
   summarized_upto_id: number
   turn_count: number
@@ -1306,6 +1344,9 @@ export interface RpgMessage {
   session_id: number
   role: 'user' | 'assistant'
   content: string
+  /** 属于哪条对话线，值是 NPC 的 id；null = 场面线（公共场面）。
+   *  前端按它分组就有线了，所以没有单独的线程列表端点 */
+  thread_id: number | null
   roll: RpgRoll | null
   state_delta: Record<string, unknown> | null
   suggestions: string[] | null
@@ -1390,10 +1431,23 @@ export const rpgApi = {
     list: (moduleId: number) =>
       api.get<RpgSession[]>(`/rpg/modules/${moduleId}/sessions/`).then(r => r.data),
     get: (id: number) => api.get<RpgSession>(`/rpg/sessions/${id}`).then(r => r.data),
-    create: (moduleId: number, data: { char_name: string; char_desc?: string; title?: string; stats?: Record<string, number>; location?: string }) =>
+    create: (moduleId: number, data: { char_name: string; char_desc?: string; title?: string; stats?: Record<string, number>; location?: string; time_slots?: string[] }) =>
       api.post<RpgSession>(`/rpg/modules/${moduleId}/sessions/`, data).then(r => r.data),
+    /** 结束当前时段。纯引擎，不调模型，所以是普通请求不是 SSE */
+    advance: (id: number) =>
+      api.post<{ session: RpgSession; facts: string[] }>(
+        `/rpg/sessions/${id}/advance`,
+      ).then(r => r.data),
+    /** 瞬移：从地点总览点一个地方就直接过去。同样零 LLM 调用 */
+    move: (id: number, target: string) =>
+      api.post<{ session: RpgSession; message: string }>(
+        `/rpg/sessions/${id}/move`, { target },
+      ).then(r => r.data),
     update: (id: number, data: { title?: string }) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}`, data).then(r => r.data),
+    /** 划掉 GM 记错的一条 NPC 近况。没有这个口子，记错了只能读档 */
+    deleteNpcNote: (id: number, npcId: number, key: string) =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}/npc-notes/${npcId}`, { key }).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/sessions/${id}`).then(r => r.data),
   },
   messages: {
@@ -1411,6 +1465,13 @@ export const rpgApi = {
       api.post<RpgSession>(`/rpg/saves/${id}/restore`).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/saves/${id}`).then(r => r.data),
   },
+  /** 「帮我想想」只读当前这条线：在老兵屋里要的建议，不该来自隔壁刚聊的话 */
+  suggest: (sessionId: number, threadId?: number | null) =>
+    api.post<{ suggestions: string[] }>(
+      `/rpg/sessions/${sessionId}/suggest`,
+      {},
+      { timeout: 120000, params: threadId ? { thread_id: threadId } : undefined },
+    ).then(r => r.data),
 }
 
 // ── Glossary APIs ──────────────────────────────────────────────────────────
@@ -1968,9 +2029,15 @@ export interface RpgTurnMeta {
   system_tokens?: number
   state_tokens?: number
   npc_tokens?: number
+  /** 【外场】那一块占了多少 token */
+  chronicle_tokens?: number
   history_count?: number
   triggered?: { id: number; keywords: string; constant: boolean; depth: number }[]
   npcs_onstage?: { id: number; name: string }[]
+  /** 这一轮归哪条线。null = 场面线 */
+  thread?: { id: number; name: string } | null
+  slot?: string
+  day?: number
   /** 裁决归一化出来的意图，它也参与了世界书关键词扫描 */
   intent_used?: string
 }
@@ -1982,7 +2049,12 @@ export interface RpgStatePatch {
   flags: Record<string, string | number | boolean | null>
   location: string
   npc_states: Record<string, Record<string, number | boolean>>
+  npc_notes: Record<string, Record<string, string>>
   status: 'alive' | 'dead' | 'ended'
+  /** 时钟也跟着走，否则按完「结束这个时段」要等整页重拉才动 */
+  time_slots: string[]
+  slot: string
+  day: number
 }
 
 export type RpgSSEMessage =
@@ -2006,6 +2078,9 @@ export function streamRpgTurn(
     item_name?: string
     move_to?: string
     target_npc?: string
+    /** 这一轮归哪条对话线，值是 NPC 的 id；不给 = 场面线。
+     *  和 target_npc 是两件事：它管叙事去哪条历史，target_npc 管动作用在谁身上 */
+    thread_id?: number | null
   },
   onMessage: (msg: RpgSSEMessage) => void,
   onClose: () => void,

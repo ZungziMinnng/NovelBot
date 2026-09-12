@@ -377,6 +377,70 @@
     --primary: 258 90% 66%;
     --primary-foreground: 0 0% 100%;
     --ring: 258 90% 66%;
+
+    /* 各板块自己的强调色。和 --primary 不一样，这几个是固定的：一个板块
+       在 18 套主题下都得是同一个身份，否则玩家换个主题就找不到道具在哪了。
+       只存 HSL 三元组，用的时候自己套 hsl() */
+    --rpg-cast: 38 92% 50%;    /* 角色：金 */
+    --rpg-bag: 152 60% 40%;    /* 道具：绿 */
+    --rpg-save: 217 80% 55%;   /* 存档：蓝 */
+    --rpg-map: 187 70% 42%;    /* 地图：青 */
+
+    /* 面板的起伏。本文件顶部那套 shadcn 样板里 --card 和 --background 是
+       同一个色，「卡片」在默认主题下就只剩一条 1px 边框——RPG 那几页看着扁
+       就是这个原因。但直接改 --card 会把整套主题的色相带偏（Monokai 会变成
+       紫灰），所以起伏只靠阴影做，颜色一概不动。
+       阴影取 --foreground：深色主题下它接近白，落成一圈微光；浅色主题下接近
+       黑，就是正常的投影。一条规则两边都成立，不用再判断明暗 */
+    --rpg-lift:
+      0 1px 2px hsl(var(--foreground) / 0.06),
+      0 12px 32px -18px hsl(var(--foreground) / 0.28);
+  }
+
+  /* 面板。给任何一个 rounded-xl border bg-card 的块加上它就有了厚度 */
+  .mode-rpg .rpg-panel {
+    box-shadow: var(--rpg-lift);
+  }
+
+  /* 页眉那一条：板块色在左，往右淡出。板块辨识度主要靠它 */
+  .mode-rpg .rpg-head {
+    background-image: linear-gradient(
+      90deg,
+      hsl(var(--rpg-accent) / 0.16),
+      hsl(var(--rpg-accent) / 0.04) 55%,
+      transparent
+    );
+  }
+
+  /* 侧栏。直接铺 bg-card 是不行的——默认主题下它和 --background 同色，
+     铺了等于没铺。改成：垫一层实心 card，再盖一层 --foreground 的薄纱。
+     深色主题下 --foreground 接近白，侧栏比页面亮；浅色主题下接近黑，侧栏比
+     页面暗。两种基底都读得出「这是一块独立的板」，而且色相一点没动。
+     两层都是实心的，不会透出后面的 Silk 把字压花 */
+  .mode-rpg .rpg-side {
+    background-color: hsl(var(--card));
+    background-image: linear-gradient(
+      hsl(var(--foreground) / 0.05),
+      hsl(var(--foreground) / 0.05)
+    );
+  }
+
+  /* 顶栏底下那条渐变线。四个 RPG 页面都是 <header>，一条规则全覆盖，
+     不用逐个改 JSX；四个 header 本来就都是定位元素，::after 直接能挂 */
+  .mode-rpg > header::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--primary) / 0.55) 30%,
+      hsl(var(--primary) / 0.55) 70%,
+      transparent
+    );
   }
 
   * {

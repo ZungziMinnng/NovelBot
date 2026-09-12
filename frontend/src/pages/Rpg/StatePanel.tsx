@@ -1,4 +1,5 @@
 import type { RpgNpc, RpgStatDef } from '@/api/client'
+import { bandOf } from './StatBar'
 
 const HIDDEN = '隐藏'
 const NUMBER = '数字'
@@ -7,11 +8,13 @@ const NUMBER = '数字'
  *  资金这种没上限的画条没有意义，条满不满取决于你随手填的上限。 */
 function Stat({ def, value }: { def: RpgStatDef; value: number }) {
   const max = def.max
+  const label = bandOf(def, value)?.label
   if (def.display === NUMBER || max === null || max === undefined) {
     return (
       <span className="flex items-center gap-1 text-xs whitespace-nowrap">
         <span className="text-muted-foreground">{def.name}</span>
         <span className="font-medium tabular-nums">{value}</span>
+        {label && <span className="text-primary">{label}</span>}
       </span>
     )
   }
@@ -19,7 +22,10 @@ function Stat({ def, value }: { def: RpgStatDef; value: number }) {
   const span = max - min
   const ratio = span > 0 ? Math.max(0, Math.min(1, (value - min) / span)) : 0
   return (
-    <span className="flex items-center gap-1.5 text-xs whitespace-nowrap" title={`${def.name} ${value}/${max}`}>
+    <span
+      className="flex items-center gap-1.5 text-xs whitespace-nowrap"
+      title={`${def.name} ${value}/${max}${label ? ` · ${label}` : ''}`}
+    >
       <span className="text-muted-foreground">{def.name}</span>
       <span className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
         <span
@@ -28,6 +34,7 @@ function Stat({ def, value }: { def: RpgStatDef; value: number }) {
         />
       </span>
       <span className="text-muted-foreground tabular-nums">{value}</span>
+      {label && <span className="text-primary">{label}</span>}
     </span>
   )
 }

@@ -1,14 +1,10 @@
 import type { RpgCondition, RpgNpc, RpgStatDef } from '@/api/client'
-import { AddRow, DeleteButton, INPUT } from './rpgUi'
+import { AddRow, CommaInput, DeleteButton, INPUT } from './rpgUi'
 
 /** 后端 check_condition 认得的比较符，顺序即下拉顺序 */
 const OPS = ['>=', '>', '<=', '<', '==', '!='] as const
 
 const SELECT = 'border rounded-lg px-2 py-1.5 text-xs bg-background/60 focus:outline-none'
-
-/** 逗号分隔的一行文本 ↔ 字符串数组。flags 和 items 都只是一串名字，
- *  给每个名字配一行输入框反而更难填 */
-const splitList = (text: string) => text.split(/[,，、;；]+/).map(s => s.trim()).filter(Boolean)
 
 /**
  * 统一条件编辑器。世界书的触发条件、动作按钮的可用条件、地点的进入条件
@@ -17,13 +13,15 @@ const splitList = (text: string) => text.split(/[,，、;；]+/).map(s => s.trim
  * 语义：列出来的每一条都要满足，全空 = 无条件。
  */
 export default function ConditionEditor({
-  value, onChange, statDefs, relationDefs, npcs,
+  value, onChange, statDefs, relationDefs, npcs, slotNames = [],
 }: {
   value: RpgCondition
   onChange: (next: RpgCondition) => void
   statDefs: RpgStatDef[]
   relationDefs: RpgStatDef[]
   npcs: RpgNpc[]
+  /** 模组的时段表。编辑器里没有会话可查，合法的时段名只能从这儿来 */
+  slotNames?: string[]
 }) {
   const stats = value.stats || {}
   const relations = value.relations || []
@@ -126,10 +124,61 @@ export default function ConditionEditor({
 
       <div className="grid grid-cols-2 gap-2">
         <div>
+          <label className="text-xs font-medium mb-1 block">限定时段</label>
+          <CommaInput
+            value={value.slots || []}
+            onChange={v => patch({ slots: v })}
+            placeholder={slotNames.length ? slotNames.join('，') : '这个模组没有时段'}
+            disabled={slotNames.length === 0}
+            className={`${INPUT} py-1.5 disabled:opacity-50`}
+          />
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {slotNames.length
+              ? `留空 = 不限。名字前加 ! 表示不能在那个时段，可选：${slotNames.join(' / ')}`
+              : '先在模组的「时段」里设定，这里才有东西可填。'}
+          </p>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">限定天数</label>
+          <div className="flex items-center gap-2">
+            <select
+              value={value.day?.op || ''}
+              onChange={e => patch({
+                day: e.target.value
+                  ? { op: e.target.value, value: value.day?.value ?? 1 }
+                  : undefined,
+              })}
+              className={SELECT}
+            >
+              <option value="">不限</option>
+              {OPS.map(op => <option key={op} value={op}>{op}</option>)}
+            </select>
+            {value.day && (
+              <>
+                <input
+                  type="number"
+                  value={value.day.value}
+                  onChange={e => patch({
+                    day: { op: value.day!.op, value: Number(e.target.value) || 0 },
+                  })}
+                  className={`${INPUT} w-20 py-1`}
+                />
+                <span className="text-xs text-muted-foreground">天</span>
+              </>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            拿天数做门槛，比如「第 3 天之后才开」。
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div>
           <label className="text-xs font-medium mb-1 block">需要的剧情标记</label>
-          <input
-            value={(value.flags || []).join('，')}
-            onChange={e => patch({ flags: splitList(e.target.value) })}
+          <CommaInput
+            value={value.flags || []}
+            onChange={v => patch({ flags: v })}
             placeholder="已经拿到钥匙，!门已经开了"
             className={`${INPUT} py-1.5`}
           />
@@ -137,9 +186,9 @@ export default function ConditionEditor({
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">需要的道具</label>
-          <input
-            value={(value.items || []).join('，')}
-            onChange={e => patch({ items: splitList(e.target.value) })}
+          <CommaInput
+            value={value.items || []}
+            onChange={v => patch({ items: v })}
             placeholder="铁钥匙，撬棍"
             className={`${INPUT} py-1.5`}
           />

@@ -29,7 +29,7 @@ PROMPTS = {
     "rpg_settle.jinja2": {
         "label": "回合结算",
         "description": "从刚写出的剧情里读出状态变化，并顺带给出三条建议行动。请保持 JSON 输出格式和字段名，后端按字段名解析。数值名不在模组定义里的会被丢弃。",
-        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "stats": "玩家当前数值表", "location": "当前位置", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name", "relation_names": "模组定义的关系数值名", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算"},
+        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "stats": "玩家当前数值表", "location": "当前位置", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算", "chronicle": "已经传开的事，最近几条，提示模型不要重复记录"},
     },
     "rpg_suggest.jinja2": {
         "label": "帮我想想",
@@ -62,14 +62,17 @@ def validate(name: str, content: str) -> None:
     values.update(
         reply_length=200, stats={"敏捷": 12}, ledger=[{"key": "撬锁", "attr": "敏捷", "band": "hard"}],
         rate=63, dice=41, relation_names=["好感", "信任"],
-        inventory=[{"name": "火把", "qty": 1}], flags={"地窖门已开": True}, npcs=[{"id": 1, "name": "老兵"}],
+        inventory=[{"name": "火把", "qty": 1}], flags={"地窖门已开": True},
+        npcs=[{"id": 1, "name": "老兵", "notes": {"伤势": "左肩中刀"}}], note_keys=["伤势"],
+        chronicle=["后山挖出了尸首"],
     )
     template = _env.from_string(content)
     template.render(**values)
     values.update(
-        reply_length=0, stats={}, ledger=[], inventory=[], flags={}, npcs=[], relation_names=[],
+        reply_length=0, stats={}, ledger=[], inventory=[], flags={}, npcs=[],
+        note_keys=[], relation_names=[],
         location="", recent="", summary="", previous_summary="", dice=0,
-        outcome_label="", engine_note="",
+        outcome_label="", engine_note="", chronicle=[],
     )
     template.render(**values)
 

@@ -55,6 +55,10 @@ class RpgModule(Base):
     default_inventory: Mapped[list] = mapped_column(JSON, default=list)
     default_location: Mapped[str] = mapped_column(String(100), default="")
 
+    # 时段表，如 ["早", "中", "晚"]。空 = 这个模组不用时段，一切照旧。
+    # 这里是默认值，建局时可以改，改完存进 session 自己那一份
+    time_slots: Mapped[list] = mapped_column(JSON, default=list)
+
     # 作废：数值系统换成 stat_defs 之后这两列没人读了。项目没有 Alembic，
     # create_all 不删列，而它们建成了 NOT NULL，从模型里拿掉会让老库插入直接
     # 失败，所以只能留着
@@ -226,6 +230,11 @@ class RpgLocation(Base):
     enter_requires: Mapped[dict] = mapped_column(JSON, default=dict)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
+    # 地图上的位置，百分比 0..100 而不是像素：换个屏幕宽度不用重算，
+    # 前端直接 left: x%。两个都是 0 = 作者还没摆过，前端落到兜底网格
+    x: Mapped[int] = mapped_column(Integer, default=0)
+    y: Mapped[int] = mapped_column(Integer, default=0)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -297,6 +306,17 @@ class RpgSession(Base):
     inventory: Mapped[list] = mapped_column(JSON, default=list)
     location: Mapped[str] = mapped_column(String(100), default="")
 
+    # ── 时间。玩家自己拨的时钟，只有「结束这个时段」能推动它 ──
+    # **只在玩家建局时改过才非空**。空 = 跟模组走，这样模组后来把时段改细，
+    # 还没定制的局会跟着变（见 rpg_state.slot_table）。存过的就冻住不再追溯，
+    # 理由同 default_location
+    time_slots: Mapped[list] = mapped_column(JSON, default=list)
+    # 当前时段，存的是「名字」不是下标。存下标就得把 module 传进
+    # check_condition 才能换算，那会打破「一处写完、三处共用」；
+    # 先例是 RpgLocation.connections 存名字不存 id
+    slot: Mapped[str] = mapped_column(String(20), default="")
+    day: Mapped[int] = mapped_column(Integer, default=1)
+
     # 剧情开关，扁平不嵌套。模型对嵌套结构做增量改动极不可靠；扁平键值的
     # 合并语义唯一：同键覆盖、新键追加、值为 null 表示删除
     flags: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -304,6 +324,29 @@ class RpgSession(Base):
     # 名字会改，id 不会。数值项按模组的 relation_stat_defs 初始化，
     # met 是内部标记（控制首次见面才注入外貌），渲染面板时跳过
     npc_states: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 这一局里 GM 边玩边记下的 NPC 近况。{"3": {"伤势": "左肩中刀", "身上带着": "猎枪"}}，
+    # 外层键同 npc_states（npc_id 的字符串），内层是自由键值，值一律是字符串。
+    #
+    # 刻意不并进 npc_states：那张表里所有非 met 的键都被当成关系数字用
+    # （rpg_context._npc_block 拿去排版、apply_relations 拿去 clamp、
+    # check_condition 拿去比大小、前端两处拿去 Number()）。合表之后模型
+    # 只要写出一次 {"好感": "很喜欢你"}，62 就被一个字符串盖掉，于是关系数
+    # 悄悄归零、所有「好感≥50」的门一起失效，而且全程没有任何报错。
+    npc_notes: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 大事记：这一局里「已经传开」的事，跨对话线共享。存在的理由是分线之后
+    # 「你在铁匠铺听说老兵他哥失踪了，回去找老兵，老兵没听过」——这不是摘要器
+    # 能修的，摘要只管一条线。
+    #
+    # 口吻必须是「已经传开的事」而不是「发生过的事」：它注入每一条线，等于
+    # 所有 NPC 全知。所以只写值得让所有人知道、且真的传开了的事，
+    # 密室里干的事不进来（字段说明见 rpg_settle.jinja2）
+    chronicle: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 去过的地点名。地图的迷雾读它：没去过也不挨着去过的地方，画成一个灰点。
+    # 存名字不存 id，理由同 connections
+    visited: Mapped[list] = mapped_column(JSON, default=list)
 
     # 滚动摘要，含义同酒馆
     summary: Mapped[str] = mapped_column(Text, default="")
@@ -330,6 +373,18 @@ class RpgMessage(Base):
 
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
+
+    # 这条消息属于哪条对话线。**值是 NPC 的 id**，NULL = 场面线（公共场面：
+    # 群戏、环境描写、一个人待着都落这里）。名字表达的是概念「这是哪条线」，
+    # 不是外键指向——不叫 npc_id 是因为那会和 target_npc（动作作用在谁身上，
+    # 是名字字符串）在同一个请求体里撞车
+    #
+    # 不建线程表：NULL 天然就是场面线，老数据零回填；回溯按消息 id 删，
+    # 线作为派生结果自动一致，不会留下一堆点不开的空对话
+    #
+    # **不要给它加外键，也不要写进 _repair_data 的悬空外键清理**——角色被删
+    # 之后那会把一条角色线静默变成场面线，两条历史当场合并，且不会报错
+    thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     # 本回合判定，只挂在 user 行上。null = 这轮没判定。
     # 挂 user 行而不是 assistant 行，是为了中断语义：assistant 行要等叙事跑完

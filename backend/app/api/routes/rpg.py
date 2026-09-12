@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import rpg_turn
 from app.api.deps import CurrentUser
+from app.api.routes.rpg_prompts import router as prompts_router
 from app.database import get_db
 from app.models.rpg import (
     RpgAction, RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc,
@@ -19,22 +20,29 @@ from app.models.rpg import (
 )
 from app.schemas.rpg import (
     RpgActionCreate, RpgActionOut, RpgActionUpdate,
+    RpgAdvanceOut,
     RpgItemCreate, RpgItemOut, RpgItemUpdate,
     RpgLocationCreate, RpgLocationOut, RpgLocationUpdate,
     RpgMessageOut,
     RpgModuleCreate, RpgModuleOut, RpgModuleUpdate,
+    RpgMoveIn, RpgMoveOut,
+    RpgNoteDeleteIn,
     RpgNpcCreate, RpgNpcOut, RpgNpcUpdate,
     RpgSaveCreate, RpgSaveOut,
     RpgSessionCreate, RpgSessionOut, RpgSessionUpdate,
+    RpgSuggestOut,
     RpgTurnRequest,
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
 )
-from app.services.rpg_state import init_relation, init_stats
+from app.services.rpg_state import (
+    advance_slot, apply_npc_notes, init_relation, init_stats, slot_table,
+)
 from app.services.sse import sse_event
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+router.include_router(prompts_router)
 
 AVATARS_DIR = Path("data/avatars")
 _ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -418,6 +426,7 @@ async def create_session(
     for name, value in (data.stats or {}).items():
         if name in stats:
             stats[name] = value
+    start = data.location if data.location is not None else module.default_location
     sess = RpgSession(
         module_id=module_id,
         title=data.title or f"{data.char_name}的冒险",
@@ -425,8 +434,21 @@ async def create_session(
         char_desc=data.char_desc,
         stats=stats,
         inventory=[dict(item) for item in (module.default_inventory or [])],
-        location=data.location if data.location is not None else module.default_location,
+        location=start,
+        # 站在哪就算去过哪：地图一开局就该有一块是亮的
+        visited=[start] if str(start or "").strip() else [],
+        # 时段表只有玩家真的改过才存进这一局。**存空 = 跟模组走**，不是
+        # 「这一局不要时钟」——空和「没配过」必须是同一个意思，模组后来调整
+        # 时段表时还没定制的局才会跟着走（见 rpg_state.slot_table）
+        time_slots=(
+            [str(s).strip() for s in data.time_slots if str(s).strip()]
+            if data.time_slots else []
+        ),
     )
+    # 开局就站在第一个时段上，否则首轮的状态块里时间是空的
+    slots = slot_table(module, sess)
+    if slots:
+        sess.slot = slots[0]
     db.add(sess)
     await db.commit()
     await db.refresh(sess)
@@ -469,6 +491,24 @@ async def update_session(
     return sess
 
 
+@router.patch("/sessions/{session_id}/npc-notes/{npc_id}", response_model=RpgSessionOut)
+async def delete_npc_note(
+    session_id: int, npc_id: int, data: RpgNoteDeleteIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """划掉 GM 记错的一条近况。
+
+    这是玩家唯一的补救：近况会一直画在角色卡上、每轮注入那个人的设定块，
+    模型在第 12 回合写下一句「其实是幕后凶手」，没有这个口子就只能读档，
+    把这之后玩的全扔掉。
+    """
+    sess = await _get_owned_session(db, session_id, user)
+    apply_npc_notes(sess, npc_id, {data.key: None})
+    await db.commit()
+    await db.refresh(sess)
+    return sess
+
+
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     sess = await _get_owned_session(db, session_id, user)
@@ -484,11 +524,23 @@ async def delete_session(session_id: int, user: CurrentUser, db: AsyncSession = 
 # 一局上所有会随回合改变的字段。summary 和 summarized_upto_id 必须跟着一起
 # 存：漏了它们，回溯之后摘要里还留着「未来」的剧情，模型会写出玩家没经历过
 # 的事，这是最难查的一类 bug
+#
+# 通则：任何「会随回合自己变的」会话列都必须加进这张表。漏一个不会报错，
+# 只会在读档之后留下一个不还原的字段——时段和天数就是这么进来的
 SNAPSHOT_FIELDS = (
     "status", "stats", "inventory", "location", "flags", "npc_states",
     "summary", "summarized_upto_id", "dc_ledger", "turn_count",
+    "time_slots", "slot", "day", "chronicle", "visited", "npc_notes",
 )
 AUTO_SAVE_KEEP = 30
+
+# 后加进 SNAPSHOT_FIELDS 的字段，老快照里根本没有这一项。读档时按这里的
+# 默认值补上，否则读一个老档会把当前值留在原地。只列后加的——
+# 「快照里没有」和「值是 None」是两回事，给老字段补默认反而会炸
+SNAPSHOT_DEFAULTS = {
+    "time_slots": [], "slot": "", "day": 1, "chronicle": [], "visited": [],
+    "npc_notes": {},
+}
 
 
 async def _take_save(db: AsyncSession, sess: RpgSession, kind: str, label: str) -> RpgSave:
@@ -499,6 +551,22 @@ async def _take_save(db: AsyncSession, sess: RpgSession, kind: str, label: str) 
     last_id = (await db.execute(
         select(func.max(RpgMessage.id)).where(RpgMessage.session_id == sess.id)
     )).scalar() or 0
+    if kind == "auto":
+        # 同一个消息位置只留最早那一张。时钟和瞬移不产生消息，连点十次就是
+        # 十张 before_message_id 相同的快照，把 30 张的窗口挤满、真正的回合档
+        # 被挤掉。最早那张才是「这一串点击之前」，后面的没有信息量
+        dupe = (await db.execute(
+            select(RpgSave)
+            .where(
+                RpgSave.session_id == sess.id,
+                RpgSave.kind == "auto",
+                RpgSave.before_message_id == last_id,
+            )
+            .order_by(RpgSave.id)
+            .limit(1)
+        )).scalars().first()
+        if dupe is not None:
+            return dupe
     row = RpgSave(
         session_id=sess.id,
         kind=kind,
@@ -570,9 +638,12 @@ async def restore_save(save_id: int, user: CurrentUser, db: AsyncSession = Depen
         RpgMessage.session_id == sess.id,
         RpgMessage.id > save.before_message_id,
     ))
-    for field, value in (save.state or {}).items():
-        if field in SNAPSHOT_FIELDS:
-            setattr(sess, field, copy.deepcopy(value))
+    state = save.state or {}
+    for field in SNAPSHOT_FIELDS:
+        if field in state:
+            setattr(sess, field, copy.deepcopy(state[field]))
+        elif field in SNAPSHOT_DEFAULTS:
+            setattr(sess, field, copy.deepcopy(SNAPSHOT_DEFAULTS[field]))
     await db.execute(delete(RpgSave).where(
         RpgSave.session_id == sess.id, RpgSave.id > save.id
     ))
@@ -613,6 +684,106 @@ async def delete_message(message_id: int, user: CurrentUser, db: AsyncSession = 
     return {"ok": True}
 
 
+# ── 时间 ──────────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/advance", response_model=RpgAdvanceOut)
+async def advance_time(
+    session_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)
+):
+    """结束当前时段。碰最后一格就翻篇：新的一天、跨天回满。
+
+    纯引擎，不调模型——按一下时钟不该产生任何叙事，也不该花玩家的钱。
+    """
+    sess = await _get_owned_session(db, session_id, user)
+    if sess.status != "alive":
+        raise HTTPException(status_code=400, detail="这一局已经结束了，先读档再继续")
+
+    # 和回合一样，动任何状态之前先拍档：时钟按错了也要能反悔
+    await _take_save(db, sess, "auto", "")
+    await _prune_auto_saves(db, session_id)
+
+    facts = advance_slot(await db.get(RpgModule, sess.module_id), sess)
+    sess.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(sess)
+    return RpgAdvanceOut(session=sess, facts=facts)
+
+
+# ── 瞬移 ──────────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/move", response_model=RpgMoveOut)
+async def move_to(
+    session_id: int, req: RpgMoveIn, user: CurrentUser, db: AsyncSession = Depends(get_db)
+):
+    """从地点总览点一个地方就直接过去。纯引擎，零 LLM。
+
+    进不去就把拒绝的理由原样返回（进入条件没满足），不是错误——
+    被门槛拦下是地图的正常反馈，不该弹一个红色的失败提示。
+    """
+    sess = await _get_owned_session(db, session_id, user)
+    if sess.status != "alive":
+        raise HTTPException(status_code=400, detail="这一局已经结束了，先读档再继续")
+
+    # 地点表和角色表在这里读、改动在这里提交：移动必须跑在路由自己这条连接上。
+    # 另开一条连接写 rpg_sessions 会和下面拍存档的写事务互锁（SQLite 单写者）
+    locs = list((await db.execute(
+        select(RpgLocation).where(RpgLocation.module_id == sess.module_id)
+    )).scalars().all())
+    npcs = list((await db.execute(
+        select(RpgNpc).where(RpgNpc.module_id == sess.module_id)
+    )).scalars().all())
+
+    # 自己拍档，和 /advance 同一个理由：它绕过了 stream_turn 的存档，
+    # 不拍的话瞬移五格再读档会回到上一个回合，中间的地点跳转无法反悔。
+    # before_message_id 与上一次回合相同，读档会删 0 条消息、只回滚状态
+    before = sess.location
+    save = await _take_save(db, sess, "auto", "")
+    message = rpg_turn.move_by_name(sess, locs, npcs, req.target)
+    if sess.location == before:
+        # 没走成（没路、门槛没过、已经在这儿了）：什么都没改，刚拍的那张档
+        # 也撤回去，否则点几个走不通的地点就攒出一串一模一样的空快照
+        if save in db.new:
+            db.expunge(save)
+        return RpgMoveOut(session=sess, message=message)
+
+    await _prune_auto_saves(db, session_id)
+    sess.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(sess)
+    return RpgMoveOut(session=sess, message=message)
+
+
+# ── 帮我想想 ──────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/suggest", response_model=RpgSuggestOut)
+async def suggest_actions(
+    session_id: int, user: CurrentUser, thread_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """根据最近几轮给出 3 条候选行动，点一条直接发出去。
+
+    「最近几轮」指**当前这条线**的最近几轮：在老兵屋里给的建议，不该来自
+    隔壁酒馆刚聊的那些话。
+    """
+    sess = await _get_owned_session(db, session_id, user)
+    module = await db.get(RpgModule, sess.module_id)
+    history = [
+        m for m in (await db.execute(
+            select(RpgMessage)
+            .where(RpgMessage.session_id == session_id)
+            .order_by(RpgMessage.id)
+        )).scalars().all()
+        if (m.thread_id or None) == (thread_id or None)
+    ]
+    try:
+        return RpgSuggestOut(
+            suggestions=await rpg_turn.suggest_actions(module, sess, history)
+        )
+    except ValueError as e:
+        # 模型配错时 resolve_model_ref 抛 ValueError，别变成 500
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/sessions/{session_id}/stream")
 async def stream_turn(
     session_id: int, req: RpgTurnRequest, user: CurrentUser,
@@ -630,12 +801,26 @@ async def stream_turn(
     if not content:
         raise HTTPException(status_code=400, detail="说点什么再发")
 
+    # 这一轮归哪条线：只在这里解析一次，之后一路传下去。
+    # 线主不在当前地点就整轮拒掉——历史照常可读，只是不给输入框
+    npcs = list((await db.execute(
+        select(RpgNpc).where(RpgNpc.module_id == sess.module_id)
+    )).scalars().all())
+    thread_id = rpg_turn.resolve_thread_id(sess, npcs, req.thread_id, req.target_npc)
+    if req.thread_id and thread_id is None:
+        raise HTTPException(status_code=404, detail="这条对话线不存在")
+    blocker = rpg_turn.thread_blocker(sess, npcs, thread_id)
+    if blocker:
+        raise HTTPException(status_code=400, detail=blocker)
+
     # 自动存档必须在这一轮动任何东西之前拍：有了权威状态就必须能反悔，
     # 一次坏判定不该毁掉整局
     await _take_save(db, sess, "auto", "")
     await _prune_auto_saves(db, session_id)
 
-    row = RpgMessage(session_id=session_id, role="user", content=content)
+    row = RpgMessage(
+        session_id=session_id, role="user", content=content, thread_id=thread_id
+    )
     db.add(row)
     sess.turn_count += 1
     sess.updated_at = datetime.utcnow()
@@ -648,6 +833,7 @@ async def stream_turn(
             async for event, data in rpg_turn.run_turn(
                 session_id, user_message_id, content, req.attr,
                 req.action_id, req.item_name, req.move_to, req.target_npc,
+                thread_id,
             ):
                 yield sse_event(event, data)
         except (asyncio.CancelledError, GeneratorExit):

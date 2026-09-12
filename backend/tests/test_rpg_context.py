@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.models.rpg import (
     RpgMessage, RpgModule, RpgNpc, RpgSession, RpgWorldEntry,
 )
-from app.services.rpg_context import build_rpg_messages, onstage_npcs, triggered_entries
+from app.services.rpg_context import (
+    build_rpg_messages, here_npcs, onstage_npcs, triggered_entries,
+)
+from app.services.rpg_state import EFFECT_CHARS
 
 SENTINEL = "哨兵串勿入提示词XYZZY"
 
@@ -52,6 +55,7 @@ class _Base(unittest.IsolatedAsyncioTestCase):
             location="地窖",
             flags={},
             npc_states={},
+            npc_notes={},
         )
         self.db.add(self.sess)
         await self.db.commit()
@@ -287,10 +291,175 @@ class NpcTests(_Base):
         self.assertIn("背景故事：他在塌方那天失去了整支班组。", system)
         self.assertIn("别问。", system)
 
+    async def test_the_gm_is_told_what_the_npc_is_carrying_right_now(self):
+        npc = await self._add(RpgNpc(
+            module_id=self.module.id, name="老兵", location="地窖", persona="警惕，话少。"
+        ))
+        self.sess.npc_notes = {str(npc.id): {"伤势": "左肩中刀", "身上带着": "一把猎枪"}}
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        self.assertIn("伤势 左肩中刀", system)
+        self.assertIn("身上带着 一把猎枪", system)
+
+    async def test_an_npc_without_notes_gets_no_extra_line(self):
+        await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        self.assertNotIn("眼下：", system)
+
+    async def test_the_notes_line_does_not_reuse_the_label_from_the_you_block(self):
+        # _compose_state 已经用「此刻：」表示「你正在和谁单独说话」。两块隔着
+        # 几百字，同一个词两个意思，模型分不清
+        npc = await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        self.sess.npc_notes = {str(npc.id): {"伤势": "左肩中刀"}}
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        self.assertEqual(system.count("此刻："), 1)
+
+    async def test_every_npc_keeps_his_name_when_the_block_overflows(self):
+        # 截断是从尾部切的，切掉的是整整一个人——而 mark_met 不看他的文字有没有
+        # 活下来，于是那个人的外貌从此再也不会注入。所以要先砍示例和档案段
+        for i in range(3):
+            await self._add(RpgNpc(
+                module_id=self.module.id, name=f"矿工{i}", location="地窖",
+                description="塌方那天活下来的人。" * 20,
+                profile_sections={"背景故事": "他在矿上待了二十年。" * 20},
+                dialogue_examples=[{"user": "你还好吗", "assistant": "别问了。" * 20}],
+            ))
+        self.sess.npc_notes = {}
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        for i in range(3):
+            self.assertIn(f"矿工{i}", system)
+
     def test_keyword_match_is_case_insensitive(self):
         npc = RpgNpc(module_id=1, name="Rook", location="", keywords="秃鹫")
         self.assertEqual(onstage_npcs([npc], "", "那只秃鹫又来了"), [npc])
         self.assertEqual(onstage_npcs([npc], "", "ROOK 在等你"), [npc])
+
+    def test_here_npcs_needs_a_matching_place(self):
+        here = RpgNpc(module_id=1, name="老兵", location="地窖")
+        away = RpgNpc(module_id=1, name="老板娘", location="酒馆")
+        nowhere = RpgNpc(module_id=1, name="路人", location="")
+        self.assertEqual(here_npcs([here, away, nowhere], "地窖"), [here])
+        # 玩家还没落脚时谁都不算在跟前
+        self.assertEqual(here_npcs([here, away], ""), [])
+
+    async def test_being_mentioned_is_not_being_here(self):
+        # 「这一轮拿到设定」和「在跟前」是两件事：前者把资料递给模型，
+        # 后者才决定算不算见过面。混成一个，被提到一句的人的外貌就永远
+        # 等不到该出现的那一次
+        await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        await self._add(RpgNpc(module_id=self.module.id, name="老板娘", location="酒馆"))
+
+        _, diag = await self._build("老板娘刚才说了什么")
+        self.assertEqual(
+            [n["name"] for n in diag["npcs_onstage"]], ["老兵", "老板娘"]
+        )
+        self.assertEqual([n["name"] for n in diag["npcs_here"]], ["老兵"])
+
+    async def test_protagonist_template_is_never_treated_as_an_npc(self):
+        # 主角模板是开局时预填玩家自己的那张卡。前端一直不把它当 NPC
+        # （condition.ts 的 knownNpcs），后端也不能把它塞进【在场】——
+        # 塞进去模型就会把它当另一个角色来演
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="阿隼", role="protagonist",
+            location="地窖", persona="逃出矿场的挖工。", appearance="个子很高。",
+        ))
+        await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+
+        # 名字就写在玩家这句话里，地点也和玩家相同，两条路都堵死
+        messages, diag = await self._build("阿隼这个名字我记着")
+        self.assertEqual([n["name"] for n in diag["npcs_onstage"]], ["老兵"])
+        self.assertEqual([n["name"] for n in diag["npcs_here"]], ["老兵"])
+        self.assertNotIn("个子很高。", "\n".join(m["content"] for m in messages))
+
+
+class MeaningTests(_Base):
+    """数值的「影响」。
+
+    作者写的说明和分档是给模型看的：只给 62 它不知道这是高还是低、该用什么
+    态度说话。守两条：存量模组一个字都不多出来；说明整轮只发一遍。
+    """
+
+    async def test_a_module_without_effects_says_nothing_extra(self):
+        # 存量模组的回归线。这几个定义一个 effect、一个 tiers 都没有
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertNotIn("【数值的含义】", system)
+
+    async def test_the_effect_and_the_bands_reach_the_model(self):
+        self.module.stat_defs = [
+            {"name": "精力", "initial": 80, "max": 100, "effect": "熬夜和打架都掉它",
+             "tiers": [{"at": 0, "label": "脱力", "note": "手在抖"}, {"at": 41, "label": "尚可"}]},
+        ]
+        self.sess.stats = {"精力": 45}
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertIn("【数值的含义】", system)
+        self.assertIn("精力：熬夜和打架都掉它", system)
+        self.assertIn("0 起 脱力=手在抖", system)
+
+    async def test_the_current_band_rides_along_with_the_number(self):
+        self.module.stat_defs = [
+            {"name": "精力", "initial": 45, "max": 100,
+             "tiers": [{"at": 0, "label": "脱力"}, {"at": 61, "label": "充沛"}]},
+        ]
+        self.sess.stats = {"精力": 45}
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertIn("精力 45/100（脱力）", system)
+
+    async def test_the_band_note_stays_out_of_the_number_line(self):
+        # 关系定义是全体 NPC 共用的一份。把解释跟在数字后面就等于同一句话
+        # 按在场人数重复，而【在场】那块只有 800 字上下的预算
+        self.module.relation_stat_defs = [
+            {"name": "好感", "min": -100, "max": 100,
+             "tiers": [{"at": 61, "label": "亲近", "note": "会主动替你出头"}]},
+        ]
+        await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        self.sess.npc_states = {"1": {"好感": 62}}
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        self.assertIn("好感 62/100（亲近）", system)
+        self.assertNotIn("好感 62/100（亲近，会主动替你出头）", system)
+
+    async def test_the_effect_is_stated_once_no_matter_how_many_npcs_are_here(self):
+        # 这条锁的是那个设计决定：共用定义只在【数值的含义】里说一遍
+        self.module.relation_stat_defs = [
+            {"name": "好感", "min": -100, "max": 100, "effect": "决定她愿不愿意帮你"},
+        ]
+        for i in range(3):
+            await self._add(RpgNpc(module_id=self.module.id, name=f"矿工{i}", location="地窖"))
+        system = (await self._build("我打个招呼"))[0][0]["content"]
+        self.assertEqual(system.count("决定她愿不愿意帮你"), 1)
+
+    async def test_a_hidden_stat_explains_itself_too(self):
+        # 同 _compose_state 的既定理由：隐藏只是不给玩家看，GM 得知道
+        # 怀疑度到 80 了会发生什么
+        self.module.stat_defs = [
+            {"name": "怀疑度", "initial": 30, "max": 100, "display": "隐藏",
+             "effect": "到 80 就有人来敲门"},
+        ]
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertIn("怀疑度：到 80 就有人来敲门", system)
+
+    async def test_the_meaning_block_sits_before_the_numbers_it_explains(self):
+        # 被尾部截断切掉的话，模型看到的就又是一串没有意思的数字
+        self.module.stat_defs = [
+            {"name": "精力", "initial": 80, "max": 100, "effect": "熬夜和打架都掉它"},
+        ]
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertLess(system.index("【数值的含义】"), system.index("【你】"))
+
+    async def test_an_over_long_effect_is_trimmed_rather_than_dropped(self):
+        # 作者可以从别处粘一大段进来。截断而不是整条丢掉，否则这个数值
+        # 在提示词里就彻底没有解释了
+        self.module.stat_defs = [
+            {"name": "精力", "initial": 80, "max": 100, "effect": "懒" * 200},
+        ]
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertIn("精力：" + "懒" * EFFECT_CHARS, system)
+        self.assertNotIn("懒" * (EFFECT_CHARS + 1), system)
+
+    async def test_a_def_with_only_a_label_and_no_effect_still_shows_up(self):
+        self.module.relation_stat_defs = [
+            {"name": "好感", "min": -100, "max": 100, "tiers": [{"at": 0, "label": "冷淡"}]},
+        ]
+        system = (await self._build("我看看四周"))[0][0]["content"]
+        self.assertIn("0 起 冷淡", system)
 
 
 class StateBlockTests(_Base):
@@ -306,6 +475,18 @@ class StateBlockTests(_Base):
         self.assertIn("地窖门已开：是", system)
         # 值为 null 的 flag 表示「这条不再成立」，不该出现在上下文里
         self.assertNotIn("火把还亮着", system)
+
+    async def test_the_clock_reaches_the_model(self):
+        # 模型看不见时间就会自己编「不知不觉天黑了」，而这局可能还停在早上
+        self.sess.slot = "晚"
+        self.sess.day = 3
+        system = (await self._build("我往前走"))[0][0]["content"]
+        self.assertIn("时间：第 3 天 · 晚", system)
+
+    async def test_a_module_without_a_clock_says_nothing_about_time(self):
+        # 一句「时间：第 1 天 · 」比不写更糟——模型会拿这个半截值去编
+        system = (await self._build("我往前走"))[0][0]["content"]
+        self.assertNotIn("时间：", system)
 
     async def test_a_bloated_backpack_is_trimmed_before_anything_else(self):
         self.sess.inventory = [

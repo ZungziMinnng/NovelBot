@@ -1,12 +1,13 @@
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords } from 'lucide-react'
+import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText } from 'lucide-react'
 import { rpgApi, type RpgModule } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
+import { PANEL } from './rpgUi'
 
 export default function Rpg() {
   const navigate = useNavigate()
@@ -53,6 +54,14 @@ export default function Rpg() {
         </button>
         <Dices className="w-5 h-5 text-violet-500" />
         <h1 className="font-bold text-lg">RPG</h1>
+        <button
+          onClick={() => navigate('/rpg/prompts')}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
+            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          title="改写给模型的指令：主持人、裁决、结算、帮我想想"
+        >
+          <ScrollText className="w-3.5 h-3.5" /> 提示词
+        </button>
         <div className="ml-auto">
           <ThemePicker />
         </div>
@@ -96,7 +105,7 @@ export default function Rpg() {
               <SpotlightCard
                 key={module.id}
                 spotlightColor="rgba(167, 139, 250, 0.14)"
-                className="rounded-xl border bg-card/60 backdrop-blur-sm hover:border-violet-500/50 transition-colors"
+                className={`${PANEL} backdrop-blur-sm hover:border-primary/50 transition-colors`}
               >
                 <div className="absolute left-0 top-0 bottom-0 w-1 bg-violet-500/70" />
                 <div

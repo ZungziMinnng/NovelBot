@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import {
   ArrowLeft, Loader2, Plus, Trash2, Dices, BookMarked, X, Users, ScrollText,
   Globe2, Clapperboard, Settings2, ChevronDown, ImagePlus, Pin, Backpack,
-  Swords, MapPin, Gauge, Sparkles,
+  Swords, MapPin, Gauge, Sparkles, Clock,
 } from 'lucide-react'
 import {
   rpgApi, modelLibraryApi, modelSelectValue,
@@ -22,7 +22,7 @@ import ItemSection from './ItemSection'
 import LocationSection from './LocationSection'
 import ConditionEditor from './ConditionEditor'
 import { GENRE_PRESETS, type GenrePreset } from './genrePresets'
-import { AddRow, DeleteButton, Field, INPUT, Section } from './rpgUi'
+import { ACCENT, AddRow, CommaInput, DeleteButton, Field, INPUT, PANEL, Section } from './rpgUi'
 
 const BANDS: Array<{ key: RpgBand; label: string }> = [
   { key: 'trivial', label: '轻易' },
@@ -123,7 +123,7 @@ export default function RpgModule() {
             窄屏（<1280px）自动落回单列，顺序和以前一样 */}
         <div className="grid gap-8 xl:grid-cols-2 items-start">
         <div className="space-y-8">
-        <Section title="这是个什么世界" desc="每轮都会注入，是整个模组的底色。" icon={Globe2}>
+        <Section title="这是个什么世界" desc="每轮都会注入，是整个模组的底色。" icon={Globe2} accent={ACCENT.map}>
           <div className="space-y-5">
             <GenreField form={form} set={set} />
             <Field
@@ -191,8 +191,26 @@ export default function RpgModule() {
           title="数值系统"
           desc="整个模组的地基。玩家一套，角色共用一套——改这里要点右上角保存才生效。"
           icon={Gauge}
+          accent={ACCENT.save}
         >
           <StatDefsSection form={form} set={set} />
+        </Section>
+
+        <Section
+          title="时段"
+          desc="玩家自己拨的时钟。留空 = 这个模组不管时间，一切照旧。"
+          icon={Clock}
+          accent={ACCENT.save}
+        >
+          <CommaInput
+            value={form.time_slots || []}
+            onChange={v => set('time_slots', v)}
+            placeholder="早，中，晚"
+          />
+          <p className="text-xs text-muted-foreground mt-1.5">
+            按播放顺序写，用逗号隔开（中英文逗号都行）。开局时玩家站在第一格，
+            「结束这个时段」往后推一格，推过最后一格就算过了一天。开始冒险时还可以按局改。
+          </p>
         </Section>
 
         <ActionSection
@@ -200,6 +218,7 @@ export default function RpgModule() {
           statDefs={form.stat_defs || []}
           relationDefs={form.relation_stat_defs || []}
           npcs={npcs}
+          slotNames={form.time_slots || []}
         />
 
         <ItemSection moduleId={moduleId} statDefs={form.stat_defs || []} />
@@ -209,9 +228,10 @@ export default function RpgModule() {
           statDefs={form.stat_defs || []}
           relationDefs={form.relation_stat_defs || []}
           npcs={npcs}
+          slotNames={form.time_slots || []}
         />
 
-        <Section title="开局时的背包" desc="建新的一局时整份拷进去，之后每局各玩各的，改模组不影响已开的局。" icon={Backpack}>
+        <Section title="开局时的背包" desc="建新的一局时整份拷进去，之后每局各玩各的，改模组不影响已开的局。" icon={Backpack} accent={ACCENT.bag}>
           <StartingInventory form={form} set={set} />
         </Section>
 
@@ -222,11 +242,12 @@ export default function RpgModule() {
           statDefs={form.stat_defs || []}
           relationDefs={form.relation_stat_defs || []}
           npcs={npcs}
+          slotNames={form.time_slots || []}
         />
 
         <NpcSection moduleId={moduleId} relationDefs={form.relation_stat_defs || []} />
 
-        <Section title="判定" desc="默认整个关掉。想要骰子味道的模组再打开，成功率由你锁定。" icon={Dices}>
+        <Section title="判定" desc="默认整个关掉。想要骰子味道的模组再打开，成功率由你锁定。" icon={Dices} accent={ACCENT.save}>
           <DifficultySettings form={form} set={set} />
         </Section>
         </div>
@@ -335,7 +356,7 @@ function PlaySection({ module }: { module: Module }) {
 function Collapsible({ title, icon: Icon, children }: { title: string; icon: typeof Dices; children: React.ReactNode }) {
   const [open, setOpen] = useState(false)
   return (
-    <section className="rounded-xl border bg-card/50 backdrop-blur-sm">
+    <section className={`${PANEL} backdrop-blur-sm`}>
       <button onClick={() => setOpen(o => !o)} className="w-full px-6 py-4 flex items-center gap-3 text-left">
         <div className="p-2 rounded-lg bg-muted text-muted-foreground shrink-0">
           <Icon className="w-4 h-4" />
@@ -393,7 +414,7 @@ function CoverHeader({
   }
 
   return (
-    <div className="rounded-xl border bg-card/50 backdrop-blur-sm p-6 flex items-center gap-5">
+    <div className={`${PANEL} backdrop-blur-sm p-6 flex items-center gap-5`}>
       <button
         onClick={() => fileRef.current?.click()}
         disabled={busy}
@@ -771,7 +792,7 @@ const EMPTY_ENTRY: EntryForm = {
 }
 
 function WorldBookSection({
-  moduleId, scanDepth, onScanDepthChange, statDefs, relationDefs, npcs,
+  moduleId, scanDepth, onScanDepthChange, statDefs, relationDefs, npcs, slotNames,
 }: {
   moduleId: number
   scanDepth: number
@@ -779,6 +800,7 @@ function WorldBookSection({
   statDefs: RpgStatDef[]
   relationDefs: RpgStatDef[]
   npcs: RpgNpc[]
+  slotNames: string[]
 }) {
   const qc = useQueryClient()
   const { data: entries = [] } = useQuery({
@@ -841,6 +863,7 @@ function WorldBookSection({
       title="世界书"
       desc="关键词命中才注入，不命中就不占 token。加上条件之后，「常驻 + 好感≥50」就是一条到线才解锁的剧情。"
       icon={BookMarked}
+      accent={ACCENT.map}
     >
       <div className="mb-4 pb-4 border-b flex items-center gap-2 flex-wrap">
         <label className="text-xs font-medium">关键词扫描范围</label>
@@ -957,6 +980,7 @@ function WorldBookSection({
                 statDefs={statDefs}
                 relationDefs={relationDefs}
                 npcs={npcs}
+                slotNames={slotNames}
               />
               <p className="text-xs text-muted-foreground mt-1.5">
                 条件只是附加约束：关键词词条要「命中关键词并且满足条件」；常驻词条则是满足条件后每轮都注入。
@@ -1080,6 +1104,7 @@ function NpcSection({ moduleId, relationDefs }: { moduleId: number; relationDefs
       title="角色卡"
       desc="玩家走到他所在的地点，或在话里提到他，这个人才会进这一轮的提示词。标成「主角模板」的那张不登场，只在开局时预填玩家自己。"
       icon={Users}
+      accent={ACCENT.cast}
     >
       <div className="space-y-2">
         {npcs.map(npc => (

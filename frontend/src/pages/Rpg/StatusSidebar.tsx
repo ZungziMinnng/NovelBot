@@ -1,20 +1,22 @@
-import { useState } from 'react'
-import { Backpack, ChevronRight, History, MapPin, User } from 'lucide-react'
+import { Backpack, ChevronRight, Clock, History, MapPin, Users } from 'lucide-react'
 import type {
-  RpgItem, RpgLocation, RpgModule, RpgNpc, RpgSave, RpgSession, RpgStatDef,
+  RpgItem, RpgModule, RpgNpc, RpgSave, RpgSession, RpgStatDef,
 } from '@/api/client'
-import { checkCondition, knownNpcs, norm, onstage } from './condition'
-import NpcSheet from './NpcSheet'
+import { knownNpcs, norm, onstage } from './condition'
 import RpgAvatar from './RpgAvatar'
 import StatBar from './StatBar'
+import { PANEL } from './rpgUi'
 
-export type SidebarTab = 'status' | 'bag' | 'map' | 'save'
+// 地图从侧栏搬走了：它现在是主界面（地点总览），而且「过去」变成了
+// 纯引擎的瞬移，和这里的其他格子不是一类东西了
+export type SidebarTab = 'cast' | 'bag' | 'save'
 
-const TABS: { key: SidebarTab; label: string; icon: typeof User }[] = [
-  { key: 'status', label: '状态', icon: User },
-  { key: 'bag', label: '道具', icon: Backpack },
-  { key: 'map', label: '地图', icon: MapPin },
-  { key: 'save', label: '存档', icon: History },
+// 每格一个颜色，和 index.css 里 .mode-rpg 的 --rpg-* 一一对应。
+// 固定不跟主题走：换个主题就找不到道具在哪了，那这个设计就白做了
+const TABS: { key: SidebarTab; label: string; icon: typeof Users; accent: string }[] = [
+  { key: 'cast', label: '角色', icon: Users, accent: 'var(--rpg-cast)' },
+  { key: 'bag', label: '道具', icon: Backpack, accent: 'var(--rpg-bag)' },
+  { key: 'save', label: '存档', icon: History, accent: 'var(--rpg-save)' },
 ]
 
 /** 「隐藏」的一律不画：那是幕后计数器（怀疑度到 60 就有人来敲门），
@@ -26,53 +28,51 @@ interface Props {
   module?: RpgModule
   npcs: RpgNpc[]
   items: RpgItem[]
-  locations: RpgLocation[]
   saves: RpgSave[]
   tab: SidebarTab
   onTab: (t: SidebarTab) => void
   locked: boolean
   streaming: boolean
-  onUseItem: (name: string) => void
-  onMoveTo: (name: string) => void
+  /** exact = 模组里有定义、效果是引擎算的。没定义的也能点，只是交给 GM 现写 */
+  onUseItem: (name: string, exact: boolean) => void
+  /** 角色档案提到 RpgPlay 上了：地点页也要开同一个弹窗，只能有一份 */
+  onOpenNpc: (npc: RpgNpc) => void
   onSaveNow: () => void
   onRestore: (save: RpgSave) => void
   onDropSave: (save: RpgSave) => void
 }
 
-/** 常驻菜单。状态/道具/地图/存档四格，和 JRPG 的菜单一个意思：
- *  始终在屏幕上，不用先想起来「我能看这个」。 */
+/** 常驻菜单。角色/道具/存档三格，和 JRPG 的菜单一个意思：
+ *  始终在屏幕上，不用先想起来「我能看这个」。
+ *
+ *  第一格是「角色」：你自己的卡（数值挂在上面，这是数值驱动模式的门面）
+ *  加上已经登记在册的人。数值没有单独的一格——它跟着「你」这张卡走，
+ *  不然玩家要在两格之间来回翻才能看完一件事。 */
 export default function StatusSidebar({
-  sess, module, npcs, items, locations, saves,
+  sess, module, npcs, items, saves,
   tab, onTab, locked, streaming,
-  onUseItem, onMoveTo, onSaveNow, onRestore, onDropSave,
+  onUseItem, onOpenNpc, onSaveNow, onRestore, onDropSave,
 }: Props) {
-  const [openNpc, setOpenNpc] = useState<RpgNpc | null>(null)
-
   const statDefs = shown(module?.stat_defs)
   const relDefs = shown(module?.relation_stat_defs)
   // 没见过也不在场的不列：列出来等于把还没登场的人抖出来
   const known = knownNpcs(npcs, sess)
 
-  const here = locations.find(l => norm(l.name) === norm(sess.location || ''))
-  const linked = (loc: RpgLocation) =>
-    !sess.location || !here
-    || (here.connections || []).includes(loc.name)
-    || (loc.connections || []).includes(sess.location)
-
   const itemByName = (name: string) => items.find(i => norm(i.name) === norm(name))
   const bag = sess.inventory || []
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-card/40 backdrop-blur-sm">
-      <div className="flex shrink-0 border-b border-border/50">
-        {TABS.map(({ key, label, icon: Icon }) => (
+    // rpg-side 而不是 bg-card：默认主题下 --card 和 --background 同色，
+    // 铺 bg-card 等于没铺。见 index.css 里那条规则
+    <div className="rpg-side flex flex-col h-full min-h-0 border-l border-border/60">
+      <div className="flex shrink-0 border-b border-border/60">
+        {TABS.map(({ key, label, icon: Icon, accent }) => (
           <button
             key={key}
             onClick={() => onTab(key)}
+            style={tab === key ? { color: `hsl(${accent})`, borderColor: `hsl(${accent})` } : undefined}
             className={`flex-1 flex flex-col items-center gap-1 py-2.5 text-[11px] border-b-2 transition-colors
-              ${tab === key
-                ? 'border-primary text-primary bg-primary/5'
-                : 'border-transparent text-muted-foreground hover:bg-muted/50'}`}
+              ${tab === key ? 'bg-foreground/[0.04] font-medium' : 'border-transparent text-muted-foreground hover:bg-muted/50'}`}
           >
             <Icon className="w-4 h-4" />
             {label}
@@ -81,9 +81,9 @@ export default function StatusSidebar({
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
-        {tab === 'status' && (
+        {tab === 'cast' && (
           <>
-            <div className="rounded-xl border bg-card/70 p-3">
+            <div className={`${PANEL} p-3`}>
               <div className="flex items-center gap-2.5">
                 <RpgAvatar name={sess.char_name || '你'} size="md" />
                 <div className="min-w-0">
@@ -92,6 +92,13 @@ export default function StatusSidebar({
                     <MapPin className="w-3 h-3 shrink-0" />
                     {sess.location || '不知身在何处'}
                   </p>
+                  {/* 和顶栏同一条判据：有时段表就有时钟，不看 slot 有没有落格 */}
+                  {(sess.time_slots?.length || module?.time_slots?.length || 0) > 0 && (
+                    <p className="text-xs text-muted-foreground truncate flex items-center gap-1">
+                      <Clock className="w-3 h-3 shrink-0" />
+                      第 {sess.day} 天{sess.slot ? ` · ${sess.slot}` : ''}
+                    </p>
+                  )}
                 </div>
               </div>
               {statDefs.length > 0 ? (
@@ -107,9 +114,16 @@ export default function StatusSidebar({
               )}
             </div>
 
+            {/* 「登记在册」写出人数，因为这一格的内容是会长的：玩家得看得出
+                名单在变。被提到一句不算登记——那只是让模型拿到了他的设定，
+                人还没在你眼前出现过，所以下面这句提示只说「走到他所在的地点」 */}
+            <p className="text-[11px] text-muted-foreground px-1 pt-1">
+              登记在册 {known.length} 人
+            </p>
+
             {known.length === 0 ? (
               <p className="text-xs text-muted-foreground px-1 leading-relaxed">
-                还没遇到什么人。走到他们所在的地点，或者在话里提到名字。
+                还没遇到什么人。走到他们所在的地点，见过面才会记到这里。
               </p>
             ) : known.map(npc => {
               const state = sess.npc_states?.[String(npc.id)] || {}
@@ -117,8 +131,8 @@ export default function StatusSidebar({
               return (
                 <button
                   key={npc.id}
-                  onClick={() => setOpenNpc(npc)}
-                  className="w-full text-left rounded-xl border bg-card/70 p-3 hover:bg-muted/40 transition-colors"
+                  onClick={() => onOpenNpc(npc)}
+                  className={`${PANEL} w-full text-left p-3 hover:bg-muted/40 transition-colors`}
                 >
                   <div className="flex items-center gap-2.5">
                     <RpgAvatar name={npc.name} url={npc.avatar_url} size="sm" />
@@ -148,8 +162,14 @@ export default function StatusSidebar({
             <Empty>身上什么都没有。</Empty>
           ) : bag.map((it, i) => {
             const def = itemByName(it.name)
+            // 有定义且作者勾了「能用」= 引擎精确结算
+            const exact = !!def?.usable
+            // 没定义的东西照样能点：开局背包名字打歪了、或者剧情里 GM 现给的，
+            // 都不是玩家的错，不该让他只能自己打字。
+            // 有定义但没勾「能用」的不给按钮——那是作者明说了「这不是用来用的」
+            const canUse = exact || !def
             return (
-              <div key={`${it.name}-${i}`} className="rounded-xl border bg-card/70 p-3">
+              <div key={`${it.name}-${i}`} className={`${PANEL} p-3`}>
                 <div className="flex items-baseline gap-2">
                   <p className="text-sm font-medium flex-1 truncate">{it.name}</p>
                   {it.qty > 1 && <span className="text-xs text-muted-foreground">×{it.qty}</span>}
@@ -175,52 +195,25 @@ export default function StatusSidebar({
                     ))}
                   </div>
                 )}
-                {def?.usable && (
+                {canUse && (
                   <button
-                    onClick={() => onUseItem(it.name)}
+                    onClick={() => onUseItem(it.name, exact)}
                     disabled={locked}
-                    className="mt-2.5 w-full text-xs py-1.5 rounded-lg bg-primary text-primary-foreground
-                      hover:opacity-90 disabled:opacity-40"
+                    title={exact
+                      ? '效果是模组里写死的，AI 改不了'
+                      : '模组里没有这件道具的定义：用出来什么效果由 GM 现写，数值不精确'}
+                    // 描边 = 效果不精确。和上面那种「数字是死的」明显区分开，
+                    // 不然玩家会以为两种按钮是一回事
+                    className={`mt-2.5 w-full text-xs py-1.5 rounded-lg disabled:opacity-40 ${
+                      exact
+                        ? 'bg-primary text-primary-foreground hover:opacity-90'
+                        : 'border text-muted-foreground hover:bg-muted'
+                    }`}
                   >
                     使用
                   </button>
                 )}
               </div>
-            )
-          })
-        )}
-
-        {tab === 'map' && (
-          locations.length === 0 ? (
-            <Empty>这个模组还没定义地点。</Empty>
-          ) : locations.map(loc => {
-            const isHere = norm(loc.name) === norm(sess.location || '')
-            const [ok, why] = checkCondition(loc.enter_requires, sess, npcs)
-            const blocked = !linked(loc)
-              ? `从${sess.location}没有路直接过去`
-              : ok ? '' : why
-            return (
-              <button
-                key={loc.id}
-                onClick={() => onMoveTo(loc.name)}
-                disabled={locked || isHere || !!blocked}
-                className={`w-full text-left rounded-xl border p-3 transition-colors
-                  ${isHere ? 'bg-primary/10 border-primary/40' : 'bg-card/70 hover:bg-muted/40'}
-                  ${blocked ? 'opacity-50 cursor-not-allowed' : ''}`}
-              >
-                <p className={`text-sm font-medium flex items-center gap-1.5 ${isHere ? 'text-primary' : ''}`}>
-                  <MapPin className="w-3.5 h-3.5 shrink-0" />
-                  {loc.name}
-                  {isHere && <span className="text-xs font-normal">· 你在这里</span>}
-                </p>
-                {(blocked || loc.description) && (
-                  <p className={`text-xs mt-1 leading-relaxed ${
-                    blocked ? 'text-rose-700 dark:text-rose-300' : 'text-muted-foreground'
-                  }`}>
-                    {blocked || loc.description}
-                  </p>
-                )}
-              </button>
             )
           })
         )}
@@ -238,7 +231,7 @@ export default function StatusSidebar({
             {saves.length === 0 ? (
               <Empty>还没有存档。每跑一回合会自动拍一张。</Empty>
             ) : saves.map(save => (
-              <div key={save.id} className="rounded-xl border bg-card/70 p-3">
+              <div key={save.id} className={`${PANEL} p-3`}>
                 <div className="flex items-baseline gap-2">
                   <p className="text-sm font-medium flex-1 truncate">{save.label}</p>
                   {save.kind === 'manual' && (
@@ -271,16 +264,6 @@ export default function StatusSidebar({
           </>
         )}
       </div>
-
-      {openNpc && (
-        <NpcSheet
-          npc={openNpc}
-          relationDefs={relDefs}
-          state={sess.npc_states?.[String(openNpc.id)] || {}}
-          here={onstage(openNpc, sess)}
-          onClose={() => setOpenNpc(null)}
-        />
-      )}
     </div>
   )
 }

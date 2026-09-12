@@ -12,6 +12,7 @@
 """
 import asyncio
 import logging
+import re
 from datetime import datetime
 from typing import AsyncIterator
 
@@ -28,8 +29,16 @@ from app.models.rpg import (
     RpgSession,
 )
 from app.services import llm_client
+from app.services.context_budget import truncate_to_token_budget
 from app.services.llm_json import call_json
-from app.services.rpg_context import build_rpg_messages
+from app.services.rpg_context import (
+    DEFAULT_CHAR_NAME,
+    SUMMARY_TOKEN_BUDGET,
+    build_rpg_messages,
+    here_npcs,
+    history_window,
+    world_npcs,
+)
 from app.services.rpg_dice import DEFAULT_BAND, OUTCOME_LABELS, normalize_band, resolve_rate, roll
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
@@ -39,10 +48,14 @@ from app.services.rpg_state import (
     apply_stats,
     check_condition,
     check_zero,
+    chronicle_lines,
     def_map,
     for_check_stats,
     mark_met,
     norm_name,
+    note_move,
+    note_visited,
+    push_chronicle,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +71,66 @@ LEDGER_KEY_CHARS = 6
 RECENT_CHARS = 400
 # 结算时给模型看的剧情长度。太长会让它把早前的变化又报一遍
 SETTLE_CHARS = 3000
+# 结算时给模型看的大事记条数。只为防它把同一件事反复写进去，
+# 不是让它接着往下编，所以只看最近几条
+CHRONICLE_PROMPT_LINES = 10
+
+
+# ── 对话线：一条线 = 一个 thread_id，NULL = 场面线 ─────────────────────────
+
+def find_thread_npc(npcs: list[RpgNpc], thread_id: int | None) -> RpgNpc | None:
+    if not thread_id:
+        return None
+    return next((n for n in npcs if n.id == thread_id), None)
+
+
+def resolve_thread_id(
+    sess: RpgSession, npcs: list[RpgNpc], thread_id: int | None, target_npc: str
+) -> int | None:
+    """这一轮归哪条线。None = 场面线。只在这里解析一次，别处不要重算。
+
+    **不拿 target_npc 兼作线的键**：它管的是「这个动作用在谁身上」
+    （relation_effects 加在谁头上），和「这段叙事归哪条历史」是两件事。
+    在老兵线里对老板娘用动作是合法的。
+
+    显式传了就用传的（认不出来算没有）；没传的话，**只有 target_npc 人就
+    站在你面前**才归他。远处那个人照旧只吃动作的数值，叙事留在你所在的这条
+    线上——否则「对不在场的人用动作」会被 thread_blocker 当场拒成 400，
+    而那本来是个合法操作。
+    """
+    if thread_id:
+        return thread_id if any(n.id == thread_id for n in npcs) else None
+    who = next(
+        (n for n in here_npcs(npcs, sess.location) if norm_name(n.name) == norm_name(target_npc)),
+        None,
+    )
+    return who.id if who else None
+
+
+def thread_blocker(sess: RpgSession, npcs: list[RpgNpc], thread_id: int | None) -> str:
+    """角色线能不能收输入。返回拒绝理由，空串 = 放行。
+
+    线主不在当前地点就整轮拒掉——历史照常可读，只是不给输入框。
+    不拒的话线和历史就不再一一对应，之后每个查询都要考虑「线主不在这儿」
+    的分支；堵在入口比散在各处便宜得多。
+    """
+    npc = find_thread_npc(npcs, thread_id)
+    if npc is None:
+        return ""
+    if (npc.location or "").strip() != (sess.location or "").strip():
+        where = (npc.location or "").strip() or "他常在的地方"
+        return f"你得先回到{where}，才能和{(npc.name or '').strip()}说话"
+    return ""
+
+
+def _thread_clause(thread_id: int | None):
+    """SQL 过滤：这一条线的消息。NULL 和「空」在这里必须是同一个意思。"""
+    col = RpgMessage.thread_id
+    return col.is_(None) if not thread_id else col == thread_id
+
+
+def _in_thread(message: RpgMessage, thread_id: int | None) -> bool:
+    return (message.thread_id or None) == (thread_id or None)
 
 
 def _spawn_detached(coro) -> None:
@@ -80,7 +153,15 @@ def _state_payload(sess: RpgSession) -> dict:
         "flags": sess.flags or {},
         "location": sess.location or "",
         "npc_states": sess.npc_states or {},
+        # GM 这一局记下的 NPC 近况：角色卡上那一块要跟着这一轮就更新
+        "npc_notes": sess.npc_notes or {},
         "status": sess.status,
+        # 去过哪儿：地图的迷雾按它散开，不带的话要等整页重新拉一次才亮
+        "visited": sess.visited or [],
+        # 时钟也跟着走。不带的话按完「结束这个时段」要等整页重新拉一次才动
+        "time_slots": sess.time_slots or [],
+        "slot": sess.slot or "",
+        "day": sess.day or 1,
     }
 
 
@@ -110,27 +191,21 @@ def _use_item(module: RpgModule, sess: RpgSession, item: RpgItem) -> tuple[list[
     return facts, warnings
 
 
-def _move(
-    sess: RpgSession, target: RpgLocation, here: RpgLocation | None, npcs: list[RpgNpc]
-) -> list[str]:
-    """走过去，或者说明为什么走不过去。返回事实句。
+def _move(sess: RpgSession, target: RpgLocation, npcs: list[RpgNpc]) -> list[str]:
+    """走过去，或者说明为什么进不去。返回事实句。
 
-    连接是双向的：作者在 A 里写了 B，从 B 也能回 A。要求两边都写等于让人
-    把每条路填两遍，忘一边就变成单行道，而作者根本不会想到去查。
+    **不看连接**：connections 只用来画地图和散迷雾（挨着去过的地方才显形），
+    不再是一道关卡。拦路的只剩 enter_requires——「没有路」拦下来的多半是
+    作者忘了连一条边，而玩家看到的却是一句莫名其妙的拒绝。
     """
     from_name = (sess.location or "").strip()
-    linked = (
-        not from_name
-        or not here
-        or target.name in (here.connections or [])
-        or from_name in (target.connections or [])
-    )
-    if not linked:
-        return [f"你想去{target.name}，但从{from_name}没有路直接过去，只能作罢"]
     ok, why = check_condition(target.enter_requires, sess, npcs)
     if not ok:
         return [f"你想进{target.name}，但{why}，被挡在外面"]
     sess.location = target.name
+    # 移动是确定性的、跨线该知道的事，顺手记进大事记（和上一条移动合并）
+    note_move(sess, target.name)
+    note_visited(sess, target.name)
     return [f"你离开{from_name}，来到了{target.name}" if from_name else f"你来到了{target.name}"]
 
 
@@ -196,10 +271,7 @@ async def _resolve_engine(
             if target is None:
                 warnings.append(f"模组里没有「{move_to}」这个地点")
             else:
-                here = next(
-                    (l for l in locs if norm_name(l.name) == norm_name(sess.location or "")), None
-                )
-                facts += _move(sess, target, here, npcs)
+                facts += _move(sess, target, npcs)
 
         if action_id:
             action = await store.get(RpgAction, action_id)
@@ -219,6 +291,29 @@ async def _resolve_engine(
             sess.updated_at = datetime.utcnow()
             await store.commit()
         return facts, warnings, _state_payload(sess)
+
+
+def move_by_name(
+    sess: RpgSession, locs: list[RpgLocation], npcs: list[RpgNpc], target_name: str
+) -> str:
+    """瞬移：从地点总览点一个地方就直接过去，零 LLM 调用。返回给玩家看的一句话。
+
+    纯函数：不开会话、不落库。地点表和角色表由调用方（/move 路由）读好传进来，
+    改动跟着路由那一条连接一起提交。**这里绝不能自己再开一条连接**——SQLite
+    只允许一个写事务，路由那边已经拍了存档（写事务开着），在里面再开一条连接
+    改 rpg_sessions 必然互锁，卡满 busy_timeout 再报 database is locked。
+
+    进不去时 sess 一个字段都不动，把那句拒绝话原样返回（进入条件没满足）。
+    """
+    target = next((l for l in locs if norm_name(l.name) == norm_name(target_name)), None)
+    if target is None:
+        return f"模组里没有「{target_name}」这个地点"
+    # 已经在的地方不该走一遍 _move：那会白白往大事记里刷一条「你去了 X」
+    if norm_name(sess.location or "") == norm_name(target.name):
+        return f"你已经在{target.name}了"
+
+    facts = _move(sess, target, npcs)
+    return facts[0] if facts else ""
 
 
 # ── ③ 判定：可选，默认关着 ────────────────────────────────────────────────
@@ -308,15 +403,17 @@ async def _store_roll(
 
 
 async def _store_reply(
-    session_id: int, reply: str, in_tok: int, out_tok: int
+    session_id: int, reply: str, in_tok: int, out_tok: int, thread_id: int | None = None
 ) -> int:
     """落 assistant 行。必须另开 session：路由里那个在 handler 返回时就关了，
     而 handler 早于生成器结束返回。
+
+    thread_id 要和玩家那条 user 行一致，否则刷新之后这一问一答分在两条线上。
     """
     async with AsyncSessionLocal() as store:
         row = RpgMessage(
             session_id=session_id, role="assistant", content=reply,
-            input_tokens=in_tok, output_tokens=out_tok,
+            input_tokens=in_tok, output_tokens=out_tok, thread_id=thread_id,
         )
         store.add(row)
         sess = await store.get(RpgSession, session_id)
@@ -330,7 +427,8 @@ async def _store_reply(
 # ── ⑥⑦ AI 结算：只管自由行动那部分的后果 ─────────────────────────────────
 
 async def _settle(
-    session_id: int, message_id: int, narration: str, outcome_label: str, engine_note: str
+    session_id: int, message_id: int, narration: str, outcome_label: str,
+    engine_note: str, thread_id: int | None = None,
 ) -> dict:
     """从刚写出的剧情里读出状态变化，夹紧后落库。返回给前端的一份结果。
 
@@ -342,6 +440,22 @@ async def _settle(
         npcs = list((await store.execute(
             select(RpgNpc).where(RpgNpc.module_id == module.id)
         )).scalars().all())
+        # 有人物的线只让模型改「线主 + 在场的人」：给全量名单它会顺手给不在场
+        # 的人加好感，那些数字没有任何剧情依据。主角模板不登场，world_npcs 排掉
+        #
+        # 模组一个地点都没定义时 sess.location 是空串，here_npcs 按定义返回空，
+        # 于是这份名单恒为空、模板里那行整个不渲染，关系和近况一条都记不进去
+        # 且不报错。没有地点就意味着「所有人都在同一个场面里」，这是唯一说得通
+        # 的读法，也是这类纯对话模组唯一能工作的读法
+        who = (
+            here_npcs(npcs, sess.location) if (sess.location or "").strip()
+            else world_npcs(npcs)
+        )
+        owner = find_thread_npc(npcs, thread_id)
+        if owner is not None and all(n.id != owner.id for n in who):
+            who.append(owner)
+        # 第二个 store 块会重新查一遍 npcs（另一批对象），只有 id 能跨过去
+        who_ids = {n.id for n in who}
         prompt = render(
             "rpg_settle.jinja2",
             narration=narration[-SETTLE_CHARS:],
@@ -350,14 +464,26 @@ async def _settle(
             location=sess.location or "",
             inventory=sess.inventory or [],
             flags=sess.flags or {},
-            npcs=[{"id": n.id, "name": n.name} for n in npcs],
+            npcs=[
+                {"id": n.id, "name": n.name, "notes": (sess.npc_notes or {}).get(str(n.id)) or {}}
+                for n in who
+            ],
+            # 整局用过的键名的并集。只给每个人自己的键不够：模型会在赫敏身上
+            # 写「伤势」、在老兵身上另起「受伤」，两套名字从此各长各的。
+            # 小说侧同一条路（summarizer 喂的是整本书角色键名的并集）
+            note_keys=sorted({
+                key for notes in (sess.npc_notes or {}).values()
+                if isinstance(notes, dict) for key in notes
+            }),
             relation_names=list(def_map(module.relation_stat_defs)),
             engine_note=engine_note,
+            # 最近 10 条给模型看一眼，免得同一件事被反复写进大事记
+            chronicle=chronicle_lines(sess)[-CHRONICLE_PROMPT_LINES:],
         )
         model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
 
     data, in_tok, out_tok = await call_json(
-        [{"role": "user", "content": prompt}], model, api_format, max_tokens=1200,
+        [{"role": "user", "content": prompt}], model, api_format, max_tokens=1500,
     )
 
     async with AsyncSessionLocal() as store:
@@ -366,7 +492,16 @@ async def _settle(
         npcs = list((await store.execute(
             select(RpgNpc).where(RpgNpc.module_id == module.id)
         )).scalars().all())
-        warnings = apply_state_delta(module, sess, data, npcs)
+        # 分线之后在角色线里被叙述走到别处会变成看得见的 bug：线主不在了，
+        # 他的输入框永久置灰。场面线照旧——「自由打字绕过地图」是既有决定
+        warnings = apply_state_delta(
+            module, sess, data, npcs, allow_move=thread_id is None,
+            # 近况只许记在这一轮真的摆在模型眼前的人身上，见 apply_state_delta
+            note_npcs=[n for n in npcs if n.id in who_ids],
+        )
+        # 大事记（模型认为「已经传开」的那部分）。和每轮建议同一条路：
+        # 顺手读一个字段，不额外花一次 LLM 调用
+        push_chronicle(sess, data.get("chronicle"))
         row = await store.get(RpgMessage, message_id)
         if row is not None:
             row.state_delta = data
@@ -385,6 +520,56 @@ async def _settle(
     }
 
 
+# ── 帮我想想：玩家主动要三条建议 ──────────────────────────────────────────
+
+# 给模型的最近剧情条数。RPG 一轮就是一整段叙事，比酒馆的单条回复长得多，
+# 所以条数比酒馆的 6 条略多一点，约合 4 个回合
+SUGGEST_WINDOW = 8
+
+
+async def suggest_actions(
+    module: RpgModule, sess: RpgSession, history: list[RpgMessage]
+) -> list[str]:
+    """「帮我想想」：给出 3 条玩家接下来可以做的事。
+
+    和每轮结算顺带产出的 suggestions 是两条独立的路：那条是被动等来的，
+    这条是玩家按按钮要的。返回空列表表示没能生成，前端提示一下就好。
+    """
+    recent = history_window(module, sess, history)[-SUGGEST_WINDOW:]
+    if not recent:
+        return []
+
+    transcript = "\n".join(
+        f"{'你' if m.role == 'user' else 'GM'}：{m.content}" for m in recent
+    )
+    prompt = render(
+        "rpg_suggest.jinja2",
+        char_name=(sess.char_name or "").strip() or DEFAULT_CHAR_NAME,
+        location=sess.location or "",
+        summary=truncate_to_token_budget(sess.summary or "", SUMMARY_TOKEN_BUDGET),
+        transcript=transcript,
+    )
+    model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
+    text = await llm_client.dispatch_chat_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_format=api_format,
+        temperature=0.95,
+        max_tokens=600,
+    )
+
+    lines = []
+    for raw in (text or "").splitlines():
+        # 模型时常自作主张加编号或引号，去掉再用
+        # 编号必须带分隔符才剥，否则 "3天后再来" 会被吃掉开头的数字
+        line = re.sub(
+            r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw
+        ).strip().strip('"“”「」')
+        if line:
+            lines.append(line)
+    return lines[:3]
+
+
 # ── 一整轮 ────────────────────────────────────────────────────────────────
 
 async def run_turn(
@@ -396,11 +581,15 @@ async def run_turn(
     item_name: str = "",
     move_to: str = "",
     target_npc: str = "",
+    thread_id: int | None = None,
 ) -> AsyncIterator[tuple[str, object]]:
     """跑完一轮，yield (事件名, 数据)，由路由编码成 SSE。
 
     玩家那条消息已经由路由落库了（网络断了也得留下）。action_id / item_name /
     move_to 是「点出来的」行动，走引擎；三个都空就是自由打字，走 AI 结算。
+
+    thread_id 是这一轮归哪条对话线，由路由解析一次后传进来（见 resolve_thread_id），
+    这里只照着用：装配上下文时只取这条线的历史，回复也落回这条线。
     """
     facts: list[str] = []
     engine_note = ""
@@ -423,7 +612,13 @@ async def run_turn(
         module = await store.get(RpgModule, sess.module_id)
         last = (await store.execute(
             select(RpgMessage)
-            .where(RpgMessage.session_id == session_id, RpgMessage.role == "assistant")
+            .where(
+                RpgMessage.session_id == session_id,
+                RpgMessage.role == "assistant",
+                # 裁决的「最近一段剧情」也要取这条线的，否则在老兵线里判定
+                # 时旁边酒馆那几句会干扰语境
+                _thread_clause(thread_id),
+            )
             .order_by(RpgMessage.id.desc())
             .limit(1)
         )).scalars().first()
@@ -494,12 +689,17 @@ async def run_turn(
             )
             .order_by(RpgMessage.id)
         )).scalars().all())
+        # 线过滤在调用点做，history_window 的签名一个字不改：传进去的就是
+        # 「这条线的消息」，它只管按摘要指针和条数切。这样既有用例全部照旧
+        history = [m for m in history if _in_thread(m, thread_id)]
         messages, diag = await build_rpg_messages(
-            store, fresh_module, fresh_sess, history, content, judgement, facts
+            store, fresh_module, fresh_sess, history, content, judgement, facts, thread_id
         )
         # 外貌已经随这次上下文发出去了，就地记一笔，下一轮不再重复发。
-        # 放在开流之前而不是之后：叙事失败也算见过，模型确实已经拿到过那段描写
-        mark_met(fresh_sess, [n["id"] for n in diag["npcs_onstage"]])
+        # 放在开流之前而不是之后：叙事失败也算见过，模型确实已经拿到过那段描写。
+        # 只认 npcs_here：被提到一句的人这一轮也拿到了设定，但玩家并没见到他，
+        # 记成见过会让他的外貌永远等不到该出现的那一次
+        mark_met(fresh_sess, [n["id"] for n in diag["npcs_here"]])
         await store.commit()
     # 出了 with 块才开流：写锁不跨 LLM 调用
     yield "meta", diag
@@ -532,16 +732,18 @@ async def run_turn(
         # state_delta 留 null，前端给「补结算」按钮
         reply = "".join(buf).strip()
         if reply:
-            _spawn_detached(_store_reply(session_id, reply, in_tok, out_tok))
+            _spawn_detached(_store_reply(session_id, reply, in_tok, out_tok, thread_id))
         raise
 
     reply = "".join(buf).strip()
-    message_id = await _store_reply(session_id, reply, in_tok, out_tok)
+    message_id = await _store_reply(session_id, reply, in_tok, out_tok, thread_id)
 
     if reply:
         label = OUTCOME_LABELS.get((judgement or {}).get("outcome") or "", "")
         try:
-            result = await _settle(session_id, message_id, reply, label, engine_note)
+            result = await _settle(
+                session_id, message_id, reply, label, engine_note, thread_id
+            )
             for warn in result["warnings"]:
                 yield "warning", warn
             yield "state", result["state"]

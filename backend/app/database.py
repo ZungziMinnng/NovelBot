@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -244,6 +245,24 @@ async def _run_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS idx_rpg_items_module ON rpg_items(module_id)",
         "CREATE INDEX IF NOT EXISTS idx_rpg_locations_module ON rpg_locations(module_id)",
         "CREATE INDEX IF NOT EXISTS idx_rpg_actions_module ON rpg_actions(module_id)",
+        # 时段（分幕）：模组给默认表，每局各存一份自己的。老库拿到 '[]'/''
+        # 就是「不用时段」，行为与加这些列之前完全一致
+        "ALTER TABLE rpg_modules ADD COLUMN time_slots JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_sessions ADD COLUMN time_slots JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_sessions ADD COLUMN slot VARCHAR(20) DEFAULT ''",
+        "ALTER TABLE rpg_sessions ADD COLUMN day INTEGER DEFAULT 1",
+        # 分线对话与大事记。**没有回填、没有新表**：thread_id 默认 NULL，
+        # 而 NULL 就是场面线，已有数据自动变成一条完整的场面线
+        "ALTER TABLE rpg_messages ADD COLUMN thread_id INTEGER DEFAULT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_messages_thread ON rpg_messages(session_id, thread_id)",
+        "ALTER TABLE rpg_sessions ADD COLUMN chronicle JSON DEFAULT '[]'",
+        # 地图：地点的坐标（百分比，0 = 还没摆过）+ 这一局去过哪儿（迷雾）。
+        # 老库拿到 0 和 '[]'，地图会按兜底网格排、当前地点和邻居照样亮着
+        "ALTER TABLE rpg_locations ADD COLUMN x INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_locations ADD COLUMN y INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_sessions ADD COLUMN visited JSON DEFAULT '[]'",
+        # GM 边玩边记的 NPC 近况。老库拿到 '{}'，角色卡上那一块不显示
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_notes JSON DEFAULT '{}'",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -264,8 +283,80 @@ async def _run_migrations() -> None:
         logger.warning("存在重复章节号，唯一索引 uq_chapters_novel_number 未生效: %s", exc)
 
 
+async def _backfill_rpg_clock(bind=None) -> None:
+    """给「模组设了时段、这一局还没站上去」的旧局补一个当前时段。
+
+    时段是这批新加的列，这批之前开的局拿到的是 '[]' 和 ''。**只补 slot，不碰
+    time_slots**：会话那一列是「玩家建局时改过的表」，空就是跟模组走（见
+    rpg_state.slot_table）。早期版本把模组的表整个拷进了局里，那等于补一次档就
+    把这一局永久冻住——模组后来改对了，局里还是旧的。
+
+    幂等：补过的局 slot 非空，下次启动不再匹配。纯 Python 而不是写进上面那串 SQL，
+    是因为要取 JSON 数组的第一个元素，交给 SQL 做要依赖 json_extract。
+    bind 只为测试能指向自己的库——**默认那个 engine 指向真实数据**。
+    """
+    async with (bind or engine).begin() as conn:
+        rows = (await conn.execute(text(
+            "SELECT s.id, s.slot, m.time_slots FROM rpg_sessions s "
+            "JOIN rpg_modules m ON m.id = s.module_id"
+        ))).all()
+        for session_id, current, from_module in rows:
+            if str(current or "").strip():
+                continue
+            names = [str(x).strip() for x in _json_list(from_module) if str(x).strip()]
+            if not names:
+                continue
+            await conn.execute(
+                text("UPDATE rpg_sessions SET slot = :slot WHERE id = :id"),
+                {"slot": names[0], "id": session_id},
+            )
+
+
+async def _repair_concatenated_clock(bind=None) -> None:
+    """清理「早，中，晚」被吃成「早中晚」留下的脏数据。
+
+    前端那个输入框曾经每敲一个字就 join→split→join 一次，逗号在往返里被丢掉，
+    于是整张时段表存成了一个格子，名字是几格连写。表现是时钟只有一格，按一下
+    「结束这个时段」直接翻篇到第二天。
+
+    判据是精确的：**这一局的时段表只有一格，且它的名字正好是模组那几格的名字连写**。
+    别的形状一律不碰，所以玩家自己起的名字不会误伤；清过一次就不再匹配，是幂等的。
+    修法是丢掉这一局自己那份（它本来也是历史遗留的拷贝），退回「跟模组走」。
+    """
+    async with (bind or engine).begin() as conn:
+        rows = (await conn.execute(text(
+            "SELECT s.id, s.time_slots, m.time_slots FROM rpg_sessions s "
+            "JOIN rpg_modules m ON m.id = s.module_id"
+        ))).all()
+        for session_id, own, from_module in rows:
+            single = [str(x).strip() for x in _json_list(own) if str(x).strip()]
+            names = [str(x).strip() for x in _json_list(from_module) if str(x).strip()]
+            if len(single) != 1 or len(names) < 2:
+                continue
+            if single[0] != "".join(names):
+                continue
+            await conn.execute(
+                text("UPDATE rpg_sessions SET time_slots = '[]', slot = :slot WHERE id = :id"),
+                {"slot": names[0], "id": session_id},
+            )
+            logger.info("RPG 第 %s 局：时段表被连写成「%s」，已退回跟模组走", session_id, single[0])
+
+
+def _json_list(raw) -> list:
+    """把库里的 JSON 列读成列表。用 text() 裸查拿不到类型转换，拿到的是字符串。"""
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 async def _repair_data() -> None:
-    """启动时幂等数据修复：卷号回写 + 悬空引用置空。"""
+    """启动时幂等数据修复：卷号回写 + 悬空引用置空 + RPG 时钟补齐。"""
     repairs = [
         # 以章节表为准回写 Memory.volume，修复批量分卷未同步导致的卷号漂移
         """
@@ -285,6 +376,8 @@ async def _repair_data() -> None:
     async with engine.begin() as conn:
         for sql in repairs:
             await conn.execute(text(sql))
+    await _repair_concatenated_clock()
+    await _backfill_rpg_clock()
 
 
 async def _migrate_world_rules() -> None:

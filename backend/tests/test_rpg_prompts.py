@@ -5,8 +5,16 @@
 """
 import unittest
 
+from fastapi import HTTPException
 from jinja2 import TemplateError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api.routes.rpg_prompts import PromptUpdate, list_prompts, reset_prompt, update_prompt
+from app.models.user import User
+# 这行看着没用，其实是 load-bearing：SQLAlchemy 配 mapper 时要能按类名找到
+# Chapter、Card 这些字符串关系指向的类。少 import 一个模块就是
+# InvalidRequestError，报的还是别的表
+from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, prompt_rule, tavern as _tavern, rpg as _rpg
 from app.services import rpg_prompts
 from app.services.auth import current_user_var
 
@@ -66,6 +74,71 @@ class RpgPromptTests(unittest.TestCase):
         current_user_var.set(_FakeUser({"rpg_gm.jinja2": "{{ reply_length }}"}))
         with self.assertRaises(TemplateError):
             rpg_prompts.render("rpg_gm.jinja2", char_name="阿隼")
+
+
+class RpgPromptRouteTests(unittest.IsolatedAsyncioTestCase):
+    """设置页那三个端点。存的是每用户一份 JSON，所以隔离性也得测
+    ——写错成共享的话，一个人改模板全站跟着变，界面上看不出来。
+    """
+
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as connection:
+            await connection.run_sync(User.__table__.create)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.db = self.sessions()
+        self.owner = User(username="owner", password_hash="unused")
+        self.other = User(username="other", password_hash="unused")
+        self.db.add_all([self.owner, self.other])
+        await self.db.commit()
+        self.token = current_user_var.set(self.owner)
+
+    async def asyncTearDown(self):
+        current_user_var.reset(self.token)
+        await self.db.close()
+        await self.engine.dispose()
+
+    async def test_defaults_validate_and_list(self):
+        prompts = await list_prompts(self.owner)
+        self.assertEqual(len(prompts), 6)
+        for prompt in prompts:
+            self.assertFalse(prompt.customized)
+            self.assertEqual(prompt.content, prompt.default_content)
+            rpg_prompts.validate(prompt.name, prompt.content)
+
+    async def test_persistence_isolation_and_reset(self):
+        name = "rpg_gm.jinja2"
+        saved = await update_prompt(name, PromptUpdate(content="你好 {{ char_name }}"), self.owner, self.db)
+        self.assertTrue(saved.customized)
+        async with self.sessions() as fresh_db:
+            fresh_owner = await fresh_db.get(User, self.owner.id)
+            self.assertEqual(fresh_owner.rpg_prompts[name], "你好 {{ char_name }}")
+        self.assertEqual(rpg_prompts.render(name, char_name="阿隼"), "你好 阿隼")
+
+        current_user_var.set(self.other)
+        self.assertNotIn(name, self.other.rpg_prompts)
+        self.assertTrue(all(not prompt.customized for prompt in await list_prompts(self.other)))
+
+        current_user_var.set(self.owner)
+        restored = await reset_prompt(name, self.owner, self.db)
+        self.assertFalse(restored.customized)
+        self.assertEqual(restored.content, restored.default_content)
+
+    async def test_invalid_templates_do_not_persist(self):
+        for content in (" ", "{% if %}", "{{ unknown }}", "{{ char_name.__class__.__mro__ }}", "{% include 'writer.jinja2' %}"):
+            with self.subTest(content=content):
+                with self.assertRaises(HTTPException) as raised:
+                    await update_prompt("rpg_gm.jinja2", PromptUpdate(content=content), self.owner, self.db)
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(self.owner.rpg_prompts, {})
+
+    async def test_unknown_names_rejected(self):
+        for name in ("writer.jinja2", "../config.py"):
+            with self.assertRaises(HTTPException) as raised:
+                await update_prompt(name, PromptUpdate(content="test"), self.owner, self.db)
+            self.assertEqual(raised.exception.status_code, 404)
+            with self.assertRaises(HTTPException):
+                await reset_prompt(name, self.owner, self.db)
 
 
 if __name__ == "__main__":
