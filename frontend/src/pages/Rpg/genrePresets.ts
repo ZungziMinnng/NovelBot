@@ -1,7 +1,9 @@
 import type { RpgAction, RpgItem, RpgLocation, RpgStatDef } from '@/api/client'
 
 type ActionSeed = Pick<RpgAction, 'name' | 'prompt_hint' | 'effects' | 'relation_effects' | 'needs_target'>
-type ItemSeed = Pick<RpgItem, 'name' | 'description' | 'category' | 'effects'>
+type ItemSeed = Pick<
+  RpgItem, 'name' | 'description' | 'category' | 'effects' | 'consumable' | 'start_with'
+>
 type LocationSeed = Pick<RpgLocation, 'name' | 'description' | 'connections'>
 
 export interface GenrePreset {
@@ -64,16 +66,23 @@ export const GENRE_PRESETS: GenrePreset[] = [
       },
     ],
     items: [
+      // 预设里的消耗品一律「开局就带在身上」，装备和关键道具不带：补给是开局
+      // 就该有的，装备和线索是要去找到的。全套上之后新开一局，背包里立刻有
+      // 东西，作者一眼看得出道具定义和背包是怎么接上的
       {
         name: '能量饮料',
         description: '难喝，但确实管用。',
         category: '消耗品',
+        consumable: true,
+        start_with: true,
         effects: { 精力: 25 },
       },
       {
         name: '小礼物',
         description: '不贵，心意到了就行。',
         category: '消耗品',
+        consumable: true,
+        start_with: true,
         effects: { 资金: -50 },
       },
     ],
@@ -122,12 +131,17 @@ export const GENRE_PRESETS: GenrePreset[] = [
         name: '魔力药剂',
         description: '喝下去舌根发苦，指尖回暖。',
         category: '消耗品',
+        consumable: true,
+        start_with: true,
         effects: { 魔力: 40 },
       },
       {
         name: '古旧笔记',
         description: '上一任主人的字迹，有几页被撕掉了。',
         category: '关键道具',
+        // 关键道具不消耗：撕掉的那几页要留到后面才对得上
+        consumable: false,
+        start_with: false,
         effects: { 学识: 8 },
       },
     ],
@@ -183,12 +197,17 @@ export const GENRE_PRESETS: GenrePreset[] = [
         name: '点心',
         description: '她上次多看了两眼的那种。',
         category: '消耗品',
+        consumable: true,
+        start_with: true,
         effects: { 耐心: 10 },
       },
       {
         name: '项圈',
         description: '皮质，内侧刻了一个字。',
         category: '装备',
+        // 装备戴上了就一直在身上，用一次少一个说不通
+        consumable: false,
+        start_with: false,
         effects: { 进度: 5 },
       },
     ],

@@ -1130,18 +1130,33 @@ export interface RpgCondition {
   day?: { op: string; value: number }
 }
 
+/** 玩法类别。和 genre 是两根正交的轴：genre 说「世界长什么样」，
+ *  这个说「这局怎么玩」。同一个魔法学院可以是模拟养成也可以是探索冒险 */
+export type RpgPlayStyle = 'sim' | 'rpg' | 'slg'
+
+/** 支持 AI 生成/优化的模组栏位，与后端 agents/rpg_assist.py 的 FIELD_SPECS 对齐。
+ *  两边是手工对齐的：这里多写一个，后端会回 400 */
+export type RpgAssistField =
+  | 'worldview' | 'opening_scene' | 'system_instruction' | 'narration_sample'
+  | 'npc_persona' | 'npc_appearance' | 'npc_description'
+  | 'location_description' | 'item_description'
+
 /** 模组（剧本）：一份可反复开局的世界设定，对应酒馆的角色卡 */
 export interface RpgModule {
   id: number
   name: string
   /** 只给作者看，后端永不注入 prompt */
   creator_note: string
-  /** 游戏类型（都市 / 魔法学院 / 互动养成…），进 GM 提示词 */
+  /** 题材（都市 / 魔法学院 / 互动养成…），进 GM 提示词 */
   genre: string
+  /** 玩法类别。老模组读出来是 'rpg'；后端对未知值一律按 'rpg' 算 */
+  play_style: RpgPlayStyle
   worldview: string
   /** 开局旁白，建局时落成首条 assistant 消息 */
   opening_scene: string
   system_instruction: string
+  /** 勾选的写作规则 id（rpg_rules）。默认 [] = 不注入 */
+  enabled_rule_ids: number[]
   /** 叙事腔调样例，作为文字引用进 system，不做真实 few-shot 轮 */
   narration_sample: string
   cover_url: string
@@ -1167,11 +1182,27 @@ export interface RpgModule {
   max_tokens: number
   reply_length: number
   model_ref: string
-  /** 裁决 / 结算 / 摘要 / 建议共用的便宜模型 */
+  /** 裁决 / 结算 / 建议共用的便宜模型 */
   fast_model_ref: string
+  /** 压缩旧剧情用。空 = 跟着 fast_model_ref 走 */
+  summary_model_ref: string
+  /** 推时段时写一句「别处此刻在发生什么」进大事记。**默认关**：
+   *  开了之后「结束这个时段」就不再是零模型调用了 */
+  offscreen_brief: boolean
   session_count: number
   npc_count: number
   entry_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** RPG 写作规则。独立规则库，不复用酒馆 / 小说侧那两张表 */
+export interface RpgRule {
+  id: number
+  name: string
+  content: string
+  enabled: boolean
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -1192,6 +1223,10 @@ export interface RpgItem {
   category: string
   usable: boolean
   consumable: boolean
+  /** 开局就带在身上。和模组的「开局背包」default_inventory 不是一回事：
+   *  那是这一局开场凭空多出来的一件东西，这是这件道具本身就该在玩家身上。
+   *  建局时两边合并，同名的算一件 */
+  start_with: boolean
   /** 数值增减 {"精力": 20, "资金": -50} */
   effects: Record<string, number>
   sort_order: number
@@ -1263,8 +1298,14 @@ export interface RpgNpc {
   appearance: string
   /** 常驻地点。等于当前局的 location 即视为在场 */
   location: string
+  /** 作息表：{"早": "大礼堂", "晚": "寝室"}。当前时段在这张表里有值就用它，
+   *  没有就落回 location。后端的 rpg_context.npc_place 是同一套算法 */
+  slot_locations: Record<string, string>
   /** 额外触发词：人不在场但被提到也注入 */
   keywords: string
+  /** 勾上之后，这一轮没提到她时她自己过日子：模型写一句「最近在做什么」，
+   *  记在这一局的 npc_activities 里，下回见面时注入。默认关 */
+  ai_scheduled: boolean
   /** 分栏档案，照抄酒馆卡：外貌身材 / 背景故事 / … */
   profile_sections: Record<string, string>
   dialogue_examples: { user: string; assistant: string }[]
@@ -1299,6 +1340,13 @@ export interface RpgSession {
   /** GM 这一局边玩边记下的 NPC 近况。{"3": {"伤势": "左肩中刀"}}，值一律是字符串。
    *  和 npc_states 分开存：那边的值是关系数字，合在一起会被字符串盖掉 */
   npc_notes: Record<string, Record<string, string>>
+  /** AI 调度给不在场的人记的那一句「最近在做什么」。{"3": "在图书馆翻旧报纸"}。
+   *  和 npc_notes 分开存，后端的 rpg_state.apply_npc_activity 是同一个意思 */
+  npc_activities: Record<string, string>
+  /** 剧情把谁挪到哪儿了：{"3": "校长办公室"}。你在对话框里说「你过来」，
+   *  结算从刚写出的正文里读出她的新位置写在这——它优先于作息表，推时段清空。
+   *  取值口径见 condition.npcPlace（后端 rpg_context.npc_place 的镜像） */
+  npc_places: Record<string, string>
   /** 大事记：已经「传开」的事，跨对话线共享。注入时排在【外场】 */
   chronicle: string[]
   /** 去过的地点名。地图的迷雾按它散开 */
@@ -1378,6 +1426,44 @@ function moduleChild<T, I>(prefix: string) {
   }
 }
 
+/** 构思向导抽取时喂给后端的白名单：前面几步已经定过的名字。
+ *  后端用它过滤角色/道具/动作引用的数值名和地点名 */
+/** 单摊一键生成支持的类别，同后端 rpg_wizard.KINDS */
+export type RpgGenerateKind = 'location' | 'npc' | 'item' | 'action'
+
+export interface RpgWizardKnown {
+  stat_names?: string[]
+  relation_names?: string[]
+  location_names?: string[]
+}
+
+/** 一步抽取的结果。字段全 Optional：一次只返回当前这步那一摊。
+ *  dropped 是被白名单过滤掉的引用的说明，必须显示给作者看 */
+export interface RpgWizardExtract {
+  genre?: string
+  worldview?: string
+  opening_scene?: string
+  system_instruction?: string
+  narration_sample?: string
+  stat_defs?: RpgStatDef[]
+  relation_stat_defs?: RpgStatDef[]
+  locations?: Array<{ name: string; description: string; connections: string[] }>
+  default_location?: string
+  npcs?: Array<{
+    name: string; persona: string; appearance: string; description: string
+    location: string; initial_state: Record<string, number>
+  }>
+  items?: Array<{
+    name: string; description: string; category: string
+    consumable: boolean; start_with: boolean; effects: Record<string, number>
+  }>
+  actions?: Array<{
+    name: string; prompt_hint: string; needs_target: boolean
+    effects: Record<string, number>; relation_effects: Record<string, number>
+  }>
+  dropped: string[]
+}
+
 export const rpgApi = {
   modules: {
     list: () => api.get<RpgModule[]>('/rpg/modules/').then(r => r.data),
@@ -1396,6 +1482,34 @@ export const rpgApi = {
     },
     deleteCover: (id: number) =>
       api.delete<RpgModule>(`/rpg/modules/${id}/cover`).then(r => r.data),
+    /** 帮作者写某一栏。不落库，返回的文字由作者决定要不要用。
+     *  超时放宽到 3 分钟：这是一次完整的创作生成，不是补全 */
+    assist: (
+      moduleId: number,
+      data: { field: RpgAssistField; content?: string; context?: Record<string, string> },
+    ) =>
+      api.post<{ text: string }>(`/rpg/modules/${moduleId}/assist`, data, {
+        timeout: 180000,
+      }).then(r => r.data),
+    /** 构思向导：抽当前这一步聊定的结论。known 带前面已定的名字白名单，
+     *  后端按它过滤角色/道具引用的数值名和地点名，对不上的进 dropped */
+    wizardExtract: (
+      moduleId: number,
+      data: { stage: string; messages: ChatMessage[]; known?: RpgWizardKnown; model?: string },
+    ) =>
+      api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/extract`, data, {
+        timeout: 180000,
+      }).then(r => r.data),
+    /** 在某一摊（地点/角色/道具/动作）点「AI 生成」。白名单由后端查库，不用前端传。
+     *  返回结构同 wizardExtract，只会含 kind 对应那一摊的列表 */
+    generate: (
+      moduleId: number,
+      kind: RpgGenerateKind,
+      data: { instruction?: string; count?: number; nsfw?: boolean; model?: string },
+    ) =>
+      api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/generate/${kind}`, data, {
+        timeout: 180000,
+      }).then(r => r.data),
   },
   worldEntries: {
     list: (moduleId: number) =>
@@ -1427,6 +1541,14 @@ export const rpgApi = {
   items: moduleChild<RpgItem, RpgItemInput>('items'),
   locations: moduleChild<RpgLocation, RpgLocationInput>('locations'),
   actions: moduleChild<RpgAction, RpgActionInput>('actions'),
+  rules: {
+    list: () => api.get<RpgRule[]>('/rpg/rules/').then(r => r.data),
+    create: (data: { name: string; content?: string; enabled?: boolean; sort_order?: number }) =>
+      api.post<RpgRule>('/rpg/rules/', data).then(r => r.data),
+    update: (id: number, data: { name?: string; content?: string; enabled?: boolean; sort_order?: number }) =>
+      api.patch<RpgRule>(`/rpg/rules/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/rules/${id}`).then(r => r.data),
+  },
   sessions: {
     list: (moduleId: number) =>
       api.get<RpgSession[]>(`/rpg/modules/${moduleId}/sessions/`).then(r => r.data),
@@ -1448,6 +1570,10 @@ export const rpgApi = {
     /** 划掉 GM 记错的一条 NPC 近况。没有这个口子，记错了只能读档 */
     deleteNpcNote: (id: number, npcId: number, key: string) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}/npc-notes/${npcId}`, { key }).then(r => r.data),
+    /** 划掉 AI 调度给这个人记的那句「最近在做什么」。只清这一句，
+     *  「AI 调度」开关是模组作者的决定，改它要回模组页 */
+    deleteNpcActivity: (id: number, npcId: number) =>
+      api.delete<RpgSession>(`/rpg/sessions/${id}/npc-activity/${npcId}`).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/sessions/${id}`).then(r => r.data),
   },
   messages: {
@@ -1965,6 +2091,43 @@ export function streamBrainstorm(
   return controller
 }
 
+/** 模组构思向导的对话轮。事件同 brainstorm：token / warning / done / error */
+export function streamRpgWizard(
+  moduleId: number,
+  payload: {
+    messages: ChatMessage[]
+    model?: string
+    nsfw?: boolean
+    /** 向导阶段 id（world/stats/places/cast/things），留空走自由聊天 */
+    stage?: string
+    /** 前几步已敲定的结论，防止早期结论被轮次截断后 AI 重复提问 */
+    confirmed?: string
+    /** 玩法类别，决定往哪个方向聊 */
+    play_style?: string
+  },
+  onMessage: (msg: ChatSSEMessage) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+
+  fetch(`/api/rpg/modules/${moduleId}/wizard`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async (response) => {
+    await readSseStream<ChatSSEMessage>(response, onMessage)
+    onClose()
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      onMessage({ event: 'error', data: String(err) })
+    }
+    onClose()
+  })
+
+  return controller
+}
+
 // ── SSE Tavern ────────────────────────────────────────────────────────────
 
 export interface TavernTurnMeta {
@@ -2050,6 +2213,8 @@ export interface RpgStatePatch {
   location: string
   npc_states: Record<string, Record<string, number | boolean>>
   npc_notes: Record<string, Record<string, string>>
+  npc_activities: Record<string, string>
+  npc_places: Record<string, string>
   status: 'alive' | 'dead' | 'ended'
   /** 时钟也跟着走，否则按完「结束这个时段」要等整页重拉才动 */
   time_slots: string[]

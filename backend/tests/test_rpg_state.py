@@ -6,12 +6,13 @@ AI 给 -999 也只能扣到下界，而且要留一条 warning 让玩家看见�
 """
 import unittest
 
-from app.models.rpg import RpgModule, RpgNpc, RpgSession
+from app.models.rpg import RpgItem, RpgModule, RpgNpc, RpgSession
 from app.services.rpg_state import (
     ON_ZERO_DEAD, ON_ZERO_FLAG,
     apply_flags, apply_inventory, apply_npc_notes, apply_relations, apply_state_delta,
     apply_stats, check_condition, check_zero, clamp, def_map, for_check_stats,
-    init_relation, init_stats, mark_met, note_visited, tier_list, tier_of, visible_defs,
+    init_relation, init_stats, mark_met, match_npc, note_visited, starting_inventory,
+    tier_list, tier_of, visible_defs,
     FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT, TIER_LABEL_CHARS, TIER_NOTE_CHARS, VISITED_LIMIT,
 )
 
@@ -354,6 +355,63 @@ class NpcNoteTests(unittest.TestCase):
         self.assertTrue(apply_npc_notes(sess, 3, "这不是字典"))
 
 
+class StartingInventoryTests(unittest.TestCase):
+    """开局背包 = 模组的开局背包 + 定义里勾了「开局就有」的道具。
+
+    这一条接的就是「在模组页定义好了道具，开局身上却什么都没有」。两边都不加
+    的话，作者定义的道具和玩家背包之间没有任何桥，只能靠 GM 每局现编一件。
+    """
+
+    @staticmethod
+    def _item(name, start_with=True):
+        return RpgItem(module_id=1, name=name, start_with=start_with)
+
+    def test_a_module_with_neither_source_starts_empty(self):
+        """存量模组的回归线：没有开局背包、没有勾过的道具，就是空手开局。"""
+        self.assertEqual(starting_inventory(_module(), []), [])
+
+    def test_a_flagged_item_lands_in_the_bag(self):
+        bag = starting_inventory(_module(), [self._item("铁钥匙")])
+        self.assertEqual([row["name"] for row in bag], ["铁钥匙"])
+        self.assertEqual(bag[0]["qty"], 1)
+
+    def test_an_unflagged_item_stays_out(self):
+        """没勾的不进背包——不然「开局就有」这个勾等于没有。"""
+        self.assertEqual(starting_inventory(_module(), [self._item("龙鳞", False)]), [])
+
+    def test_the_kit_and_the_flags_are_added_together(self):
+        """两边合起来而不是二选一：作者会拿开局背包放剧情道具、拿勾放补给。"""
+        module = _module(default_inventory=[{"name": "母亲的遗物", "qty": 1}])
+        bag = starting_inventory(module, [self._item("铁钥匙")])
+        self.assertEqual([row["name"] for row in bag], ["母亲的遗物", "铁钥匙"])
+
+    def test_the_same_item_written_two_ways_is_one_row(self):
+        """撞名时开局背包那份赢：它写了数量，比定义默认的一件更具体。
+
+        没有这条的话，定义里写「治伤药水」、开局背包里写「治伤药水 」（粘贴时
+        带了个空格）会给玩家并排显示两条一样的，数量还是分开算的。
+        """
+        module = _module(default_inventory=[{"name": "治伤药水 ", "qty": 3}])
+        bag = starting_inventory(module, [self._item("治伤药水")])
+        self.assertEqual(len(bag), 1)
+        self.assertEqual(bag[0]["qty"], 3)
+        self.assertEqual(bag[0]["name"], "治伤药水")
+
+    def test_a_row_without_a_name_is_skipped(self):
+        """空名字的行丢掉：背包里会出现一个点不动的空条。"""
+        module = _module(default_inventory=[{"name": "  "}, {"name": "火把", "qty": 1}, "烂数据"])
+        bag = starting_inventory(module, [self._item(""), self._item("铁钥匙")])
+        self.assertEqual([row["name"] for row in bag], ["火把", "铁钥匙"])
+
+    def test_a_hand_written_row_keeps_its_note_and_a_derived_one_does_not_get_one(self):
+        """开局背包那行是作者手写的，note 要原样带走；定义来的那件不伪造 note，
+        侧栏显示说明时本来就先看定义里的 description（比这儿能写的长）。"""
+        module = _module(default_inventory=[{"name": "火把", "qty": 1, "note": "还在烧"}])
+        bag = starting_inventory(module, [self._item("铁钥匙")])
+        self.assertEqual(bag[0]["note"], "还在烧")
+        self.assertEqual(bag[1]["note"], "")
+
+
 class InventoryTests(unittest.TestCase):
     def test_same_item_merges_across_sloppy_spacing(self):
         sess = _sess(inventory=[{"name": "铁钥匙", "qty": 1}])
@@ -551,6 +609,48 @@ class VisitedTests(unittest.TestCase):
         note_visited(sess, "  ")
         note_visited(sess, None)
         self.assertEqual(sess.visited, ["出租屋"])
+
+
+class MatchNpcTests(unittest.TestCase):
+    """按名字找人。模型只会写「赫敏」，作者填的是「赫敏格兰杰」。
+
+    放宽的底线是**宁可认不出，不能认错人**：认不出只是这一条改动落空加一条
+    warning，认错人会把好感加到别人头上，而且没人看得出来。
+    """
+
+    def setUp(self):
+        self.hermione = RpgNpc(id=3, module_id=1, name="赫敏格兰杰")
+        self.ron = RpgNpc(id=4, module_id=1, name="罗恩韦斯莱")
+
+    def test_the_full_name_matches(self):
+        self.assertIs(match_npc("赫敏格兰杰", [self.hermione, self.ron]), self.hermione)
+
+    def test_the_given_name_alone_matches(self):
+        self.assertIs(match_npc("赫敏", [self.hermione, self.ron]), self.hermione)
+
+    def test_the_family_name_alone_matches(self):
+        self.assertIs(match_npc("格兰杰", [self.hermione, self.ron]), self.hermione)
+
+    def test_a_separator_in_the_middle_does_not_break_it(self):
+        self.assertIs(match_npc("赫敏·格兰杰", [self.hermione, self.ron]), self.hermione)
+        author = RpgNpc(id=5, module_id=1, name="赫敏·格兰杰")
+        self.assertIs(match_npc("赫敏格兰杰", [author]), author)
+
+    def test_two_people_who_both_fit_match_nobody(self):
+        a = RpgNpc(id=6, module_id=1, name="村民甲")
+        b = RpgNpc(id=7, module_id=1, name="村民乙")
+        self.assertIsNone(match_npc("村民", [a, b]))
+
+    def test_one_character_is_too_short_to_guess_from(self):
+        li = RpgNpc(id=8, module_id=1, name="李铁柱")
+        self.assertIsNone(match_npc("李", [li]))
+
+    def test_an_unrelated_name_does_not_match(self):
+        self.assertIsNone(match_npc("哈利", [self.hermione, self.ron]))
+
+    def test_a_blank_name_does_not_match(self):
+        self.assertIsNone(match_npc("  ", [self.hermione]))
+        self.assertIsNone(match_npc("·", [self.hermione]))
 
 
 if __name__ == "__main__":

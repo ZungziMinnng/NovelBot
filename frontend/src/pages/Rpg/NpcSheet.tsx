@@ -9,18 +9,26 @@ import StatBar from './StatBar'
  * 没见过的人连在侧栏列出都不该，更不会走到这里。
  */
 export default function NpcSheet({
-  npc, relationDefs, state, notes, here, onClose, onDeleteNote,
+  npc, relationDefs, state, notes, activity, here, place, onClose,
+  onDeleteNote, onDeleteActivity,
 }: {
   npc: RpgNpc
   relationDefs: RpgStatDef[]
   state: Record<string, number | boolean>
   /** GM 这一局记下的他的近况。键值都是模型自己起的，模组里没有 */
   notes: Record<string, string>
+  /** AI 调度替你不在场时她做的事记下的一句话。没勾「AI 调度」的人是空串 */
+  activity: string
   /** 他此刻是不是和玩家在同一个地点 */
   here: boolean
+  /** 他此刻在哪儿。**不是角色卡上的常驻地点**——有作息表的人是按时段走的，
+   *  写常驻地点会让玩家跑过去扑空 */
+  place: string
   onClose: () => void
   /** 划掉记错的一条。模型写下的持久事实，玩家得有个不读档的补救 */
   onDeleteNote: (key: string) => void
+  /** 划掉那一句「最近在做什么」。同上的补救，但它是单独一句不是键值表 */
+  onDeleteActivity: () => void
 }) {
   const sections = Object.entries(npc.profile_sections || {}).filter(([, text]) => (text || '').trim())
   const noteRows = Object.entries(notes || {}).filter(([, text]) => (text || '').trim())
@@ -40,7 +48,7 @@ export default function NpcSheet({
             <p className="font-semibold truncate">{npc.name}</p>
             <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1 truncate">
               <MapPin className="w-3 h-3 shrink-0" />
-              {npc.location || '行踪不定'}
+              {place || '行踪不定'}
               {here && <span className="text-primary">· 就在你面前</span>}
             </p>
           </div>
@@ -72,13 +80,30 @@ export default function NpcSheet({
             <Block key={key} title={key}>{text}</Block>
           ))}
 
-          {noteRows.length > 0 && (
+          {(noteRows.length > 0 || activity) && (
             // 刻意和上面那几块长得不一样：这些是模型边玩边写的，会出错，
             // 玩家得一眼看出来它不是模组作者写的设定，否则骂错人
             <div className="border-l-2 border-primary/40 pl-3">
               <p className="text-xs font-medium text-muted-foreground">这一局记下的</p>
-              <p className="text-[11px] text-muted-foreground/70 mb-2">GM 在这一局里记下的，和模组原本的设定分开</p>
+              <p className="text-[11px] text-muted-foreground/70 mb-2">模型在这一局里记下的，和模组原本的设定分开</p>
               <div className="space-y-1">
+                {/* 「最近」排在近况前面：它是这个人此刻的处境，近况是具体某一项 */}
+                {activity && (
+                  <div className="group flex items-start gap-2 text-sm leading-relaxed">
+                    <p className="flex-1">
+                      <span className="text-muted-foreground">最近</span>
+                      <span className="mx-1.5 text-muted-foreground/50">·</span>
+                      {activity}
+                    </p>
+                    <button
+                      onClick={onDeleteActivity}
+                      title="划掉这句。她还是会继续自己过日子"
+                      className="p-0.5 mt-0.5 rounded text-muted-foreground/50 opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
                 {noteRows.map(([key, text]) => (
                   <div key={key} className="group flex items-start gap-2 text-sm leading-relaxed">
                     <p className="flex-1">

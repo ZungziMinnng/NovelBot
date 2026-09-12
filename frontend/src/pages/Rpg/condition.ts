@@ -12,14 +12,40 @@ export const norm = (s: string) => (s || '').trim().toLowerCase()
  */
 const linked = (loc: RpgLocation, here: RpgLocation | undefined, location: string) =>
   !location || !here
-  || (here.connections || []).includes(loc.name)
-  || (loc.connections || []).includes(location)
+  // 按 norm 配，不按字面：地图上的线是 edgePairs 按 norm 画的，这里按字面配的话，
+  // 连接名多一个空格（从别处粘进来的）会变成「线画着，点却还是灰的」
+  || (here.connections || []).some(n => norm(n) === norm(loc.name))
+  || (loc.connections || []).some(n => norm(n) === norm(location))
+
+/**
+ * 有路通到它的地点 id。判据和 mapLayout.edgePairs 完全一致：按 norm 配名字，
+ * 悬空的名字（作者改名之后留下的）不算——画不出线的连接不能拿来散迷雾。
+ */
+function wiredIds(locations: RpgLocation[]): Set<number> {
+  const byName = new Map(locations.map(l => [norm(l.name), l]))
+  const out = new Set<number>()
+  for (const a of locations) {
+    for (const name of a.connections || []) {
+      const b = byName.get(norm(name))
+      if (!b || b.id === a.id) continue
+      out.add(a.id)
+      out.add(b.id)
+    }
+  }
+  return out
+}
 
 /**
  * 地图上看得见的地点 id。去过的、当前站着的，加上它们的邻居；其余是迷雾。
  *
  * 同 knownNpcs 的道理：没探到的地方连名字都不该露出来。逃生口和 linked 一致
  * ——当前地点不在表里时全部可见，否则玩家会看到一张全黑的地图却什么都能去。
+ *
+ * **一条路都没连的地点始终可见。** 迷雾是顺着连接散的，不在图里的点没有任何
+ * 路径能照亮它：玩家看不见就点不了，点不了就永远走不到，于是它永远是个灰点。
+ * 作者在画布上双击建一个地点、还没来得及连线，就正好是这种情况——加完之后
+ * 进游戏发现它不在，只会以为是没存上。要藏东西该用进入条件，那个至少会
+ * 告诉玩家差在哪。
  */
 export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Set<number> {
   const at = sess.location || ''
@@ -27,18 +53,38 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
   if (!at || !here) return new Set(locations.map(l => l.id))
 
   const lit = new Set([norm(here.name), ...(sess.visited || []).map(norm)])
+  const wired = wiredIds(locations)
   const out = new Set<number>()
   for (const loc of locations) {
-    const near = lit.has(norm(loc.name))
+    const near = !wired.has(loc.id)
+      || lit.has(norm(loc.name))
       || locations.some(p => lit.has(norm(p.name)) && linked(loc, p, p.name))
     if (near) out.add(loc.id)
   }
   return out
 }
 
+/**
+ * 这个人此刻在哪儿：剧情挪过她就听剧情的，否则作息表 → 常驻地点。
+ *
+ * 后端 `rpg_context.npc_place` 的镜像，两边必须一样——不一样的那一次就是
+ * 「面板上他站在你面前，提示词里却没有这个人」。
+ *
+ * places 传这一局的 `sess.npc_places`：玩家说了句「你过来」，结算把她的新位置
+ * 写在里面，下一轮这一格就显示「就在你面前」。读不到会话的场合（模组编辑页）
+ * 不传，行为和不传一样。
+ */
+export const npcPlace = (npc: RpgNpc, slot: string, places?: Record<string, string>) => {
+  const over = ((places || {})[String(npc.id)] || '').trim()
+  if (over) return over
+  const now = (slot || '').trim()
+  const at = now ? ((npc.slot_locations || {})[now] || '').trim() : ''
+  return at || (npc.location || '')
+}
+
 /** 他此刻是不是和玩家在同一个地点 */
 export const onstage = (npc: RpgNpc, sess: RpgSession) =>
-  !!sess.location && norm(npc.location) === norm(sess.location)
+  !!sess.location && norm(npcPlace(npc, sess.slot, sess.npc_places)) === norm(sess.location)
 
 /**
  * 玩家已经知道存在的人：见过面的，加上此刻就在同一个地点的。

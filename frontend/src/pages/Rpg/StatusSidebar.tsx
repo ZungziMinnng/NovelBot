@@ -2,7 +2,7 @@ import { Backpack, ChevronRight, Clock, History, MapPin, Users } from 'lucide-re
 import type {
   RpgItem, RpgModule, RpgNpc, RpgSave, RpgSession, RpgStatDef,
 } from '@/api/client'
-import { knownNpcs, norm, onstage } from './condition'
+import { knownNpcs, norm, npcPlace, onstage } from './condition'
 import RpgAvatar from './RpgAvatar'
 import StatBar from './StatBar'
 import { PANEL } from './rpgUi'
@@ -139,7 +139,7 @@ export default function StatusSidebar({
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium truncate">{npc.name}</p>
                       <p className="text-xs text-muted-foreground truncate">
-                        {isHere ? '就在你面前' : npc.location || '不知在哪'}
+                        {isHere ? '就在你面前' : npcPlace(npc, sess.slot, sess.npc_places) || '不知在哪'}
                       </p>
                     </div>
                     <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />

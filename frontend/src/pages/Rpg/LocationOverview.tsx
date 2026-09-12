@@ -1,6 +1,6 @@
 import { MapPin } from 'lucide-react'
 import type { RpgLocation, RpgNpc, RpgSession } from '@/api/client'
-import { checkCondition, knownNpcs, norm, visibleLocations } from './condition'
+import { checkCondition, knownNpcs, norm, npcPlace, visibleLocations } from './condition'
 import { edgePairs, layout } from './mapLayout'
 
 interface Props {
@@ -49,7 +49,10 @@ export default function LocationOverview({
 
   /** 这个地点上站着谁。只看得到见过面的人——没见过的不该被抖出来 */
   const known = knownNpcs(npcs, sess)
-  const faces = (loc: RpgLocation) => known.filter(n => norm(n.location) === norm(loc.name))
+  // 站在这个点上的人。onstage 是「在玩家当前地点」，这里要的是「在这个地点」，
+  // 所以拿 sess 换成这个点本身比较——走的仍是 npcPlace 那一套（含作息表）
+  const faces = (loc: RpgLocation) =>
+    known.filter(n => norm(npcPlace(n, sess.slot, sess.npc_places)) === norm(loc.name))
 
   /** 进不去的话，那句理由。空串 = 能进 */
   const blockedWhy = (loc: RpgLocation) => {

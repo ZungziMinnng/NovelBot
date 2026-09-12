@@ -1,0 +1,253 @@
+"""RPG 的滚动概要。**每条线各存一份**。
+
+这一条是整个分线设计的地基：概要是注入 system 的，一份全局概要注入每条线，
+等于把你在密室里跟 A 说的话原样告诉 B。chronicle 之所以规定「只写已经传开
+的事」，防的就是这个；摘要器要是绕过去，分线就白做了。
+
+顺带钉住那个最容易漏的地方：新列必须进快照表，否则读档之后概要里还留着
+「未来」的剧情。
+"""
+import unittest
+from unittest.mock import patch
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.agents import rpg_turn
+from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS
+from app.database import Base
+from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
+from app.models.rpg import RpgMessage, RpgModule, RpgSession
+from app.services.rpg_context import (
+    build_rpg_messages, history_window, thread_summarized_upto, thread_summary,
+)
+
+
+def _sess(**kwargs):
+    base = {
+        "stats": {}, "location": "", "summary": "", "summarized_upto_id": 0,
+        "thread_summaries": {}, "thread_upto": {},
+    }
+    base.update(kwargs)
+    return RpgSession(module_id=1, char_name="阿隼", **base)
+
+
+class PerThreadPointerTests(unittest.TestCase):
+    def test_the_scene_line_keeps_using_the_old_columns(self):
+        # 老库没有新列，场面线必须照旧走 summary / summarized_upto_id，
+        # 否则升级之后所有已有存档的长期记忆一夜蒸发
+        sess = _sess(summary="场面上的往事", summarized_upto_id=12)
+        self.assertEqual(thread_summary(sess, None), "场面上的往事")
+        self.assertEqual(thread_summarized_upto(sess, None), 12)
+
+    def test_each_character_line_has_its_own(self):
+        sess = _sess(
+            summary="场面上的往事", summarized_upto_id=12,
+            thread_summaries={"7": "跟老兵的往事"}, thread_upto={"7": 30},
+        )
+        self.assertEqual(thread_summary(sess, 7), "跟老兵的往事")
+        self.assertEqual(thread_summarized_upto(sess, 7), 30)
+        # 没压缩过的线是空的，不能拿场面线的顶上
+        self.assertEqual(thread_summary(sess, 9), "")
+        self.assertEqual(thread_summarized_upto(sess, 9), 0)
+
+    def test_a_corrupt_pointer_does_not_crash(self):
+        sess = _sess(thread_upto={"7": "坏了"})
+        self.assertEqual(thread_summarized_upto(sess, 7), 0)
+
+    def test_the_window_cuts_by_its_own_pointer(self):
+        module = RpgModule(user_id=1, name="m", stat_defs=[], relation_stat_defs=[], context_turns=20)
+        sess = _sess(summarized_upto_id=100, thread_upto={"7": 2})
+        history = [RpgMessage(id=i, session_id=1, role="user", content=str(i)) for i in (1, 2, 3)]
+        # 同一批消息，两条线切出来的窗口不一样：场面线的指针已经走到 100
+        self.assertEqual([m.id for m in history_window(module, sess, history, 7)], [3])
+        self.assertEqual(history_window(module, sess, history, None), [])
+
+
+class SummaryInjectionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.db = self.sessions()
+        self.module = RpgModule(user_id=1, name="测试模组", stat_defs=[], relation_stat_defs=[])
+        self.db.add(self.module)
+        await self.db.commit()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        await self.engine.dispose()
+
+    async def test_one_lines_summary_never_reaches_another(self):
+        """这是分线摘要存在的全部理由，坏了就是密室对话全场广播。"""
+        sess = RpgSession(
+            module_id=self.module.id, char_name="阿隼", stats={}, location="",
+            thread_summaries={"7": "你在密室里告诉老兵你杀了人"},
+        )
+        self.db.add(sess)
+        await self.db.commit()
+
+        own, _ = await build_rpg_messages(self.db, self.module, sess, [], "嗯", thread_id=7)
+        self.assertIn("你杀了人", own[0]["content"])
+        for other in (None, 9):
+            with self.subTest(thread_id=other):
+                messages, _ = await build_rpg_messages(
+                    self.db, self.module, sess, [], "嗯", thread_id=other
+                )
+                self.assertNotIn("你杀了人", messages[0]["content"])
+
+
+class MaybeSummarizeTests(unittest.IsolatedAsyncioTestCase):
+    """压缩本身：够不够条数、写没写对格子、失败了会不会拖垮这一轮。"""
+
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.patcher = patch.object(rpg_turn, "AsyncSessionLocal", self.sessions)
+        self.patcher.start()
+
+    async def asyncTearDown(self):
+        self.patcher.stop()
+        await self.engine.dispose()
+
+    async def _seed(self, count, thread_id=None, context_turns=1):
+        async with self.sessions() as db:
+            module = RpgModule(
+                user_id=1, name="测试模组", stat_defs=[], relation_stat_defs=[],
+                context_turns=context_turns,
+            )
+            db.add(module)
+            await db.commit()
+            sess = RpgSession(module_id=module.id, char_name="阿隼", stats={}, location="")
+            db.add(sess)
+            await db.commit()
+            db.add_all([
+                RpgMessage(
+                    session_id=sess.id, role="user", content=f"第{i}句", thread_id=thread_id,
+                )
+                for i in range(count)
+            ])
+            # 隔壁线的消息：不该被算进来，也不该被压缩掉
+            db.add(RpgMessage(session_id=sess.id, role="user", content="隔壁", thread_id=999))
+            await db.commit()
+            return sess.id
+
+    async def _reload(self, session_id):
+        async with self.sessions() as db:
+            return await db.get(RpgSession, session_id)
+
+    async def test_a_short_line_is_left_alone(self):
+        session_id = await self._seed(2, thread_id=7)
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete") as call:
+            self.assertFalse(await rpg_turn._maybe_summarize(session_id, 7))
+            call.assert_not_called()
+
+    async def test_the_overflow_of_a_character_line_lands_in_its_own_slot(self):
+        session_id = await self._seed(6, thread_id=7)
+        seen = {}
+
+        async def fake(messages, **_kwargs):
+            seen["prompt"] = messages[0]["content"]
+            return "  老兵终于开口了  "
+
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                self.assertTrue(await rpg_turn._maybe_summarize(session_id, 7))
+
+        sess = await self._reload(session_id)
+        self.assertEqual(sess.thread_summaries, {"7": "老兵终于开口了"})
+        # 留最后 context_turns*2 = 2 条，压掉前 4 条，指针停在第 4 条上
+        self.assertEqual(sess.thread_upto, {"7": 4})
+        # 场面线的两列一个字都不能动
+        self.assertEqual(sess.summary, "")
+        self.assertEqual(sess.summarized_upto_id, 0)
+        # 隔壁线的消息不能混进 transcript
+        self.assertNotIn("隔壁", seen["prompt"])
+        self.assertIn("第0句", seen["prompt"])
+        self.assertNotIn("第5句", seen["prompt"])
+
+    async def test_the_scene_line_still_writes_the_old_columns(self):
+        session_id = await self._seed(6, thread_id=None)
+        with patch.object(
+            rpg_turn.llm_client, "dispatch_chat_complete", return_value="场面上的往事"
+        ):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                self.assertTrue(await rpg_turn._maybe_summarize(session_id, None))
+
+        sess = await self._reload(session_id)
+        self.assertEqual(sess.summary, "场面上的往事")
+        self.assertEqual(sess.summarized_upto_id, 4)
+        self.assertEqual(sess.thread_summaries, {})
+
+    async def test_the_summary_model_is_preferred_over_the_fast_one(self):
+        session_id = await self._seed(6, thread_id=7)
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            module = await db.get(RpgModule, sess.module_id)
+            module.fast_model_ref = "12"
+            module.summary_model_ref = "34"
+            await db.commit()
+
+        with patch.object(
+            rpg_turn.llm_client, "dispatch_chat_complete", return_value="梗概"
+        ):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ) as pick:
+                await rpg_turn._maybe_summarize(session_id, 7)
+        self.assertEqual(pick.call_args.args, ("memory", "34"))
+
+    async def test_an_empty_summary_model_falls_back_to_the_fast_one(self):
+        # 老库这一列是空串，必须继续跟着裁决模型走，不能落到全局默认上
+        session_id = await self._seed(6, thread_id=7)
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            module = await db.get(RpgModule, sess.module_id)
+            module.fast_model_ref = "12"
+            await db.commit()
+
+        with patch.object(
+            rpg_turn.llm_client, "dispatch_chat_complete", return_value="梗概"
+        ):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ) as pick:
+                await rpg_turn._maybe_summarize(session_id, 7)
+        self.assertEqual(pick.call_args.args, ("memory", "12"))
+
+    async def test_a_blank_reply_does_not_move_the_pointer(self):
+        # 空回复照样推指针的话，被压掉的那几条从此谁也看不到了
+        session_id = await self._seed(6, thread_id=7)
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete", return_value="   "):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                self.assertFalse(await rpg_turn._maybe_summarize(session_id, 7))
+        sess = await self._reload(session_id)
+        self.assertEqual(sess.thread_upto, {})
+
+
+class SnapshotCoverageTests(unittest.TestCase):
+    def test_the_new_columns_are_in_the_snapshot(self):
+        """漏了不会报错，只会在读档之后留下一份还写着「未来」的概要。"""
+        for field in ("thread_summaries", "thread_upto"):
+            with self.subTest(field=field):
+                self.assertIn(field, SNAPSHOT_FIELDS)
+                # 后加的字段老快照里没有，读档时要按默认值补
+                self.assertIn(field, SNAPSHOT_DEFAULTS)
+
+    def test_every_snapshot_field_exists_on_the_model(self):
+        for field in SNAPSHOT_FIELDS:
+            with self.subTest(field=field):
+                self.assertTrue(hasattr(RpgSession, field))
+
+
+if __name__ == "__main__":
+    unittest.main()

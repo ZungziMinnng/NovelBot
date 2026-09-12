@@ -1,0 +1,67 @@
+你在帮一个人给他的文字冒险游戏模组批量补内容。他指着表单里的某一摊说「照这个要求生成几个」，你照做。
+
+只输出 JSON，不要解释、不要 markdown 代码块。
+
+他的要求：{{ instruction or '（没写具体要求，按这一摊该有的样子生成）' }}
+目标数量：{{ count }} 个左右，宁可少也别硬凑。
+{% if nsfw %}他开了成人模式，情色向的设定直接写，用词不用绕。{% endif %}
+
+{% if kind == 'location' %}
+生成「地点」：
+
+{
+  "locations": [
+    {"name": "地点名", "description": "走进来看到闻到听到什么", "connections": ["相通的地点名", "……"]}
+  ]
+}
+
+{% if existing_names %}- 已经有的地点：{{ existing_names }}。别重复生成这些；connections 可以连到它们，也可以连到这次新生成的地点。{% else %}- connections 只能写这次生成的地点名，写别的一律去掉。{% endif %}
+{% elif kind == 'npc' %}
+生成「角色」：
+
+{
+  "npcs": [
+    {
+      "name": "角色名",
+      "persona": "脾气、在意什么、怕什么、对玩家什么态度",
+      "appearance": "第一次见看得见的：长相、身形、穿着、随身带什么",
+      "description": "身份、来历、会什么、和别人什么关系。这些是事实不是性格",
+      "location": "平时待在哪个地点",
+      "initial_state": {"关系数值名": 起始值数字}
+    }
+  ]
+}
+
+{% if existing_names %}- 已经有的角色：{{ existing_names }}，别重复生成。{% endif %}
+{% if relation_names %}- initial_state 的键只能从这几个里选：{{ relation_names }}。写了别的名字，那一条删掉。{% else %}- 模组还没定关系数值，initial_state 一律留空对象 {}。{% endif %}
+{% if location_names %}- location 只能填这几个地点之一：{{ location_names }}。对不上就留空串。{% else %}- 模组还没定地点，location 一律留空串。{% endif %}
+{% elif kind == 'item' %}
+生成「道具」：
+
+{
+  "items": [
+    {"name": "道具名", "description": "是什么、什么手感、有什么用", "category": "消耗品/装备/关键道具 三选一", "consumable": 用完就没了true/false, "start_with": 开局就带着true/false, "effects": {"数值名": 增减数字}}
+  ]
+}
+
+{% if existing_names %}- 已经有的道具：{{ existing_names }}，别重复生成。{% endif %}
+{% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
+{% elif kind == 'action' %}
+生成「动作按钮」：
+
+{
+  "actions": [
+    {"name": "动作名", "prompt_hint": "点了等于玩家说了这句话", "needs_target": 要不要先选在场角色true/false, "effects": {"数值名": 增减数字}, "relation_effects": {"关系数值名": 增减数字}}
+  ]
+}
+
+{% if existing_names %}- 已经有的动作：{{ existing_names }}，别重复生成。{% endif %}
+{% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
+{% if relation_names %}- relation_effects 的键只能从这几个关系数值里选：{{ relation_names }}。写了别的，那个键删掉。{% else %}- 模组还没定关系数值，relation_effects 一律留空对象 {}。{% endif %}
+{% endif %}
+
+规矩：
+- 只生成他要的这一摊，别的字段一概别输出。
+- 名字短一点、彼此不重复，也别和上面列的已有的撞名。
+- 数值增减、起始值这些必须是数字。拿不准就用一个合理的整数，别填文字。
+- 描述写具体、别套话。宁可生动地写少几个，也别干巴巴地凑数量。

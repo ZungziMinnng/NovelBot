@@ -263,6 +263,39 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_sessions ADD COLUMN visited JSON DEFAULT '[]'",
         # GM 边玩边记的 NPC 近况。老库拿到 '{}'，角色卡上那一块不显示
         "ALTER TABLE rpg_sessions ADD COLUMN npc_notes JSON DEFAULT '{}'",
+        # 道具定义上的「开局就有」。老库拿到 0 = 一件都不带，开局背包照旧只看
+        # rpg_modules.default_inventory，和加这一列之前一模一样
+        "ALTER TABLE rpg_items ADD COLUMN start_with BOOLEAN DEFAULT 0",
+        # 玩法类别（模拟 / 探索冒险 / 经营策略）。老库拿到 'rpg'，而 'rpg' 的
+        # 玩法规则就是照着现在这套 GM 提示词写的，所以老模组行为完全不变
+        "ALTER TABLE rpg_modules ADD COLUMN play_style VARCHAR(20) DEFAULT 'rpg'",
+        # 摘要专用模型。老库拿到 ''，而消费端一律写 summary_model_ref or
+        # fast_model_ref，空串就是跟着裁决模型走，和没有这一列时一样
+        "ALTER TABLE rpg_modules ADD COLUMN summary_model_ref VARCHAR(100) DEFAULT ''",
+        # 分线概要。老库拿到 '{}' = 每条角色线都还没压缩过，从头开始滚，
+        # 场面线继续用原来的 summary / summarized_upto_id 两列
+        "ALTER TABLE rpg_sessions ADD COLUMN thread_summaries JSON DEFAULT '{}'",
+        "ALTER TABLE rpg_sessions ADD COLUMN thread_upto JSON DEFAULT '{}'",
+        # 作息表：把「这个人在哪儿」按当前时段取。老库拿到 '{}' = 没有作息表，
+        # 一律落回 location，和加这一列之前逐字一致
+        "ALTER TABLE rpg_npcs ADD COLUMN slot_locations JSON DEFAULT '{}'",
+        # 时段跳转时的外场简报（一次便宜的模型调用）。默认关：老模组保持
+        # 「结束时段零模型调用」，这是当初就写进文档和界面上的承诺，
+        # 不能因为加了新功能就悄悄把它变成假的
+        "ALTER TABLE rpg_modules ADD COLUMN offscreen_brief BOOLEAN DEFAULT 0",
+        # 角色是否交给 AI 调度。默认关：老模组不勾就一个模型调用都不多，
+        # 行为和加这一列之前逐字一致
+        "ALTER TABLE rpg_npcs ADD COLUMN ai_scheduled BOOLEAN DEFAULT 0",
+        # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。老库拿到 '{}' =
+        # 谁都没被调度过，角色卡上不出现这一行
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_activities JSON DEFAULT '{}'",
+        # 剧情挪动的人物位置：{"3": "校长办公室"}。老库拿到 '{}' = 谁的位置
+        # 都没被剧情改过，一律按作息表 / 常驻地点算，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_places JSON DEFAULT '{}'",
+        # RPG 写作规则（rpg_rules 表由 create_all 建，这里只补索引）+ 模组勾选的
+        # 规则 id。老库拿到 '[]' = 不勾任何规则、不注入，行为与加这列之前一致
+        "CREATE INDEX IF NOT EXISTS idx_rpg_rules_user ON rpg_rules(user_id)",
+        "ALTER TABLE rpg_modules ADD COLUMN enabled_rule_ids JSON DEFAULT '[]'",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

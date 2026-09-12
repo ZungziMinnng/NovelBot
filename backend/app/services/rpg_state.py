@@ -37,6 +37,10 @@ VISITED_LIMIT = 100
 NOTE_LIMIT = 10
 NOTE_CHARS = 60
 
+# AI 调度的角色「最近在做什么」，每个角色只有一句，所以比 NOTE_CHARS 更短：
+# 它和近况并排画在同一张卡上，长了两行挤在一起
+ACTIVITY_CHARS = 40
+
 # 数值的「影响」那几段最长多少字。同 NOTE_CHARS 的理由，而且更紧：说明每轮
 # 发一遍，档位标签还要跟在每个数字后面画在侧栏上，长了就换行
 EFFECT_CHARS = 30
@@ -47,6 +51,15 @@ TIER_NOTE_CHARS = 20
 # 移动」的话，玩家在镇上连点五个地点就会刷出五条「你去了 X」
 MOVE_TAG = "〔移动〕"
 DAY_TAG = "〔日期〕"
+# 开场那一幕也进大事记，理由见 api/routes/rpg.py 的建局处。只取开头这么多字：
+# 大事记是一行一条的硬事实，整段旁白塞进去会常驻吃掉外场那点预算
+OPENING_TAG = "〔开场〕"
+OPENING_CHARS = 120
+
+# 外场简报（见 agents/rpg_turn.offscreen_brief）。用「别处」不用「外场」：
+# 注入时那一整块块的标题就叫【外场】，行内再挂一个同名标签等于说两遍
+OFFSCREEN_TAG = "〔别处〕"
+OFFSCREEN_CHARS = 40
 
 # 背包里同名道具的模糊匹配：去空格后比对。模型写「铁 钥匙」很常见
 _NORMALIZE_TABLE = str.maketrans("", "", " 　\t")
@@ -70,6 +83,54 @@ def _num(value, fallback=0) -> int:
 
 def norm_name(text) -> str:
     return str(text or "").translate(_NORMALIZE_TABLE).strip().lower()
+
+
+# 角色名里的间隔号。只在人名比对时去掉，不进 norm_name——背包那边的
+# 「铁-钥匙」和「铁钥匙」是不是一件东西，是另一个问题，别顺手一起改
+_NAME_SEPS = str.maketrans("", "", "·•・.-_、,，")
+
+# 半个名字最少要这么长才敢认。一个字的「李」能撞上一整屋人
+_MIN_PARTIAL = 2
+
+
+def match_npc(name, npcs):
+    """按名字找人，允许模型只写一半。返回角色对象，认不出就是 None。
+
+    模型眼前的【在场】块写的是全名，但中文里没人会通篇写「赫敏格兰杰」，
+    它就是会写「赫敏」。只认全等的话，每一轮都掉一条「找不到角色「赫敏」」，
+    关系和近况全部白算。
+
+    放宽只放到「一头对齐」为止：全等 → 去掉间隔号再全等 → 一方是另一方的
+    前缀或后缀（短的那头至少两个字）。而且**必须只对上一个人**：模组里常有
+    三个「村民」，认错人比不认更糟——关系数字会记到另一个人头上，作者事后
+    根本查不出来。对上两个就当没对上，照旧发警告。
+    """
+    people = list(npcs or [])
+    key = norm_name(name)
+    if not key:
+        return None
+
+    exact = [n for n in people if norm_name(n.name) == key]
+    if exact:
+        # 同名的人折叠成最后一个，沿用既有行为（relations 一直如此）
+        return exact[-1]
+
+    bare = key.translate(_NAME_SEPS)
+    if not bare:
+        return None
+    same = [n for n in people if norm_name(n.name).translate(_NAME_SEPS) == bare]
+    if same:
+        return same[-1]
+
+    hits = []
+    for npc in people:
+        full = norm_name(npc.name).translate(_NAME_SEPS)
+        if not full or min(len(full), len(bare)) < _MIN_PARTIAL:
+            continue
+        if full.startswith(bare) or full.endswith(bare) \
+                or bare.startswith(full) or bare.endswith(full):
+            hits.append(npc)
+    return hits[0] if len(hits) == 1 else None
 
 
 # ── 数值定义 ──────────────────────────────────────────────────────────────
@@ -366,6 +427,59 @@ def apply_npc_notes(sess, npc_id: int, delta) -> list[str]:
     return warnings
 
 
+def npc_activity(sess, npc_id) -> str:
+    """这个角色最近在做什么（AI 调度写的那一句）。没记过就是空串。"""
+    value = (sess.npc_activities or {}).get(str(npc_id))
+    return str(value or "").strip()
+
+
+def apply_npc_activity(sess, npc_id: int, text) -> None:
+    """记下、或清掉一个角色「最近在做什么」。
+
+    空串 / None = 清掉（玩家手动划掉走这条路）。**每个角色只有一句**，
+    新的一次直接盖掉旧的——这是「最近」，不是日志。
+
+    和 npc_notes 分开存：那张表是 GM 从这一轮叙事里读出来的近况（伤在哪、
+    身上带着什么），这张是调度替不在场的人写的行动。两个写手共用一套键名的
+    话，模型迟早会用一个「伤势」盖掉刚记下的行动，而且两边都以为对方在管。
+
+    整个字典赋回去才标脏，原地改 JSON 列不会落库。
+    """
+    table = dict(sess.npc_activities or {})
+    key = str(npc_id)
+    value = str(text or "").strip()
+    if not value:
+        table.pop(key, None)
+    else:
+        if len(value) > ACTIVITY_CHARS:
+            value = value[:ACTIVITY_CHARS] + "…"
+        table[key] = value
+    sess.npc_activities = table
+
+
+def apply_npc_place(sess, npc_id: int, place) -> None:
+    """剧情把这个人挪到哪儿了（写进 sess.npc_places）。
+
+    空串 / None = 清掉，她回到作息表 / 常驻地点安排的地方。**这不是「撤回」的
+    特例**，而是唯一的表达方式：作者排的作息表是「她该在哪儿」，清掉就等于
+    剧情放她回去了。
+
+    位置只活到下一个时段（advance_slot 会清空整张表），所以这里不留历史。
+
+    整个字典赋回去才标脏，原地改 JSON 列不会落库（同 apply_npc_activity）。
+    """
+    # 只收字符串：模型偶尔把值写成 {"地点": "宿舍"}，那样存进去的是一段 JSON
+    # 文本，界面上直接把这段 JSON 当地名显示出来
+    value = str(place or "").strip() if isinstance(place, (str, int, float)) else ""
+    table = dict(sess.npc_places or {})
+    key = str(npc_id)
+    if value:
+        table[key] = value
+    else:
+        table.pop(key, None)
+    sess.npc_places = table
+
+
 def mark_met(sess, npc_ids) -> None:
     """标记见过面。外貌只在首次见面时注入，见过之后每轮再发一遍纯属浪费。"""
     states = dict(sess.npc_states or {})
@@ -379,6 +493,43 @@ def mark_met(sess, npc_ids) -> None:
             changed = True
     if changed:
         sess.npc_states = states
+
+
+def starting_inventory(module, items) -> list[dict]:
+    """这一局开局的背包：模组的开局背包 + 定义里勾了「开局就有」的道具。
+
+    两边合起来而不是二选一，因为它们说的不是一件事：`default_inventory` 是
+    「这一局开场就多一件东西」（这一局专属的剧情道具），`start_with` 是「这件
+    道具本身就该在身上」（跟着模组走的那几件补给）。作者会两个都用。
+
+    认名字用的是 norm_name 而不是字面：定义里写「治伤药水」、开局背包里写
+    「治伤药水 」（粘贴时带了个空格）按字面算就是两件，玩家背包里并排两条一样的。
+    撞名时开局背包那份赢——它写了数量，比定义默认的一件更具体。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in module.default_inventory or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        # 原样搬过去，只把名字两头的空格去掉：开局背包是作者手写的整行数据，
+        # 这里多补一个字段就等于多一处会和他写的东西打架的地方
+        out.append({**row, "name": name})
+        seen.add(norm_name(name))
+
+    for item in items or []:
+        if not getattr(item, "start_with", False):
+            continue
+        name = str(getattr(item, "name", "") or "").strip()
+        if not name or norm_name(name) in seen:
+            continue
+        seen.add(norm_name(name))
+        # 不带 note：背包里那一行要显示说明时会先看定义（见 StatusSidebar），
+        # 定义里的 description 本来就比这里能写的长
+        out.append({"name": name, "qty": 1, "note": ""})
+    return out
 
 
 def apply_inventory(sess, changes) -> list[str]:
@@ -580,6 +731,11 @@ def advance_slot(module, sess) -> list[str]:
     if not names:
         return []
 
+    # 剧情挪过的位置只活一格：时段一变，作息表重新说了算。不清的话模型随手
+    # 写的一笔会永久盖掉作者排的作息表，而作息表是他唯一的排期手段——
+    # 到那时「她把所有人调到我门口」只要说一句话就够了
+    sess.npc_places = {}
+
     now = str(sess.slot or "").strip()
     # 当前时段不在表里（刚建局、或建局后改过时段表）就从第一格重新数起
     index = names.index(now) + 1 if now in names else 0
@@ -597,6 +753,7 @@ def advance_slot(module, sess) -> list[str]:
 
 def apply_state_delta(
     module, sess, delta, npcs=None, allow_move: bool = True, note_npcs=None,
+    move_npcs=None,
 ) -> list[str]:
     """把模型提议的一整份改动落到 session 上，返回给玩家看的 warning。
 
@@ -605,19 +762,26 @@ def apply_state_delta(
     allow_move=False 时丢掉 location：分线之后「在老兵线里被叙述走到别处」
     会变成看得见的 bug——老兵不在了，他的输入框永久置灰。场面线照旧放行，
     「自由打字绕过地图」这个决定（见文档 §13）的边界正好画在这里。
+    **人物位置跟着同一个开关走**，理由一字不差：角色线里线主被叙述走开，
+    她那条线的输入框就永久置灰了。
 
     note_npcs 是**允许被记近况的人**，默认就是 npcs。调用方传的是这一轮真的
     摆在模型眼前的那几个（在场的 + 线主），比关系数值那一路窄。理由是两者
     的代价不对称：关系是个数字，写错了下一轮就被盖掉；近况是长期事实，会
     原样画在角色卡上、每轮注入那个人的设定块，而剧情里随口提一句「老板」
     就足以让隔壁镇的老板凭空多出一条伤。
+
+    move_npcs 是**允许被改位置的人**，默认空 = 一个都不准改（老调用点行为
+    不变）。调用方传的是刚写出来的正文里真的出现过的人（named_npcs），比
+    note_npcs 再紧一层：位置写错不是「卡上多一行字」，而是她凭空站在你面前、
+    侧栏说「就在你面前」、还能拉进私聊——玩家没有任何纠正的入口。
     """
     if not isinstance(delta, dict):
         return []
     warnings: list[str] = []
-    by_name = {norm_name(n.name): n.id for n in (npcs or [])}
-    # 同名的人（模组里常有三个「村民」）在这里会被折叠成最后一个——既有行为，
-    # relations 一直如此，近况沿用同一套映射
+    # 认名字走 match_npc：模型会把「赫敏格兰杰」写成「赫敏」。同名的人
+    # （模组里常有三个「村民」）折叠成最后一个——既有行为，relations 一直如此，
+    # 近况沿用同一套映射
     note_ids = {n.id for n in ((npcs or []) if note_npcs is None else note_npcs)}
 
     steps = [
@@ -633,10 +797,11 @@ def apply_state_delta(
 
     # 关系数值按角色名提议：模型记不住 id，但名字就在它眼前的【在场】块里
     for name, changes in (delta.get("relations") or {}).items():
-        npc_id = by_name.get(norm_name(name))
-        if npc_id is None:
+        who = match_npc(name, npcs)
+        if who is None:
             warnings.append(f"找不到角色「{name}」，关系变化没能应用")
             continue
+        npc_id = who.id
         try:
             warnings.extend(apply_relations(module, sess, npc_id, changes))
         except Exception:
@@ -644,10 +809,11 @@ def apply_state_delta(
 
     # 近况同样按角色名提议，但只认这一轮在模型眼前的人
     for name, changes in (delta.get("npc_notes") or {}).items():
-        npc_id = by_name.get(norm_name(name))
-        if npc_id is None:
+        who = match_npc(name, npcs)
+        if who is None:
             warnings.append(f"找不到角色「{name}」，近况没能记下")
             continue
+        npc_id = who.id
         if npc_id not in note_ids:
             warnings.append(f"「{name}」这一轮不在场，关于他的近况没有记下")
             continue
@@ -655,6 +821,25 @@ def apply_state_delta(
             warnings.extend(apply_npc_notes(sess, npc_id, changes))
         except Exception:
             warnings.append(f"{name}的近况没能记下")
+
+    # 人物位置：剧情把谁挪到哪儿了。空串 = 放她回作息表安排的地方
+    places = delta.get("npc_places")
+    if isinstance(places, dict) and places:
+        if not allow_move:
+            warnings.append("这一轮的人物走动被忽略了（你正在和人单独说话）")
+        else:
+            allowed = {n.id for n in (move_npcs or [])}
+            for name, place in places.items():
+                who = match_npc(name, npcs)
+                if who is None:
+                    warnings.append(f"找不到角色「{name}」，位置变化没能应用")
+                    continue
+                if who.id not in allowed:
+                    # 只是嘴上被提到、正文里没露面的人不许挪：模型据此把
+                    # 一个没出场的人放到玩家跟前，就是纯凭空的编造
+                    warnings.append(f"「{name}」这一轮没在剧情里露面，他的位置没有改")
+                    continue
+                apply_npc_place(sess, who.id, place)
 
     location = str(delta.get("location") or "").strip()
     if location and not allow_move:

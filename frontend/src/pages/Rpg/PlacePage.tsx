@@ -1,6 +1,6 @@
 import { Info, MapPin, MessagesSquare, Users } from 'lucide-react'
 import type { RpgLocation, RpgNpc, RpgSession } from '@/api/client'
-import { knownNpcs, norm } from './condition'
+import { knownNpcs, norm, onstage } from './condition'
 import RpgAvatar from './RpgAvatar'
 import { PANEL } from './rpgUi'
 
@@ -29,7 +29,7 @@ export default function PlacePage({
 }: Props) {
   const loc = locations.find(l => norm(l.name) === norm(sess.location || ''))
   // 只列见过面的人：列出来等于把还没登场的人抖出来
-  const here = knownNpcs(npcs, sess).filter(n => norm(n.location) === norm(sess.location || ''))
+  const here = knownNpcs(npcs, sess).filter(n => onstage(n, sess))
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">

@@ -9,6 +9,8 @@ import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import { AddRow, DeleteButton, INPUT, Section } from './rpgUi'
 import ConditionEditor from './ConditionEditor'
 import EffectEditor from './EffectEditor'
+import BatchGenerate from './BatchGenerate'
+import { effectChips } from './effectChips'
 
 interface ActionForm {
   name: string
@@ -25,13 +27,15 @@ const EMPTY: ActionForm = {
 
 /** 动作按钮。点一次数值由引擎算死，AI 完全碰不到，只拿到「已经发生的事实」去写文字。 */
 export default function ActionSection({
-  moduleId, statDefs, relationDefs, npcs, slotNames,
+  moduleId, statDefs, relationDefs, npcs, slotNames, example = '奖励',
 }: {
   moduleId: number
   statDefs: RpgStatDef[]
   relationDefs: RpgStatDef[]
   npcs: RpgNpc[]
   slotNames: string[]
+  /** 空格子里的示例词，按玩法类别换（见 stylePresets.STYLE_EXAMPLES） */
+  example?: string
 }) {
   const qc = useQueryClient()
   const { data: actions = [] } = useQuery({
@@ -135,7 +139,7 @@ export default function ActionSection({
             <input
               value={form.name}
               onChange={e => setForm({ ...form, name: e.target.value })}
-              placeholder="按钮上的字，如：奖励"
+              placeholder={`按钮上的字，如：${example}`}
               className={INPUT}
             />
             <div>
@@ -202,7 +206,33 @@ export default function ActionSection({
             </div>
           </div>
         ) : (
-          <AddRow onClick={() => setShowForm(true)}>添加动作</AddRow>
+          <div className="space-y-2">
+            <AddRow onClick={() => setShowForm(true)}>添加动作</AddRow>
+            <BatchGenerate<{
+              name: string; prompt_hint: string; needs_target: boolean
+              effects: Record<string, number>; relation_effects: Record<string, number>
+            }>
+              moduleId={moduleId}
+              kind="action"
+              placeholder="想生成什么动作按钮？比如：几个和 NPC 拉近关系的社交动作"
+              renderRow={(a) => (
+                <>
+                  {effectChips(a.effects)}
+                  {effectChips(a.relation_effects, true)}
+                </>
+              )}
+              onApply={async (acts) => {
+                for (const a of acts) {
+                  await rpgApi.actions.create(moduleId, {
+                    name: a.name, prompt_hint: a.prompt_hint, needs_target: a.needs_target,
+                    effects: a.effects, relation_effects: a.relation_effects,
+                    sort_order: actions.length + 1,
+                  })
+                }
+                await refresh()
+              }}
+            />
+          </div>
         )}
       </div>
     </Section>

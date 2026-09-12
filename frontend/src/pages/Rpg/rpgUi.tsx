@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Dices } from 'lucide-react'
-import { Plus, Trash2 } from 'lucide-react'
+import { Loader2, Plus, Sparkles, Trash2, X } from 'lucide-react'
+import toast from 'react-hot-toast'
+import { rpgApi, type RpgAssistField } from '@/api/client'
 
 export const INPUT = 'w-full border rounded-lg px-3 py-2 text-sm bg-background/60 focus:outline-none focus:ring-1 focus:ring-primary/50'
 
@@ -107,7 +109,7 @@ export function Section({
 }
 
 export function Field({
-  label, value, onChange, placeholder, hint, multiline,
+  label, value, onChange, placeholder, hint, multiline, assist,
 }: {
   label: string
   value: string
@@ -115,6 +117,8 @@ export function Field({
   placeholder?: string
   hint?: string
   multiline?: boolean
+  /** 传了就在输入框下面出「AI 生成 / AI 优化」。栏位名见后端 FIELD_SPECS */
+  assist?: AssistTarget
 }) {
   return (
     <div>
@@ -129,7 +133,145 @@ export function Field({
       ) : (
         <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className={INPUT} />
       )}
+      {assist && <Assist {...assist} value={value} onApply={onChange} />}
       {hint && <p className="text-xs text-muted-foreground mt-1.5">{hint}</p>}
+    </div>
+  )
+}
+
+// ── 帮我写 ────────────────────────────────────────────────────────────────
+
+export interface AssistTarget {
+  moduleId: number
+  /** 后端 agents/rpg_assist.py 的 FIELD_SPECS 里的键 */
+  field: RpgAssistField
+  /** {展示名: 文本}，作为参考喂给模型。写成函数是为了拿点击那一刻的表单值，
+   *  而不是渲染那一刻的——作者常常是边写世界观边点旁边这个按钮 */
+  context?: () => Record<string, string>
+}
+
+/**
+ * 一个「帮我写」按钮加它的草稿区。放在输入框**下面**而不是标签行里：
+ * 角色卡、地点、道具那几栏是裸 textarea，压根没有标签行可以塞。
+ *
+ * 生成的东西不直接写回输入框 —— 作者点「用这段」才写。AI 不该悄悄改掉人家
+ * 已经写好的设定。点了「用这段」这一栏就进表单、随后自动存进库，跟作者自己
+ * 敲进去的字完全一样（要反悔就再改回去，或者重新生成一次）。
+ */
+export function Assist({
+  moduleId, field, context, value, onApply,
+}: AssistTarget & { value: string; onApply: (text: string) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState<string | null>(null)
+  const isGenerate = !value.trim()
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      const { text } = await rpgApi.modules.assist(moduleId, {
+        field, content: value, context: context?.() ?? {},
+      })
+      if (!text.trim()) {
+        toast.error('AI 没返回内容，再试一次')
+        return
+      }
+      setDraft(text)
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || (isGenerate ? 'AI 生成失败' : 'AI 优化失败'))
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={run}
+        disabled={busy}
+        className="flex items-center gap-1 text-xs px-2 py-1 rounded-md
+          text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
+      >
+        {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+        {isGenerate ? 'AI 生成' : 'AI 优化'}
+      </button>
+      {draft !== null && (
+        <AssistDraft
+          original={value}
+          draft={draft}
+          retrying={busy}
+          onRetry={run}
+          onDiscard={() => setDraft(null)}
+          onApply={text => { onApply(text); setDraft(null) }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** AI 结果就地展开，可改、可重试，确认后才替换原文。
+ *
+ *  不直接 import 酒馆那个（`TavernCard.tsx`）：它把 `border-pink-500/30`、
+ *  `bg-pink-500/[0.04]` 写死了，在 RPG 的紫色和另外 17 套主题下是一块粉斑。
+ *  这里跟主题主色走。 */
+function AssistDraft({
+  original, draft, onDiscard, onApply, onRetry, retrying,
+}: {
+  original: string
+  draft: string
+  onDiscard: () => void
+  onApply: (text: string) => void
+  onRetry: () => void
+  retrying: boolean
+}) {
+  const [text, setText] = useState(draft)
+
+  // 重新生成之后不收起，把新结果换进来
+  useEffect(() => { setText(draft) }, [draft])
+
+  return (
+    <div className={`${PANEL} mt-2 overflow-hidden`} style={{ borderColor: 'hsl(var(--primary) / 0.3)' }}>
+      <div
+        className="px-3 py-2 flex items-center gap-1.5 border-b"
+        style={{ borderColor: 'hsl(var(--primary) / 0.2)', background: 'hsl(var(--primary) / 0.06)' }}
+      >
+        <Sparkles className="w-3.5 h-3.5 text-primary shrink-0" />
+        <span className="text-xs font-medium text-primary">AI 写的版本</span>
+        <span className="text-xs text-muted-foreground">
+          {original.trim() ? '确认后替换上面的内容' : '确认后填进上面的输入框'}
+        </span>
+        <button
+          onClick={onDiscard}
+          className="ml-auto p-1 rounded-md hover:bg-primary/10 text-muted-foreground"
+          title="丢弃这版"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      <div className="p-3">
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          className={`${INPUT} resize-y min-h-[8rem] leading-relaxed`}
+        />
+        <div className="mt-2 flex gap-2 justify-end">
+          <button
+            onClick={onRetry}
+            disabled={retrying}
+            className="text-xs px-2.5 py-1.5 rounded-md text-muted-foreground hover:bg-muted
+              flex items-center gap-1.5 disabled:opacity-50"
+          >
+            {retrying && <Loader2 className="w-3 h-3 animate-spin" />}
+            重新生成
+          </button>
+          <button
+            onClick={() => onApply(text)}
+            disabled={!text.trim()}
+            className="text-xs px-3 py-1.5 rounded-md
+              bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            {original.trim() ? '替换原文' : '用这段'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

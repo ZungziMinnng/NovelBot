@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.prompts.loader import render
@@ -11,7 +10,7 @@ from app.schemas.chat import (
     ChatRequest,
 )
 from app.services import context_builder, llm_client, llm_json, web_search
-from app.services.sse import sse_event as _sse
+from app.services.sse import stream_chat
 from app.api.deps import CurrentUser, get_owned_novel
 
 router = APIRouter()
@@ -130,51 +129,9 @@ async def chat_stream(
     # 解析模型
     model, api_format = llm_client.get_agent_client("writer", req.model)
 
-    return _stream_response(
+    return stream_chat(
         messages, model, api_format, req.temperature, req.max_tokens,
         pre_warning=search_warning,
-    )
-
-
-def _stream_response(
-    messages: list[dict],
-    model: str,
-    api_format: str,
-    temperature: float,
-    max_tokens: int,
-    pre_warning: str = "",
-) -> StreamingResponse:
-    async def event_stream():
-        if pre_warning:
-            yield _sse("warning", pre_warning)
-        try:
-            in_tok = 0
-            out_tok = 0
-            async for chunk in llm_client.dispatch_chat_stream_with_usage(
-                messages=messages,
-                model=model,
-                api_format=api_format,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            ):
-                if isinstance(chunk, tuple):
-                    _, in_tok, out_tok = chunk
-                elif isinstance(chunk, dict):
-                    if "warning" in chunk:
-                        yield _sse("warning", chunk["warning"])
-                else:
-                    yield _sse("token", chunk)
-            yield _sse("done", {"input_tokens": in_tok, "output_tokens": out_tok})
-        except Exception as e:
-            yield _sse("error", str(e))
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
     )
 
 

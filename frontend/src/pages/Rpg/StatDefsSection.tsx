@@ -25,10 +25,12 @@ const newRelationStat = (): RpgStatDef => ({
  * 定义变了不会追溯已经开的局：那一局的数值在建局时就拷走了。
  */
 export default function StatDefsSection({
-  form, set,
+  form, set, example = '精力',
 }: {
   form: RpgModule
   set: <K extends keyof RpgModule>(key: K, value: RpgModule[K]) => void
+  /** 空格子里的示例词，按玩法类别换（见 stylePresets.STYLE_EXAMPLES） */
+  example?: string
 }) {
   return (
     <div className="space-y-6">
@@ -38,6 +40,7 @@ export default function StatDefsSection({
         defs={form.stat_defs || []}
         onChange={v => set('stat_defs', v)}
         make={newPlayerStat}
+        example={example}
         full
       />
       <StatTable
@@ -52,7 +55,7 @@ export default function StatDefsSection({
 }
 
 function StatTable({
-  label, hint, defs, onChange, make, full,
+  label, hint, defs, onChange, make, full, example = '精力',
 }: {
   label: string
   hint: string
@@ -61,6 +64,7 @@ function StatTable({
   make: () => RpgStatDef
   /** 玩家数值才有「可判定」和「归零时」两列 */
   full?: boolean
+  example?: string
 }) {
   const patch = (i: number, next: Partial<RpgStatDef>) =>
     onChange(defs.map((d, n) => (n === i ? { ...d, ...next } : d)))
@@ -75,7 +79,7 @@ function StatTable({
               <input
                 value={def.name}
                 onChange={e => patch(i, { name: e.target.value })}
-                placeholder="名字，如：精力"
+                placeholder={`名字，如：${example}`}
                 className={`${INPUT} flex-1 py-1.5`}
               />
               <select

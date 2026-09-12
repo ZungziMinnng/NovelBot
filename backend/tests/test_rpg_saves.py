@@ -262,6 +262,42 @@ class RpgSaveTests(unittest.TestCase):
 
         self._run(scenario)
 
+    def test_the_scheduled_activities_rewind_too(self):
+        """AI 调度写的那句「最近在做什么」同理，而且更隐蔽。
+
+        它每轮注入那个人的设定块，不回滚的话读档回来她还带着一句「未来」的行动。
+        """
+        async def scenario():
+            db, user, _other, sess, _npc = await self._setup()
+
+            sess.npc_activities = {"1": "在图书馆翻旧报纸"}
+            await db.commit()
+            save = await create_save(sess.id, RpgSaveCreate(label="动手前"), user, db)
+
+            sess.npc_activities = {"1": "在靶场练箭"}
+            await db.commit()
+
+            restored = await restore_save(save.id, user, db)
+            self.assertEqual(restored.npc_activities, {"1": "在图书馆翻旧报纸"})
+
+        self._run(scenario)
+
+    def test_an_old_snapshot_without_activities_falls_back_to_an_empty_table(self):
+        async def scenario():
+            db, user, _other, sess, _npc = await self._setup()
+
+            save = await _take_save(db, sess, "manual", "老档")
+            save.state = {k: v for k, v in save.state.items() if k != "npc_activities"}
+            await db.commit()
+
+            sess.npc_activities = {"1": "在靶场练箭"}
+            await db.commit()
+
+            restored = await restore_save(save.id, user, db)
+            self.assertEqual(restored.npc_activities, {})
+
+        self._run(scenario)
+
     def test_crossing_out_one_note_is_the_way_out_that_is_not_a_rewind(self):
         """这条路由存在的全部理由：不用把这之后玩的都扔掉也能改掉一条错记录。
 

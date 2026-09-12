@@ -12,13 +12,14 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.rpg import RpgMessage, RpgModule, RpgNpc, RpgSession, RpgWorldEntry
+from app.models.rpg import RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry
 from app.services.context_budget import estimate_tokens, truncate_to_token_budget
 from app.services.rpg_dice import OUTCOME_LABELS
+from app.services.rpg_play_style import style_block
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
     EFFECT_CHARS, TIER_LABEL_CHARS, check_condition, chronicle_lines, def_map,
-    tier_list, tier_of,
+    npc_activity, tier_list, tier_of,
 )
 
 SYSTEM_TOKEN_BUDGET = 8000
@@ -118,22 +119,77 @@ def world_npcs(npcs: list[RpgNpc]) -> list[RpgNpc]:
     return [n for n in npcs if (n.role or "npc") != "protagonist"]
 
 
-def here_npcs(npcs: list[RpgNpc], location: str) -> list[RpgNpc]:
+def npc_place(npc: RpgNpc, slot: str = "", places: dict | None = None) -> str:
+    """这个人此刻在哪儿：剧情挪过她就听剧情的，否则作息表 → 常驻地点。
+
+    **这不是第二个「在场」判据**，只是把 location 的取值方式换成了按时段查表。
+    谁在场仍然只有一种问法（here_npcs），前端 condition.onstage 是它的镜像，
+    两边一起改，否则会出现「面板上站在你面前、提示词里没这个人」。
+
+    places 是这一局的 npc_places：玩家在对话框里说「你过来」之后，结算把她的
+    位置写在里面。它是**剧情的事实**，优先于作息表这个**设定**；推时段时被
+    清空，作息表重新说了算。传 None（读不到会话的场合，比如模组编辑页）就
+    当它不存在，行为和加这一列之前逐字一致。
+    """
+    over = str((places or {}).get(str(npc.id)) or "").strip()
+    if over:
+        return over
+    table = npc.slot_locations if isinstance(npc.slot_locations, dict) else {}
+    now = (slot or "").strip()
+    if now:
+        at = str(table.get(now) or "").strip()
+        if at:
+            return at
+    return (npc.location or "").strip()
+
+
+def named_npcs(npcs: list[RpgNpc], text: str) -> list[RpgNpc]:
+    """名字（或触发词）在这段文字里出现过的人。
+
+    给「位置」那条写入路径当允许名单：只有**刚写出来的正文里真的出现了**
+    的人，才准结算改他的位置。比 onstage_npcs 的「被提到」再紧一层——
+    玩家嘴上抱怨一句马尔福，不该把马尔福挪到他跟前；正文里写了他推门进来，
+    才叫剧情真的动了这个人。
+
+    认名字的口径和小节和 onstage_npcs 一致（真名子串 + 触发词）。
+    """
+    haystack = (text or "").lower()
+    if not haystack:
+        return []
+    hits = []
+    for npc in world_npcs(npcs):
+        name = (npc.name or "").strip().lower()
+        if (name and name in haystack) or any(
+            kw.lower() in haystack for kw in _split_keywords(npc.keywords)
+        ):
+            hits.append(npc)
+    return hits
+
+
+def here_npcs(
+    npcs: list[RpgNpc], location: str, slot: str = "", places: dict | None = None,
+) -> list[RpgNpc]:
     """就在玩家当前地点的人。
 
     「在场」只有这一个定义：注入设定要它，标记见过面也要它。两边各写一遍
     迟早会分叉——分叉的那一次就是「被提到一句的人再也拿不到外貌描写」。
+
+    slot 传空（没设时段、或调用方不关心时间）时作息表不参与，一律按常驻地点算，
+    和没有这个功能时逐字一致。
     """
     here = (location or "").strip()
     if not here:
         return []
     return [
         npc for npc in world_npcs(npcs)
-        if (npc.location or "").strip() == here
+        if npc_place(npc, slot, places) == here
     ]
 
 
-def onstage_npcs(npcs: list[RpgNpc], location: str, scan_text: str) -> list[RpgNpc]:
+def onstage_npcs(
+    npcs: list[RpgNpc], location: str, scan_text: str, slot: str = "",
+    places: dict | None = None,
+) -> list[RpgNpc]:
     """这一轮要注入设定的人：在场的，加上被名字或触发词提到的。
 
     后一半是为了「人不在这儿但这一轮聊到了他」——没有它，玩家问"老兵说过什么"
@@ -142,7 +198,7 @@ def onstage_npcs(npcs: list[RpgNpc], location: str, scan_text: str) -> list[RpgN
     注意「注入」不等于「见过面」：被提到的人这一轮拿到设定，但不能因此算作
     他的外貌已经描写过。标记见过面的只有 here_npcs 那一份。
     """
-    spots = {id(npc) for npc in here_npcs(npcs, location)}
+    spots = {id(npc) for npc in here_npcs(npcs, location, slot, places)}
     haystack = (scan_text or "").lower()
     hits = []
     for npc in world_npcs(npcs):
@@ -324,6 +380,13 @@ def _one_npc(
         # 不用「此刻：」：_compose_state 已经拿它表示「你在和谁单独说话」，
         # 两块隔着几百字，同一个词两个意思
         lines.append("眼下：" + "；".join(f"{k} {v}" for k, v in notes.items()))
+    # AI 调度替她写的「最近在做什么」。她不在场时在别处自己过，玩家下回撞见
+    # 她得看得出这段日子没白过——不然调度就只是个后台空转的计数器。
+    # 紧跟在「眼下」后面：两行是一类东西（这一局里活着的近况），
+    # 排在作者写的档案之后、对话示例之前
+    activity = npc_activity(sess, npc.id)
+    if activity:
+        lines.append(f"最近：{activity}")
     # 对话示例只作为文字引用，不做真实 few-shot 轮：那会让模型学着
     # 连玩家那一侧一起写
     if examples:
@@ -352,7 +415,9 @@ def _npc_block(npcs: list[RpgNpc], sess: RpgSession, module: RpgModule) -> str:
     specs = def_map(module.relation_stat_defs)
     here = (sess.location or "").strip()
     # 稳定排序：同组内仍按 sort_order。地点为空时全员等价，不重排
-    ordered = sorted(npcs, key=lambda n: ((n.location or "").strip() != here) if here else False)
+    ordered = sorted(
+        npcs, key=lambda n: (npc_place(n, sess.slot, sess.npc_places) != here) if here else False
+    )
 
     for examples, profile in ((True, True), (False, True), (False, False)):
         block = "【在场】\n" + "\n\n".join(
@@ -429,17 +494,61 @@ def _inject_judgement(messages: list[dict], judgement: dict) -> None:
     last["content"] = f"{head}\n\n{last['content']}\n\n{tail}"
 
 
+def thread_summary(sess: RpgSession, thread_id: int | None) -> str:
+    """这条线的滚动概要。场面线走 summary 列，角色线走 thread_summaries。"""
+    if thread_id is None:
+        return sess.summary or ""
+    return (sess.thread_summaries or {}).get(str(thread_id), "") or ""
+
+
+def thread_summarized_upto(sess: RpgSession, thread_id: int | None) -> int:
+    """这条线已经压缩到哪条消息。含义同上，分开存。"""
+    if thread_id is None:
+        return sess.summarized_upto_id or 0
+    try:
+        return int((sess.thread_upto or {}).get(str(thread_id), 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def history_window(
-    module: RpgModule, sess: RpgSession, history: list[RpgMessage]
+    module: RpgModule,
+    sess: RpgSession,
+    history: list[RpgMessage],
+    thread_id: int | None = None,
 ) -> list[RpgMessage]:
-    """发原文的窗口：已压缩进 summary 的消息不再重复发。
+    """发原文的窗口：已压缩进概要的消息不再重复发。
 
     公开而不是私有：「帮我想想」也要按同一套规则取最近发生的事，
     两边各切一次的话，窗口的边界迟早对不上。
+
+    history 已经由调用方按线筛过了，thread_id 在这里只用来取对的那个指针——
+    传错线会让窗口按另一条线的进度去切，边界看着还很正常。
     """
-    upto = sess.summarized_upto_id or 0
+    upto = thread_summarized_upto(sess, thread_id)
     limit = max(1, module.context_turns or 20) * 2
     return [m for m in history if m.id > upto][-limit:]
+
+
+async def resolve_rules(
+    session: AsyncSession, user_id: int | None, ids: list[int]
+) -> str:
+    """按模组勾选的 id 拼 RPG 写作规则，无兜底——空就是空。
+
+    照酒馆 tavern_context.resolve_rules：RPG 默认不注入规则，没有小说侧那套
+    「NULL 回退到内置护栏」的语义。失效 id（规则被删）自然筛掉。
+    """
+    if not ids:
+        return ""
+    wanted = {int(i) for i in ids}
+    rules = (await session.execute(
+        select(RpgRule)
+        .where(RpgRule.user_id == user_id, RpgRule.enabled.is_(True))
+        .order_by(RpgRule.sort_order, RpgRule.id)
+    )).scalars().all()
+    return "\n\n".join(
+        r.content.strip() for r in rules if r.id in wanted and r.content.strip()
+    )
 
 
 async def build_rpg_messages(
@@ -465,7 +574,7 @@ async def build_rpg_messages(
 
     creator_note 永不出现在返回值里。
     """
-    window = history_window(module, sess, history)
+    window = history_window(module, sess, history, thread_id)
     # scan_depth=1 就只扫玩家刚发的这句。往回扫得越多，GM 自己的旁白越容易
     # 让词条反复命中——它提到了那个词，下一轮扫描又扫到，自己喂自己
     back = max(0, int(module.scan_depth or 3) - 1)
@@ -488,10 +597,12 @@ async def build_rpg_messages(
     )).scalars().all()
     # 词条的数值条件里可以写「赫敏的好感≥50」，所以要先拿到 npcs 再筛词条
     hits = triggered_entries(list(entries), scan_text, sess, list(npcs))
-    onstage = onstage_npcs(list(npcs), sess.location, scan_text)
+    onstage = onstage_npcs(
+        list(npcs), sess.location, scan_text, sess.slot, sess.npc_places,
+    )
     # 真的在跟前的那几个。标记见过面只认这一份：npcs_onstage 里还含被提到的
     # 人，他们的外貌这一轮发了，但人并没见到，不能算见过
-    here = here_npcs(list(npcs), sess.location)
+    here = here_npcs(list(npcs), sess.location, sess.slot, sess.npc_places)
     # 线主。主角模板不登场，不该有自己的线
     thread_npc = (
         next((n for n in world_npcs(list(npcs)) if n.id == thread_id), None)
@@ -505,6 +616,11 @@ async def build_rpg_messages(
         genre=(module.genre or "").strip(),
         reply_length=max(0, int(module.reply_length or 0)),
     ).strip())
+
+    # 玩法规则紧跟在 GM 指令后面，作为独立的一段而不是模板里的一个变量：
+    # 改过 rpg_gm.jinja2 的用户存的是旧版本，往模板里塞占位符对他们就是静默失效。
+    # 排在 system_instruction 之前，作者自己写的规则仍然能压过类别的通用规则
+    sections.append(style_block(module.play_style))
 
     if (module.system_instruction or "").strip():
         sections.append(module.system_instruction.strip())
@@ -555,11 +671,19 @@ async def build_rpg_messages(
     if (module.narration_sample or "").strip():
         sections.append("【叙事样例】\n" + module.narration_sample.strip())
 
-    if (sess.summary or "").strip():
+    # 取这条线自己那一份。**不能用一份全局概要**：概要注入的是 system，
+    # 一份全局概要注入每一条线，等于把你在密室里跟 A 说的话原样告诉 B
+    prior = thread_summary(sess, thread_id).strip()
+    if prior:
         sections.append(
-            "【此前剧情】\n"
-            + truncate_to_token_budget(sess.summary.strip(), SUMMARY_TOKEN_BUDGET)
+            "【此前剧情】\n" + truncate_to_token_budget(prior, SUMMARY_TOKEN_BUDGET)
         )
+
+    # 写作规则放 sections 末尾，同酒馆：它约束的是「怎么写」，最贴近本轮生成，
+    # 排最后离叙事最近、模型最不会忽略。空即不注入
+    rules_block = await resolve_rules(session, module.user_id, module.enabled_rule_ids or [])
+    if rules_block:
+        sections.append(rules_block)
 
     system_content = truncate_to_token_budget("\n\n".join(sections), SYSTEM_TOKEN_BUDGET)
 
@@ -601,5 +725,7 @@ async def build_rpg_messages(
         "npcs_onstage": [{"id": n.id, "name": n.name} for n in onstage],
         "npcs_here": [{"id": n.id, "name": n.name} for n in here],
         "intent_used": intent,
+        # 这一轮实际注入了写作规则没有，方便核对勾选是否生效
+        "rules_used": bool(rules_block),
     }
     return messages, diag

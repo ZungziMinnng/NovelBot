@@ -16,18 +16,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agents import rpg_turn
-from app.api.routes.rpg import move_to
+from app.api.routes.rpg import create_session, move_to
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
 from app.models.rpg import (
     RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSave, RpgSession,
 )
 from app.models.user import User
-from app.schemas.rpg import RpgMoveIn
+from app.schemas.rpg import RpgMoveIn, RpgSessionCreate
 from app.services.rpg_context import build_rpg_messages
 from app.services.rpg_state import (
-    CHRONICLE_LIMIT, advance_slot, apply_state_delta, note_move,
-    push_chronicle,
+    CHRONICLE_LIMIT, OPENING_CHARS, OPENING_TAG,
+    advance_slot, apply_state_delta, note_move, push_chronicle,
 )
 
 STAT_DEFS = [{"name": "精力", "initial": 100, "min": 0, "max": 100}]
@@ -158,14 +158,17 @@ class ThreadIsolationTests(unittest.IsolatedAsyncioTestCase):
 
         seen = {}
 
-        async def fake(_module, _sess, history):
+        async def fake(_module, _sess, history, thread_id=None):
             seen["contents"] = [m.content for m in history]
+            seen["thread_id"] = thread_id
             return []
 
         with patch.object(rpg_turn, "suggest_actions", fake):
             await suggest_actions(sess.id, user, 7, self.db)
 
         self.assertEqual(seen["contents"], ["对老兵说的"])
+        # 线号也要传进去：概要是按线存的，拿错线会把别人的往事当成前情
+        self.assertEqual(seen["thread_id"], 7)
 
 
 class ChronicleTests(unittest.IsolatedAsyncioTestCase):
@@ -285,6 +288,63 @@ class ChronicleTests(unittest.IsolatedAsyncioTestCase):
         messages, diag = await build_rpg_messages(self.db, module, sess, [], "我看看四周")
         self.assertNotIn("【外场】", messages[0]["content"])
         self.assertEqual(diag["chronicle_tokens"], 0)
+
+
+class OpeningSceneTests(unittest.IsolatedAsyncioTestCase):
+    """开场白归谁。
+
+    它是**场面线**的第一条旁白，不复制到任何人的私聊线——复制的话每条线各自
+    演化、各自被总结，同一段话在不同线里会被改写成不同的事实。
+
+    但那一幕是这一局最公共的事实（「你在校长办公室、赫敏就在跟前」），所以
+    同时压一条进大事记：那条通道本来就是跨线共享的，私聊线才知道刚发生了什么。
+    """
+
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.db = self.sessions()
+        self.user = SimpleNamespace(id=1)
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        await self.engine.dispose()
+
+    async def _open(self, opening):
+        module = _module(opening_scene=opening, default_location="校长办公室")
+        self.db.add(module)
+        await self.db.commit()
+        sess = await create_session(
+            module.id, RpgSessionCreate(char_name="阿隼"), self.user, self.db,
+        )
+        msgs = (await self.db.execute(
+            select(RpgMessage).where(RpgMessage.session_id == sess.id)
+        )).scalars().all()
+        return sess, msgs
+
+    async def test_it_lands_on_the_scene_line_only(self):
+        sess, msgs = await self._open("你在校长办公室，赫敏抬头看你。")
+        self.assertEqual(len(msgs), 1)
+        self.assertIsNone(msgs[0].thread_id)
+        self.assertEqual(msgs[0].role, "assistant")
+
+    async def test_it_also_becomes_one_public_fact(self):
+        sess, _ = await self._open("你在校长办公室，赫敏抬头看你。")
+        self.assertEqual(len(sess.chronicle), 1)
+        self.assertTrue(sess.chronicle[0].startswith(OPENING_TAG))
+        self.assertIn("赫敏", sess.chronicle[0])
+
+    async def test_a_long_opening_does_not_camp_in_the_outside_block(self):
+        # 大事记是一行一条的硬事实，整段旁白塞进去会常驻吃掉外场的预算
+        sess, _ = await self._open("很长的开场" * 200)
+        self.assertLessEqual(len(sess.chronicle[0]), OPENING_CHARS + len(OPENING_TAG))
+
+    async def test_no_opening_means_no_message_and_no_fact(self):
+        sess, msgs = await self._open("   ")
+        self.assertEqual(msgs, [])
+        self.assertEqual(sess.chronicle or [], [])
 
 
 class SceneAndThreadBlockTests(unittest.IsolatedAsyncioTestCase):

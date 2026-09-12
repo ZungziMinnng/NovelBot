@@ -37,12 +37,19 @@ from app.services.rpg_context import (
     build_rpg_messages,
     here_npcs,
     history_window,
+    named_npcs,
+    npc_place,
+    thread_summarized_upto,
+    thread_summary,
     world_npcs,
 )
 from app.services.rpg_dice import DEFAULT_BAND, OUTCOME_LABELS, normalize_band, resolve_rate, roll
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
+    OFFSCREEN_CHARS,
+    OFFSCREEN_TAG,
     apply_inventory,
+    apply_npc_activity,
     apply_relations,
     apply_state_delta,
     apply_stats,
@@ -52,9 +59,11 @@ from app.services.rpg_state import (
     def_map,
     for_check_stats,
     mark_met,
+    match_npc,
     norm_name,
     note_move,
     note_visited,
+    npc_activity,
     push_chronicle,
 )
 
@@ -101,7 +110,8 @@ def resolve_thread_id(
     if thread_id:
         return thread_id if any(n.id == thread_id for n in npcs) else None
     who = next(
-        (n for n in here_npcs(npcs, sess.location) if norm_name(n.name) == norm_name(target_npc)),
+        (n for n in here_npcs(npcs, sess.location, sess.slot, sess.npc_places)
+         if norm_name(n.name) == norm_name(target_npc)),
         None,
     )
     return who.id if who else None
@@ -117,9 +127,9 @@ def thread_blocker(sess: RpgSession, npcs: list[RpgNpc], thread_id: int | None) 
     npc = find_thread_npc(npcs, thread_id)
     if npc is None:
         return ""
-    if (npc.location or "").strip() != (sess.location or "").strip():
-        where = (npc.location or "").strip() or "他常在的地方"
-        return f"你得先回到{where}，才能和{(npc.name or '').strip()}说话"
+    where = npc_place(npc, sess.slot, sess.npc_places)
+    if where != (sess.location or "").strip():
+        return f"你得先回到{where or '他常在的地方'}，才能和{(npc.name or '').strip()}说话"
     return ""
 
 
@@ -155,6 +165,11 @@ def _state_payload(sess: RpgSession) -> dict:
         "npc_states": sess.npc_states or {},
         # GM 这一局记下的 NPC 近况：角色卡上那一块要跟着这一轮就更新
         "npc_notes": sess.npc_notes or {},
+        # AI 调度给不在场的人记的「最近在做什么」，同理
+        "npc_activities": sess.npc_activities or {},
+        # 剧情把谁挪到哪儿了：带回去面板才认得出「她此刻就在你面前」，
+        # 不带的话要等整页重新拉一次才动
+        "npc_places": sess.npc_places or {},
         "status": sess.status,
         # 去过哪儿：地图的迷雾按它散开，不带的话要等整页重新拉一次才亮
         "visited": sess.visited or [],
@@ -426,6 +441,33 @@ async def _store_reply(
 
 # ── ⑥⑦ AI 结算：只管自由行动那部分的后果 ─────────────────────────────────
 
+def _place_block(movable: list[RpgNpc], sess: RpgSession) -> str:
+    """结算提示词末尾追加的「人物位置」段。没人可动就是空串。
+
+    附在 rpg_settle.jinja2 之后而不是改进模板：那个模板用户可以自定义，
+    往里加变量会让他们的旧版本静默失效（同 style_block 的理由）。
+
+    得**把这几个人现在的位置写给模型看**：不写的话它只知道「赫敏推门进来」，
+    不知道她原本在宿舍，也就写不出「她回去了」那种清空。
+    """
+    if not movable:
+        return ""
+    rows = "".join(
+        f"{n.name} 现在在 {npc_place(n, sess.slot, sess.npc_places) or '行踪不明'}\n"
+        for n in movable
+    )
+    return (
+        "\n\n=== 人物位置 ===\n"
+        "这段剧情里**真的换了地方**的人（被叫来、跟着走、被带走、回自己屋），"
+        "在输出里加一个 npc_places：\n"
+        + rows
+        + '{"npc_places": {"赫敏": "校长办公室"}}\n'
+        '她只是回到自己平时待的地方，就写空串 ""，系统会按作息表替她算。\n'
+        "没换地方的人不要写。这个字段里只准出现上面这几位，别人一律不要写。\n"
+        "它只影响「她在不在你跟前」，不改任何数值。\n"
+    )
+
+
 async def _settle(
     session_id: int, message_id: int, narration: str, outcome_label: str,
     engine_note: str, thread_id: int | None = None,
@@ -448,7 +490,8 @@ async def _settle(
         # 且不报错。没有地点就意味着「所有人都在同一个场面里」，这是唯一说得通
         # 的读法，也是这类纯对话模组唯一能工作的读法
         who = (
-            here_npcs(npcs, sess.location) if (sess.location or "").strip()
+            here_npcs(npcs, sess.location, sess.slot, sess.npc_places)
+            if (sess.location or "").strip()
             else world_npcs(npcs)
         )
         owner = find_thread_npc(npcs, thread_id)
@@ -480,6 +523,13 @@ async def _settle(
             # 最近 10 条给模型看一眼，免得同一件事被反复写进大事记
             chronicle=chronicle_lines(sess)[-CHRONICLE_PROMPT_LINES:],
         )
+        # 人物位置。可动的只有「这段正文里真的出现了」的人——玩家嘴上叫一声
+        # 不算，正文里写了她推门进来才算（named_npcs 的口径，和下面那道
+        # 写入闸门用的是同一条规则，两边不能分叉）。
+        #
+        # 拼在模板后面而不是写进 rpg_settle.jinja2：那个模板用户可以自定义，
+        # 他们的旧版本不含这一段，位置这条线会对这些人静默失效。同 style_block
+        prompt += _place_block(named_npcs(world_npcs(npcs), narration), sess)
         model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
 
     data, in_tok, out_tok = await call_json(
@@ -498,6 +548,9 @@ async def _settle(
             module, sess, data, npcs, allow_move=thread_id is None,
             # 近况只许记在这一轮真的摆在模型眼前的人身上，见 apply_state_delta
             note_npcs=[n for n in npcs if n.id in who_ids],
+            # 位置比近况再紧一层：只有正文里真的出现过的人。模型据一个
+            # 只在玩家嘴里出现过的名字就能把人挪到跟前，那是纯凭空的编造
+            move_npcs=named_npcs(world_npcs(npcs), narration),
         )
         # 大事记（模型认为「已经传开」的那部分）。和每轮建议同一条路：
         # 顺手读一个字段，不额外花一次 LLM 调用
@@ -520,6 +573,303 @@ async def _settle(
     }
 
 
+# ── ⑧ 压缩旧剧情：一条线一份概要 ──────────────────────────────────────────
+
+# 摘要给模型看的一句话前缀。和 suggest 那边保持一致
+SUMMARY_MAX_TOKENS = 1200
+
+
+async def _maybe_summarize(session_id: int, thread_id: int | None) -> bool:
+    """这条线未压缩的消息超出窗口时，把溢出的那一段折成概要。
+
+    **每条线各存一份**。一份全局概要会注入每一条线，等于把密室里的对话原样
+    告诉所有人——chronicle 之所以规定「只写已经传开的事」，防的就是这个。
+
+    不能照抄酒馆的写法（同一个 session 里读 → 调 LLM → commit）：这个文件有
+    「写锁绝不跨 LLM 调用」的铁律，所以拆成读、调、写三段，结构同 _settle。
+
+    整个函数不抛：概要没生成只是停在旧位置，上下文退化成纯截断，下一轮照玩。
+    """
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return False
+        module = await store.get(RpgModule, sess.module_id)
+        if module is None:
+            return False
+        keep = max(1, module.context_turns or 20) * 2
+        upto = thread_summarized_upto(sess, thread_id)
+        pending = [
+            m for m in (await store.execute(
+                select(RpgMessage)
+                .where(RpgMessage.session_id == session_id, RpgMessage.id > upto)
+                .order_by(RpgMessage.id)
+            )).scalars().all()
+            if _in_thread(m, thread_id)
+        ]
+        if len(pending) <= keep:
+            return False
+
+        overflow = pending[: len(pending) - keep]
+        last_id = overflow[-1].id
+        who = (sess.char_name or "").strip() or DEFAULT_CHAR_NAME
+        transcript = "\n".join(
+            f"{who if m.role == 'user' else 'GM'}：{m.content}" for m in overflow
+        )
+        prompt = render(
+            "rpg_summary.jinja2",
+            previous_summary=thread_summary(sess, thread_id).strip(),
+            transcript=transcript,
+        )
+        # 摘要单独一个字段：它的输出会喂给下一次摘要，错一次会一路带到局终，
+        # 和「快且便宜就行」的裁决不是一类活。空 = 跟着裁决模型走
+        model, api_format = llm_client.get_agent_client(
+            "memory", module.summary_model_ref or module.fast_model_ref
+        )
+
+    text = await llm_client.dispatch_chat_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_format=api_format,
+        temperature=0.3,
+        max_tokens=SUMMARY_MAX_TOKENS,
+    )
+    if not (text or "").strip():
+        return False
+
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return False
+        if thread_id is None:
+            sess.summary = text.strip()
+            sess.summarized_upto_id = last_id
+        else:
+            # JSON 列就地改动 SQLAlchemy 认不出来（没上 MutableDict），
+            # 必须换成新字典才会写回去
+            sess.thread_summaries = {
+                **(sess.thread_summaries or {}), str(thread_id): text.strip(),
+            }
+            sess.thread_upto = {**(sess.thread_upto or {}), str(thread_id): last_id}
+        await store.commit()
+    return True
+
+
+# ── ⑨ 外场简报：推时段时给大事记补一句「别处在发生什么」──────────────────
+
+# 模型的输出上限。一两句话而已，给多了它就会开始编长篇
+OFFSCREEN_MAX_TOKENS = 200
+OFFSCREEN_LINES = 2
+
+# 模型被要求「没什么可写就输出无」时可能给出的各种写法
+_OFFSCREEN_NONE = {"无", "無", "none", "无。", "（无）", "(无)", "没有", "-"}
+
+
+async def offscreen_brief(session_id: int, from_slot: str = "") -> list[str]:
+    """推时段时补一条外场简报进大事记。返回写进去的那几行（已经带标签）。
+
+    **这是整个 RPG 玩法里唯一一次「玩家没说话却调模型」**，所以它由模组上的
+    offscreen_brief 开关管着，默认关：老模组按一下时钟仍然是零模型调用，
+    文档和界面上那句承诺不会因为加了这个功能变成假话。
+
+    只写玩家已经见过、此刻不在他身边的那些人——没见过的人进了大事记，等于
+    让所有对话线都能随口提起一个玩家还不该知道的名字。名单为空时直接返回，
+    连模型都不叫。
+
+    整个函数不抛：简报没生成只是少一条传闻，时钟该走还是走。
+    """
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return []
+        module = await store.get(RpgModule, sess.module_id)
+        if module is None or not module.offscreen_brief:
+            return []
+        npcs = list((await store.execute(
+            select(RpgNpc).where(RpgNpc.module_id == module.id)
+        )).scalars().all())
+        met = {
+            int(key) for key, state in (sess.npc_states or {}).items()
+            if isinstance(state, dict) and state.get("met") and str(key).isdigit()
+        }
+        here = (sess.location or "").strip()
+        others = [
+            n for n in world_npcs(npcs)
+            if n.id in met and npc_place(n, sess.slot, sess.npc_places) != here
+        ]
+        if not others:
+            return []
+        prompt = render(
+            "rpg_offscreen.jinja2",
+            day=max(1, sess.day or 1),
+            from_slot=(from_slot or "").strip(),
+            slot=(sess.slot or "").strip(),
+            location=here,
+            others=[
+                {
+                    "name": n.name,
+                    "place": npc_place(n, sess.slot, sess.npc_places) or "行踪不明",
+                    "persona": (n.persona or n.description or "").strip()[:60],
+                    "notes": "；".join(
+                        f"{k} {v}" for k, v in ((sess.npc_notes or {}).get(str(n.id)) or {}).items()
+                    )[:60],
+                }
+                for n in others
+            ],
+            chronicle=chronicle_lines(sess)[-CHRONICLE_PROMPT_LINES:],
+        )
+        model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
+        stamp = f"第 {max(1, sess.day or 1)} 天" + (
+            f"·{sess.slot}" if (sess.slot or "").strip() else ""
+        )
+
+    try:
+        text = await llm_client.dispatch_chat_complete(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            api_format=api_format,
+            temperature=0.8,
+            max_tokens=OFFSCREEN_MAX_TOKENS,
+        )
+    except Exception:
+        logger.exception("RPG 局 %s 外场简报生成失败", session_id)
+        return []
+
+    lines: list[str] = []
+    for raw in (text or "").splitlines():
+        # 去掉模型爱加的编号、项目符号和引号，同 suggest_actions
+        line = re.sub(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw)
+        line = line.strip().strip('"“”「」『』')
+        if not line or line.lower() in _OFFSCREEN_NONE:
+            continue
+        # 单行硬夹一下：大事记是一行一条的硬事实，一条长文会常驻吃掉外场预算
+        lines.append(f"{OFFSCREEN_TAG}{stamp} {line[:OFFSCREEN_CHARS]}")
+        if len(lines) >= OFFSCREEN_LINES:
+            break
+    if not lines:
+        return []
+
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return []
+        push_chronicle(sess, lines)
+        await store.commit()
+    return lines
+
+
+# ── ⑩ AI 调度：没被提到的角色自己过日子 ───────────────────────────────────
+
+# 一次调用写完所有闲着的角色，所以上限比外场简报宽
+ACTIVITY_MAX_TOKENS = 500
+# 给模型看的「最近一段剧情」长度。只为对齐时间轴，不给它全文
+ACTIVITY_RECENT_CHARS = 300
+
+
+async def idle_npc_activities(
+    session_id: int, engaged_ids: set[int],
+) -> dict[str, str]:
+    """给这一轮没被提到的、勾了「AI 调度」的角色各记一句「最近在做什么」。
+
+    engaged_ids 是这一轮注入过设定的那批人（在场 + 被提到的），由调用方从
+    build_rpg_messages 的 diag 里取。他们这一轮归叙事模型管，不该再被调度器
+    另写一份——两边各写一遍，玩家下回见面时听到的会和自己刚经历的对不上。
+
+    **一次调用写完所有人**，不是一人一次：勾了调度的角色可能有一屋子，
+    一人一次的话玩家每轮要为 N 次调用付钱、等 N 次往返。
+
+    有三件事是刻意不做的，写在这里免得后来改的人顺手加上：
+    - **不改 location**。她在哪儿仍然只由作息表和常驻地点说了算。让模型顺手
+      挪窝，玩家照着面板上的地点找过去就会扑空，地图的迷雾也无从跟着走。
+    - **不写大事记**。这是「她一个人干了什么」，不是「已经传开的事」；写进去
+      等于每条对话线上的所有人都知道了，chronicle 那条规矩禁的正是这个。
+    - **不碰任何数值**。数值归引擎，模型只能提议改动，这条是全模式的地基。
+
+    整个函数不抛：调度失败只是这一次没记上，下一轮照旧。
+    """
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return {}
+        module = await store.get(RpgModule, sess.module_id)
+        if module is None:
+            return {}
+        npcs = list((await store.execute(
+            select(RpgNpc).where(RpgNpc.module_id == module.id)
+        )).scalars().all())
+        # 主角模板不登场，没有「她最近在做什么」这回事
+        idle = [n for n in world_npcs(npcs) if n.ai_scheduled and n.id not in engaged_ids]
+        if not idle:
+            return {}
+        last = (await store.execute(
+            select(RpgMessage)
+            .where(RpgMessage.session_id == session_id, RpgMessage.role == "assistant")
+            .order_by(RpgMessage.id.desc())
+            .limit(1)
+        )).scalars().first()
+        prompt = render(
+            "rpg_activity.jinja2",
+            day=max(1, sess.day or 1),
+            slot=(sess.slot or "").strip(),
+            location=(sess.location or "").strip(),
+            recent=((last.content or "")[-ACTIVITY_RECENT_CHARS:] if last else "") or "（故事刚开始）",
+            npcs=[
+                {
+                    "name": n.name,
+                    "place": npc_place(n, sess.slot, sess.npc_places) or "行踪不明",
+                    "persona": (n.persona or n.description or "").strip()[:60],
+                    "activity": npc_activity(sess, n.id),
+                }
+                for n in idle
+            ],
+        )
+        model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
+
+    try:
+        text = await llm_client.dispatch_chat_complete(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            api_format=api_format,
+            temperature=0.9,
+            max_tokens=ACTIVITY_MAX_TOKENS,
+        )
+    except Exception:
+        logger.exception("RPG 局 %s 角色调度失败", session_id)
+        return {}
+
+    # 模型写的是名字，落库要的是 id。名字对不上就整行丢掉——**不报 warning**：
+    # 这是玩家没要求过的后台动作，为它的瑕疵打断他一轮剧情不划算
+    updates: dict[str, str] = {}
+    for raw in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw).strip()
+        if not line:
+            continue
+        # 全角冒号是模板要求的写法，半角是模型自己换的，两种都收
+        parts = re.split(r"[：:]", line, maxsplit=1)
+        if len(parts) != 2:
+            continue
+        who = match_npc(parts[0].strip().strip('"“”「」『』'), idle)
+        says = parts[1].strip().strip('"“”「」『』')
+        if who is None or not says:
+            continue
+        # 「赫敏：无」也算没写。不挡住的话角色卡上会挂一行「最近：无」，
+        # 而且它会一直留在那儿，模型下一轮还照着它编
+        if says.lower() in _OFFSCREEN_NONE:
+            continue
+        updates[str(who.id)] = says
+    if not updates:
+        return {}
+
+    async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
+        if sess is None:
+            return {}
+        for npc_id, says in updates.items():
+            apply_npc_activity(sess, int(npc_id), says)
+        await store.commit()
+    return updates
+
+
 # ── 帮我想想：玩家主动要三条建议 ──────────────────────────────────────────
 
 # 给模型的最近剧情条数。RPG 一轮就是一整段叙事，比酒馆的单条回复长得多，
@@ -528,14 +878,18 @@ SUGGEST_WINDOW = 8
 
 
 async def suggest_actions(
-    module: RpgModule, sess: RpgSession, history: list[RpgMessage]
+    module: RpgModule, sess: RpgSession, history: list[RpgMessage],
+    thread_id: int | None = None,
 ) -> list[str]:
     """「帮我想想」：给出 3 条玩家接下来可以做的事。
 
     和每轮结算顺带产出的 suggestions 是两条独立的路：那条是被动等来的，
     这条是玩家按按钮要的。返回空列表表示没能生成，前端提示一下就好。
+
+    history 由调用方按线筛过，thread_id 用来取对的那一份概要——拿错了会把
+    别的线的往事当成这条线的前情，而建议看上去仍然很合理。
     """
-    recent = history_window(module, sess, history)[-SUGGEST_WINDOW:]
+    recent = history_window(module, sess, history, thread_id)[-SUGGEST_WINDOW:]
     if not recent:
         return []
 
@@ -546,7 +900,9 @@ async def suggest_actions(
         "rpg_suggest.jinja2",
         char_name=(sess.char_name or "").strip() or DEFAULT_CHAR_NAME,
         location=sess.location or "",
-        summary=truncate_to_token_budget(sess.summary or "", SUMMARY_TOKEN_BUDGET),
+        summary=truncate_to_token_budget(
+            thread_summary(sess, thread_id), SUMMARY_TOKEN_BUDGET
+        ),
         transcript=transcript,
     )
     model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
@@ -758,6 +1114,30 @@ async def run_turn(
             # 给「补结算」按钮
             logger.exception("RPG 局 %s 结算失败", session_id)
             yield "warning", "这一轮的状态变化没能结算，可以稍后手动补"
+
+    # 压缩排在结算之后：这一轮的消息已经落库，它也该参与计数。
+    # 失败不吭声——玩家没要求过这件事，报错只会让他以为这一轮出了问题
+    try:
+        await _maybe_summarize(session_id, thread_id)
+    except Exception:
+        logger.exception("RPG 局 %s 概要生成失败，上下文退化为纯截断", session_id)
+
+    # AI 调度排在最后：它要知道这一轮提到了谁，那是 build_rpg_messages 算的。
+    # **这是唯一一次「玩家说完话了还在调模型」**，而且是每轮都调，所以它必须
+    # 排在 done 之前——done 之后前端就不再收了，玩家的侧栏会一直停在旧状态。
+    # 没勾任何角色、或者勾了的都在场，这一次调用根本不发生
+    try:
+        # diag 是这一轮注入过设定的人（在场 + 被提到的）。他们归叙事模型管，
+        # 调度器另写一份会和玩家刚经历的剧情对不上
+        engaged = {int(n["id"]) for n in diag.get("npcs_onstage") or []}
+        # 线主单独补一笔。模组一个地点都没定义时 here_npcs 恒为空，玩家在和她
+        # 私聊却没说她的名字，她就不在那份名单里——于是调度器会给一个**正在和
+        # 你说话的人**另写一份「她今天在干什么」，下一轮两句直接打架
+        if thread_id:
+            engaged.add(int(thread_id))
+        await idle_npc_activities(session_id, engaged)
+    except Exception:
+        logger.exception("RPG 局 %s 角色调度失败", session_id)
 
     yield "done", {
         "message_id": message_id,

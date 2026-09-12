@@ -33,6 +33,11 @@ class RpgModule(Base):
     opening_scene: Mapped[str] = mapped_column(Text, default="")
     # GM 风格覆盖，拼在底层 GM 指令之后
     system_instruction: Mapped[str] = mapped_column(Text, default="")
+
+    # 勾选的 rpg_rules.id（RPG 自己的写作规则库，不是酒馆的也不是小说侧的）。
+    # 默认 [] = 不注入。理由同酒馆：RPG 是全新功能，没有「老数据护栏不能丢」的
+    # 包袱，所以不要小说侧那套 NULL 三态语义
+    enabled_rule_ids: Mapped[list] = mapped_column(JSON, default=list)
     # 叙事腔调样例。只作为文字引用进 system，不做真实 few-shot 轮——
     # 那会让模型学着连玩家那一侧一起写
     narration_sample: Mapped[str] = mapped_column(Text, default="")
@@ -42,6 +47,12 @@ class RpgModule(Base):
     # 「都市」「魔法学院」「互动养成」这种。只是一句话进 GM 提示词，
     # 但它决定了模型的整体基调，比任何参数都管用
     genre: Mapped[str] = mapped_column(String(100), default="")
+
+    # 玩法类别：sim（模拟）/ rpg（探索冒险，默认）/ slg（经营策略）。
+    # 和 genre 是两根正交的轴：genre 说「世界长什么样」，它说「这局怎么玩」。
+    # 同一个魔法学院，可以是模拟养成也可以是探索冒险，两者说的不是一回事。
+    # 取值见 services/rpg_play_style.py
+    play_style: Mapped[str] = mapped_column(String(20), default="rpg")
 
     # ── 数值定义 ──
     # 玩家那一套。[{name, initial, min, max, for_check, on_zero, display}]
@@ -92,9 +103,40 @@ class RpgModule(Base):
     reply_length: Mapped[int] = mapped_column(Integer, default=300)
 
     model_ref: Mapped[str] = mapped_column(String(100), default="")
-    # 裁决 / 结算 / 摘要 / 建议共用的便宜模型。酒馆只有摘要一个，
+    # 裁决 / 结算 / 建议共用的便宜模型。酒馆只有摘要一个，
     # RPG 一轮里有三处结构化调用，合用一个字段省得配四遍
     fast_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    # 压缩旧剧情用。空 = 跟着 fast_model_ref 走，所以老库行为不变。
+    # 单独拎出来是因为摘要和裁决的要求不一样：裁决要快要便宜，摘要错一次
+    # 会把错的东西一路带到局终（它的输出会喂给下一次摘要）
+    summary_model_ref: Mapped[str] = mapped_column(String(100), default="")
+
+    # 推时段时写一句「别处的传闻」进大事记。**默认关**：开了之后「结束这个
+    # 时段」就不再是零模型调用了，这个承诺写在文档、按钮提示和测试里
+    offscreen_brief: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgRule(Base):
+    """RPG 写作规则。与酒馆 tavern_rules、小说侧 prompt_rules 各自分表。
+
+    小说侧那批规则是按写长篇正文调的，套到逐轮对话上会打架；酒馆那批又是按
+    酒馆玩法调的，共用一张表会让几个模式的列表互相污染。这里没有内置规则，
+    所以不需要 is_builtin / builtin_key——RPG 默认不注入任何规则。
+    """
+    __tablename__ = "rpg_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -170,8 +212,17 @@ class RpgNpc(Base):
 
     # 常驻地点。等于 session.location 即视为在场
     location: Mapped[str] = mapped_column(String(100), default="")
+    # 作息表：{"早": "大礼堂", "晚": "寝室"}。当前时段在这张表里有值就用它，
+    # 没有（或整个表是空的）就落回 location。**不是第二个在场判据**——
+    # 它只是给 location 换了个按时段取值的算法，谁在场仍然只有一种问法
+    slot_locations: Mapped[dict] = mapped_column(JSON, default=dict)
     # 额外触发词：人不在场但被提到也注入，匹配方式同世界书
     keywords: Mapped[str] = mapped_column(String(500), default="")
+
+    # 勾上之后，这一轮没被提到的人会自己过日子：模型给她写一句「最近在做什么」，
+    # 记在 session.npc_activities 里，下回见面时注入。**默认关**——它意味着
+    # 每轮多一次模型调用，而这个模式此前只有玩家说话时才花钱
+    ai_scheduled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 这个人的关系数值起点。空 = 按模组的 relation_stat_defs 取 initial；
     # 填了就覆盖对应项（「她一开始就恨你」）
@@ -201,6 +252,10 @@ class RpgItem(Base):
     usable: Mapped[bool] = mapped_column(Boolean, default=True)
     # 用完就少一个。关键道具（钥匙）设 false
     consumable: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 开局就带在身上。和 rpg_modules.default_inventory 是两件事：那是「这一局
+    # 开场凭空多出来的一件东西」，这是「这件道具本身就该在玩家身上」。
+    # 建局时两边合并（rpg_state.starting_inventory）
+    start_with: Mapped[bool] = mapped_column(Boolean, default=False)
     # {"精力": 20, "资金": -50}，键必须是 stat_defs 里有的名字
     effects: Mapped[dict] = mapped_column(JSON, default=dict)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
@@ -335,6 +390,29 @@ class RpgSession(Base):
     # 悄悄归零、所有「好感≥50」的门一起失效，而且全程没有任何报错。
     npc_notes: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。键同 npc_states
+    # （npc_id 的字符串），值是**一句**话，每个角色只有一个。
+    #
+    # 存在这一局而不是角色卡上：同一个模组可以开好几局，写进卡里等于把 A 局的
+    # 玩法带到 B 局——玩家在 B 局第一次见到赫敏，她已经在复述 A 局的事了。
+    # 和 npc_notes 分开同理，那张表是 GM 从叙事里读出来的近况，这张是调度替
+    # 不在场的人编的行动，两个写手共用一个键空间迟早互相盖
+    npc_activities: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 剧情把谁挪到哪儿了：{"3": "校长办公室"}，键同 npc_states。
+    #
+    # 作息表和常驻地点回答的是「没事的时候她在哪儿」，这一列回答「这一格剧情
+    # 把她挪到哪了」——玩家在对话框里说「你过来」，结算从刚写出的正文里读出
+    # 她的新位置写在这里，下一轮她真的站在跟前（侧栏这么说、能拉进私聊、
+    # 调度也不再替一个站在你面前的人写「在宿舍干什么」）。
+    #
+    # 存这一局而不是写进角色卡：同一个模组开两局，A 局把她叫到办公室，
+    # B 局第一次见面不该从办公室开始。理由同 npc_activities。
+    #
+    # **推时段清空**（rpg_state.advance_slot）：时段一变就回到「作息表说了算」，
+    # 否则模型随手写的一笔会永久盖掉作者排的作息表，而那是他唯一的排期手段。
+    npc_places: Mapped[dict] = mapped_column(JSON, default=dict)
+
     # 大事记：这一局里「已经传开」的事，跨对话线共享。存在的理由是分线之后
     # 「你在铁匠铺听说老兵他哥失踪了，回去找老兵，老兵没听过」——这不是摘要器
     # 能修的，摘要只管一条线。
@@ -348,9 +426,17 @@ class RpgSession(Base):
     # 存名字不存 id，理由同 connections
     visited: Mapped[list] = mapped_column(JSON, default=list)
 
-    # 滚动摘要，含义同酒馆
+    # 滚动摘要，含义同酒馆。**这两列只管场面线**（thread_id 为 NULL 的那条）
     summary: Mapped[str] = mapped_column(Text, default="")
     summarized_upto_id: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 每条角色线各存一份概要。{"3": "……"} / {"3": 128}，键是 npc_id 的字符串。
+    #
+    # 不能只存一份全局概要：概要是要注入 system 的，一份全局概要注入每一条线，
+    # 等于把你在密室里跟 A 说的话原样告诉 B。chronicle 之所以要求「只写已经
+    # 传开的事」，防的就是这个；摘要器绕过那条规矩的话，分线就白做了
+    thread_summaries: Mapped[dict] = mapped_column(JSON, default=dict)
+    thread_upto: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 难度台账：[{"key": "撬锁", "attr": "敏捷", "band": "hard"}]，留最近 20 条。
     # 裁决时注入当一致性锚，挡住「同一个动作难度来回跳」

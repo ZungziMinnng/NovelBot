@@ -41,6 +41,36 @@ PROMPTS = {
         "description": "把较早的剧情压缩为长期记忆。建议保留禁止编造的要求；修改只影响下一次压缩。",
         "variables": {"previous_summary": "已有剧情梗概", "transcript": "需要压缩的剧情"},
     },
+    "rpg_offscreen.jinja2": {
+        "label": "外场简报",
+        "description": "玩家推时段时，写一两句「别处此刻在发生什么」进大事记。只在模组里勾上「时段跳转时写外场简报」才会走这个模板，默认不调用；整个模板最要紧的是不许造新人新地名，否则传闻会污染所有对话线。",
+        "variables": {"day": "第几天", "from_slot": "刚过去的时段名", "slot": "现在的时段名", "location": "玩家所在地点", "others": "玩家见过、此刻不在他身边的角色，每项含 name、place、persona、notes", "chronicle": "已经传开的事，最近几条"},
+    },
+    "rpg_activity.jinja2": {
+        "label": "角色自由行动",
+        "description": "给这一轮没被提到的角色各写一句「最近在做什么」。只在角色卡上勾了「AI 调度」才会走这个模板，默认不调用；写法上最要紧的是不许造新人新地名，也不许写会影响玩家的重大事件——这些句子会常驻在那个人的设定里。",
+        "variables": {"day": "第几天", "slot": "当前时段名", "location": "玩家所在地点", "recent": "最近一段剧情，只用来看时间对不齐", "npcs": "这一轮没被提到、且开了 AI 调度的角色，每项含 name、place、persona、activity（上次记下的那句）"},
+    },
+    "rpg_assist.jinja2": {
+        "label": "帮我写（模组编辑）",
+        "description": "编辑模组时点「AI 生成 / AI 优化」用的。同一个模板兼管两件事：这一栏是空的就从零写，有内容就在原文上改。只影响编辑器里的按钮，不进游玩时的任何环节。",
+        "variables": {"field_label": "正在写哪一栏", "field_guidance": "这一栏该写什么，由后端按栏位给出", "max_chars": "字数上限", "content": "这一栏当前的内容，空表示从零写", "is_generate": "true = 从零写，false = 在原文上改", "context_blocks": "模组里已经写好的其他部分，每项含 label、content"},
+    },
+    "rpg_wizard.jinja2": {
+        "label": "构思向导（对话）",
+        "description": "新建模组时那个「构思助手」的对话提示词。带作者一步步把世界、数值、地点、角色、道具聊具体，每一步只聊一摊。只帮着攒设定，不进游玩时的任何环节。",
+        "variables": {"nsfw": "是否开成人模式", "stage": "当前哪一步（world/stats/places/cast/things），空表示还没进向导", "confirmed": "前面几步已经定下来的内容，空表示还没定", "play_style": "玩法类别（sim/rpg/slg），决定该往哪个方向聊"},
+    },
+    "rpg_wizard_extract.jinja2": {
+        "label": "构思向导（抽取）",
+        "description": "把构思对话里聊定的结论抽成表单字段。按当前这一步只抽对应的那一摊。角色/道具/动作引用的数值名、地点名要和前面定过的对得上，对不上的会被后端丢掉。请保持 JSON 输出格式和字段名。",
+        "variables": {"stage": "当前哪一步（world/stats/places/cast/things）", "stat_names": "前面定过的玩家数值名，供道具/动作的 effects 校验", "relation_names": "前面定过的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "前面定过的地点名，供角色 location 校验"},
+    },
+    "rpg_generate.jinja2": {
+        "label": "一键生成（模组编辑）",
+        "description": "在地点/角色/道具/动作那一摊点「AI 生成」时用的。按作者一句话的要求批量生成，引用的数值名、地点名要和模组里已有的对得上，对不上的会被后端丢掉。请保持 JSON 输出格式和字段名。",
+        "variables": {"kind": "生成哪一摊（location/npc/item/action）", "instruction": "作者的要求，如「生成霍格沃兹的五个地点」", "count": "目标数量", "nsfw": "是否开成人模式", "stat_names": "模组已有的玩家数值名，供道具/动作 effects 校验", "relation_names": "模组已有的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "模组已有的地点名，供角色 location 校验", "existing_names": "这一摊里模组已有的名字，提示模型别重复生成"},
+    },
 }
 
 _env = ImmutableSandboxedEnvironment(undefined=StrictUndefined)
@@ -63,8 +93,19 @@ def validate(name: str, content: str) -> None:
         reply_length=200, stats={"敏捷": 12}, ledger=[{"key": "撬锁", "attr": "敏捷", "band": "hard"}],
         rate=63, dice=41, relation_names=["好感", "信任"],
         inventory=[{"name": "火把", "qty": 1}], flags={"地窖门已开": True},
-        npcs=[{"id": 1, "name": "老兵", "notes": {"伤势": "左肩中刀"}}], note_keys=["伤势"],
+        npcs=[{
+            "id": 1, "name": "老兵", "notes": {"伤势": "左肩中刀"},
+            # place/persona/activity 只有「角色自由行动」那个模板用得上。
+            # 多给的键对别的模板无害，而少给一个键 StrictUndefined 会当场炸
+            "place": "铁匠铺", "persona": "话少", "activity": "在磨刀",
+        }], note_keys=["伤势"],
         chronicle=["后山挖出了尸首"],
+        max_chars=400, is_generate=True,
+        context_blocks=[{"label": "世界观", "content": "示例"}],
+        day=3, from_slot="中", slot="晚",
+        others=[{"name": "赫敏", "place": "图书馆", "persona": "好胜", "notes": "左肩中刀"}],
+        stat_names=["精力", "资金"], location_names=["酒馆", "后巷"],
+        count=3, existing_names=["酒馆", "后巷"],
     )
     template = _env.from_string(content)
     template.render(**values)
@@ -73,6 +114,10 @@ def validate(name: str, content: str) -> None:
         note_keys=[], relation_names=[],
         location="", recent="", summary="", previous_summary="", dice=0,
         outcome_label="", engine_note="", chronicle=[],
+        is_generate=False, context_blocks=[],
+        from_slot="", slot="", others=[],
+        stat_names=[], location_names=[],
+        existing_names=[],
     )
     template.render(**values)
 

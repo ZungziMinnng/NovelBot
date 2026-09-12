@@ -4,8 +4,10 @@ import toast from 'react-hot-toast'
 import { Package, X } from 'lucide-react'
 import { rpgApi, type RpgItem, type RpgStatDef } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
-import { ACCENT, AddRow, DeleteButton, INPUT, Section } from './rpgUi'
+import { ACCENT, AddRow, Assist, DeleteButton, INPUT, Section } from './rpgUi'
 import EffectEditor from './EffectEditor'
+import BatchGenerate from './BatchGenerate'
+import { effectChips } from './effectChips'
 
 const CATEGORIES = ['消耗品', '装备', '关键道具'] as const
 
@@ -15,19 +17,28 @@ interface ItemForm {
   category: string
   usable: boolean
   consumable: boolean
+  start_with: boolean
   effects: Record<string, number>
 }
 
 const EMPTY: ItemForm = {
-  name: '', description: '', category: '消耗品', usable: true, consumable: true, effects: {},
+  name: '', description: '', category: '消耗品',
+  usable: true, consumable: true, start_with: false, effects: {},
 }
+
+/** 换分类时「用一次就少一个」跟不跟着变。消耗品一件一件地少，装备和关键道具
+ *  不该用一次就没了——钥匙用完消失是 bug 不是设计。只给个对的默认值，勾还是
+ *  能手动改回来，所以这条不会把「一瓶反复喝的药水」这种写法堵死 */
+const consumableByCategory = (category: string) => category === '消耗品'
 
 /** 道具定义。玩家「使用」时数值由引擎按 effects 精确增减，AI 只负责写成画面。 */
 export default function ItemSection({
-  moduleId, statDefs,
+  moduleId, statDefs, assistContext,
 }: {
   moduleId: number
   statDefs: RpgStatDef[]
+  /** 模组层面的参考（模组名/题材/类别/世界观），「帮我写」要用 */
+  assistContext: () => Record<string, string>
 }) {
   const qc = useQueryClient()
   const { data: items = [] } = useQuery({
@@ -46,7 +57,8 @@ export default function ItemSection({
     setEditingId(item.id)
     setForm({
       name: item.name, description: item.description, category: item.category,
-      usable: item.usable, consumable: item.consumable, effects: item.effects || {},
+      usable: item.usable, consumable: item.consumable, start_with: item.start_with,
+      effects: item.effects || {},
     })
     setShowForm(true)
   }
@@ -84,7 +96,7 @@ export default function ItemSection({
   return (
     <Section
       title="道具"
-      desc="定义了效果的道具，用起来数字是死的，AI 改不了。没定义的东西也能进背包，只是没有精确效果。"
+      desc="定义了效果的道具，用起来数字是死的，AI 改不了。勾上「开局就带在身上」的，新开的局一开局就有一件；没勾的要在剧情里拿到。"
       icon={Package}
       accent={ACCENT.bag}
     >
@@ -102,6 +114,11 @@ export default function ItemSection({
                     {k}{v > 0 ? `+${v}` : v}
                   </span>
                 ))}
+                {item.start_with && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                    开局就带
+                  </span>
+                )}
                 {!item.usable && (
                   <span className="text-[11px] text-muted-foreground">不可使用</span>
                 )}
@@ -134,18 +151,30 @@ export default function ItemSection({
               />
               <select
                 value={form.category}
-                onChange={e => setForm({ ...form, category: e.target.value })}
+                onChange={e => {
+                  const category = e.target.value
+                  setForm({ ...form, category, consumable: consumableByCategory(category) })
+                }}
                 className={INPUT}
               >
                 {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
-            <textarea
-              value={form.description}
-              onChange={e => setForm({ ...form, description: e.target.value })}
-              placeholder="它长什么样、哪来的、用起来是什么感觉……"
-              className={`${INPUT} resize-y min-h-[4rem]`}
-            />
+            <div>
+              <textarea
+                value={form.description}
+                onChange={e => setForm({ ...form, description: e.target.value })}
+                placeholder="它长什么样、哪来的、用起来是什么感觉……"
+                className={`${INPUT} resize-y min-h-[4rem]`}
+              />
+              <Assist
+                moduleId={moduleId}
+                field="item_description"
+                context={() => ({ ...assistContext(), 道具名: form.name, 分类: form.category })}
+                value={form.description}
+                onApply={v => setForm(f => ({ ...f, description: v }))}
+              />
+            </div>
             <EffectEditor
               label="使用时的数值变化"
               defs={statDefs}
@@ -172,6 +201,20 @@ export default function ItemSection({
                 <span className="text-xs">用一次就少一个</span>
               </label>
             </div>
+            {/* 单独一行，因为这一条的后果和前两条不在一处：前两条管「怎么用」，
+                这条管「有没有」。没勾的话，这件道具只是个定义，开局身上不会有 */}
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.start_with}
+                onChange={e => setForm({ ...form, start_with: e.target.checked })}
+                className="accent-[hsl(var(--primary))]"
+              />
+              <span className="text-xs">
+                开局就带在身上
+                <span className="text-muted-foreground">（不勾的话，新开的局里不会有这件）</span>
+              </span>
+            </label>
             <div className="flex gap-2 justify-end">
               <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
               <button
@@ -184,7 +227,33 @@ export default function ItemSection({
             </div>
           </div>
         ) : (
-          <AddRow onClick={() => setShowForm(true)}>添加道具</AddRow>
+          <div className="space-y-2">
+            <AddRow onClick={() => setShowForm(true)}>添加道具</AddRow>
+            <BatchGenerate<{
+              name: string; description: string; category: string
+              consumable: boolean; start_with: boolean; effects: Record<string, number>
+            }>
+              moduleId={moduleId}
+              kind="item"
+              placeholder="想生成什么道具？比如：生成几件魔法学院里常见的消耗品"
+              renderRow={(it) => (
+                <>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{it.category}</span>
+                  {effectChips(it.effects)}
+                </>
+              )}
+              onApply={async (its) => {
+                for (const it of its) {
+                  await rpgApi.items.create(moduleId, {
+                    name: it.name, description: it.description, category: it.category,
+                    consumable: it.consumable, start_with: it.start_with, effects: it.effects,
+                    sort_order: items.length + 1,
+                  })
+                }
+                await refresh()
+              }}
+            />
+          </div>
         )}
       </div>
     </Section>

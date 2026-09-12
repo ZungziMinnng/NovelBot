@@ -1,17 +1,20 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText } from 'lucide-react'
-import { rpgApi, type RpgModule } from '@/api/client'
+import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText, Settings2, X } from 'lucide-react'
+import { rpgApi, type RpgModule, type RpgPlayStyle } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
-import { PANEL } from './rpgUi'
+import { INPUT, PANEL } from './rpgUi'
+import { PLAY_STYLES, STYLE_DEFAULTS, styleLabel } from './stylePresets'
 
 export default function Rpg() {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const [creating, setCreating] = useState(false)
   const { data: modules = [], isLoading } = useQuery({
     queryKey: ['rpg-modules'],
     queryFn: rpgApi.modules.list,
@@ -32,9 +35,15 @@ export default function Rpg() {
     }
   }
 
-  const create = async () => {
+  const create = async (name: string, playStyle: RpgPlayStyle) => {
     try {
-      const created = await rpgApi.modules.create({ name: '未命名模组' })
+      // 类别和它带的默认开关一次发过去：先建空壳再 PATCH 的话，中间那一下失败
+      // 就留下一个类别不对的模组，而作者根本不知道有这回事
+      const created = await rpgApi.modules.create({
+        name: name.trim() || '未命名模组',
+        play_style: playStyle,
+        ...STYLE_DEFAULTS[playStyle],
+      })
       qc.invalidateQueries({ queryKey: ['rpg-modules'] })
       navigate(`/rpg/module/${created.id}`)
     } catch {
@@ -62,6 +71,14 @@ export default function Rpg() {
         >
           <ScrollText className="w-3.5 h-3.5" /> 提示词
         </button>
+        <button
+          onClick={() => navigate('/rpg/settings')}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
+            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          title="写作规则：管住叙事的用词用语"
+        >
+          <Settings2 className="w-3.5 h-3.5" /> 设定
+        </button>
         <div className="ml-auto">
           <ThemePicker />
         </div>
@@ -78,7 +95,7 @@ export default function Rpg() {
             </p>
           </div>
           <button
-            onClick={create}
+            onClick={() => setCreating(true)}
             className="flex items-center gap-1.5 text-sm rounded-lg px-4 py-2 shrink-0
               bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
           >
@@ -92,7 +109,7 @@ export default function Rpg() {
           </div>
         ) : modules.length === 0 ? (
           <button
-            onClick={create}
+            onClick={() => setCreating(true)}
             className="w-full rounded-xl border border-dashed border-violet-500/30 py-20 text-center
               hover:bg-violet-500/5 transition-colors group"
           >
@@ -122,7 +139,12 @@ export default function Rpg() {
                   <div className="flex items-start gap-3.5">
                     <ModuleCover name={module.name} url={module.cover_url} />
                     <div className="min-w-0 flex-1">
-                      <p className="font-semibold truncate">{module.name}</p>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="font-semibold truncate">{module.name}</p>
+                        <span className="text-[11px] px-2 py-0.5 rounded-full shrink-0 bg-primary/10 text-primary">
+                          {styleLabel(module.play_style)}
+                        </span>
+                      </div>
                       <p className="text-xs text-muted-foreground mt-1 flex items-center gap-3">
                         <span className="flex items-center gap-1" title="NPC">
                           <Users className="w-3 h-3" />{module.npc_count}
@@ -165,6 +187,90 @@ export default function Rpg() {
           </div>
         )}
       </main>
+
+      {creating && <CreateDialog onCancel={() => setCreating(false)} onCreate={create} />}
+    </div>
+  )
+}
+
+/**
+ * 新建模组只问两件事：叫什么、怎么玩。
+ *
+ * 原来是零表单直接建一个空壳。问题不在于少一步，而在于类别决定了一堆默认开关
+ * （随机数、时段表），建完再改要作者自己去翻设置页——而他这时候还不知道有这些
+ * 开关。留在树里不用 portal：--rpg-* 那些变量定在外面那个 .mode-rpg 上。
+ */
+function CreateDialog({
+  onCancel, onCreate,
+}: {
+  onCancel: () => void
+  onCreate: (name: string, playStyle: RpgPlayStyle) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [style, setStyle] = useState<RpgPlayStyle>('rpg')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    setBusy(true)
+    try { await onCreate(name, style) } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-sm px-6">
+      <div className={`${PANEL} w-full max-w-md p-6 space-y-5 backdrop-blur-md`}>
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold">新建模组</h3>
+          <button onClick={onCancel} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+
+        <div>
+          <label className="text-sm font-medium mb-2 block">模组名字</label>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !busy) submit() }}
+            placeholder="例：锈锁地窖"
+            autoFocus
+            className={INPUT}
+          />
+        </div>
+
+        <div>
+          <label className="text-sm font-medium mb-2 block">怎么玩</label>
+          <div className="space-y-1.5">
+            {PLAY_STYLES.map(s => (
+              <button
+                key={s.key}
+                onClick={() => setStyle(s.key)}
+                className={`w-full text-left px-3 py-2 rounded-lg border transition-colors ${
+                  style === s.key
+                    ? 'bg-primary/10 border-primary/40'
+                    : 'border-border/70 hover:bg-muted'
+                }`}
+              >
+                <span className={`text-sm ${style === s.key ? 'text-primary font-medium' : ''}`}>{s.label}</span>
+                <p className="text-xs text-muted-foreground mt-0.5">{s.hint}</p>
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            类别管这局怎么玩，进编辑页后还能改，也可以另外写题材（什么世界）。
+          </p>
+        </div>
+
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+          <button
+            onClick={submit}
+            disabled={busy}
+            className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
+              bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            开始写
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

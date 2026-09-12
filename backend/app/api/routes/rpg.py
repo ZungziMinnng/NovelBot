@@ -10,17 +10,19 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import rpg_turn
+from app.agents import rpg_assist, rpg_turn, rpg_wizard
 from app.api.deps import CurrentUser
 from app.api.routes.rpg_prompts import router as prompts_router
 from app.database import get_db
 from app.models.rpg import (
     RpgAction, RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc,
-    RpgSave, RpgSession, RpgWorldEntry,
+    RpgRule, RpgSave, RpgSession, RpgWorldEntry,
 )
 from app.schemas.rpg import (
     RpgActionCreate, RpgActionOut, RpgActionUpdate,
     RpgAdvanceOut,
+    RpgAssistIn, RpgAssistOut,
+    RpgGenerateIn,
     RpgItemCreate, RpgItemOut, RpgItemUpdate,
     RpgLocationCreate, RpgLocationOut, RpgLocationUpdate,
     RpgMessageOut,
@@ -28,16 +30,22 @@ from app.schemas.rpg import (
     RpgMoveIn, RpgMoveOut,
     RpgNoteDeleteIn,
     RpgNpcCreate, RpgNpcOut, RpgNpcUpdate,
+    RpgRuleCreate, RpgRuleOut, RpgRuleUpdate,
     RpgSaveCreate, RpgSaveOut,
     RpgSessionCreate, RpgSessionOut, RpgSessionUpdate,
     RpgSuggestOut,
     RpgTurnRequest,
+    RpgWizardChatIn, RpgWizardExtractIn, RpgWizardExtractOut,
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
 )
+from app.services import llm_json
 from app.services.rpg_state import (
-    advance_slot, apply_npc_notes, init_relation, init_stats, slot_table,
+    OPENING_CHARS, OPENING_TAG,
+    advance_slot, apply_npc_activity, apply_npc_notes, init_relation, init_stats,
+    push_chronicle, slot_table,
+    starting_inventory,
 )
-from app.services.sse import sse_event
+from app.services.sse import sse_event, stream_chat
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +113,13 @@ async def _get_owned_session(db: AsyncSession, session_id: int, user) -> RpgSess
     return sess
 
 
+async def _get_owned_rule(db: AsyncSession, rule_id: int, user) -> RpgRule:
+    rule = await db.get(RpgRule, rule_id)
+    if not rule or rule.user_id != user.id:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return rule
+
+
 async def _module_counts(db: AsyncSession, module_ids: list[int]) -> dict[int, dict]:
     """批量取每个模组的局数 / NPC 数 / 词条数，避免列表页 N+1。"""
     if not module_ids:
@@ -128,6 +143,53 @@ def _module_out(module: RpgModule, counts: dict | None = None) -> RpgModuleOut:
     for key, value in (counts or {}).items():
         setattr(out, key, value)
     return out
+
+
+# ── 写作规则 ──────────────────────────────────────────────────────────────
+
+@router.get("/rules/", response_model=list[RpgRuleOut])
+async def list_rules(user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    return (await db.execute(
+        select(RpgRule)
+        .where(RpgRule.user_id == user.id)
+        .order_by(RpgRule.sort_order, RpgRule.id)
+    )).scalars().all()
+
+
+@router.post("/rules/", response_model=RpgRuleOut)
+async def create_rule(
+    data: RpgRuleCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)
+):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="规则名称不能为空")
+    rule = RpgRule(**{**data.model_dump(), "name": name}, user_id=user.id)
+    db.add(rule)
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+@router.patch("/rules/{rule_id}", response_model=RpgRuleOut)
+async def update_rule(
+    rule_id: int, data: RpgRuleUpdate, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    rule = await _get_owned_rule(db, rule_id, user)
+    for field, value in data.model_dump(exclude_none=True).items():
+        setattr(rule, field, value)
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+@router.delete("/rules/{rule_id}")
+async def delete_rule(rule_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """删规则。勾选过它的模组里会留一个失效 id，解析时自然跳过，不用回头清。"""
+    rule = await _get_owned_rule(db, rule_id, user)
+    await db.delete(rule)
+    await db.commit()
+    return {"ok": True}
 
 
 # ── 模组 ──────────────────────────────────────────────────────────────────
@@ -197,6 +259,114 @@ async def delete_module(module_id: int, user: CurrentUser, db: AsyncSession = De
     await db.delete(module)
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/modules/{module_id}/assist", response_model=RpgAssistOut)
+async def assist_module_field(
+    module_id: int, data: RpgAssistIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """帮作者写某一栏。不落库——生成完给作者过目，他点「用这个」才进表单。"""
+    module = await _get_owned_module(db, module_id, user)
+    if data.field not in rpg_assist.FIELD_SPECS:
+        raise HTTPException(status_code=400, detail="这一栏不支持 AI 生成")
+    try:
+        text = await rpg_assist.assist_field(
+            data.field, data.content, data.context, module.model_ref
+        )
+    except ValueError as e:
+        # 模型配错时 resolve_model_ref 抛 ValueError，别变成 500
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RpgAssistOut(text=text)
+
+
+@router.post("/modules/{module_id}/wizard")
+async def wizard_chat(
+    module_id: int, data: RpgWizardChatIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """构思向导的对话轮，SSE 流式。不落库——聊定的结论前端逐项确认后才写回。"""
+    module = await _get_owned_module(db, module_id, user)
+    try:
+        messages, model, api_format = await rpg_wizard.chat_stream_args(
+            [m.model_dump() for m in data.messages],
+            module.model_ref, data.nsfw, data.stage, data.confirmed, data.play_style,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return stream_chat(messages, model, api_format, module.temperature, module.max_tokens)
+
+
+@router.post("/modules/{module_id}/wizard/extract", response_model=RpgWizardExtractOut)
+async def wizard_extract(
+    module_id: int, data: RpgWizardExtractIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """抽当前这一步聊定的结论并按白名单清洗。不落库。"""
+    module = await _get_owned_module(db, module_id, user)
+    if data.stage not in rpg_wizard.STAGES:
+        raise HTTPException(status_code=400, detail="未知的向导步骤")
+    if not data.messages:
+        return RpgWizardExtractOut()
+    transcript = "\n\n".join(
+        f"{'作者' if m.role == 'user' else '助手'}：{m.content}"
+        for m in data.messages if m.content
+    )
+    try:
+        result = await rpg_wizard.extract_stage(
+            data.stage, transcript, data.known, module.model_ref
+        )
+    except llm_json.JsonCallError as e:
+        raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RpgWizardExtractOut(**result)
+
+
+# 一键生成的类别 → 拉「已有同名」用的模型。白名单靠查库，不用前端传
+_GENERATE_MODELS = {
+    "location": RpgLocation, "npc": RpgNpc, "item": RpgItem, "action": RpgAction,
+}
+
+
+@router.post("/modules/{module_id}/generate/{kind}", response_model=RpgWizardExtractOut)
+async def generate_batch(
+    module_id: int, kind: str, data: RpgGenerateIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """在某一摊点「AI 生成」，按一句话要求批量生成并按白名单清洗。不落库——
+    前端预览勾选后各自建行。白名单（数值名/地点名/同类已有名字）在这里查库，
+    避免前端传一份可能过期的。"""
+    module = await _get_owned_module(db, module_id, user)
+    if kind not in _GENERATE_MODELS:
+        raise HTTPException(status_code=400, detail="这一摊不支持一键生成")
+
+    location_names = list((await db.execute(
+        select(RpgLocation.name).where(RpgLocation.module_id == module.id)
+    )).scalars().all())
+    existing_names = list((await db.execute(
+        select(_GENERATE_MODELS[kind].name).where(
+            _GENERATE_MODELS[kind].module_id == module.id
+        )
+    )).scalars().all())
+    known = {
+        "stat_names": [s.get("name") for s in (module.stat_defs or []) if s.get("name")],
+        "relation_names": [
+            s.get("name") for s in (module.relation_stat_defs or []) if s.get("name")
+        ],
+        "location_names": location_names,
+        "existing_names": existing_names,
+    }
+    count = max(1, min(data.count, 10))
+    try:
+        result = await rpg_wizard.generate_batch(
+            kind, data.instruction, count, known, data.nsfw, module.model_ref,
+        )
+    except llm_json.JsonCallError as e:
+        raise HTTPException(status_code=502, detail=f"生成失败：{e}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RpgWizardExtractOut(**result)
 
 
 @router.post("/modules/{module_id}/cover", response_model=RpgModuleOut)
@@ -427,13 +597,20 @@ async def create_session(
         if name in stats:
             stats[name] = value
     start = data.location if data.location is not None else module.default_location
+    # 开局背包 = 模组写的那些 + 道具定义里勾了「开局就有」的。
+    # 以前只拷 default_inventory，所以「在道具页定义了一件东西」和「玩家身上
+    # 有这件东西」之间没有任何桥，定义完开局背包还是空的——这就是作者看到
+    # 「道具定义了却用不上」的地方
+    bag = starting_inventory(module, (await db.execute(
+        select(RpgItem).where(RpgItem.module_id == module_id).order_by(RpgItem.sort_order, RpgItem.id)
+    )).scalars().all())
     sess = RpgSession(
         module_id=module_id,
         title=data.title or f"{data.char_name}的冒险",
         char_name=data.char_name,
         char_desc=data.char_desc,
         stats=stats,
-        inventory=[dict(item) for item in (module.default_inventory or [])],
+        inventory=bag,
         location=start,
         # 站在哪就算去过哪：地图一开局就该有一块是亮的
         visited=[start] if str(start or "").strip() else [],
@@ -466,9 +643,16 @@ async def create_session(
         await db.commit()
 
     if module.opening_scene.strip():
-        db.add(RpgMessage(
-            session_id=sess.id, role="assistant", content=module.opening_scene.strip()
-        ))
+        opening = module.opening_scene.strip()
+        # 开场白是**场面线**的第一条旁白。历史是按线切的，所以私聊线里看不到它
+        # ——玩家一开局去点开场白里写到的那个人，会撞上一条空线，而模型在那条
+        # 线里也不知道刚刚发生了什么。
+        db.add(RpgMessage(session_id=sess.id, role="assistant", content=opening))
+        # 所以顺手压一条进外场。开场那一幕是这一局最公共的事实（「你在校长
+        # 办公室、赫敏就在跟前」），而大事记本来就是跨线共享的那条通道，抬头
+        # 还写着「传闻不等于亲眼见过」，正好合用。**不复制全文到每条线**：
+        # 那样每条线都会各自演化、各自被总结，同一段话在不同线里会变成不同的事
+        push_chronicle(sess, f"{OPENING_TAG}{opening[:OPENING_CHARS]}")
         await db.commit()
     return sess
 
@@ -509,6 +693,26 @@ async def delete_npc_note(
     return sess
 
 
+@router.delete("/sessions/{session_id}/npc-activity/{npc_id}", response_model=RpgSessionOut)
+async def delete_npc_activity(
+    session_id: int, npc_id: int, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """划掉 AI 调度给这个人记的那句「最近在做什么」。
+
+    这是玩家唯一的补救，理由同 delete_npc_note：那句话每轮注入这个人的设定块，
+    模型会照着它往下编。她不在这儿的时候写了什么，玩家没看着、也不该被逼着
+    接受——比如调度给一个刚死了哥的人编了「在集市上跟人闲聊天」。
+
+    只清这一句，不清掉他的「AI 调度」开关：开关是模组作者的决定，改它要回模组页。
+    """
+    sess = await _get_owned_session(db, session_id, user)
+    apply_npc_activity(sess, npc_id, "")
+    await db.commit()
+    await db.refresh(sess)
+    return sess
+
+
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     sess = await _get_owned_session(db, session_id, user)
@@ -531,6 +735,14 @@ SNAPSHOT_FIELDS = (
     "status", "stats", "inventory", "location", "flags", "npc_states",
     "summary", "summarized_upto_id", "dc_ledger", "turn_count",
     "time_slots", "slot", "day", "chronicle", "visited", "npc_notes",
+    # AI 调度的产物。不回滚的话读档之后角色卡上还挂着「未来」的那句行动
+    "npc_activities",
+    # 分线概要同理，而且更隐蔽：场面线的概要回滚了、角色线的没回滚，
+    # 读档之后两条线对同一段往事的记忆会直接打架
+    "thread_summaries", "thread_upto",
+    # 剧情挪动的人物位置。不回滚的话读档回到三天前，赫敏还站在办公室里——
+    # 而那个"办公室"是三天后你才叫她去的
+    "npc_places",
 )
 AUTO_SAVE_KEEP = 30
 
@@ -539,7 +751,8 @@ AUTO_SAVE_KEEP = 30
 # 「快照里没有」和「值是 None」是两回事，给老字段补默认反而会炸
 SNAPSHOT_DEFAULTS = {
     "time_slots": [], "slot": "", "day": 1, "chronicle": [], "visited": [],
-    "npc_notes": {},
+    "npc_notes": {}, "thread_summaries": {}, "thread_upto": {},
+    "npc_activities": {}, "npc_places": {},
 }
 
 
@@ -692,7 +905,9 @@ async def advance_time(
 ):
     """结束当前时段。碰最后一格就翻篇：新的一天、跨天回满。
 
-    纯引擎，不调模型——按一下时钟不该产生任何叙事，也不该花玩家的钱。
+    默认**纯引擎，不调模型**——按一下时钟不该产生任何叙事，也不该花玩家的钱。
+    模组上勾了「外场简报」才会额外调一次便宜的模型写一两句别处的事，
+    那时的花费和等待都写在按钮的提示里。
     """
     sess = await _get_owned_session(db, session_id, user)
     if sess.status != "alive":
@@ -702,9 +917,17 @@ async def advance_time(
     await _take_save(db, sess, "auto", "")
     await _prune_auto_saves(db, session_id)
 
-    facts = advance_slot(await db.get(RpgModule, sess.module_id), sess)
+    module = await db.get(RpgModule, sess.module_id)
+    was = str(sess.slot or "").strip()
+    facts = advance_slot(module, sess)
     sess.updated_at = datetime.utcnow()
     await db.commit()
+
+    # 简报在写事务提交之后才调模型：这个项目的铁律是写锁绝不跨 LLM 调用。
+    # 简报自己另开一条连接写大事记，写完再把这个 sess 刷回来看新值
+    if module is not None and module.offscreen_brief:
+        facts = facts + await rpg_turn.offscreen_brief(session_id, was)
+
     await db.refresh(sess)
     return RpgAdvanceOut(session=sess, facts=facts)
 
@@ -777,7 +1000,7 @@ async def suggest_actions(
     ]
     try:
         return RpgSuggestOut(
-            suggestions=await rpg_turn.suggest_actions(module, sess, history)
+            suggestions=await rpg_turn.suggest_actions(module, sess, history, thread_id)
         )
     except ValueError as e:
         # 模型配错时 resolve_model_ref 抛 ValueError，别变成 500

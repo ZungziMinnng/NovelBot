@@ -3,25 +3,26 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
-  ArrowLeft, BookMarked, Clock, Dices, Lightbulb, Loader2, MapPin, PanelRightOpen,
+  ArrowLeft, BookMarked, Clock, Cpu, Dices, Lightbulb, Loader2, MapPin, PanelRightOpen,
   Send, SkipForward, Square, User, X,
 } from 'lucide-react'
 import {
-  rpgApi, streamRpgTurn,
-  type RpgAction, type RpgMessage, type RpgNpc, type RpgRoll, type RpgSave,
-  type RpgSession, type RpgSSEMessage, type RpgTurnMeta,
+  rpgApi, modelLibraryApi, modelSelectValue, streamRpgTurn,
+  type ModelEntry, type RpgAction, type RpgMessage, type RpgModule, type RpgNpc,
+  type RpgRoll, type RpgSave, type RpgSession, type RpgSSEMessage, type RpgTurnMeta,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import AutoTextarea from '@/components/AutoTextarea'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import Silk from '@/components/Silk/Silk'
-import { checkCondition, knownNpcs, norm, onstage } from './condition'
+import { checkCondition, knownNpcs, norm, npcPlace, onstage } from './condition'
 import DiceRoll from './DiceRoll'
 import LocationOverview from './LocationOverview'
 import NpcSheet from './NpcSheet'
 import PlacePage from './PlacePage'
 import StatePanel from './StatePanel'
 import StatusSidebar, { type SidebarTab } from './StatusSidebar'
+import { styleLabel } from './stylePresets'
 
 /** 界面上的一条消息。id 为 null 表示流式过程中还没落库的占位气泡 */
 interface Bubble {
@@ -133,6 +134,21 @@ export default function RpgPlay() {
 
   useEffect(() => { if (loaded) setBubbles(loaded.map(toBubble)) }, [loaded])
 
+  // 新局直接落在场面线上。开场白是场面线的第一条旁白，而默认视图是地图总览
+  // ——不跳的话玩家开局第一眼看到的是一张地图，得往里点两层才看得到作者
+  // 写的那一幕，多数人会以为开场白没生效。
+  // 判据是「玩家一句话都还没说过」，而且只在进页面时判一次：之后无论他停在
+  // 哪一级，刷新回来都该停在原地，不能被这一跳抢走
+  const landedRef = useRef(false)
+  useEffect(() => {
+    if (!loaded || landedRef.current) return
+    landedRef.current = true
+    if (loaded.length > 0 && loaded.every(m => m.role !== 'user')) {
+      setThreadId(null)
+      setView('line')
+    }
+  }, [loaded])
+
   useEffect(() => () => { abortRef.current?.abort() }, [])
 
   // 只有见过面或此刻在场的人能当动作对象：对一个还没登场的人「夸奖」
@@ -164,6 +180,15 @@ export default function RpgPlay() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lineBubbles])
+
+  /** 公共场面里的最后一段旁白。一条还没开口的私聊线拿它当背景垫在上面：
+   *  那条线自己没有历史，但故事并不是从玩家的第一句话才开始的——新局时
+   *  这一段正好就是开场白 */
+  const sceneTail = useMemo(
+    () => [...bubbles].reverse()
+      .find(b => (b.thread_id ?? null) === null && b.role === 'assistant')?.content || '',
+    [bubbles],
+  )
 
   const send = useCallback((
     text: string, useAttr: string, extra: TurnExtra = {}, thread: number | null = threadId,
@@ -357,7 +382,7 @@ export default function RpgPlay() {
     }
   }
 
-  /** 结束当前时段。纯引擎，不叫模型——按一下时钟不该产生叙事，也不该花钱 */
+  /** 结束当前时段。默认纯引擎，不叫模型；模组勾了「别处简报」才会多一次调用 */
   const advance = async () => {
     if (locked || engineBusy) return
     setEngineBusy(true)
@@ -378,6 +403,16 @@ export default function RpgPlay() {
   const dropNote = async (npcId: number, key: string) => {
     try {
       qc.setQueryData(['rpg-session', sessionId], await rpgApi.sessions.deleteNpcNote(sessionId, npcId, key))
+    } catch {
+      toast.error('没能划掉')
+    }
+  }
+
+  /** 划掉 AI 调度替她编的那一句。同理不拍存档，而且清掉之后
+   *  她下一轮还会照常过日子、再写一句新的 */
+  const dropActivity = async (npcId: number) => {
+    try {
+      qc.setQueryData(['rpg-session', sessionId], await rpgApi.sessions.deleteNpcActivity(sessionId, npcId))
     } catch {
       toast.error('没能划掉')
     }
@@ -464,7 +499,10 @@ export default function RpgPlay() {
         <Silk speed={2} scale={1.4} color="#6d3ab0" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
       </div>
 
-      <header className="relative z-10 border-b border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 flex items-center gap-3 shrink-0">
+      {/* z-20 而不是 z-10：页头里的下拉（模型、主题）是绝对定位的，会垂到下面
+          那块内容区上。内容区也是 z-10 而且在 DOM 里更靠后，同层后来者居上，
+          下拉就被右边的角色栏盖住了。页头必须比内容高一层 */}
+      <header className="relative z-20 border-b border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 flex items-center gap-3 shrink-0">
         <button
           onClick={() => navigate(`/rpg/module/${sess.module_id}`)}
           className="p-2 rounded-md hover:bg-muted"
@@ -476,7 +514,9 @@ export default function RpgPlay() {
         <div className="min-w-0">
           <p className="font-bold text-sm truncate">{sess.char_name || '无名者'}</p>
           <p className="text-xs text-muted-foreground truncate">
-            {module?.name || ''} · 第 {sess.turn_count} 回合
+            {module?.name || ''}
+            {module ? ` · ${styleLabel(module.play_style)}` : ''}
+            {' · '}第 {sess.turn_count} 回合
           </p>
         </div>
 
@@ -505,13 +545,16 @@ export default function RpgPlay() {
             <button
               onClick={advance}
               disabled={locked || engineBusy}
-              title="推进到下一个时段。这一下不生成剧情，模型也不会参与"
+              title={module?.offscreen_brief
+                ? '推进到下一个时段。这一下不生成剧情，但会调一次便宜模型写一句「别处」的大事记'
+                : '推进到下一个时段。这一下不生成剧情，模型也不会参与'}
               className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border
                 hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <SkipForward className="w-3.5 h-3.5" />结束这个时段
             </button>
           )}
+          {module && <ModelPicker module={module} disabled={streaming} />}
           <ThemePicker />
           <button
             onClick={() => setMenuOpen(true)}
@@ -626,11 +669,30 @@ export default function RpgPlay() {
               {view === 'line' && (
                 <>
                   {lineBubbles.length === 0 && (
-                    <p className="text-center text-sm text-muted-foreground py-20">
-                      {threadNpc
-                        ? `你和${threadNpc.name}还没说过话。写下你要说的第一句。`
-                        : '场面线还是空的。写下你要做的事，或者回地点总览找人说话。'}
-                    </p>
+                    <>
+                      {/* 私聊线的开头垫一段公共场面。**不是这条线的消息**，所以
+                          画成虚线框的灰字，还写明了出处——不标的话玩家会以为
+                          这句是对方说的，下一句就接着它回话，而模型那边这条线
+                          里根本没有这段文字 */}
+                      {threadNpc && sceneTail && (
+                        <div className="space-y-1.5 pt-4">
+                          <p className="text-[11px] text-muted-foreground px-1">
+                            此刻的场面 · 来自公共场面，不算你们说过的话
+                          </p>
+                          <div className="rounded-2xl border border-dashed border-border/60 bg-muted/20
+                            px-5 py-4 text-sm leading-[1.9] whitespace-pre-wrap text-muted-foreground">
+                            {sceneTail}
+                          </div>
+                        </div>
+                      )}
+                      <p className={`text-center text-sm text-muted-foreground ${
+                        threadNpc && sceneTail ? 'py-8' : 'py-20'}`}
+                      >
+                        {threadNpc
+                          ? `你和${threadNpc.name}还没说过话。写下你要说的第一句。`
+                          : '场面线还是空的。写下你要做的事，或者回地点总览找人说话。'}
+                      </p>
+                    </>
                   )}
                   {lineBubbles.map((b, i) => (
                     <div key={b.id ?? `pending-${i}`} className="space-y-2">
@@ -804,9 +866,12 @@ export default function RpgPlay() {
           relationDefs={relDefs}
           state={sess.npc_states?.[String(openNpc.id)] || {}}
           notes={sess.npc_notes?.[String(openNpc.id)] || {}}
+          activity={sess.npc_activities?.[String(openNpc.id)] || ''}
           here={onstage(openNpc, sess)}
+          place={npcPlace(openNpc, sess.slot, sess.npc_places)}
           onClose={() => setOpenNpc(null)}
           onDeleteNote={key => dropNote(openNpc.id, key)}
+          onDeleteActivity={() => dropActivity(openNpc.id)}
         />
       )}
 
@@ -826,6 +891,93 @@ export default function RpgPlay() {
             </button>
             {menu}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 页头的「模型」下拉。改的是**模组**，不是这一局——同一个模组的其他存档跟着变。
+ * 这是照酒馆的做法（TavernChat 切模型也是写回卡片），好处是换完不用回设定页，
+ * 代价是它不是这一局的私有设置，所以按钮的 title 里得说清楚。
+ *
+ * 面板留在组件树里用 absolute，**不能 createPortal** —— `--rpg-*` 那些颜色变量
+ * 定在 .mode-rpg 这个 div 上，portal 到 body 的东西取不到，会变成一块裸色。
+ */
+function ModelPicker({ module, disabled }: { module: RpgModule; disabled: boolean }) {
+  const qc = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+  const { data: models = [] } = useQuery({ queryKey: ['model-library'], queryFn: modelLibraryApi.list })
+  const usable = models.filter((m: ModelEntry) => m.model_type !== 'embedding')
+
+  // 点别处收起来。用 document 监听而不是铺一层 fixed 幕布：页头带 backdrop-blur，
+  // 而 backdrop-filter 会给 fixed 子元素当包含块，幕布只盖得住页头那一条
+  useEffect(() => {
+    if (!open) return
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+  }, [open])
+
+  const change = async (key: 'model_ref' | 'fast_model_ref' | 'summary_model_ref', value: string) => {
+    try {
+      await rpgApi.modules.update(module.id, { [key]: value })
+      qc.invalidateQueries({ queryKey: ['rpg-module', module.id] })
+    } catch {
+      toast.error('换模型失败')
+    }
+  }
+
+  const row = (
+    label: string,
+    key: 'model_ref' | 'fast_model_ref' | 'summary_model_ref',
+    empty: string,
+    hint: string,
+  ) => (
+    <div>
+      <label className="text-xs font-medium mb-1 block">{label}</label>
+      <select
+        value={modelSelectValue(models, module[key])}
+        onChange={e => change(key, e.target.value)}
+        className="w-full border rounded-lg px-2.5 py-1.5 text-xs bg-background/60"
+      >
+        <option value="">{empty}</option>
+        {usable.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
+      </select>
+      <p className="text-[11px] text-muted-foreground mt-1">{hint}</p>
+    </div>
+  )
+
+  return (
+    <div ref={box} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        disabled={disabled}
+        title="换这一局用的模型。改的是这个模组，同一模组的其他存档也跟着变"
+        className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border
+          hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        <Cpu className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">模型</span>
+      </button>
+
+      {open && (
+        // 底色不用 PANEL 的 bg-card/70 而是实心 bg-card：半透明的话下面的聊天
+        // 文字会透上来，三个下拉根本看不清。其余（rpg-panel 的那圈起伏、圆角、
+        // 边框）和别处一致
+        <div className="rpg-panel absolute right-0 top-full mt-2 z-50 w-64 p-3 space-y-3
+          rounded-xl border bg-card shadow-xl"
+        >
+          {row('叙事', 'model_ref', '跟随默认', '写旁白的那次调用。')}
+          {row('判定与结算', 'fast_model_ref', '跟随默认', '只吐 JSON，便宜的就行。')}
+          {row('总结', 'summary_model_ref', '跟随判定模型', '把旧剧情压成梗概，压错会一路带下去。')}
+          <p className="text-[11px] text-muted-foreground border-t pt-2">
+            改的是模组本身，这个模组的其他存档也跟着变。
+          </p>
         </div>
       )}
     </div>
