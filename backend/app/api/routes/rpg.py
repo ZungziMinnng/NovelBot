@@ -35,7 +35,7 @@ from app.schemas.rpg import (
     RpgSessionCreate, RpgSessionOut, RpgSessionUpdate,
     RpgSuggestOut,
     RpgTurnRequest,
-    RpgWizardChatIn, RpgWizardExtractIn, RpgWizardExtractOut,
+    RpgWizardChatIn, RpgWizardExtractIn, RpgWizardExtractOut, RpgWizardFullIn,
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
 )
 from app.services import llm_json
@@ -293,6 +293,7 @@ async def wizard_chat(
             [m.model_dump() for m in data.messages],
             rpg_wizard.pick_model(data.model, module.model_ref),
             data.nsfw, data.stage, data.confirmed, data.play_style,
+            data.world_scope,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -321,6 +322,29 @@ async def wizard_extract(
         )
     except llm_json.JsonCallError as e:
         raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RpgWizardExtractOut(**result)
+
+
+@router.post("/modules/{module_id}/wizard/generate", response_model=RpgWizardExtractOut)
+async def wizard_generate_full(
+    module_id: int, data: RpgWizardFullIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """根据一句话生成整套模组草案，清洗后交给前端预览回填。"""
+    module = await _get_owned_module(db, module_id, user)
+    instruction = data.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="请先输入一句话想法")
+    try:
+        result = await rpg_wizard.generate_full(
+            instruction, data.nsfw, module.play_style,
+            rpg_wizard.pick_model(data.model, module.model_ref),
+            data.world_scope,
+        )
+    except llm_json.JsonCallError as e:
+        raise HTTPException(status_code=502, detail=f"生成失败：{e}") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return RpgWizardExtractOut(**result)

@@ -15,7 +15,9 @@
 点下去什么都不发生，**不报错、静默失效**。所以：每步只抽这一步的字段，
 前面已定的名字当白名单传下去，后端按白名单过滤，丢掉的在预览里标出来。
 
-## 五步及其字段归属
+## 六步及其字段归属
+
+开始向导前先选择世界规模：完整世界会优先搭建大陆/区域、组织和多人物骨架；一块区域的故事则集中描写一个宗门、城市或聚落。这个选择会传给分步对话和一句话整套生成，避免模型默认把完整世界缩成单一小场面。
 
 顺序由依赖决定：数值是地基，地点要在角色之前（角色的 `location` 得指向已存在的地点）。
 
@@ -24,8 +26,9 @@
 | 1 | `world` | `genre` `worldview` `opening_scene` `system_instruction` `narration_sample` | — |
 | 2 | `stats` | `stat_defs` `relation_stat_defs` | — |
 | 3 | `places` | `locations[]` `default_location` | — |
-| 4 | `cast` | `npcs[]`（含 `initial_state` `location` `slot_locations`） | 2 的关系数值名、3 的地点名 |
-| 5 | `things` | `items[]` `actions[]` | 2 的玩家/关系数值名、3 的地点名 |
+| 4 | `slots` | `time_slots[]` | — |
+| 5 | `cast` | `npcs[]`（含 `initial_state` `location` `slot_locations`） | 2 的关系数值名、3 的地点名 |
+| 6 | `things` | `items[]` `actions[]` | 2 的玩家/关系数值名、3 的地点名 |
 
 `creator_note` 不生成 —— 既有底线是它不进 prompt、也不给生成入口。
 
@@ -33,7 +36,7 @@
 
 ### 1. `backend/app/prompts/templates/rpg_wizard.jinja2`（新）
 
-对话模板。单文件按 `{% if stage == ... %}` 分五个分支，同 `brainstorm_indulge.jinja2` 的写法。
+对话模板。单文件按 `{% if stage == ... %}` 分六个分支，同 `brainstorm_indulge.jinja2` 的写法。
 
 变量：`nsfw` `stage` `confirmed` `play_style`（玩法类别决定该聊什么 ——
 sim 不用聊判定、slg 要聊经营循环）。
@@ -53,13 +56,13 @@ sim 不用聊判定、slg 要聊经营循环）。
 
 ### 3. `backend/app/services/rpg_prompts.py`
 
-`PROMPTS` 里加两条注册（`label` / `description` / `variables`）。
+`PROMPTS` 里注册向导对话、抽取和一句话整套生成模板（`label` / `description` / `variables`）。
 这是 RPG 提示词的注册点，不加设置页就看不到、用户改不了。
 
 ### 4. `backend/app/agents/rpg_wizard.py`（新）
 
 ```
-STAGES = ["world", "stats", "places", "cast", "things"]
+STAGES = ["world", "stats", "places", "slots", "cast", "things"]
 
 async def extract_stage(stage, transcript, known, model_ref) -> dict
 ```
@@ -111,7 +114,7 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 
 ### 7. `frontend/src/pages/Rpg/wizardStages.ts`（新）
 
-五步的 `id` / `label` / `hint` / `opener`。`id` 必须与后端 `STAGES` 和模板分支一致。
+六步的 `id` / `label` / `hint` / `opener`。`id` 必须与后端 `STAGES` 和模板分支一致。
 
 ### 8. `frontend/src/api/client.ts`
 
@@ -124,7 +127,7 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 只给那两个对话，不扩到这里）。保留：步骤条、跳过、回到某步重聊、模型选择。
 
 每步「下一步」= 抽当前步 → 只填空栏 → 进下一步（同 `handleNext`）。
-最后一步「完成并核对」= 弹全量预览。
+任意阶段都可以点「预览并回填」提取当前对话；最后一步「完成并核对」也会弹全量预览。
 
 ### 10. `frontend/src/pages/Rpg/WizardApplyModal.tsx`（新）
 
@@ -149,7 +152,7 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 
 `backend/tests/test_rpg_wizard.py`（新）：
 
-1. 五步的 stage id 在模板里都有对应分支（照 `test_rpg_prompts.py` 的写法）
+1. 六步的 stage id 在模板里都有对应分支（照 `test_rpg_prompts.py` 的写法）
 2. 两个新模板都在 `PROMPTS` 里注册了
 3. 清洗逻辑逐项（mock 掉 LLM）：
    - `initial_state` 里的野键被丢掉且进了 `dropped`
@@ -167,7 +170,7 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 2. `rpg_wizard.py` 清洗逻辑 + 测试 → verify: 清洗用例全绿
 3. 两个路由 → verify: 手动打一次 extract，确认野键被丢
 4. 前端 stages + client → verify: `npm run build`
-5. `WizardPanel` + `WizardApplyModal` → verify: 走完五步
+5. `WizardPanel` + `WizardApplyModal` → verify: 走完六步，并可在任意一步预览回填
 6. 接进 `RpgModule` → verify: 回填后刷新页面数据还在
 
 ## 需要你确认的两处
@@ -194,3 +197,14 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 
 模板 `rpg_generate.jinja2`（PROMPTS 第 12 个），按 kind 分支。前端 `rpgApi.modules.generate`。
 测试 `GenerateBatchTests` in `test_rpg_wizard.py`。
+
+## 追加：两种构思入口
+
+向导初始页明确分成两种模式：
+
+- **开始分步构思**：按世界观、数值、地点、时段、角色、道具与动作六步逐步对话；每一步都可以提取并预览回填。
+- **一句话生成整套**：输入一个简单想法，调用 `POST /modules/{id}/wizard/generate` 一次生成所有编辑页字段。助手先在对话中给出生成简介，再打开预览；用户可以选择「回填到模组」或「换一套」重新随机生成。
+
+一句话模式不进入自由追问，也不直接落库。后端会按数值名、关系名和地点名清洗角色、道具、动作的引用；不匹配的引用会列在 `dropped` 中。
+
+地点支持可选父地点。没有父地点的是大陆/区域级大地图节点；设置父地点后，游玩时进入父地点页即可打开其内部小地图，例如宗门下面的正殿、炼丹房。未设置层级的旧地点继续按原来的平面地图显示。

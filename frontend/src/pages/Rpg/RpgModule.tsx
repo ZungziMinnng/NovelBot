@@ -240,19 +240,39 @@ export default function RpgModule() {
         const v = picked[key]
         if (typeof v === 'string' && v) next[key] = v
       }
+      if (picked.time_slots?.length) {
+        next.time_slots = Array.from(new Set([...(prev.time_slots || []), ...picked.time_slots]))
+      }
       if (picked.stat_defs?.length) next.stat_defs = [...(prev.stat_defs || []), ...picked.stat_defs]
       if (picked.relation_stat_defs?.length) next.relation_stat_defs = [...(prev.relation_stat_defs || []), ...picked.relation_stat_defs]
       return next
     })
 
     try {
-      for (const loc of picked.locations || []) {
-        await rpgApi.locations.create(moduleId, { name: loc.name, description: loc.description, connections: loc.connections })
+      const pendingLocations = [...(picked.locations || [])]
+      const createdLocationIds = new Map<string, number>()
+      while (pendingLocations.length) {
+        const ready = pendingLocations.filter(loc => !loc.parent_name || createdLocationIds.has(loc.parent_name))
+        const batch = ready.length ? ready : [pendingLocations[0]]
+        for (const loc of batch) {
+          const created = await rpgApi.locations.create(moduleId, {
+            name: loc.name,
+            description: loc.description,
+            connections: loc.connections,
+            ...(loc.parent_name && createdLocationIds.has(loc.parent_name)
+              ? { parent_id: createdLocationIds.get(loc.parent_name) }
+              : {}),
+          })
+          createdLocationIds.set(loc.name, created.id)
+          const index = pendingLocations.indexOf(loc)
+          if (index >= 0) pendingLocations.splice(index, 1)
+        }
       }
       for (const npc of picked.npcs || []) {
         await rpgApi.npcs.create(moduleId, {
           name: npc.name, persona: npc.persona, appearance: npc.appearance,
-          description: npc.description, location: npc.location, initial_state: npc.initial_state,
+          description: npc.description, profile_sections: npc.profile_sections || {},
+          location: npc.location, initial_state: npc.initial_state,
         })
       }
       for (const it of picked.items || []) {

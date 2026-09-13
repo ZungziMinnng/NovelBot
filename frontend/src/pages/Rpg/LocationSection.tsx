@@ -18,11 +18,12 @@ import BatchGenerate from './BatchGenerate'
 interface LocForm {
   name: string
   description: string
+  parent_id: number | null
   connections: string[]
   enter_requires: RpgCondition
 }
 
-const EMPTY: LocForm = { name: '', description: '', connections: [], enter_requires: {} }
+const EMPTY: LocForm = { name: '', description: '', parent_id: null, connections: [], enter_requires: {} }
 
 /** 地点。connections 存名字不存 id——NPC 的常驻地点本来就是字符串，
  *  用 id 会凭空多一套映射，改个地点名就对不上了。 */
@@ -55,7 +56,7 @@ export default function LocationSection({
   const startEdit = (loc: RpgLocation) => {
     setEditingId(loc.id)
     setForm({
-      name: loc.name, description: loc.description,
+      name: loc.name, description: loc.description, parent_id: loc.parent_id || null,
       connections: loc.connections || [], enter_requires: loc.enter_requires || {},
     })
     setShowForm(true)
@@ -243,6 +244,20 @@ export default function LocationSection({
               placeholder={`地点名，如：${example}`}
               className={INPUT}
             />
+            <div>
+              <label className="text-xs font-medium mb-1.5 block">所属地点（可选）</label>
+              <select
+                value={form.parent_id ?? ''}
+                onChange={e => setForm({ ...form, parent_id: e.target.value ? Number(e.target.value) : null })}
+                className={INPUT}
+              >
+                <option value="">顶层地点（大地图）</option>
+                {locations.filter(loc => loc.id !== editingId).map(loc => (
+                  <option key={loc.id} value={loc.id}>{loc.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">设置后，这个地点会显示在父地点的内部小地图中。</p>
+            </div>
             <div>
               <textarea
                 value={form.description}

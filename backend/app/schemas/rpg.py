@@ -173,6 +173,8 @@ class RpgWizardChatIn(BaseModel):
     # 前面几步已经定下来的内容，纯文本，喂给模型避免自相矛盾
     confirmed: str = ""
     play_style: str = "rpg"
+    # 世界规模：world = 完整世界，region = 单一区域故事
+    world_scope: str = "region"
 
 
 class RpgWizardExtractIn(BaseModel):
@@ -182,6 +184,14 @@ class RpgWizardExtractIn(BaseModel):
     # {stat_names: [], relation_names: [], location_names: []}
     known: dict = {}
     model: str = ""
+
+
+class RpgWizardFullIn(BaseModel):
+    """根据一句话想法生成整套模组草案，不直接落库。"""
+    instruction: str = ""
+    nsfw: bool = False
+    model: str = ""
+    world_scope: str = "region"
 
 
 class RpgGenerateIn(BaseModel):
@@ -205,6 +215,7 @@ class RpgWizardExtractOut(BaseModel):
     relation_stat_defs: Optional[list] = None
     locations: Optional[list] = None
     default_location: Optional[str] = None
+    time_slots: Optional[list] = None
     npcs: Optional[list] = None
     items: Optional[list] = None
     actions: Optional[list] = None
@@ -354,6 +365,7 @@ class RpgItemOut(BaseModel):
 class RpgLocationCreate(BaseModel):
     name: str
     description: str = ""
+    parent_id: Optional[int] = None
     connections: list = []
     enter_requires: dict = {}
     sort_order: int = 0
@@ -366,6 +378,7 @@ class RpgLocationCreate(BaseModel):
 class RpgLocationUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    parent_id: Optional[int] = None
     connections: Optional[list] = None
     enter_requires: Optional[dict] = None
     sort_order: Optional[int] = None
@@ -378,6 +391,7 @@ class RpgLocationOut(BaseModel):
     module_id: int
     name: str
     description: str
+    parent_id: Optional[int]
     connections: list
     enter_requires: dict
     sort_order: int

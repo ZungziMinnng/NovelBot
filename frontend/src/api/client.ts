@@ -1240,6 +1240,7 @@ export interface RpgLocation {
   module_id: number
   name: string
   description: string
+  parent_id: number | null
   connections: string[]
   enter_requires: RpgCondition
   sort_order: number
@@ -1439,6 +1440,7 @@ export interface RpgWizardKnown {
   relation_names?: string[]
   location_names?: string[]
 }
+export type RpgWorldScope = 'world' | 'region'
 
 /** 一步抽取的结果。字段全 Optional：一次只返回当前这步那一摊。
  *  dropped 是被白名单过滤掉的引用的说明，必须显示给作者看 */
@@ -1450,10 +1452,12 @@ export interface RpgWizardExtract {
   narration_sample?: string
   stat_defs?: RpgStatDef[]
   relation_stat_defs?: RpgStatDef[]
-  locations?: Array<{ name: string; description: string; connections: string[] }>
+  locations?: Array<{ name: string; description: string; connections: string[]; parent_id?: number | null; parent_name?: string }>
   default_location?: string
+  time_slots?: string[]
   npcs?: Array<{
     name: string; persona: string; appearance: string; description: string
+    profile_sections?: Record<string, string>
     location: string; initial_state: Record<string, number>
   }>
   items?: Array<{
@@ -1501,6 +1505,13 @@ export const rpgApi = {
       data: { stage: string; messages: ChatMessage[]; known?: RpgWizardKnown; model?: string },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/extract`, data, {
+        timeout: 180000,
+      }).then(r => r.data),
+    wizardGenerate: (
+      moduleId: number,
+      data: { instruction: string; nsfw?: boolean; model?: string; world_scope?: RpgWorldScope },
+    ) =>
+      api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/generate`, data, {
         timeout: 180000,
       }).then(r => r.data),
     /** 在某一摊（地点/角色/道具/动作）点「AI 生成」。白名单由后端查库，不用前端传。
@@ -2108,6 +2119,8 @@ export function streamRpgWizard(
     confirmed?: string
     /** 玩法类别，决定往哪个方向聊 */
     play_style?: string
+    /** 世界规模：完整世界或单一区域故事 */
+    world_scope?: RpgWorldScope
   },
   onMessage: (msg: ChatSSEMessage) => void,
   onClose: () => void,

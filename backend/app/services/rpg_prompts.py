@@ -58,13 +58,18 @@ PROMPTS = {
     },
     "rpg_wizard.jinja2": {
         "label": "构思向导（对话）",
-        "description": "新建模组时那个「构思助手」的对话提示词。带作者一步步把世界、数值、地点、角色、道具聊具体，每一步只聊一摊。只帮着攒设定，不进游玩时的任何环节。",
-        "variables": {"nsfw": "是否开成人模式", "stage": "当前哪一步（world/stats/places/cast/things），空表示还没进向导", "confirmed": "前面几步已经定下来的内容，空表示还没定", "play_style": "玩法类别（sim/rpg/slg），决定该往哪个方向聊"},
+        "description": "新建模组时那个「构思助手」的对话提示词。根据作者选择的世界规模，带作者一步步搭建完整世界或一块区域，再聊数值、地点、角色、道具。只帮着攒设定，不进游玩时的任何环节。",
+        "variables": {"nsfw": "是否开成人模式", "stage": "当前哪一步（world/stats/places/cast/things），空表示还没进向导", "confirmed": "前面几步已经定下来的内容，空表示还没定", "play_style": "玩法类别（sim/rpg/slg），决定该往哪个方向聊", "world_scope": "世界规模（world=完整世界，region=单一区域故事）"},
     },
     "rpg_wizard_extract.jinja2": {
         "label": "构思向导（抽取）",
         "description": "把构思对话里聊定的结论抽成表单字段。按当前这一步只抽对应的那一摊。角色/道具/动作引用的数值名、地点名要和前面定过的对得上，对不上的会被后端丢掉。请保持 JSON 输出格式和字段名。",
         "variables": {"stage": "当前哪一步（world/stats/places/cast/things）", "stat_names": "前面定过的玩家数值名，供道具/动作的 effects 校验", "relation_names": "前面定过的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "前面定过的地点名，供角色 location 校验"},
+    },
+    "rpg_wizard_full.jinja2": {
+        "label": "一句话生成整套模组",
+        "description": "根据一句话想法和选择的世界规模一次生成模组编辑页已有的全部字段；完整世界会铺开大陆、区域、组织和多人物，区域故事则聚焦一个局部。返回草案供用户勾选回填。可在 RPG 提示词页面直接编辑。",
+        "variables": {"instruction": "作者的一句话想法", "nsfw": "是否开启成人模式", "play_style": "玩法类别（sim/rpg/slg）", "world_scope": "世界规模（world=完整世界，region=单一区域故事）"},
     },
     "rpg_generate.jinja2": {
         "label": "一键生成（模组编辑）",

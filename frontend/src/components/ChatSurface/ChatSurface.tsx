@@ -10,6 +10,8 @@ interface Props {
   isStreaming: boolean
   /** 已发出、首个 token 还没到 */
   waiting: boolean
+  /** 等待一次性生成时显示的额外提示 */
+  waitingLabel?: string
   onSend: (text: string) => void
   /** 传了就在流式时显示停止按钮，否则发送键变转圈 */
   onStop?: () => void
@@ -64,6 +66,7 @@ export default function ChatSurface({
   messages,
   isStreaming,
   waiting,
+  waitingLabel,
   onSend,
   onStop,
   onEditAt,
@@ -201,7 +204,7 @@ export default function ChatSurface({
                         }`}
                       >
                         {waiting && isLast && msg.role === 'assistant'
-                          ? <ThinkingDots />
+                          ? <span className="inline-flex items-center gap-2"><ThinkingDots />{waitingLabel && <span>{waitingLabel}</span>}</span>
                           : renderMarkdown(msg.content)}
                         {isStreaming && !waiting && isLast && msg.role === 'assistant' && (
                           <span className="inline-block w-0.5 h-4 bg-current ml-0.5 animate-pulse align-middle" />

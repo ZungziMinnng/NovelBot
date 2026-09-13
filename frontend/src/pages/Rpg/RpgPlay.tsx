@@ -91,6 +91,8 @@ export default function RpgPlay() {
   // 侧栏在宽屏常驻，窄屏收成抽屉
   const [menuOpen, setMenuOpen] = useState(false)
   const [view, setView] = useState<View>('overview')
+  // 地图当前展开的父地点；null 表示大陆/区域级大地图
+  const [mapParentId, setMapParentId] = useState<number | null>(null)
   // 看谁的视角。null = 全部（整条时间线），值是 NPC 的 id。
   // 只是一个**筛选器**：所有消息都在同一条时间线上，切视角不改变什么归谁
   const [focusNpcId, setFocusNpcId] = useState<number | null>(null)
@@ -490,6 +492,7 @@ export default function RpgPlay() {
       // 视角是消息的派生结果：消息被删回那一刻，那个人可能根本还没出现过，
       // 所以不留在一个可能已经没内容的视角上，回总览重新进
       setFocusNpcId(null)
+      setMapParentId(null)
       setView('overview')
       toast.success(`回到了第 ${next.turn_count} 回合`)
     } catch {
@@ -626,19 +629,27 @@ export default function RpgPlay() {
           ) : null}
 
           {/* 我在哪一级、看谁的视角。总览是中枢，往上都能点回去 */}
-          {view !== 'overview' && (
+          {(view !== 'overview' || mapParentId !== null) && (
             <div className="border-b border-border/50 bg-background/50 backdrop-blur-md px-6 py-1.5
               text-xs text-muted-foreground flex items-center gap-2 shrink-0">
               <button
-                onClick={() => setView('overview')}
+                onClick={() => { setMapParentId(null); setView('overview') }}
                 className="flex items-center gap-1 hover:text-foreground shrink-0"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />地点总览
               </button>
-              <span className="opacity-40 shrink-0">/</span>
-              <button onClick={() => setView('place')} className="hover:text-foreground truncate">
-                {sess.location || '不知身在何处'}
-              </button>
+              {mapParentId !== null && view === 'overview' ? (
+                <span className="truncate">
+                  {locations.find(location => location.id === mapParentId)?.name || '内部地图'}
+                </span>
+              ) : (
+                <>
+                  <span className="opacity-40 shrink-0">/</span>
+                  <button onClick={() => setView('place')} className="hover:text-foreground truncate">
+                    {sess.location || '不知身在何处'}
+                  </button>
+                </>
+              )}
               {view === 'line' && (
                 <>
                   <span className="opacity-40 shrink-0">/</span>
@@ -712,6 +723,7 @@ export default function RpgPlay() {
                   sess={sess}
                   locations={locations}
                   npcs={npcs}
+                  parentId={mapParentId}
                   locked={locked}
                   onGo={go}
                   onPick={() => setView('place')}
@@ -724,6 +736,7 @@ export default function RpgPlay() {
                   sess={sess}
                   locations={locations}
                   npcs={npcs}
+                  onOpenMap={id => { setMapParentId(id); setView('overview') }}
                   onTalk={npc => { setFocusNpcId(npc.id); setView('line') }}
                   onDetail={setOpenNpc}
                   onScene={() => { setFocusNpcId(null); setView('line') }}

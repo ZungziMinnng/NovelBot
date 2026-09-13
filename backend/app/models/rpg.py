@@ -278,6 +278,11 @@ class RpgLocation(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
 
+    # 可选父地点：空表示大地图地点；有值表示父地点内部的小地图节点。
+    parent_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("rpg_locations.id"), nullable=True, index=True,
+    )
+
     # 从这里能直接去哪儿，存名字不存 id：RpgNpc.location 本来就是字符串、
     # onstage_npcs() 本来就按名字比对，用 id 会凭空多一套映射
     connections: Mapped[list] = mapped_column(JSON, default=list)

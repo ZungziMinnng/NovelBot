@@ -13,6 +13,8 @@ interface Props {
   onDetail: (npc: RpgNpc) => void
   /** 公共场面：群戏、环境描写、一个人待着都落这里 */
   onScene: () => void
+  /** 当前地点有子地点时，打开它的内部地图 */
+  onOpenMap?: (locationId: number) => void
 }
 
 /**
@@ -27,9 +29,10 @@ interface Props {
  * 老规矩——正是它让同一句话看着像是存错了地方。
  */
 export default function PlacePage({
-  sess, locations, npcs, onTalk, onDetail, onScene,
+  sess, locations, npcs, onTalk, onDetail, onScene, onOpenMap,
 }: Props) {
   const loc = locations.find(l => norm(l.name) === norm(sess.location || ''))
+  const children = loc ? locations.filter(child => child.parent_id === loc.id) : []
   // 只列见过面的人：列出来等于把还没登场的人抖出来
   const here = knownNpcs(npcs, sess).filter(n => onstage(n, sess))
 
@@ -44,6 +47,21 @@ export default function PlacePage({
           <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{loc.description}</p>
         )}
       </div>
+
+      {children.length > 0 && onOpenMap && (
+        <button
+          onClick={() => onOpenMap(loc!.id)}
+          className="w-full text-left rounded-xl border border-primary/25 bg-primary/[0.06] p-4 hover:bg-primary/[0.12] transition-colors"
+        >
+          <p className="text-sm font-medium flex items-center gap-1.5">
+            <MapPin className="w-4 h-4 text-primary shrink-0" />
+            进入内部地图
+          </p>
+          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+            这里有 {children.length} 个内部地点：{children.map(child => child.name).join('、')}
+          </p>
+        </button>
+      )}
 
       <button
         onClick={onScene}

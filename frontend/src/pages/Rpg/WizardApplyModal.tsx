@@ -9,6 +9,7 @@ interface Props {
   draft: RpgWizardExtract
   onCancel: () => void
   onApply: (picked: WizardPicked) => void
+  onRegenerate?: () => void
 }
 
 const TEXT_FIELDS: Array<[keyof RpgWizardExtract, string]> = [
@@ -26,7 +27,7 @@ const TEXT_FIELDS: Array<[keyof RpgWizardExtract, string]> = [
  * 引用校验——后端只按「聊定时的白名单」过滤过，作者在这里取消勾选某个数值之后，
  * 引用它的道具就悬空了，那是后端拦不到的，得当场提示。
  */
-export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
+export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerate }: Props) {
   // 每一项一个稳定 key：文本用字段名，列表项用 "类型:下标"
   const allKeys = useMemo(() => collectKeys(draft), [draft])
   const [picked, setPicked] = useState<Set<string>>(() => new Set(allKeys))
@@ -88,6 +89,8 @@ export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
     if (relDefs.length) out.relation_stat_defs = relDefs
     const locs = (draft.locations || []).filter((_, i) => picked.has(`loc:${i}`))
     if (locs.length) out.locations = locs
+    const slots = (draft.time_slots || []).filter((_, i) => picked.has(`slot:${i}`))
+    if (slots.length) out.time_slots = slots
     if (draft.default_location && picked.has('default_location')) out.default_location = draft.default_location
     const npcs = (draft.npcs || []).filter((_, i) => picked.has(`npc:${i}`))
     if (npcs.length) out.npcs = npcs
@@ -108,9 +111,11 @@ export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
       >
         <div className="px-5 py-3 border-b flex items-center justify-between shrink-0">
           <div className="min-w-0">
-            <h3 className="font-medium">把聊定的内容填进模组</h3>
+            <h3 className="font-medium">{onRegenerate ? '整套模组草案已生成' : '把聊定的内容填进模组'}</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              勾掉不想要的。数值是地基，取消某个数值会让引用它的道具悬空。
+              {onRegenerate
+                ? '先看一下这套设定。满意就回填，不满意可以换一套。'
+                : '勾掉不想要的。数值是地基，取消某个数值会让引用它的道具悬空。'}
             </p>
           </div>
           <button onClick={onCancel} className="p-1.5 rounded-md hover:bg-muted shrink-0">
@@ -168,9 +173,15 @@ export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
             {(draft.locations || []).map((l, i) => (
               <Row key={i} on={picked.has(`loc:${i}`)} onToggle={() => toggle(`loc:${i}`)}
                 title={l.name}
-                sub={l.connections.length ? `通往 ${l.connections.join('、')}` : undefined}>
+                sub={[l.parent_name ? `属于 ${l.parent_name}` : '', l.connections.length ? `通往 ${l.connections.join('、')}` : ''].filter(Boolean).join(' · ') || undefined}>
                 {l.description && <p className="text-sm mt-1 whitespace-pre-wrap line-clamp-2">{l.description}</p>}
               </Row>
+            ))}
+          </Group>
+
+          <Group title="时段">
+            {(draft.time_slots || []).map((slot, i) => (
+              <Row key={i} on={picked.has(`slot:${i}`)} onToggle={() => toggle(`slot:${i}`)} title={slot} />
             ))}
           </Group>
 
@@ -180,6 +191,9 @@ export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
                 title={n.name}
                 sub={[n.location, ...Object.entries(n.initial_state || {}).map(([k, v]) => `${k} ${v}`)].filter(Boolean).join(' · ') || undefined}>
                 {n.persona && <p className="text-sm mt-1 whitespace-pre-wrap line-clamp-2">{n.persona}</p>}
+                {n.profile_sections && Object.entries(n.profile_sections).filter(([, text]) => text).map(([key, text]) => (
+                  <p key={key} className="text-xs mt-1 text-muted-foreground line-clamp-2"><span className="font-medium">{key}</span>：{text}</p>
+                ))}
               </Row>
             ))}
           </Group>
@@ -215,15 +229,20 @@ export default function WizardApplyModal({ draft, onCancel, onApply }: Props) {
 
         <div className="px-5 py-3 border-t flex justify-end gap-2 shrink-0">
           <button onClick={onCancel} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
-            取消
+            {onRegenerate ? '暂不回填' : '取消'}
           </button>
+          {onRegenerate && (
+            <button onClick={onRegenerate} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+              随机换一套
+            </button>
+          )}
           <button
             onClick={apply}
             disabled={picked.size === 0}
             className="flex items-center gap-1 text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
           >
             <Check className="w-3.5 h-3.5" />
-            填进模组（{picked.size}）
+            {onRegenerate ? '回填到模组' : '填进模组'}（{picked.size}）
           </button>
         </div>
       </div>
@@ -269,6 +288,7 @@ function collectKeys(draft: RpgWizardExtract): string[] {
   ;(draft.stat_defs || []).forEach((_, i) => keys.push(`stat:${i}`))
   ;(draft.relation_stat_defs || []).forEach((_, i) => keys.push(`rel:${i}`))
   ;(draft.locations || []).forEach((_, i) => keys.push(`loc:${i}`))
+  ;(draft.time_slots || []).forEach((_, i) => keys.push(`slot:${i}`))
   if (draft.default_location) keys.push('default_location')
   ;(draft.npcs || []).forEach((_, i) => keys.push(`npc:${i}`))
   ;(draft.items || []).forEach((_, i) => keys.push(`item:${i}`))

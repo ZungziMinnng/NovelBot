@@ -260,6 +260,9 @@ async def _run_migrations() -> None:
         # 老库拿到 0 和 '[]'，地图会按兜底网格排、当前地点和邻居照样亮着
         "ALTER TABLE rpg_locations ADD COLUMN x INTEGER DEFAULT 0",
         "ALTER TABLE rpg_locations ADD COLUMN y INTEGER DEFAULT 0",
+        # 可选的地点层级：空是大地图，非空表示父地点内部的小地图节点
+        "ALTER TABLE rpg_locations ADD COLUMN parent_id INTEGER DEFAULT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_locations_parent ON rpg_locations(module_id, parent_id)",
         "ALTER TABLE rpg_sessions ADD COLUMN visited JSON DEFAULT '[]'",
         # GM 边玩边记的 NPC 近况。老库拿到 '{}'，角色卡上那一块不显示
         "ALTER TABLE rpg_sessions ADD COLUMN npc_notes JSON DEFAULT '{}'",

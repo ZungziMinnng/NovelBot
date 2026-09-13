@@ -20,7 +20,7 @@ from app.services.rpg_state import (
 
 # 向导的步骤顺序。id 与 rpg_wizard.jinja2 / rpg_wizard_extract.jinja2 的 stage
 # 分支、前端 wizardStages.ts 保持一致。顺序有依赖：数值是地基、地点要在角色之前
-STAGES = ["world", "stats", "places", "cast", "things"]
+STAGES = ["world", "stats", "places", "slots", "cast", "things"]
 
 _DISPLAYS = {DISPLAY_BAR, DISPLAY_NUMBER, DISPLAY_HIDDEN}
 _ON_ZEROS = {ON_ZERO_NONE, ON_ZERO_DEAD, ON_ZERO_FLAG}
@@ -34,6 +34,38 @@ _WORLD_CHARS = {
     "narration_sample": 300,
 }
 _DESC_CHARS = 300  # 地点/角色/道具的描述段
+
+
+async def generate_full(
+    instruction: str, nsfw: bool, play_style: str, model_ref: str,
+    world_scope: str = "region",
+) -> dict:
+    """Generate one complete, form-shaped module draft from a short idea."""
+    prompt = render(
+        "rpg_wizard_full.jinja2",
+        instruction=instruction.strip(), nsfw=nsfw, play_style=play_style or "rpg",
+        world_scope=world_scope if world_scope in {"world", "region"} else "region",
+    )
+    model, api_format = llm_client.get_fast_client(model_ref)
+    parsed, _, _ = await llm_json.call_json(
+        [{"role": "system", "content": prompt}],
+        model,
+        api_format,
+        max_tokens=5000,
+    )
+    dropped: list[str] = []
+    world = _clean_world(parsed, dropped)
+    stats = _clean_stats(parsed, dropped)
+    places = _clean_places(parsed, dropped)
+    slots = _clean_slots(parsed, dropped)
+    relation_names = [s["name"] for s in stats["relation_stat_defs"]]
+    stat_names = [s["name"] for s in stats["stat_defs"]]
+    location_names = [p["name"] for p in places["locations"]]
+    cast = _clean_cast(parsed, dropped, relation_names, location_names)
+    things = _clean_things(parsed, dropped, stat_names, relation_names)
+    result = {**world, **stats, **places, **slots, **cast, **things}
+    result["dropped"] = dropped
+    return result
 
 
 def pick_model(chosen: str, module_ref: str) -> str:
@@ -66,7 +98,7 @@ def _text(value, limit=0) -> str:
 
 async def chat_stream_args(
     messages: list[dict], model_ref: str, nsfw: bool, stage: str,
-    confirmed: str, play_style: str,
+    confirmed: str, play_style: str, world_scope: str = "region",
 ):
     """组装构思对话的 (messages, model, api_format)。SSE 由路由层包。
 
@@ -79,6 +111,7 @@ async def chat_stream_args(
         stage=stage,
         confirmed=confirmed if stage else "",
         play_style=play_style or "rpg",
+        world_scope=world_scope if world_scope in {"world", "region"} else "region",
     )
     full = [{"role": "system", "content": system_prompt}]
     full += [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -123,6 +156,7 @@ async def extract_stage(
         "world": _clean_world,
         "stats": _clean_stats,
         "places": _clean_places,
+        "slots": _clean_slots,
         "cast": lambda p, d: _clean_cast(p, d, relation_names, location_names),
         "things": lambda p, d: _clean_things(p, d, stat_names, relation_names),
     }
@@ -208,6 +242,15 @@ def _clean_world(parsed: dict, dropped: list) -> dict:
     return {key: _text(parsed.get(key), limit) for key, limit in _WORLD_CHARS.items()}
 
 
+def _clean_slots(parsed: dict, dropped: list) -> dict:
+    slots = []
+    for value in parsed.get("time_slots") or []:
+        name = _text(value, 40)
+        if name and name not in slots:
+            slots.append(name)
+    return {"time_slots": slots}
+
+
 def _clean_stat_def(spec: dict, *, full: bool) -> dict | None:
     """一条数值定义。full=True 是玩家数值（有 for_check/on_zero），False 是关系数值。
 
@@ -233,7 +276,8 @@ def _clean_stat_def(spec: dict, *, full: bool) -> dict | None:
     out = {
         "name": name, "initial": initial, "min": lo, "max": hi,
         "display": display,
-        "effect": _text(spec.get("effect"), EFFECT_CHARS),
+        "effect": _text(spec.get("effect"), EFFECT_CHARS)
+        or f"影响与{name}相关的判定和剧情结果",
     }
     if full:
         on_zero = _text(spec.get("on_zero"))
@@ -272,12 +316,17 @@ def _clean_places(parsed: dict, dropped: list, known_names=()) -> dict:
         locations.append({
             "name": name,
             "description": _text(spec.get("description"), _DESC_CHARS),
+            "parent_name": _text(spec.get("parent_name")),
             "connections": spec.get("connections") or [],
         })
         names.append(name)
     # connections 必须指向真实存在的地点（本批新建的 + 模组里已有的），否则地图连线断头
     valid = set(names) | {_text(n) for n in known_names if _text(n)}
     for loc in locations:
+        parent = loc["parent_name"]
+        if parent and (parent not in valid or parent == loc["name"]):
+            dropped.append(f"地点「{loc['name']}」的父地点「{parent}」不存在，已设为顶层")
+            loc["parent_name"] = ""
         kept, cut = [], []
         for target in loc["connections"]:
             t = _text(target)
@@ -320,6 +369,11 @@ def _clean_cast(parsed: dict, dropped: list, relation_names, location_names) -> 
             "persona": _text(spec.get("persona"), 400),
             "appearance": _text(spec.get("appearance"), _DESC_CHARS),
             "description": _text(spec.get("description"), 500),
+            "profile_sections": {
+                key: _text((spec.get("profile_sections") or {}).get(key), 500)
+                for key in ("appearance", "background", "abilities", "relationships")
+                if _text((spec.get("profile_sections") or {}).get(key), 500)
+            },
             "location": location,
             "initial_state": initial_state,
         })

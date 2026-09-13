@@ -4,7 +4,7 @@ import { Bot, Loader2, ChevronRight, SkipForward } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
   streamRpgWizard, modelLibraryApi,
-  type ChatSSEMessage, type RpgWizardExtract, type RpgWizardKnown, type RpgPlayStyle,
+  type ChatSSEMessage, type RpgWizardExtract, type RpgWizardKnown, type RpgPlayStyle, type RpgWorldScope,
 } from '@/api/client'
 import { rpgApi } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
@@ -28,10 +28,14 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
 
   const [messages, setMessages] = useState<ChatSurfaceMessage[]>([])
   const [stage, setStage] = useState(-1)
+  const [worldScope, setWorldScope] = useState<RpgWorldScope>('region')
+  const [oneShotMode, setOneShotMode] = useState(false)
+  const [generatingFull, setGeneratingFull] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [waiting, setWaiting] = useState(false)
   const [model, setModel] = useState('')
   const [extracting, setExtracting] = useState(false)
+  const [fullInstruction, setFullInstruction] = useState('')
   // 跨步累积的抽取结果。每步只抽自己那一摊，合并进来，最后一次性预览
   const [draft, setDraft] = useState<RpgWizardExtract>(EMPTY_DRAFT)
   const [preview, setPreview] = useState<RpgWizardExtract | null>(null)
@@ -45,6 +49,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   const chatModels = modelLibrary.filter(m => m.model_type !== 'embedding')
 
   const abortRef = useRef<AbortController | null>(null)
+  const fullRequestRef = useRef(0)
   useEffect(() => () => { abortRef.current?.abort() }, [])
 
   /** 前面几步已定的名字，喂给后面步骤的抽取当白名单 */
@@ -65,6 +70,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     if (rels.length) parts.push(`关系数值：${rels.join('、')}`)
     const locs = (d.locations || []).map(l => l.name)
     if (locs.length) parts.push(`地点：${locs.join('、')}`)
+    if (d.time_slots?.length) parts.push(`时段：${d.time_slots.join('、')}`)
     const npcs = (d.npcs || []).map(n => n.name)
     if (npcs.length) parts.push(`角色：${npcs.join('、')}`)
     return parts.join('\n')
@@ -85,6 +91,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         stage: stageId,
         confirmed: stageId ? confirmed : '',
         play_style: playStyle,
+        world_scope: worldScope,
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {
@@ -100,15 +107,63 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
       },
       () => { setIsStreaming(false); setWaiting(false) },
     )
-  }, [moduleId, model, nsfwMode, playStyle])
+  }, [moduleId, model, nsfwMode, playStyle, worldScope])
+
+  const generateFull = useCallback(async (text: string, originalInstruction = text) => {
+    if (!text || isStreaming || generatingFull) return
+    const history = [...messages, { role: 'user' as const, content: text }]
+    setMessages([...history, { role: 'assistant', content: '' }])
+    setGeneratingFull(true)
+    setIsStreaming(true)
+    setWaiting(true)
+    const requestId = ++fullRequestRef.current
+    try {
+      const result = await rpgApi.modules.wizardGenerate(moduleId, {
+        instruction: text,
+        nsfw: nsfwMode,
+        model,
+        world_scope: worldScope,
+      })
+      if (requestId !== fullRequestRef.current) return
+      setMessages([...history, {
+        role: 'assistant',
+        content: fullDraftIntro(result),
+      }])
+      setFullInstruction(originalInstruction)
+      setDraft(result)
+      setPreview(result)
+    } catch (err) {
+      if (requestId !== fullRequestRef.current) return
+      setMessages([...history, {
+        role: 'assistant',
+        content: `[生成失败] ${String(err)}`,
+      }])
+      toast.error(`整套生成失败：${String(err)}`)
+    } finally {
+      if (requestId === fullRequestRef.current) {
+        setGeneratingFull(false)
+        setIsStreaming(false)
+        setWaiting(false)
+      }
+    }
+  }, [messages, moduleId, model, nsfwMode, worldScope, isStreaming, generatingFull])
 
   const send = useCallback((text: string, base?: ChatSurfaceMessage[]) => {
-    if (!text || isStreaming) return
+    if (!text || isStreaming || generatingFull) return
+    if (stage < 0) {
+      if (oneShotMode) {
+        void generateFull(text)
+      } else {
+        toast.error('请先选择“开始分步构思”或“一句话生成整套”')
+      }
+      return
+    }
     run([...(base ?? messages), { role: 'user', content: text }], stage, confirmedText(draft))
-  }, [isStreaming, messages, stage, run, draft, confirmedText])
+  }, [isStreaming, generatingFull, oneShotMode, generateFull, messages, stage, run, draft, confirmedText])
 
   const goToStage = useCallback((index: number, base?: ChatSurfaceMessage[], d?: RpgWizardExtract) => {
     const target = WIZARD_STAGES[index]
+    setOneShotMode(false)
     setStage(index)
     run([
       ...(base ?? messages),
@@ -118,6 +173,8 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
 
   const stop = useCallback(() => {
     abortRef.current?.abort()
+    fullRequestRef.current += 1
+    setGeneratingFull(false)
     setIsStreaming(false)
     setWaiting(false)
   }, [])
@@ -193,6 +250,10 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     stop()
     setMessages([])
     setStage(-1)
+    setOneShotMode(false)
+    setWorldScope('region')
+    setGeneratingFull(false)
+    setFullInstruction('')
     setDraft(EMPTY_DRAFT)
   }, [messages.length, stop])
 
@@ -201,7 +262,13 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     onApply(picked)
   }, [onApply])
 
-  const busy = isStreaming || extracting
+  const handleRegenerate = useCallback(() => {
+    if (!fullInstruction || generatingFull) return
+    setPreview(null)
+    void generateFull(`请基于上次想法重新随机生成一套不同方案：${fullInstruction}`, fullInstruction)
+  }, [fullInstruction, generatingFull, generateFull])
+
+  const busy = isStreaming || extracting || generatingFull
   const current = stage >= 0 ? WIZARD_STAGES[stage] : null
 
   return (
@@ -211,11 +278,16 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         messages={messages}
         isStreaming={isStreaming}
         waiting={waiting}
+        waitingLabel={generatingFull ? '正在生成整套模组，请稍候…' : undefined}
         onSend={send}
         onStop={stop}
         onEditAt={handleEditAt}
         onClear={handleClear}
-        placeholder={current ? '回答上面的问题，或者说“我不知道，你帮我定”... (Enter 发送)' : '开始构思...'}
+        placeholder={current
+          ? '回答上面的问题，或者说“我不知道，你帮我定”… (Enter 发送)'
+          : oneShotMode
+            ? '例如：一个发生在雨夜港口的失忆侦探故事'
+            : '请选择一种构思方式后再输入...'}
         headerExtra={
           <select
             value={model}
@@ -246,6 +318,16 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
                 <p className="text-xs text-muted-foreground truncate">{current.hint}</p>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
+                {stage >= 0 && (
+                  <button
+                    onClick={handleFinish}
+                    disabled={busy}
+                    title="提取当前对话并预览回填内容"
+                    className="text-xs border rounded px-2 py-1 text-primary transition-colors hover:bg-primary/10 disabled:opacity-40"
+                  >
+                    预览并回填
+                  </button>
+                )}
                 {stage < lastStage && (
                   <button
                     onClick={handleSkip}
@@ -273,30 +355,100 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
           <div className="mt-6">
             <div className="text-center text-sm text-muted-foreground/70">
               <Bot className="w-8 h-8 mx-auto mb-2 opacity-30" />
-              <p>只有一个模糊想法也没关系。</p>
-              <p>AI 会一步步问你，最后一次性核对写进模组。</p>
+              {oneShotMode ? (
+                <>
+                  <p className="font-medium text-foreground">一句话生成整套模组</p>
+                  <p>输入一个简单想法，AI 会生成完整草案供你预览回填。</p>
+                </>
+              ) : (
+                <>
+                  <p>选择一种方式开始构思：</p>
+                  <p>分步讨论，或用一句话直接生成整套模组。</p>
+                </>
+              )}
             </div>
-            <button
-              onClick={() => goToStage(0)}
-              className="mt-6 w-full text-sm rounded-lg px-3 py-2.5 bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
-            >
-              开始构思
-            </button>
-            <ol className="mt-4 space-y-1">
-              {WIZARD_STAGES.map((s, i) => (
-                <li key={s.id} className="text-xs text-muted-foreground/70">
-                  {i + 1}. {s.label}<span className="text-muted-foreground/50">　{s.hint}</span>
-                </li>
-              ))}
-            </ol>
+            <div className="mt-5 rounded-lg border bg-muted/20 p-3">
+              <p className="text-xs font-medium mb-2">先选择世界规模</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={() => setWorldScope('world')}
+                  className={`text-left rounded-lg border px-3 py-2 transition-colors ${worldScope === 'world' ? 'border-primary bg-primary/10 text-primary' : 'hover:bg-muted'}`}
+                >
+                  <span className="block text-sm font-medium">完整世界</span>
+                  <span className="block text-xs opacity-70 mt-0.5">大陆、区域、组织和多人物的完整骨架</span>
+                </button>
+                <button
+                  onClick={() => setWorldScope('region')}
+                  className={`text-left rounded-lg border px-3 py-2 transition-colors ${worldScope === 'region' ? 'border-primary bg-primary/10 text-primary' : 'hover:bg-muted'}`}
+                >
+                  <span className="block text-sm font-medium">一块区域的故事</span>
+                  <span className="block text-xs opacity-70 mt-0.5">聚焦一个宗门、城市或聚落</span>
+                </button>
+              </div>
+            </div>
+            {oneShotMode ? (
+              <button
+                onClick={() => setOneShotMode(false)}
+                className="mt-6 w-full text-sm rounded-lg px-3 py-2.5 border hover:bg-muted transition-colors"
+              >
+                返回选择构思方式
+              </button>
+            ) : (
+              <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={() => goToStage(0)}
+                  className="text-sm rounded-lg px-3 py-2.5 bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                >
+                  开始分步构思
+                </button>
+                <button
+                  onClick={() => setOneShotMode(true)}
+                  className="text-sm rounded-lg px-3 py-2.5 border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+                >
+                  一句话生成整套
+                </button>
+              </div>
+            )}
+            {!oneShotMode && (
+              <ol className="mt-4 space-y-1">
+                {WIZARD_STAGES.map((s, i) => (
+                  <li key={s.id} className="text-xs text-muted-foreground/70">
+                    {i + 1}. {s.label}<span className="text-muted-foreground/50">　{s.hint}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
           </div>
         }
       />
       {preview && (
-        <WizardApplyModal draft={preview} onCancel={() => setPreview(null)} onApply={handleApply} />
+        <WizardApplyModal
+          draft={preview}
+          onCancel={() => setPreview(null)}
+          onApply={handleApply}
+          onRegenerate={oneShotMode ? handleRegenerate : undefined}
+        />
       )}
     </>
   )
+}
+
+function fullDraftIntro(draft: RpgWizardExtract): string {
+  const lines = ['我根据你的想法生成了一套模组草案。']
+  if (draft.genre) lines.push(`题材：${draft.genre}`)
+  if (draft.worldview) lines.push(`世界观：${draft.worldview}`)
+  const groups = [
+    ['数值', (draft.stat_defs?.length || 0) + (draft.relation_stat_defs?.length || 0)],
+    ['地点', draft.locations?.length || 0],
+    ['时段', draft.time_slots?.length || 0],
+    ['角色', draft.npcs?.length || 0],
+    ['道具', draft.items?.length || 0],
+    ['动作按钮', draft.actions?.length || 0],
+  ]
+  const counts = groups.filter(([, count]) => count).map(([label, count]) => `${label}${count}项`)
+  if (counts.length) lines.push(`已生成：${counts.join('、')}。`)
+  lines.push('请在弹出的预览中勾选要回填的内容；不满意可以换一套。')
+  return lines.join('\n')
 }
 
 function patchLast(msgs: ChatSurfaceMessage[], updater: (content: string) => string): ChatSurfaceMessage[] {
@@ -329,6 +481,7 @@ function countStage(d: RpgWizardExtract, stageId: string): number {
     case 'world': return ['genre', 'worldview', 'opening_scene', 'system_instruction', 'narration_sample'].filter(k => d[k as keyof RpgWizardExtract]).length
     case 'stats': return (d.stat_defs?.length || 0) + (d.relation_stat_defs?.length || 0)
     case 'places': return d.locations?.length || 0
+    case 'slots': return d.time_slots?.length || 0
     case 'cast': return d.npcs?.length || 0
     case 'things': return (d.items?.length || 0) + (d.actions?.length || 0)
     default: return 0

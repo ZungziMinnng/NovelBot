@@ -25,6 +25,12 @@ class StageWiringTests(unittest.TestCase):
     def test_both_templates_are_registered(self):
         self.assertIn("rpg_wizard.jinja2", rpg_prompts.PROMPTS)
         self.assertIn("rpg_wizard_extract.jinja2", rpg_prompts.PROMPTS)
+        self.assertIn("rpg_wizard_full.jinja2", rpg_prompts.PROMPTS)
+
+    def test_prompt_limits_the_wizard_to_form_fields(self):
+        prompt = rpg_prompts.default_content("rpg_wizard.jinja2")
+        self.assertIn("猎物系统", prompt)
+        self.assertIn("不要设计或追问字段外的系统", prompt)
 
 
 class PickModelTests(unittest.TestCase):
@@ -104,6 +110,12 @@ class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("月球" in d for d in out["dropped"]))
         self.assertEqual(out["default_location"], "酒馆")
 
+    async def test_time_slots_are_trimmed_and_deduplicated(self):
+        out = await self._extract("slots", {
+            "time_slots": [" 清晨 ", "白天", "清晨", "", None],
+        })
+        self.assertEqual(out["time_slots"], ["清晨", "白天"])
+
     async def test_default_location_not_in_list_is_cleared(self):
         out = await self._extract("places", {
             "default_location": "皇宫",
@@ -167,6 +179,38 @@ class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
             known={},
         )
         self.assertEqual(out["items"][0]["effects"], {})
+        self.assertTrue(any("体力" in d for d in out["dropped"]))
+
+
+class FullGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_generation_uses_cleaned_names_as_reference_whitelist(self):
+        parsed = {
+            "genre": "都市悬疑",
+            "worldview": "雨夜港口",
+            "time_slots": ["夜晚", "夜晚"],
+            "stat_defs": [{"name": "理智", "initial": 50, "min": 0, "max": 100}],
+            "relation_stat_defs": [{"name": "信任", "initial": 0, "min": -100, "max": 100}],
+            "locations": [{"name": "码头", "description": "雾气", "connections": ["不存在"]}],
+            "default_location": "码头",
+            "npcs": [{"name": "侦探", "location": "码头", "initial_state": {"信任": 10, "敌意": 5}, "profile_sections": {"background": "曾在旧城区长大"}}],
+            "items": [{"name": "手电", "effects": {"理智": -1, "体力": 2}}],
+            "actions": [{"name": "调查", "effects": {"理智": 1}, "relation_effects": {"信任": 1}}],
+        }
+
+        async def fake_call_json(*_args, **_kwargs):
+            return parsed, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json):
+            with patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+                out = await rpg_wizard.generate_full("雨夜港口的侦探", False, "rpg", "7")
+
+        self.assertEqual(out["time_slots"], ["夜晚"])
+        self.assertTrue(out["stat_defs"][0]["effect"])
+        self.assertEqual(out["npcs"][0]["initial_state"], {"信任": 10})
+        self.assertEqual(out["npcs"][0]["profile_sections"], {"background": "曾在旧城区长大"})
+        self.assertEqual(out["items"][0]["effects"], {"理智": -1})
+        self.assertTrue(any("不存在" in d for d in out["dropped"]))
+        self.assertTrue(any("敌意" in d for d in out["dropped"]))
         self.assertTrue(any("体力" in d for d in out["dropped"]))
 
 

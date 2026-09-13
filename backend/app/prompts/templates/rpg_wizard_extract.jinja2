@@ -38,6 +38,14 @@
 }
 
 - connections 里只能写这次 locations 列表里出现过的地点名，写别的一律去掉。
+{% elif stage == 'slots' %}
+本次只整理「时段」这一摊：
+
+{
+  "time_slots": ["按顺序排列的时段名称"]
+}
+
+- 只收对话里明确确定的时段名称，不要生成时段之外的规则。
 {% elif stage == 'cast' %}
 本次只整理「角色」这一摊：
 
@@ -48,6 +56,7 @@
       "persona": "脾气、在意什么、怕什么、对玩家什么态度",
       "appearance": "第一次见看得见的：长相、身形、穿着、随身带什么",
       "description": "身份、来历、会什么、和别人什么关系。这些是事实不是性格",
+      "profile_sections": {"appearance": "外貌身材详细档案", "background": "出身、成长经历、重要事件、当前身份和人生转折", "abilities": "能力特长、弱点和限制", "relationships": "与其他角色的关系、矛盾、依赖和秘密"},
       "location": "平时待在哪个地点",
       "initial_state": {"关系数值名": 起始值数字}
     }

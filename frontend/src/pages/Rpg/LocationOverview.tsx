@@ -14,6 +14,8 @@ interface Props {
   onGo: (name: string) => void
   /** 进当前所在地点的地点页。只有「你在这里」那张卡能点 */
   onPick: () => void
+  /** 当前查看的地图层级；null 是大地图 */
+  parentId?: number | null
 }
 
 /**
@@ -32,9 +34,10 @@ interface Props {
  * 判定权始终在后端，这里放行了后端照样会拦。
  */
 export default function LocationOverview({
-  sess, locations, npcs, locked, busy, onGo, onPick,
+  sess, locations, npcs, locked, busy, onGo, onPick, parentId = null,
 }: Props) {
-  if (locations.length === 0) {
+  const scoped = locations.filter(loc => (loc.parent_id ?? null) === parentId)
+  if (scoped.length === 0) {
     return (
       <p className="text-center text-sm text-muted-foreground py-20">
         这个模组还没定义地点。回模组页的「地点」里加几个，这里就会有了。
@@ -42,10 +45,13 @@ export default function LocationOverview({
     )
   }
 
-  const here = locations.find(l => norm(l.name) === norm(sess.location || ''))
+  const here = scoped.find(l => norm(l.name) === norm(sess.location || ''))
   const isHere = (loc: RpgLocation) => !!here && loc.id === here.id
-  const pos = layout(locations)
-  const visible = visibleLocations(locations, sess)
+  const pos = layout(scoped)
+  const visible = new Set([
+    ...visibleLocations(locations, sess),
+    ...(parentId === null ? [] : scoped.map(loc => loc.id)),
+  ])
 
   /** 这个地点上站着谁。只看得到见过面的人——没见过的不该被抖出来 */
   const known = knownNpcs(npcs, sess)
@@ -69,7 +75,7 @@ export default function LocationOverview({
           viewBox="0 0 100 100"
           preserveAspectRatio="none"
         >
-          {edgePairs(locations).map(({ a, b }) => {
+          {edgePairs(scoped).map(({ a, b }) => {
             // 两头都看得见才画。只亮一头的话，未探索区域的形状会从线里被读出来
             if (!visible.has(a.id) || !visible.has(b.id)) return null
             const pa = pos.get(a.id)!
@@ -88,9 +94,10 @@ export default function LocationOverview({
           })}
         </svg>
 
-        {locations.map(loc => {
+        {scoped.map(loc => {
           const p = pos.get(loc.id)!
           const style = { left: `${p.x}%`, top: `${p.y}%` }
+          const hasChildren = locations.some(child => child.parent_id === loc.id)
 
           // 迷雾里的点必须是惰性的：名字、title（那句理由里带着地点名）、
           // 有谁、能不能点，一样都不能漏出去
@@ -134,6 +141,7 @@ export default function LocationOverview({
               <MapPin className="w-3 h-3 shrink-0" />
               {loc.name}
               {mine && <span className="font-normal">· 你在这里</span>}
+              {hasChildren && <span className="font-normal">· 有内部地图</span>}
               {/* 有认识的人在，就挂一个点。名字塞不进节点，放在 title 里 */}
               {!mine && people.length > 0 && (
                 <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" />
