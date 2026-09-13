@@ -27,6 +27,30 @@ class StageWiringTests(unittest.TestCase):
         self.assertIn("rpg_wizard_extract.jinja2", rpg_prompts.PROMPTS)
 
 
+class PickModelTests(unittest.TestCase):
+    """向导下拉里选的那个模型说了算。
+
+    下拉第一项是「模组默认模型」（value 空串），所以空 = 跟模组走。这条规矩的
+    反面代价很具体：**作者选了 A 模型，实际连的却是主页设置里的默认模型**——
+    请求里带了选择、路由没接，日志里只看得到默认模型的名字，从界面上完全看不出
+    是哪一步丢的。三个入口（对话 / 抽取 / 一键生成）走同一个函数，就是为了
+    不让它们各自漂走。
+    """
+
+    def test_a_chosen_model_wins(self):
+        self.assertEqual(rpg_wizard.pick_model("12", "3"), "12")
+
+    def test_nothing_chosen_follows_the_module(self):
+        self.assertEqual(rpg_wizard.pick_model("", "3"), "3")
+
+    def test_blank_is_the_same_as_nothing(self):
+        self.assertEqual(rpg_wizard.pick_model("   ", "3"), "3")
+
+    def test_an_empty_pair_stays_empty(self):
+        # 两边都空 = 交给 resolve_model_ref 回落到全局默认，这里不替它决定
+        self.assertEqual(rpg_wizard.pick_model("", ""), "")
+
+
 class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
     async def _extract(self, stage, parsed, known=None):
         async def fake_call_json(*_args, **_kwargs):

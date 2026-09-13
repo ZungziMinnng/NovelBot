@@ -7,7 +7,7 @@ import unittest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.rpg import (
-    RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry,
+    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry,
 )
 from app.services.rpg_context import build_rpg_messages, resolve_rules
 
@@ -18,7 +18,10 @@ class _Base(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite://")
         async with self.engine.begin() as connection:
-            for model in (RpgModule, RpgRule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage):
+            for model in (
+                RpgModule, RpgRule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage,
+                RpgLocation,
+            ):
                 await connection.run_sync(model.__table__.create)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.db = self.sessions()

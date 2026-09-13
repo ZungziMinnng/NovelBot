@@ -36,6 +36,20 @@ _WORLD_CHARS = {
 _DESC_CHARS = 300  # 地点/角色/道具的描述段
 
 
+def pick_model(chosen: str, module_ref: str) -> str:
+    """向导这一步用哪个模型：作者在向导里选的优先，没选才跟模组走。
+
+    下拉的第一项是「模组默认模型」（value 为空串），所以空 = 按模组配置走，
+    **不是**「没配」。三个入口（对话 / 抽取 / 一键生成）都要过这里——从前后端
+    各自判一次的话，出现过的正是「选了模型却还是连默认模型」：前端把选择发了
+    出来，路由没接。
+
+    不在这里校验模型是否存在：那是 resolve_model_ref 的活，它认不出来会抛
+    ValueError，路由翻成人话的 400。
+    """
+    return (chosen or "").strip() or module_ref
+
+
 def _num(value, fallback=0):
     """抽取里的数字。float 也留着（temperature 那种），只挡文字。"""
     try:

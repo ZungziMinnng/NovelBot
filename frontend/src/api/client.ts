@@ -1392,9 +1392,12 @@ export interface RpgMessage {
   session_id: number
   role: 'user' | 'assistant'
   content: string
-  /** 属于哪条对话线，值是 NPC 的 id；null = 场面线（公共场面）。
-   *  前端按它分组就有线了，所以没有单独的线程列表端点 */
-  thread_id: number | null
+  /** 这条消息发生在哪个地点。统一时间线之后一屏里会混着几个地方的戏，
+   *  前端靠它在换地方的地方插一条分隔 */
+  location: string
+  /** 当时在场的 NPC id。看某个人的视角就按它筛——他参与过的群戏也在里面。
+   *  null = 不知道（迁移过来的老消息），当所有人可见：不知道不等于没有 */
+  present: number[] | null
   roll: RpgRoll | null
   state_delta: Record<string, unknown> | null
   suggestions: string[] | null
@@ -1591,12 +1594,13 @@ export const rpgApi = {
       api.post<RpgSession>(`/rpg/saves/${id}/restore`).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/saves/${id}`).then(r => r.data),
   },
-  /** 「帮我想想」只读当前这条线：在老兵屋里要的建议，不该来自隔壁刚聊的话 */
-  suggest: (sessionId: number, threadId?: number | null) =>
+  /** 「帮我想想」看的是整条时间线：全场只有一条历史，隔壁刚聊的那几句
+   *  就是你的前情 */
+  suggest: (sessionId: number, focusNpcId?: number | null) =>
     api.post<{ suggestions: string[] }>(
       `/rpg/sessions/${sessionId}/suggest`,
-      {},
-      { timeout: 120000, params: threadId ? { thread_id: threadId } : undefined },
+      focusNpcId ? { focus_npc_id: focusNpcId } : {},
+      { timeout: 120000 },
     ).then(r => r.data),
 }
 
@@ -2194,11 +2198,14 @@ export interface RpgTurnMeta {
   npc_tokens?: number
   /** 【外场】那一块占了多少 token */
   chronicle_tokens?: number
+  /** 【场面】那一块占了多少 token：地点描述加在场名单，每轮都在 */
+  scene_tokens?: number
   history_count?: number
   triggered?: { id: number; keywords: string; constant: boolean; depth: number }[]
   npcs_onstage?: { id: number; name: string }[]
-  /** 这一轮归哪条线。null = 场面线 */
-  thread?: { id: number; name: string } | null
+  /** 真的和玩家站在同一个地点的那些人。诊断行的「在场」读这一份——
+   *  npcs_onstage 还含「只是被提到」的人，那是给提示词注入用的宽名单 */
+  npcs_here?: { id: number; name: string }[]
   slot?: string
   day?: number
   /** 裁决归一化出来的意图，它也参与了世界书关键词扫描 */
@@ -2227,6 +2234,9 @@ export type RpgSSEMessage =
   | { event: 'adjudicate'; data: { need_check: boolean; attr: string; band: RpgBand; intent: string; reason: string } }
   | { event: 'roll'; data: { rate: number; dice: number; outcome: RpgOutcome; attr: string } }
   | { event: 'token'; data: string }
+  /** 后端当前处在哪一步：adjudicating（裁决）/ building（组织线索）/ settling（结算）。
+   *  只在这些静默阶段发，叙述开始后靠 token 表示「在写」 */
+  | { event: 'stage'; data: string }
   | { event: 'warning'; data: string }
   | { event: 'state'; data: RpgStatePatch }
   | { event: 'suggestions'; data: string[] }
@@ -2242,10 +2252,11 @@ export function streamRpgTurn(
     action_id?: number | null
     item_name?: string
     move_to?: string
+    /** 当前查看的 NPC，用于选择该角色可见的历史与摘要 */
+    focus_npc_id?: number | null
+    /** 动作用在谁身上（好感加给他）。和「这段叙事归谁看」无关——
+     *  那个由消息上的 present 快照决定，不由请求参数决定 */
     target_npc?: string
-    /** 这一轮归哪条对话线，值是 NPC 的 id；不给 = 场面线。
-     *  和 target_npc 是两件事：它管叙事去哪条历史，target_npc 管动作用在谁身上 */
-    thread_id?: number | null
   },
   onMessage: (msg: RpgSSEMessage) => void,
   onClose: () => void,

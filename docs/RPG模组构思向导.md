@@ -85,6 +85,12 @@ async def extract_stage(stage, transcript, known, model_ref) -> dict
 模型选择：对话用 `get_agent_client("writer", ...)`（创作活，同 `rpg_assist` 的理由）；
 抽取用 `llm_json.call_json` + `get_fast_client`（结构化活，同小说侧）。
 
+**用哪个模型由 `pick_model(chosen, module_ref)` 一处决定**：下拉第一项是
+「模组默认模型」（value 是空串），所以空 = 跟模组走、非空 = 用选的那个。三个入口
+（对话 / 抽取 / 一键生成）都过它，**不在路由里各判一次**——各自判的后果已经出现过一次：
+前端把选择发了出来、路由收下却没用，作者选了 A 模型，实际连的是主页设置里的默认模型，
+日志里只有默认模型的名字，界面上完全看不出选择丢在哪一步。
+
 ### 5. `backend/app/schemas/rpg.py`
 
 `RpgWizardChatIn`（`messages` `model` `nsfw` `stage` `confirmed` `play_style`）、

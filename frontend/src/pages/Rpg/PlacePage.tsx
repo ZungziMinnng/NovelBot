@@ -8,7 +8,7 @@ interface Props {
   sess: RpgSession
   locations: RpgLocation[]
   npcs: RpgNpc[]
-  /** 进这个人的线，之后说的话只进他这条历史 */
+  /** 只看这个人参与过的部分。不改变接下来的话进哪儿——那只有一个地方可进 */
   onTalk: (npc: RpgNpc) => void
   onDetail: (npc: RpgNpc) => void
   /** 公共场面：群戏、环境描写、一个人待着都落这里 */
@@ -16,13 +16,15 @@ interface Props {
 }
 
 /**
- * 地点页：这里有哪些人，点谁就跟谁说话。
+ * 地点页：这里有哪些人，点谁就看谁的视角。
  *
- * 这一页上的按钮全是导航（换一条线看），不是动作，所以不看 `locked`：
+ * 这一页上的按钮全是导航（换个视角看），不是动作，所以不看 `locked`：
  * 一局结束之后历史照样该能翻。
  *
- * 「场面线」的文案特意不叫「独处」——它会膨胀成**公共场面**，三人同桌吃饭、
- * 群戏、没人在场的环境描写都只能落这里。写成「独处」玩家就不知道该往哪放了。
+ * 措辞是「看谁」而不是「进谁的线」：所有消息都在同一条时间线上，点一个人
+ * 只是把时间线**筛**成他参与过的那些，不会让接下来写的话落到别处去。
+ * 从前这一页写的「在其中点名提到某个人，就会进他单独的那条线」是界面的
+ * 老规矩——正是它让同一句话看着像是存错了地方。
  */
 export default function PlacePage({
   sess, locations, npcs, onTalk, onDetail, onScene,
@@ -50,10 +52,11 @@ export default function PlacePage({
       >
         <p className="text-sm font-medium flex items-center gap-1.5">
           <Users className="w-4 h-4 text-primary shrink-0" />
-          大家在一起
+          看全部
         </p>
         <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-          没有特定的说话对象，在场的人都在。群戏、环境描写、一个人待着，都写到这条线上。
+          整条时间线，从开场白到现在。群戏、环境描写、一个人待着、跟谁说了句话，
+          都在这上面。
         </p>
       </button>
 
@@ -79,10 +82,11 @@ export default function PlacePage({
           </button>
           <button
             onClick={() => onTalk(npc)}
+            title="只看他参与过的部分"
             className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-primary
               text-primary-foreground hover:opacity-90 shrink-0"
           >
-            <MessagesSquare className="w-3.5 h-3.5" />说话
+            <MessagesSquare className="w-3.5 h-3.5" />查看
           </button>
         </div>
       ))}

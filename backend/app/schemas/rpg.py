@@ -492,9 +492,13 @@ class RpgMessageOut(BaseModel):
     session_id: int
     role: str
     content: str
-    # 这条消息属于哪条对话线，值是 NPC 的 id；null = 场面线。
-    # 前端按它分组就有线了，不需要单独的线程列表端点
+    # 已废弃：后端不再读写，保留只为老前端不至于拿到 null 就崩。
+    # 新的筛选键是下面的 present
     thread_id: Optional[int] = None
+    # 这条消息发生在哪个地点，以及当时在场的 NPC id 列表（写入时快照）
+    location: str = ""
+    # None = 不知道（迁移过来的老消息）→ 当所有人可见；[] = 确定只有玩家一个人
+    present: Optional[list[int]] = None
     roll: Optional[dict] = None
     state_delta: Optional[dict] = None
     suggestions: Optional[list] = None
@@ -517,6 +521,8 @@ class RpgTurnRequest(BaseModel):
     item_name: str = ""
     move_to: str = ""
     target_npc: str = ""
+    # 当前前端正在查看的 NPC。只决定上下文取哪条记忆，不影响动作目标。
+    focus_npc_id: Optional[int] = None
     # 这一轮归哪条对话线，值是 NPC 的 id；不给 = 场面线。
     # 和 target_npc 是两件事：它管「这段叙事归哪条历史」，target_npc 管
     # 「这个动作用在谁身上」。在老兵线里对老板娘用动作是合法的

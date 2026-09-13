@@ -7,11 +7,15 @@
 作息表和常驻地点回答「没事的时候她在哪儿」，npc_places 回答「这一格剧情把
 她挪到哪了」。两条底线：
 
-1. **只有刚写出来的正文里真的出现过的人**才准被改位置（named_npcs 那条口径）。
+1. **只有刚写出来的正文里真的出现过的人**才准被改位置（named_npcs 那条口径），
+   外加私聊线的线主（一对一说话时正文很可能只写「她」，见 _settle）。
    玩家嘴上提到一句不行——那会让一个从没出场的角色凭空站在你面前、侧栏写
    「就在你面前」、还能拉进私聊，而玩家没有任何纠正的入口。
 2. **推时段清空**。时段一变作息表重新说了算，否则模型随手写的一笔会永久
    盖掉作者排的作息表，而那是他唯一的排期手段。
+
+和玩家自己的位置不同，这条线**在私聊线里也放行**：点开她单独说「你回宿舍去」
+是最自然的挪人方式，原先连 NPC 一起丢，只剩一条 toast。
 """
 import unittest
 from unittest.mock import patch
@@ -19,11 +23,11 @@ from unittest.mock import patch
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agents import rpg_turn
-from app.agents.rpg_turn import _place_block, thread_blocker
+from app.agents.rpg_turn import _place_block
 from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
-from app.models.rpg import RpgModule, RpgNpc, RpgSession
+from app.models.rpg import RpgLocation, RpgModule, RpgNpc, RpgSession
 from app.services.rpg_context import here_npcs, named_npcs, npc_place, onstage_npcs
 from app.services.rpg_state import advance_slot, apply_npc_place, apply_state_delta
 
@@ -82,15 +86,6 @@ class PlaceOverrideTests(unittest.TestCase):
         npc = _npc(slot_locations={"晚": "宿舍"})
         got = onstage_npcs([npc], "校长办公室", "赫敏说了什么", "晚", {"3": "校长办公室"})
         self.assertEqual(got, [npc])
-
-    def test_the_thread_opens_once_she_is_really_there(self):
-        # 这是玩家能感觉到的差别：她真在跟前，才能拉一边单独说话
-        npc = _npc(slot_locations={"晚": "宿舍"})
-        sess = _sess(npc_places={})
-        self.assertIn("宿舍", thread_blocker(sess, [npc], npc.id))
-        sess.npc_places = {"3": "校长办公室"}
-        self.assertEqual(thread_blocker(sess, [npc], npc.id), "")
-
 
 class NamedNpcTests(unittest.TestCase):
     """位置改动的允许名单：这一段正文里出现过谁。"""
@@ -157,17 +152,18 @@ class WritePathTests(unittest.TestCase):
         self.assertEqual(sess.npc_places, {})
         self.assertTrue(any("查无此人" in w for w in warnings))
 
-    def test_a_thread_line_drops_it(self):
-        # 和玩家位置同一条边：角色线里线主被叙述走开，她那条线的输入框
-        # 就永久置灰了（见 apply_state_delta 的 allow_move）
+    def test_the_players_own_move_is_applied(self):
+        # 叙述把玩家自己挪走照旧放行。「自由打字绕过地图」是文档 §13 的既有
+        # 决定，当初的边界画在「场面线放行、私聊线不放行」上——线没了，那个
+        # 开关跟着没了，于是所有情况一个待遇
         npc = _npc()
         sess = _sess()
         warnings = apply_state_delta(
             RpgModule(stat_defs=[], relation_stat_defs=[]), sess,
-            self._delta({"赫敏": "图书馆"}), [npc], allow_move=False, move_npcs=[npc],
+            {"location": "图书馆"}, [npc], move_npcs=[npc],
         )
-        self.assertEqual(sess.npc_places, {})
-        self.assertTrue(any("单独说话" in w for w in warnings))
+        self.assertEqual(sess.location, "图书馆")
+        self.assertFalse(any("走动" in w or "地点变化" in w for w in warnings))
 
     def test_no_allow_list_means_nobody_can_be_moved(self):
         # 老调用点（没传 move_npcs）行为不变：一个都不许挪
@@ -250,23 +246,33 @@ class PromptBlockTests(unittest.TestCase):
     """结算提示词末尾那一段。不写进去，模型压根不知道有这个字段。"""
 
     def test_it_lists_everybody_with_their_current_place(self):
-        block = _place_block([_npc()], _sess())
+        block = _place_block([_npc()], [], _sess())
         self.assertIn("npc_places", block)
         self.assertIn("赫敏 现在在 宿舍", block)
 
     def test_it_shows_the_scene_place_not_the_schedule(self):
         # 得让她原本在宿舍这件事被看到，模型才写得出「她回去了」那种清空
-        block = _place_block([_npc()], _sess(npc_places={"3": "校长办公室"}))
+        block = _place_block([_npc()], [], _sess(npc_places={"3": "校长办公室"}))
         self.assertIn("赫敏 现在在 校长办公室", block)
 
     def test_nobody_named_means_no_block(self):
         # 一个字段都不提，省掉几十个字，也免得模型凭空想起要挪人
-        self.assertEqual(_place_block([], _sess()), "")
+        self.assertEqual(_place_block([], ["宿舍"], _sess()), "")
 
     def test_a_nameless_person_is_still_shown(self):
         # 作者把名字留空了。这儿写成空串不难看，也不影响别的
-        block = _place_block([_npc(name="", location="")], _sess())
+        block = _place_block([_npc(name="", location="")], [], _sess())
         self.assertIn("行踪不明", block)
+
+    def test_known_places_are_offered(self):
+        # 现编一个模组里没有的地名，侧栏会显示它、地点总览里却找不到，
+        # 玩家照提示「去她所在的地方」就走不过去。给一份真名单
+        block = _place_block([_npc()], ["宿舍", "图书馆"], _sess())
+        self.assertIn("宿舍、图书馆", block)
+
+    def test_no_known_places_means_no_such_line(self):
+        # 模组一个地点都没建时，这段不拼，行为和加它之前逐字一致
+        self.assertNotIn("只能填", _place_block([_npc()], [], _sess()))
 
 
 class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
@@ -297,6 +303,7 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
                 slot_locations={"晚": "宿舍"}, persona="好胜",
             )
             db.add(npc)
+            db.add(RpgLocation(module_id=module.id, name="图书馆"))
             await db.commit()
             sess = RpgSession(
                 module_id=module.id, char_name="阿隼", stats={},
@@ -307,6 +314,7 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
             self.session_id = sess.id
             self.npc_id = npc.id
+            self.module_id = module.id
 
     async def asyncTearDown(self):
         self.patcher.stop()
@@ -322,7 +330,9 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
              patch.object(rpg_turn, "call_json", fake_call_json):
-            got = await rpg_turn._settle(self.session_id, 0, narration, "", "")
+            got = await rpg_turn._settle(
+                self.session_id, 0, narration, "", "",
+            )
         return got, prompts[0]
 
     async def _places(self):
@@ -330,10 +340,13 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
             return dict((await db.get(RpgSession, self.session_id)).npc_places or {})
 
     async def test_the_prompt_offers_the_field_with_where_she_is_now(self):
-        # 得让她「现在在宿舍」被看到，模型才写得出「她回去了」那种清空
+        # 得让她「现在在宿舍」被看到，模型才写得出「她回去了」那种清空。
+        # 地名那一行同一次钉住：模型现编一个模组里没有的地名，侧栏会显示它、
+        # 地点总览里却找不到，玩家没法照提示走过去
         _got, prompt = await self._run("赫敏推门进来，站在你面前。", {})
         self.assertIn("npc_places", prompt)
         self.assertIn("赫敏 现在在 宿舍", prompt)
+        self.assertIn("只能填这些已有的地名：图书馆", prompt)
 
     async def test_nobody_in_the_text_means_the_field_is_never_offered(self):
         # 一个字都不提，模型也就不会想起要挪谁
@@ -367,6 +380,23 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
         await self._run("赫敏推门进来，说了几句话就走了。",
                         {"npc_places": {"赫敏": ""}})
         self.assertEqual(await self._places(), {})
+
+    async def test_someone_in_the_room_moves_even_if_the_text_only_says_她(self):
+        # 面对面说话时正文很可能只写「她」。只认全名的话，玩家最常见的挪人
+        # 方式（当着她的面叫她回宿舍）就永远失效——所以在场的人无条件可动。
+        # 这一条是替原先那个「线主无条件可动」的：线主本来就是指「你正在跟
+        # 她说话的那位」，线没了，等价的集合就是眼前这些人
+        async with self.sessions() as db:
+            row = await db.get(RpgNpc, self.npc_id)
+            # 作息表压过 location，得连它一起改才真的「在跟前」
+            row.slot_locations = {"晚": "校长办公室"}
+            await db.commit()
+        got, _prompt = await self._run(
+            "她点点头，收拾好东西出门去了。",
+            {"npc_places": {"赫敏": "图书馆"}},
+        )
+        self.assertEqual(await self._places(), {str(self.npc_id): "图书馆"})
+        self.assertEqual(got["state"]["npc_places"], {str(self.npc_id): "图书馆"})
 
 
 class SnapshotTests(unittest.TestCase):

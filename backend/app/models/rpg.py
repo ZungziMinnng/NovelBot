@@ -426,15 +426,12 @@ class RpgSession(Base):
     # 存名字不存 id，理由同 connections
     visited: Mapped[list] = mapped_column(JSON, default=list)
 
-    # 滚动摘要，含义同酒馆。**这两列只管场面线**（thread_id 为 NULL 的那条）
+    # 滚动摘要，含义同酒馆。历史统一成一条之后只剩这一份
     summary: Mapped[str] = mapped_column(Text, default="")
     summarized_upto_id: Mapped[int] = mapped_column(Integer, default=0)
 
-    # 每条角色线各存一份概要。{"3": "……"} / {"3": 128}，键是 npc_id 的字符串。
-    #
-    # 不能只存一份全局概要：概要是要注入 system 的，一份全局概要注入每一条线，
-    # 等于把你在密室里跟 A 说的话原样告诉 B。chronicle 之所以要求「只写已经
-    # 传开的事」，防的就是这个；摘要器绕过那条规矩的话，分线就白做了
+    # NPC 独立摘要与各自已压缩到的消息指针，按 NPC id 存储。
+    # 保留为 JSON 映射，兼容已有数据库与没有独立线的旧会话。
     thread_summaries: Mapped[dict] = mapped_column(JSON, default=dict)
     thread_upto: Mapped[dict] = mapped_column(JSON, default=dict)
 
@@ -460,17 +457,32 @@ class RpgMessage(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
 
-    # 这条消息属于哪条对话线。**值是 NPC 的 id**，NULL = 场面线（公共场面：
-    # 群戏、环境描写、一个人待着都落这里）。名字表达的是概念「这是哪条线」，
-    # 不是外键指向——不叫 npc_id 是因为那会和 target_npc（动作作用在谁身上，
-    # 是名字字符串）在同一个请求体里撞车
-    #
-    # 不建线程表：NULL 天然就是场面线，老数据零回填；回溯按消息 id 删，
-    # 线作为派生结果自动一致，不会留下一堆点不开的空对话
+    # **已废弃：后端不再读这一列。** 保留只为不动老库的表结构（SQLite 删列要
+    # 重建表）。原先它同时是三件事——历史分区键、隐私边界、界面视图，三件事
+    # 绑在一个值上，于是每次让一件对了另两件就错。现在由 location + present
+    # 两列接管，见下
     #
     # **不要给它加外键，也不要写进 _repair_data 的悬空外键清理**——角色被删
     # 之后那会把一条角色线静默变成场面线，两条历史当场合并，且不会报错
     thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    # 这条消息发生在哪个地点。**写入时快照**，不是读时回查 sess.location——
+    # 玩家会走，事后推不出来。统一时间线里混着好几个地点的消息，靠它在
+    # 历史上打分隔，否则模型会把三天前在铁匠铺说的话读成眼前这场对话
+    location: Mapped[str] = mapped_column(String(100), default="")
+
+    # 这条消息发生时**在场**的 NPC id 列表。同样是写入时快照：npc_places
+    # 每回合都在变（作息表推时段会清空、剧情会把谁挪走），事后推不出来
+    #
+    # 这一列是新的隐私边界。私聊视图 = present 里有她的消息；群戏写一次
+    # present=[赫敏, 罗恩]，两边同时看得到，**一份存储零复制**——复制进各条
+    # 历史会让同一段戏在几条线里各自演化、各自被压成概要，§23 那条硬规矩
+    #
+    # **nullable 是有意的，两种空含义不同**：
+    #   None  = 不知道（迁移过来的老消息）→ 当所有人可见，老存档什么都不消失
+    #   []    = 确定只有玩家一个人 → 不进任何 NPC 的视图
+    # 把 None 写成 [] 会让老存档里所有群戏对 NPC 集体失忆
+    present: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
 
     # 本回合判定，只挂在 user 行上。null = 这轮没判定。
     # 挂 user 行而不是 assistant 行，是为了中断语义：assistant 行要等叙事跑完

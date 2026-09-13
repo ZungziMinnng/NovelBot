@@ -296,6 +296,21 @@ async def _run_migrations() -> None:
         # 规则 id。老库拿到 '[]' = 不勾任何规则、不注入，行为与加这列之前一致
         "CREATE INDEX IF NOT EXISTS idx_rpg_rules_user ON rpg_rules(user_id)",
         "ALTER TABLE rpg_modules ADD COLUMN enabled_rule_ids JSON DEFAULT '[]'",
+        # 统一时间线：消息自带地点和在场名单（都是写入时快照，理由见 RpgMessage）。
+        # 老库拿到 '' 和 NULL——**NULL 的语义是「不知道」，当所有人可见**，
+        # 所以老存档里没有任何一条消息会因为这次改动消失
+        "ALTER TABLE rpg_messages ADD COLUMN location VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_messages ADD COLUMN present JSON DEFAULT NULL",
+        # 老消息按线回填在场名单：从角色线来的就是那一个人。用字符串拼而不是
+        # json_array()，免得依赖 SQLite 编译时带没带 JSON1
+        #
+        # 场面线（thread_id IS NULL）当年是群戏和独处混在一条线上，分不出来，
+        # 保持 NULL = 所有人可见。**别图省事把它填成 '[]'**——那等于宣布老存档
+        # 里所有群戏都是玩家一个人干的，每个 NPC 对共同经历集体失忆
+        #
+        # 幂等：填过的行 present 非空，不再匹配；新消息 thread_id 恒为 NULL
+        "UPDATE rpg_messages SET present = '[' || thread_id || ']' "
+        "WHERE thread_id IS NOT NULL AND present IS NULL",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -373,6 +388,47 @@ async def _repair_concatenated_clock(bind=None) -> None:
                 {"slot": names[0], "id": session_id},
             )
             logger.info("RPG 第 %s 局：时段表被连写成「%s」，已退回跟模组走", session_id, single[0])
+
+
+async def _rpg_timeline_is_legacy(conn) -> bool:
+    """rpg_messages 还没有 location 列吗？——「这是加列那一次启动」的判据。
+
+    必须**在 create_all 之后、加列迁移之前**问。create_all 只建缺的表、从不改
+    已有的表，所以老库在这一刻一定还没有这一列；新建的库带着列建出来，判据为
+    假，而新库本来也没有老消息要回填。放到 _run_migrations 之后问就恒为假了。
+
+    抽成函数而不是写在 init_db 里，是为了能被测——init_db 动的是真实数据库。
+    """
+    return not await conn.run_sync(
+        lambda c: any(
+            col["name"] == "location" for col in inspect(c).get_columns("rpg_messages")
+        )
+    )
+
+
+async def _backfill_rpg_timeline(bind=None) -> None:
+    """统一时间线的老库回填：作废按线写的概要指针，让窗口重新发原文。
+
+    老库里 summary / summarized_upto_id 记的是**场面线**压到哪。统一成一条时间线
+    之后，那个指针之前、属于角色线的那些消息从来没有被压进任何一份概要，却会被
+    history_window 当成「已经压过了」跳过——早先私聊的内容就这么静默消失，而且
+    不报错。归零让它们重新发原文，随后摘要器按统一时间线重新压一遍。
+
+    窗口本来就有 context_turns * 2 封顶（见 rpg_context.history_window），
+    所以归零只是让最近那段重新发一次，撑不爆上下文。
+
+    **只跑一次**，判据由调用方给（init_db 的 legacy_timeline）——这条 UPDATE
+    自己不是幂等的：新局攒起来的 summarized_upto_id 会被下次启动再清一次。
+    bind 只为测试能指向自己的库，默认那个 engine 指向真实数据。
+    """
+    async with (bind or engine).begin() as conn:
+        result = await conn.execute(text(
+            "UPDATE rpg_sessions SET summarized_upto_id = 0 WHERE summarized_upto_id > 0"
+        ))
+    if result.rowcount:
+        logger.info(
+            "统一时间线：%s 局的旧概要指针已归零，将按新时间线重新压缩", result.rowcount
+        )
 
 
 def _json_list(raw) -> list:
@@ -547,7 +603,11 @@ async def init_db():
             lambda sync_conn: inspect(sync_conn).has_table("world_rules")
         )
         await conn.run_sync(Base.metadata.create_all)
+        # 判据要在这里取：加列迁移一跑，它恒为假。理由见 _rpg_timeline_is_legacy
+        legacy_timeline = await _rpg_timeline_is_legacy(conn)
     await _run_migrations()
     await _repair_data()
     if not existing:
         await _migrate_world_rules()
+    if legacy_timeline:
+        await _backfill_rpg_timeline()

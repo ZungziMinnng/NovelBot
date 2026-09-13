@@ -39,6 +39,7 @@ from app.schemas.rpg import (
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
 )
 from app.services import llm_json
+from app.services.rpg_context import present_ids
 from app.services.rpg_state import (
     OPENING_CHARS, OPENING_TAG,
     advance_slot, apply_npc_activity, apply_npc_notes, init_relation, init_stats,
@@ -290,7 +291,8 @@ async def wizard_chat(
     try:
         messages, model, api_format = await rpg_wizard.chat_stream_args(
             [m.model_dump() for m in data.messages],
-            module.model_ref, data.nsfw, data.stage, data.confirmed, data.play_style,
+            rpg_wizard.pick_model(data.model, module.model_ref),
+            data.nsfw, data.stage, data.confirmed, data.play_style,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -314,7 +316,8 @@ async def wizard_extract(
     )
     try:
         result = await rpg_wizard.extract_stage(
-            data.stage, transcript, data.known, module.model_ref
+            data.stage, transcript, data.known,
+            rpg_wizard.pick_model(data.model, module.model_ref),
         )
     except llm_json.JsonCallError as e:
         raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e
@@ -360,7 +363,8 @@ async def generate_batch(
     count = max(1, min(data.count, 10))
     try:
         result = await rpg_wizard.generate_batch(
-            kind, data.instruction, count, known, data.nsfw, module.model_ref,
+            kind, data.instruction, count, known, data.nsfw,
+            rpg_wizard.pick_model(data.model, module.model_ref),
         )
     except llm_json.JsonCallError as e:
         raise HTTPException(status_code=502, detail=f"生成失败：{e}") from e
@@ -647,7 +651,13 @@ async def create_session(
         # 开场白是**场面线**的第一条旁白。历史是按线切的，所以私聊线里看不到它
         # ——玩家一开局去点开场白里写到的那个人，会撞上一条空线，而模型在那条
         # 线里也不知道刚刚发生了什么。
-        db.add(RpgMessage(session_id=sess.id, role="assistant", content=opening))
+        db.add(RpgMessage(
+            session_id=sess.id, role="assistant", content=opening,
+            # 开场这一幕的在场名单也快照下来。开场白里写到的那些人从此算「她在
+            # 场」——这正是第三十节那个「她像是不知道开场」的根
+            location=sess.location or "",
+            present=present_ids(npcs, sess.location, sess.slot, sess.npc_places),
+        ))
         # 所以顺手压一条进外场。开场那一幕是这一局最公共的事实（「你在校长
         # 办公室、赫敏就在跟前」），而大事记本来就是跨线共享的那条通道，抬头
         # 还写着「传闻不等于亲眼见过」，正好合用。**不复制全文到每条线**：
@@ -733,13 +743,11 @@ async def delete_session(session_id: int, user: CurrentUser, db: AsyncSession = 
 # 只会在读档之后留下一个不还原的字段——时段和天数就是这么进来的
 SNAPSHOT_FIELDS = (
     "status", "stats", "inventory", "location", "flags", "npc_states",
-    "summary", "summarized_upto_id", "dc_ledger", "turn_count",
+    "summary", "summarized_upto_id", "thread_summaries", "thread_upto",
+    "dc_ledger", "turn_count",
     "time_slots", "slot", "day", "chronicle", "visited", "npc_notes",
     # AI 调度的产物。不回滚的话读档之后角色卡上还挂着「未来」的那句行动
     "npc_activities",
-    # 分线概要同理，而且更隐蔽：场面线的概要回滚了、角色线的没回滚，
-    # 读档之后两条线对同一段往事的记忆会直接打架
-    "thread_summaries", "thread_upto",
     # 剧情挪动的人物位置。不回滚的话读档回到三天前，赫敏还站在办公室里——
     # 而那个"办公室"是三天后你才叫她去的
     "npc_places",
@@ -980,28 +988,36 @@ async def move_to(
 
 @router.post("/sessions/{session_id}/suggest", response_model=RpgSuggestOut)
 async def suggest_actions(
-    session_id: int, user: CurrentUser, thread_id: int | None = None,
-    db: AsyncSession = Depends(get_db),
+    session_id: int, user: CurrentUser,
+    db: AsyncSession = Depends(get_db), focus_npc_id: int | None = None,
 ):
     """根据最近几轮给出 3 条候选行动，点一条直接发出去。
 
-    「最近几轮」指**当前这条线**的最近几轮：在老兵屋里给的建议，不该来自
-    隔壁酒馆刚聊的那些话。
+    「最近几轮」就是这条时间线的最近几轮——线拆掉之后没有别的线可切。
+    原先要按线取是为了「在老兵屋里给的建议不该来自隔壁酒馆刚聊的那些话」，
+    那个理由随线一起没了：现在全场只有一条历史，隔壁酒馆那几句就是你的前情。
     """
     sess = await _get_owned_session(db, session_id, user)
     module = await db.get(RpgModule, sess.module_id)
-    history = [
-        m for m in (await db.execute(
-            select(RpgMessage)
-            .where(RpgMessage.session_id == session_id)
-            .order_by(RpgMessage.id)
-        )).scalars().all()
-        if (m.thread_id or None) == (thread_id or None)
-    ]
+    if focus_npc_id:
+        exists = await db.scalar(select(RpgNpc.id).where(
+            RpgNpc.id == focus_npc_id, RpgNpc.module_id == sess.module_id,
+        ))
+        if exists is None:
+            raise HTTPException(status_code=404, detail="角色不存在")
+    rows = list((await db.execute(
+        select(RpgMessage)
+        .where(RpgMessage.session_id == session_id)
+        .order_by(RpgMessage.id)
+    )).scalars().all())
     try:
-        return RpgSuggestOut(
-            suggestions=await rpg_turn.suggest_actions(module, sess, history, thread_id)
-        )
+        if focus_npc_id:
+            suggestions = await rpg_turn.suggest_actions(
+                module, sess, rows, focus_npc_id
+            )
+        else:
+            suggestions = await rpg_turn.suggest_actions(module, sess, rows)
+        return RpgSuggestOut(suggestions=suggestions)
     except ValueError as e:
         # 模型配错时 resolve_model_ref 抛 ValueError，别变成 500
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1024,25 +1040,31 @@ async def stream_turn(
     if not content:
         raise HTTPException(status_code=400, detail="说点什么再发")
 
-    # 这一轮归哪条线：只在这里解析一次，之后一路传下去。
-    # 线主不在当前地点就整轮拒掉——历史照常可读，只是不给输入框
+    # 这里原先有三件事：解析这一轮归哪条线、线主不在跟前就拒、显式给了 null
+    # 就不拿 target_npc 兜底。全是线的概念，线拆了，三件一起没了。
+    # **req.thread_id 不再读**：它是老前端的字段，忽略即可，不再代表归属——
+    # 一段叙事归谁看由消息上的 present 决定，那是快照，不是请求参数
     npcs = list((await db.execute(
         select(RpgNpc).where(RpgNpc.module_id == sess.module_id)
     )).scalars().all())
-    thread_id = rpg_turn.resolve_thread_id(sess, npcs, req.thread_id, req.target_npc)
-    if req.thread_id and thread_id is None:
-        raise HTTPException(status_code=404, detail="这条对话线不存在")
-    blocker = rpg_turn.thread_blocker(sess, npcs, thread_id)
-    if blocker:
-        raise HTTPException(status_code=400, detail=blocker)
+    if req.focus_npc_id and not any(n.id == req.focus_npc_id for n in npcs):
+        raise HTTPException(status_code=404, detail="角色不存在")
 
     # 自动存档必须在这一轮动任何东西之前拍：有了权威状态就必须能反悔，
     # 一次坏判定不该毁掉整局
     await _take_save(db, sess, "auto", "")
     await _prune_auto_saves(db, session_id)
 
+    # 这一轮的在场名单，**在写 user 行之前快照一次**，同一轮的两行共用。
+    # 不能等 assistant 行落库时再算：结算会把人物挪走（apply_npc_activity /
+    # move_npcs），那时候算出来的是「这一轮结束后谁在」，一问一答会分到两拨
+    # 在场名单里，于是同一次对话在两个人的视图里各缺一半
+    present = present_ids(npcs, sess.location, sess.slot, sess.npc_places)
+    place = sess.location or ""
+
     row = RpgMessage(
-        session_id=session_id, role="user", content=content, thread_id=thread_id
+        session_id=session_id, role="user", content=content,
+        location=place, present=present,
     )
     db.add(row)
     sess.turn_count += 1
@@ -1056,7 +1078,7 @@ async def stream_turn(
             async for event, data in rpg_turn.run_turn(
                 session_id, user_message_id, content, req.attr,
                 req.action_id, req.item_name, req.move_to, req.target_npc,
-                thread_id,
+                present, place, req.focus_npc_id,
             ):
                 yield sse_event(event, data)
         except (asyncio.CancelledError, GeneratorExit):

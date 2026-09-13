@@ -97,6 +97,13 @@ export const knownNpcs = (npcs: RpgNpc[], sess: RpgSession) =>
   npcs.filter(n => n.role !== 'protagonist'
     && (sess.npc_states?.[String(n.id)]?.met || onstage(n, sess)))
 
+/** 名字里的间隔号。只在人名比对时去掉，也不进 `norm`——背包那边「铁-钥匙」
+ *  和「铁钥匙」是不是一件东西是另一个问题。同后端 `rpg_state._NAME_SEPS` */
+const NAME_SEPS = /[·•・.\-_、,，]/g
+
+/** 半个名字最少要这么长才敢认。一个字的「李」能撞上一整屋人（同 `_MIN_PARTIAL`） */
+const MIN_PARTIAL = 2
+
 const OPS: Record<string, (a: number, b: number) => boolean> = {
   '>=': (a, b) => a >= b,
   '>': (a, b) => a > b,

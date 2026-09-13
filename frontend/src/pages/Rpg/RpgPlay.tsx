@@ -22,6 +22,7 @@ import NpcSheet from './NpcSheet'
 import PlacePage from './PlacePage'
 import StatePanel from './StatePanel'
 import StatusSidebar, { type SidebarTab } from './StatusSidebar'
+import RpgTurnStatus from './RpgTurnStatus'
 import { styleLabel } from './stylePresets'
 
 /** 界面上的一条消息。id 为 null 表示流式过程中还没落库的占位气泡 */
@@ -32,13 +33,17 @@ interface Bubble {
   roll: RpgRoll | null
   /** 这一轮刚掷出来的才让骰子动，翻历史不该每条都再抖一遍 */
   fresh: boolean
-  /** 属于哪条线。流式过程中还没落库，只能由前端从这一轮的目标带过来 */
-  thread_id: number | null
+  /** 当时在场的 NPC id，看某个人的视角按它筛。null = 不知道，当所有人可见
+   *  （老消息，以及还在流、名单要等后端快照的那两条占位气泡） */
+  present: number[] | null
+  /** 发生在哪个地点。换地方的地方插一条分隔——统一时间线之后一屏里
+   *  会混着几个地方的戏，不标就分不清哪句是在哪儿说的 */
+  location: string
 }
 
 const toBubble = (m: RpgMessage): Bubble => ({
   id: m.id, role: m.role, content: m.content, roll: m.roll, fresh: false,
-  thread_id: m.thread_id ?? null,
+  present: m.present ?? null, location: m.location || '',
 })
 
 /** 「点出来的」那一轮额外带的东西。三个都空就是自由打字 */
@@ -47,10 +52,18 @@ interface TurnExtra {
   item_name?: string
   move_to?: string
   target_npc?: string
+  focus_npc_id?: number | null
 }
 
-/** 三级：地点总览 → 某个地点 → 某条对话线。总览是中枢，进去靠点，回来靠面包屑 */
+/** 三级：地点总览 → 某个地点 → 时间线。总览是中枢，进去靠点，回来靠面包屑 */
 type View = 'overview' | 'place' | 'line'
+
+/** 诊断行用：这一轮被提到、但人不在你跟前的那些名字。
+ *  就是 npcs_onstage（宽名单，给注入用）减去 npcs_here（真的同地点） */
+const mentionedOnly = (meta: RpgTurnMeta) => {
+  const here = new Set((meta.npcs_here || []).map(n => n.id))
+  return (meta.npcs_onstage || []).filter(n => !here.has(n.id)).map(n => n.name)
+}
 
 export default function RpgPlay() {
   const { sessionId: sessionIdParam } = useParams<{ sessionId: string }>()
@@ -64,6 +77,9 @@ export default function RpgPlay() {
   const [streaming, setStreaming] = useState(false)
   // 首个 token 到达之前单独一个状态：光标闪在空气泡里看不出是在等还是卡了
   const [waiting, setWaiting] = useState(false)
+  // 后端当前处在哪一步（adjudicating/building/settling）。静默阶段靠它给出
+  // 「正在做什么」，见 agents/rpg_turn.py 里的 stage 事件
+  const [stage, setStage] = useState('')
   const [meta, setMeta] = useState<RpgTurnMeta | null>(null)
   const [tips, setTips] = useState<string[]>([])
   // 「帮我想想」在跑。和 streaming 分开：那一个是整轮生成，这个只是要几条建议
@@ -75,8 +91,9 @@ export default function RpgPlay() {
   // 侧栏在宽屏常驻，窄屏收成抽屉
   const [menuOpen, setMenuOpen] = useState(false)
   const [view, setView] = useState<View>('overview')
-  // 当前对话线。null = 场面线（公共场面），值是 NPC 的 id
-  const [threadId, setThreadId] = useState<number | null>(null)
+  // 看谁的视角。null = 全部（整条时间线），值是 NPC 的 id。
+  // 只是一个**筛选器**：所有消息都在同一条时间线上，切视角不改变什么归谁
+  const [focusNpcId, setFocusNpcId] = useState<number | null>(null)
   const [openNpc, setOpenNpc] = useState<RpgNpc | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
@@ -124,18 +141,26 @@ export default function RpgPlay() {
     enabled: tab === 'save',
   })
   // 消息以后端为准：只在进页面时拉一次，之后本地追加。
-  // 线不在后端单拉——按 thread_id 分组就有线了，少一个端点，
-  // 也不会出现「新消息不在当前线的查询结果里所以看不到」
+  // 没有单独的「线」端点，也不需要：只有一个视角要筛，筛的是消息自己带的名单
   const { data: loaded } = useQuery({
     queryKey: ['rpg-messages', sessionId],
     queryFn: () => rpgApi.messages.list(sessionId),
     enabled: Number.isFinite(sessionId) && sessionId > 0,
   })
 
-  useEffect(() => { if (loaded) setBubbles(loaded.map(toBubble)) }, [loaded])
+  // 流式期间以本地为准：列表在生成中途被重新拉下来（staleTime 30 秒 + 切回
+  // 窗口就重拉）会把这颗还没落库的流式气泡整个换掉，而 openRef 已经是 true，
+  // 下一个 token 就直接追加到**你自己那句话的气泡**里了。这一轮结束时 done
+  // 里那次 invalidate 会把权威列表拉回来
+  useEffect(() => {
+    if (!loaded || streaming) return
+    setBubbles(loaded.map(toBubble))
+    // streaming 故意不进依赖：进去就变成「每次它一变就重新拉下来覆盖」
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded])
 
-  // 新局直接落在场面线上。开场白是场面线的第一条旁白，而默认视图是地图总览
-  // ——不跳的话玩家开局第一眼看到的是一张地图，得往里点两层才看得到作者
+  // 新局直接落在时间线上。开场白是这条时间线的第一条旁白，而默认视图是地图
+  // 总览——不跳的话玩家开局第一眼看到的是一张地图，得往里点两层才看得到作者
   // 写的那一幕，多数人会以为开场白没生效。
   // 判据是「玩家一句话都还没说过」，而且只在进页面时判一次：之后无论他停在
   // 哪一级，刷新回来都该停在原地，不能被这一跳抢走
@@ -144,7 +169,7 @@ export default function RpgPlay() {
     if (!loaded || landedRef.current) return
     landedRef.current = true
     if (loaded.length > 0 && loaded.every(m => m.role !== 'user')) {
-      setThreadId(null)
+      setFocusNpcId(null)
       setView('line')
     }
   }, [loaded])
@@ -158,46 +183,51 @@ export default function RpgPlay() {
     [npcs, sess],
   )
 
-  const threadNpc = useMemo(
-    () => (threadId ? npcs.find(n => n.id === threadId) ?? null : null),
-    [npcs, threadId],
+  const focusNpc = useMemo(
+    () => (focusNpcId ? npcs.find(n => n.id === focusNpcId) ?? null : null),
+    [npcs, focusNpcId],
   )
 
-  // 换线时把动作对象重置成线主：不重置就会**跨线泄漏**——在老兵线里
-  // target 还留着老板娘，下一个动作的好感就加到别人头上。
-  // 场面线一律清空：自动替玩家选一个对象，会把这一轮悄悄送进那个人的线
+  // 换视角时把动作对象重置成那个人：不重置就会**跨人泄漏**——看完老兵再看
+  // 老板娘，target 还留着老兵，下一个动作的好感就加到别人头上。
+  // 「全部」视角一律清空：自动替玩家选一个对象没有任何依据
   useEffect(() => {
-    const owner = threadId ? npcs.find(n => n.id === threadId) : null
+    const owner = focusNpcId ? npcs.find(n => n.id === focusNpcId) : null
     setTarget(owner ? owner.name : '')
-  }, [threadId, npcs])
+  }, [focusNpcId, npcs])
 
-  /** 这条线上该显示的气泡。流式里的那些也带着 thread_id，所以不断线 */
+  /** 这个视角该显示的气泡：**当时在场的都算**，包括他参与过的群戏——
+   *  同一场戏在在场每个人的视角里都在，靠的是那条消息本身就记着谁在场，
+   *  不需要往各人的历史里各复制一份（复制会让同一段戏各演化一遍）。
+   *  present 为 null 的是老消息，当所有人可见 */
   const lineBubbles = useMemo(
-    () => bubbles.filter(b => (b.thread_id ?? null) === threadId),
-    [bubbles, threadId],
+    () => (focusNpcId === null
+      ? bubbles
+      : bubbles.filter(b => b.present === null || b.present.includes(focusNpcId))),
+    [bubbles, focusNpcId],
   )
+
+  /** 在飞的那一轮是不是就落在你眼前。只有一条时间线了，所以它永远在这里；
+   *  还没落库的气泡 present 记的是 null（谁在场要等后端快照），于是它在哪个
+   *  视角里都看得见——这也正是「不知道就当所有人可见」这条读法 */
+  const streamingHere = streaming
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [lineBubbles])
-
-  /** 公共场面里的最后一段旁白。一条还没开口的私聊线拿它当背景垫在上面：
-   *  那条线自己没有历史，但故事并不是从玩家的第一句话才开始的——新局时
-   *  这一段正好就是开场白 */
-  const sceneTail = useMemo(
-    () => [...bubbles].reverse()
-      .find(b => (b.thread_id ?? null) === null && b.role === 'assistant')?.content || '',
-    [bubbles],
-  )
+    // stage 也进依赖：结算提示是在正文写完之后才插进来的，那会儿气泡没变，
+    // 只等 lineBubbles 的话新插的那一行会落在可视区下面，正好看不见
+  }, [lineBubbles, stage])
 
   const send = useCallback((
-    text: string, useAttr: string, extra: TurnExtra = {}, thread: number | null = threadId,
+    text: string, useAttr: string, extra: TurnExtra = {},
   ) => {
     setBubbles(prev => [...prev, {
-      id: null, role: 'user', content: text, roll: null, fresh: true, thread_id: thread,
+      id: null, role: 'user', content: text, roll: null, fresh: true,
+      present: null, location: '',
     }])
     setStreaming(true)
     setWaiting(true)
+    setStage('')
     setMeta(null)
     setTips([])
     openRef.current = false
@@ -211,7 +241,8 @@ export default function RpgPlay() {
       if (openRef.current) return
       openRef.current = true
       setBubbles(prev => [...prev, {
-        id: null, role: 'assistant', content: '', roll: null, fresh: true, thread_id: thread,
+        id: null, role: 'assistant', content: '', roll: null, fresh: true,
+        present: null, location: '',
       }])
     }
 
@@ -230,8 +261,7 @@ export default function RpgPlay() {
 
     abortRef.current = streamRpgTurn(
       sessionId,
-      // thread_id 显式带上，后端不再靠 target_npc 猜这段叙事归哪条历史
-      { content: text, attr: useAttr, thread_id: thread, ...extra },
+      { content: text, attr: useAttr, ...extra },
       (msg: RpgSSEMessage) => {
         if (msg.event === 'meta') {
           // 后端发两次：先只带 user_message_id，上下文拼完再补诊断。必须合并
@@ -250,7 +280,12 @@ export default function RpgPlay() {
         } else if (msg.event === 'token') {
           openBubble()
           setWaiting(false)
+          // 开始吐字了，静默期结束：气泡里的光标接手，「正在做什么」的
+          // 分阶段提示让位
+          setStage('')
           patchLast(prev => prev + msg.data)
+        } else if (msg.event === 'stage') {
+          setStage(msg.data)
         } else if (msg.event === 'state') {
           // 引擎结算发一次、AI 结算再发一次，就地合进缓存，数值面板立刻跟着动
           qc.setQueryData(['rpg-session', sessionId], (prev?: RpgSession) => (
@@ -262,23 +297,32 @@ export default function RpgPlay() {
           toast(msg.data)
         } else if (msg.event === 'done') {
           const id = msg.data.message_id
+          setStage('')
           setBubbles(prev => prev.map((b, i) => (i === prev.length - 1 ? { ...b, id } : b)))
           qc.invalidateQueries({ queryKey: ['rpg-session', sessionId] })
         } else if (msg.event === 'error') {
           openBubble()
           setWaiting(false)
+          setStage('')
           patchLast(prev => prev + `\n[错误] ${msg.data}`)
+          // 光在气泡里塞一行错误很容易被忽略——那行字可能缩在屏幕上方，
+          // 而玩家的视线在输入框。再弹一个 toast，失败不会被当成「还在跑」
+          toast.error('这一轮没能生成，可重试或点终止')
         }
       },
-      () => { setStreaming(false); setWaiting(false) },
+      () => { setStreaming(false); setWaiting(false); setStage('') },
     )
-  }, [sessionId, qc, threadId])
+  }, [sessionId, qc])
 
   const handleSend = () => {
     const text = input.trim()
     if (!text || streaming) return
+    // 发出去的话进的是**唯一那条时间线**，谁在场由后端在写入时快照，
+    // 前端不再猜、也不再替你切视角。原先这里会看正文里有几个人的名字，
+    // 命中唯一一个跟前的人就自动跳进他的线——那正是「一会儿场面线一会儿
+    // 对话线」的来源：同一句话被界面搬到了另一个地方，玩家看到的是消息存错了
     setInput('')
-    send(text, attr)
+    send(text, attr, focusNpcId ? { focus_npc_id: focusNpcId } : {})
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -295,7 +339,7 @@ export default function RpgPlay() {
     // 先清掉旧的：等的时候还挂着上一轮的建议，会让人以为那就是答案
     setTips([])
     try {
-      const { suggestions } = await rpgApi.suggest(sessionId, threadId)
+      const { suggestions } = await rpgApi.suggest(sessionId, focusNpcId)
       if (suggestions.length === 0) toast('没想出来，再聊两句试试')
       else setTips(suggestions)
     } catch {
@@ -308,6 +352,7 @@ export default function RpgPlay() {
     abortRef.current?.abort()
     setStreaming(false)
     setWaiting(false)
+    setStage('')
     qc.invalidateQueries({ queryKey: ['rpg-messages', sessionId] })
   }
 
@@ -332,18 +377,15 @@ export default function RpgPlay() {
       toast.error(`「${action.name}」得先选一个对象`)
       return
     }
-    // 对**就站在眼前**的人用动作 = 走进他那条线。线决定叙事去哪条历史，
-    // target_npc 决定好感加在谁头上，这里让两件事在同一屏里都看得见。
-    // 人不在跟前就别切：线主不在后端会整轮拒掉，而对远方的人用动作本来合法
-    const present = who ? metNpcs.find(n => n.name === who && onstage(n, sess)) : undefined
-    const into = present ? present.id : threadId
-    setThreadId(into)
-    setView('line')
+    // 选中的人只决定数值加给谁（target_npc），不决定这段戏归谁看——
+    // 后者是写入时的在场快照，两件事不要互相决定
     const hint = (action.prompt_hint || '').trim() || `你${action.name}`
-    send(who ? `${hint}（对象：${who}）` : hint, '', { action_id: action.id, target_npc: who }, into)
+    send(who ? `${hint}（对象：${who}）` : hint, '', {
+      action_id: action.id, target_npc: who, focus_npc_id: focusNpcId,
+    })
   }
 
-  /** 背包里点「使用」。一律落场面线：用道具是引擎行为，不是对话。
+  /** 背包里点「使用」。用道具是引擎动作，不是对话，落在唯一那条时间线上。
    *
    *  `exact` = 模组里有这件道具的定义（见侧栏）。没定义的**不能带 item_name**：
    *  后端会回一句「模组里没有这件道具」的黄条，而玩家拿到的东西是剧情里 GM
@@ -351,9 +393,12 @@ export default function RpgPlay() {
   const useItem = (name: string, exact: boolean) => {
     if (locked) return
     setMenuOpen(false)
-    setThreadId(null)
+    // 翻页这一句要留：背包在总览页、地点页也点得到，不翻过去玩家就看不见
+    // 刚生成的叙事，等于消息掉进黑洞
     setView('line')
-    send(`你用了「${name}」。`, '', exact ? { item_name: name } : {}, null)
+    send(`你用了「${name}」。`, '', {
+      ...(exact ? { item_name: name } : {}), focus_npc_id: focusNpcId,
+    })
   }
 
   const refreshSaves = () => qc.invalidateQueries({ queryKey: ['rpg-saves', sessionId] })
@@ -371,7 +416,7 @@ export default function RpgPlay() {
       // 只有真的走过去了才换页：被拦下来还翻到地点页，玩家会以为自己到了
       if (norm(next.location) === norm(name)) {
         // 落地先看有谁在这儿，比留在原地图少点一次
-        setThreadId(null)
+        setFocusNpcId(null)
         setView('place')
       }
       refreshSaves()
@@ -442,9 +487,9 @@ export default function RpgPlay() {
       refreshSaves()
       setTips([])
       setMenuOpen(false)
-      // 线是消息的派生结果：消息被删回那一刻，当时还不存在的线就没了，
-      // 所以不能留在一个可能已经空掉的线上，回总览重新进
-      setThreadId(null)
+      // 视角是消息的派生结果：消息被删回那一刻，那个人可能根本还没出现过，
+      // 所以不留在一个可能已经没内容的视角上，回总览重新进
+      setFocusNpcId(null)
       setView('overview')
       toast.success(`回到了第 ${next.turn_count} 回合`)
     } catch {
@@ -468,10 +513,6 @@ export default function RpgPlay() {
 
   // 和侧栏同一套口径：「隐藏」的不画，那是幕后计数器
   const relDefs = (module?.relation_stat_defs || []).filter(d => d.name && d.display !== '隐藏')
-
-  // 线主不在跟前就只给看、不给输入框。后端也会拒（400），这里只是提前
-  // 表达出来——不然玩家打一段字，换来的是气泡里一行原始 JSON 报错
-  const ownerAway = !!threadId && (!threadNpc || !onstage(threadNpc, sess))
 
   // 宽屏钉在右边、窄屏收进抽屉，同一份
   const menu = (
@@ -584,7 +625,7 @@ export default function RpgPlay() {
             </div>
           ) : null}
 
-          {/* 我在哪一级、在哪条线上。总览是中枢，往上都能点回去 */}
+          {/* 我在哪一级、看谁的视角。总览是中枢，往上都能点回去 */}
           {view !== 'overview' && (
             <div className="border-b border-border/50 bg-background/50 backdrop-blur-md px-6 py-1.5
               text-xs text-muted-foreground flex items-center gap-2 shrink-0">
@@ -602,14 +643,30 @@ export default function RpgPlay() {
                 <>
                   <span className="opacity-40 shrink-0">/</span>
                   <span className="truncate">
-                    {threadNpc ? `与 ${threadNpc.name}` : '公共场面'}
+                    {focusNpc ? `只看 ${focusNpc.name}` : '全部'}
                   </span>
+                  {/* 看全部。这是**筛掉别人**之后唯一的退路：一个人的视角里
+                      看不到他没赶上的那些戏，点一下回到整条时间线。
+                      和地点页一样是导航，不看 locked——生成中途也该能走 */}
+                  {focusNpc && (
+                    <button
+                      onClick={() => setFocusNpcId(null)}
+                      className="ml-auto shrink-0 hover:text-foreground"
+                    >
+                      看全部
+                    </button>
+                  )}
                 </>
               )}
             </div>
           )}
 
-          {view === 'line' && meta && (
+          {/* 上一轮的诊断。它描述的是**那一轮**，切视角不会让它变成别人的，
+              所以这里不按当前视角过滤。
+              system_tokens 是完整诊断才有的：后端先发一条只带 user_message_id
+              的 meta，中间那几秒 triggered 还是 undefined，会抢答一句「本轮没有
+              世界书词条生效」 */}
+          {view === 'line' && meta && meta.system_tokens !== undefined && (
             <div className="border-b border-border/50 bg-primary/[0.04] px-6 py-1.5 text-xs text-muted-foreground
               flex flex-wrap items-center gap-x-2 gap-y-0.5 shrink-0">
               <BookMarked className="w-3 h-3 shrink-0" />
@@ -629,11 +686,18 @@ export default function RpgPlay() {
                 <span className="sm:ml-auto">
                   设定 {meta.system_tokens} · 状态 {meta.state_tokens ?? 0}
                   {' · '}角色 {meta.npc_tokens ?? 0} · 外场 {meta.chronicle_tokens ?? 0}
+                  {/* 地点描述和在场名单那一块。每轮都在，大小只跟作者写的
+                      地点描述有多长有关 */}
+                  {' · '}场面 {meta.scene_tokens ?? 0}
                   {' · '}历史 {meta.history_count} 条
                   {meta.slot && ` · 第 ${meta.day} 天 ${meta.slot}`}
-                  {` · ${meta.thread ? `线：${meta.thread.name}` : '场面线'}`}
-                  {meta.npcs_onstage && meta.npcs_onstage.length > 0
-                    && ` · 在场 ${meta.npcs_onstage.map(n => n.name).join('、')}`}
+                  {meta.npcs_here && meta.npcs_here.length > 0
+                    && ` · 在场 ${meta.npcs_here.map(n => n.name).join('、')}`}
+                  {/* 只是被提到、人不在跟前的那几个。原先这两拨人合在一起叫
+                      「在场」，而结算那边「在场」只认地点相同，于是同一轮里
+                      诊断行说她在场、结算的提示又说她不在场 */}
+                  {mentionedOnly(meta).length > 0
+                    && ` · 提到 ${mentionedOnly(meta).join('、')}`}
                 </span>
               )}
             </div>
@@ -660,42 +724,35 @@ export default function RpgPlay() {
                   sess={sess}
                   locations={locations}
                   npcs={npcs}
-                  onTalk={npc => { setThreadId(npc.id); setView('line') }}
+                  onTalk={npc => { setFocusNpcId(npc.id); setView('line') }}
                   onDetail={setOpenNpc}
-                  onScene={() => { setThreadId(null); setView('line') }}
+                  onScene={() => { setFocusNpcId(null); setView('line') }}
                 />
               )}
 
               {view === 'line' && (
                 <>
                   {lineBubbles.length === 0 && (
-                    <>
-                      {/* 私聊线的开头垫一段公共场面。**不是这条线的消息**，所以
-                          画成虚线框的灰字，还写明了出处——不标的话玩家会以为
-                          这句是对方说的，下一句就接着它回话，而模型那边这条线
-                          里根本没有这段文字 */}
-                      {threadNpc && sceneTail && (
-                        <div className="space-y-1.5 pt-4">
-                          <p className="text-[11px] text-muted-foreground px-1">
-                            此刻的场面 · 来自公共场面，不算你们说过的话
-                          </p>
-                          <div className="rounded-2xl border border-dashed border-border/60 bg-muted/20
-                            px-5 py-4 text-sm leading-[1.9] whitespace-pre-wrap text-muted-foreground">
-                            {sceneTail}
-                          </div>
-                        </div>
-                      )}
-                      <p className={`text-center text-sm text-muted-foreground ${
-                        threadNpc && sceneTail ? 'py-8' : 'py-20'}`}
-                      >
-                        {threadNpc
-                          ? `你和${threadNpc.name}还没说过话。写下你要说的第一句。`
-                          : '场面线还是空的。写下你要做的事，或者回地点总览找人说话。'}
-                      </p>
-                    </>
+                    <p className="text-center text-sm text-muted-foreground py-20">
+                      {focusNpc
+                        ? `${focusNpc.name}还没和你照过面。写下你要做的事，或者回地点总览找他。`
+                        : '还是空的。写下你要做的事，或者回地点总览看看有谁在。'}
+                    </p>
                   )}
                   {lineBubbles.map((b, i) => (
                     <div key={b.id ?? `pending-${i}`} className="space-y-2">
+                      {/* 换地方的分隔。统一时间线之后一屏里会混着几个地方的戏，
+                          不标就分不清哪句是在哪儿说的。只在**真的换了**的时候画：
+                          同一条消息在别人的视角里会不会露头不影响这个判断 */}
+                      {b.location && b.location !== lineBubbles[i - 1]?.location && (
+                        <div className="flex items-center gap-3 pt-2">
+                          <div className="h-px flex-1 bg-border/60" />
+                          <span className="text-[11px] text-muted-foreground flex items-center gap-1 shrink-0">
+                            <MapPin className="w-3 h-3" />{b.location}
+                          </span>
+                          <div className="h-px flex-1 bg-border/60" />
+                        </div>
+                      )}
                       {b.role === 'user' ? (
                         <>
                           <div className="flex gap-2.5 justify-end">
@@ -718,31 +775,30 @@ export default function RpgPlay() {
                       ) : (
                         <div className="rounded-2xl border border-primary/15 bg-card/80 backdrop-blur-sm
                           px-5 py-4 text-sm leading-[1.9] whitespace-pre-wrap">
-                          {waiting && i === lineBubbles.length - 1 ? <ThinkingDots /> : b.content}
-                          {streaming && !waiting && i === lineBubbles.length - 1 && (
+                          {waiting && streamingHere && i === lineBubbles.length - 1
+                            ? <ThinkingDots /> : b.content}
+                          {streamingHere && !waiting && i === lineBubbles.length - 1 && (
                             <span className="inline-block w-0.5 h-4 bg-current ml-0.5 animate-pulse align-middle" />
                           )}
                         </div>
                       )}
                     </div>
                   ))}
+                  {/* 等待/结算提示。刻意放在气泡列表**外面**：助手气泡是收到
+                      第一个 token 才建的，等待期里根本没有气泡可挂，原来那三个
+                      点因此永远不显示——这就是「按了发送什么反应都没有」的根因。
+                      waiting 管出字前，stage 管出字后的静默结算 */}
+                  <RpgTurnStatus
+                    stage={stage}
+                    visible={streamingHere && (waiting || stage !== '')}
+                  />
                   <div ref={bottomRef} />
                 </>
               )}
             </div>
           </div>
 
-          {view === 'line' && ownerAway && (
-            <div className="border-t border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 shrink-0">
-              <p className="max-w-3xl mx-auto text-xs text-muted-foreground leading-relaxed">
-                {threadNpc
-                  ? `${threadNpc.name}已经不在${sess.location || '这里'}了，说不上话。回地点总览去他所在的地方。`
-                  : '这条线的主人已经不在这个模组里了。'}
-              </p>
-            </div>
-          )}
-
-          {view === 'line' && !ownerAway && (
+          {view === 'line' && (
             <div className="border-t border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 shrink-0">
               <div className="max-w-3xl mx-auto space-y-2">
                 {tips.length > 0 && !streaming && (
@@ -784,7 +840,7 @@ export default function RpgPlay() {
                       <select
                         value={target}
                         onChange={e => setTarget(e.target.value)}
-                        title="动作作用在谁身上。选了他就等于走进他那条线"
+                        title="动作作用在谁身上（好感加给他）。只决定数值加给谁，不会把你切到别的地方去"
                         className="text-xs border rounded-lg px-2 py-1 bg-background/60 focus:outline-none"
                       >
                         <option value="">对谁…</option>
@@ -799,7 +855,11 @@ export default function RpgPlay() {
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={dead ? '这一局已经结束了。' : '你要做什么？（Enter 发送，Shift+Enter 换行）'}
+                    placeholder={dead ? '这一局已经结束了。' : focusNpc
+                      // 视角只是个筛选器，不决定这句话归谁——但玩家点进来看她，
+                      // 想做的事就是把话说给她，输入框照这个写最顺手
+                      ? `对 ${focusNpc.name} 说…（Enter 发送，Shift+Enter 换行）`
+                      : '做点什么，或者直接说你想要说的话'}
                     minRows={2}
                     disabled={locked}
                     className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background/60

@@ -39,8 +39,7 @@ from app.services.rpg_context import (
     history_window,
     named_npcs,
     npc_place,
-    thread_summarized_upto,
-    thread_summary,
+    summary_for_focus,
     world_npcs,
 )
 from app.services.rpg_dice import DEFAULT_BAND, OUTCOME_LABELS, normalize_band, resolve_rate, roll
@@ -85,62 +84,13 @@ SETTLE_CHARS = 3000
 CHRONICLE_PROMPT_LINES = 10
 
 
-# ── 对话线：一条线 = 一个 thread_id，NULL = 场面线 ─────────────────────────
-
-def find_thread_npc(npcs: list[RpgNpc], thread_id: int | None) -> RpgNpc | None:
-    if not thread_id:
-        return None
-    return next((n for n in npcs if n.id == thread_id), None)
-
-
-def resolve_thread_id(
-    sess: RpgSession, npcs: list[RpgNpc], thread_id: int | None, target_npc: str
-) -> int | None:
-    """这一轮归哪条线。None = 场面线。只在这里解析一次，别处不要重算。
-
-    **不拿 target_npc 兼作线的键**：它管的是「这个动作用在谁身上」
-    （relation_effects 加在谁头上），和「这段叙事归哪条历史」是两件事。
-    在老兵线里对老板娘用动作是合法的。
-
-    显式传了就用传的（认不出来算没有）；没传的话，**只有 target_npc 人就
-    站在你面前**才归他。远处那个人照旧只吃动作的数值，叙事留在你所在的这条
-    线上——否则「对不在场的人用动作」会被 thread_blocker 当场拒成 400，
-    而那本来是个合法操作。
-    """
-    if thread_id:
-        return thread_id if any(n.id == thread_id for n in npcs) else None
-    who = next(
-        (n for n in here_npcs(npcs, sess.location, sess.slot, sess.npc_places)
-         if norm_name(n.name) == norm_name(target_npc)),
-        None,
-    )
-    return who.id if who else None
-
-
-def thread_blocker(sess: RpgSession, npcs: list[RpgNpc], thread_id: int | None) -> str:
-    """角色线能不能收输入。返回拒绝理由，空串 = 放行。
-
-    线主不在当前地点就整轮拒掉——历史照常可读，只是不给输入框。
-    不拒的话线和历史就不再一一对应，之后每个查询都要考虑「线主不在这儿」
-    的分支；堵在入口比散在各处便宜得多。
-    """
-    npc = find_thread_npc(npcs, thread_id)
-    if npc is None:
-        return ""
-    where = npc_place(npc, sess.slot, sess.npc_places)
-    if where != (sess.location or "").strip():
-        return f"你得先回到{where or '他常在的地方'}，才能和{(npc.name or '').strip()}说话"
-    return ""
-
-
-def _thread_clause(thread_id: int | None):
-    """SQL 过滤：这一条线的消息。NULL 和「空」在这里必须是同一个意思。"""
-    col = RpgMessage.thread_id
-    return col.is_(None) if not thread_id else col == thread_id
-
-
-def _in_thread(message: RpgMessage, thread_id: int | None) -> bool:
-    return (message.thread_id or None) == (thread_id or None)
+# 这里原先有一整段线的东西：find_thread_npc / resolve_thread_id / thread_blocker
+# / _thread_clause / _in_thread / split_lines。现在没了——线没了。
+#
+# 一个 thread_id 曾经同时是历史分区键、隐私边界和界面视图，三件事绑在一个值上，
+# 于是每次让一件对了另两件就错（§29 修视图、§30 修历史，而隐私从 §30 起其实已经
+# 只剩话术在撑）。现在历史只有一条，隐私改由消息上的 present 承担（写入时快照的
+# 在场名单），界面那点筛选在读取端做。**别再把「这一段归谁看」写成一个存储字段**
 
 
 def _spawn_detached(coro) -> None:
@@ -418,17 +368,21 @@ async def _store_roll(
 
 
 async def _store_reply(
-    session_id: int, reply: str, in_tok: int, out_tok: int, thread_id: int | None = None
+    session_id: int, reply: str, in_tok: int, out_tok: int,
+    present: list[int] | None = None, place: str = "",
 ) -> int:
     """落 assistant 行。必须另开 session：路由里那个在 handler 返回时就关了，
     而 handler 早于生成器结束返回。
 
-    thread_id 要和玩家那条 user 行一致，否则刷新之后这一问一答分在两条线上。
+    present / place 要和玩家那条 user 行一致：对不上的话一问一答分进两拨在场
+    名单，各个视图里各缺一半。所以由路由快照一次、原样传下来，这里不重算——
+    重算会拿到结算挪过人之后的状态，那是「这一轮结束后谁在」。
     """
     async with AsyncSessionLocal() as store:
         row = RpgMessage(
             session_id=session_id, role="assistant", content=reply,
-            input_tokens=in_tok, output_tokens=out_tok, thread_id=thread_id,
+            input_tokens=in_tok, output_tokens=out_tok,
+            location=place, present=present,
         )
         store.add(row)
         sess = await store.get(RpgSession, session_id)
@@ -441,7 +395,7 @@ async def _store_reply(
 
 # ── ⑥⑦ AI 结算：只管自由行动那部分的后果 ─────────────────────────────────
 
-def _place_block(movable: list[RpgNpc], sess: RpgSession) -> str:
+def _place_block(movable: list[RpgNpc], locations: list[str], sess: RpgSession) -> str:
     """结算提示词末尾追加的「人物位置」段。没人可动就是空串。
 
     附在 rpg_settle.jinja2 之后而不是改进模板：那个模板用户可以自定义，
@@ -449,6 +403,11 @@ def _place_block(movable: list[RpgNpc], sess: RpgSession) -> str:
 
     得**把这几个人现在的位置写给模型看**：不写的话它只知道「赫敏推门进来」，
     不知道她原本在宿舍，也就写不出「她回去了」那种清空。
+
+    locations 是模组地点表里的地名。npc_places 的值原样存原样显示，模型凭空
+    造一个「教室」而模组里没有这个地点时，侧栏看得见、地点总览里找不到，
+    玩家照提示「去她所在的地方」就走不过去。给一份真名单让它优先用。模组
+    一个地点都没建时是空表，这一句不拼，行为和加它之前逐字一致。
     """
     if not movable:
         return ""
@@ -456,11 +415,16 @@ def _place_block(movable: list[RpgNpc], sess: RpgSession) -> str:
         f"{n.name} 现在在 {npc_place(n, sess.slot, sess.npc_places) or '行踪不明'}\n"
         for n in movable
     )
+    # 放在示例那行之前：名单紧挨着要填的值，模型挑一个照抄就是了
+    known = (
+        "只能填这些已有的地名：" + "、".join(locations) + "\n" if locations else ""
+    )
     return (
         "\n\n=== 人物位置 ===\n"
         "这段剧情里**真的换了地方**的人（被叫来、跟着走、被带走、回自己屋），"
         "在输出里加一个 npc_places：\n"
         + rows
+        + known
         + '{"npc_places": {"赫敏": "校长办公室"}}\n'
         '她只是回到自己平时待的地方，就写空串 ""，系统会按作息表替她算。\n'
         "没换地方的人不要写。这个字段里只准出现上面这几位，别人一律不要写。\n"
@@ -470,7 +434,7 @@ def _place_block(movable: list[RpgNpc], sess: RpgSession) -> str:
 
 async def _settle(
     session_id: int, message_id: int, narration: str, outcome_label: str,
-    engine_note: str, thread_id: int | None = None,
+    engine_note: str,
 ) -> dict:
     """从刚写出的剧情里读出状态变化，夹紧后落库。返回给前端的一份结果。
 
@@ -494,11 +458,26 @@ async def _settle(
             if (sess.location or "").strip()
             else world_npcs(npcs)
         )
-        owner = find_thread_npc(npcs, thread_id)
-        if owner is not None and all(n.id != owner.id for n in who):
-            who.append(owner)
+        # 人物位置可动的名单：**在跟前的人**，加上「刚写出来的正文里真的出现了」
+        # 的人（named_npcs 的口径）。
+        #
+        # 在场的人无条件补进来，这一条是替原先那个「线主无条件补进来」的：一对一
+        # 说话时正文很可能只写「她点点头出去了」，只认全名的话她就永远挪不动，而
+        # 那正是玩家最常见的挪人方式。线没了之后，和它等价的集合就是「眼前这些人」
+        # ——线主的定义本来就是「你正在跟她说话的那个」。
+        #
+        # 放宽到全部在场的人不会误伤：_place_block 明写着「没换地方的人不要写」，
+        # 模型得**主动填一个新地名**才会挪动谁，名单长一点只是多几个可选项。
+        #
+        # 这份名单同时喂给 _place_block（告诉模型可以写谁）和下面的 move_npcs
+        # （允许改谁）。两边必须同源：只改一边就会变成「模型写了却被静默丢掉」
+        movable = named_npcs(world_npcs(npcs), narration)
+        for n in who:
+            if all(m.id != n.id for m in movable):
+                movable.append(n)
         # 第二个 store 块会重新查一遍 npcs（另一批对象），只有 id 能跨过去
         who_ids = {n.id for n in who}
+        movable_ids = {n.id for n in movable}
         prompt = render(
             "rpg_settle.jinja2",
             narration=narration[-SETTLE_CHARS:],
@@ -523,13 +502,17 @@ async def _settle(
             # 最近 10 条给模型看一眼，免得同一件事被反复写进大事记
             chronicle=chronicle_lines(sess)[-CHRONICLE_PROMPT_LINES:],
         )
-        # 人物位置。可动的只有「这段正文里真的出现了」的人——玩家嘴上叫一声
-        # 不算，正文里写了她推门进来才算（named_npcs 的口径，和下面那道
-        # 写入闸门用的是同一条规则，两边不能分叉）。
-        #
+        # 模组地点表里的地名，给模型一份真名单。npc_places 的值是原样存、
+        # 原样显示的，模型现编一个「教室」而模组里没有这个地方时，侧栏会显示
+        # 它、地点总览里却找不到，玩家就没法照提示走过去
+        known_places = [
+            loc.name for loc in (await store.execute(
+                select(RpgLocation).where(RpgLocation.module_id == module.id)
+            )).scalars().all() if (loc.name or "").strip()
+        ]
         # 拼在模板后面而不是写进 rpg_settle.jinja2：那个模板用户可以自定义，
         # 他们的旧版本不含这一段，位置这条线会对这些人静默失效。同 style_block
-        prompt += _place_block(named_npcs(world_npcs(npcs), narration), sess)
+        prompt += _place_block(movable, known_places, sess)
         model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
 
     data, in_tok, out_tok = await call_json(
@@ -542,15 +525,13 @@ async def _settle(
         npcs = list((await store.execute(
             select(RpgNpc).where(RpgNpc.module_id == module.id)
         )).scalars().all())
-        # 分线之后在角色线里被叙述走到别处会变成看得见的 bug：线主不在了，
-        # 他的输入框永久置灰。场面线照旧——「自由打字绕过地图」是既有决定
         warnings = apply_state_delta(
-            module, sess, data, npcs, allow_move=thread_id is None,
+            module, sess, data, npcs,
             # 近况只许记在这一轮真的摆在模型眼前的人身上，见 apply_state_delta
             note_npcs=[n for n in npcs if n.id in who_ids],
-            # 位置比近况再紧一层：只有正文里真的出现过的人。模型据一个
-            # 只在玩家嘴里出现过的名字就能把人挪到跟前，那是纯凭空的编造
-            move_npcs=named_npcs(world_npcs(npcs), narration),
+            # 位置比近况再紧一层：正文里真的出现过的人，加在场的人。用上面
+            # 算好的那一份，不重新求值——重新求值就会和提示词那份分叉
+            move_npcs=[n for n in npcs if n.id in movable_ids],
         )
         # 大事记（模型认为「已经传开」的那部分）。和每轮建议同一条路：
         # 顺手读一个字段，不额外花一次 LLM 调用
@@ -573,17 +554,19 @@ async def _settle(
     }
 
 
-# ── ⑧ 压缩旧剧情：一条线一份概要 ──────────────────────────────────────────
+# ── ⑧ 压缩旧剧情：全剧一份概要 ────────────────────────────────────────────
 
 # 摘要给模型看的一句话前缀。和 suggest 那边保持一致
 SUMMARY_MAX_TOKENS = 1200
 
 
-async def _maybe_summarize(session_id: int, thread_id: int | None) -> bool:
-    """这条线未压缩的消息超出窗口时，把溢出的那一段折成概要。
+async def _maybe_summarize(session_id: int, focus_npc_id: int | None = None) -> bool:
+    """未压缩的消息超出窗口时，把溢出的那一段折成概要。
 
-    **每条线各存一份**。一份全局概要会注入每一条线，等于把密室里的对话原样
-    告诉所有人——chronicle 之所以规定「只写已经传开的事」，防的就是这个。
+    只有一份概要，因为历史只有一条。原先是一线一份，理由是「一份全局概要注入
+    每条线，等于把密室里的对话原样告诉所有人」——那个理由随线一起没了：现在
+    没有「每条线」，模型本来就看得见全部历史（它得看得见，不然接不上剧情）。
+    隔离改由 prompt 里的【场面】话术承担，见 rpg_context.SCENE_PREAMBLE。
 
     不能照抄酒馆的写法（同一个 session 里读 → 调 LLM → commit）：这个文件有
     「写锁绝不跨 LLM 调用」的铁律，所以拆成读、调、写三段，结构同 _settle。
@@ -598,15 +581,26 @@ async def _maybe_summarize(session_id: int, thread_id: int | None) -> bool:
         if module is None:
             return False
         keep = max(1, module.context_turns or 20) * 2
-        upto = thread_summarized_upto(sess, thread_id)
-        pending = [
-            m for m in (await store.execute(
-                select(RpgMessage)
-                .where(RpgMessage.session_id == session_id, RpgMessage.id > upto)
-                .order_by(RpgMessage.id)
-            )).scalars().all()
-            if _in_thread(m, thread_id)
-        ]
+        if focus_npc_id:
+            try:
+                upto = int((sess.thread_upto or {}).get(str(focus_npc_id), 0) or 0)
+            except (TypeError, ValueError):
+                upto = 0
+        else:
+            upto = sess.summarized_upto_id or 0
+        all_pending = (await store.execute(
+            select(RpgMessage)
+            .where(RpgMessage.session_id == session_id, RpgMessage.id > upto)
+            .order_by(RpgMessage.id)
+        )).scalars().all()
+        if focus_npc_id:
+            pending = [
+                m for m in all_pending
+                if m.present is None or focus_npc_id in (m.present or [])
+            ]
+        else:
+            # 全局摘要只保存公共信息；单人对话由对应 NPC 摘要承接。
+            pending = [m for m in all_pending if m.present is None or len(m.present or []) > 1]
         if len(pending) <= keep:
             return False
 
@@ -618,7 +612,7 @@ async def _maybe_summarize(session_id: int, thread_id: int | None) -> bool:
         )
         prompt = render(
             "rpg_summary.jinja2",
-            previous_summary=thread_summary(sess, thread_id).strip(),
+            previous_summary=summary_for_focus(sess, focus_npc_id).strip(),
             transcript=transcript,
         )
         # 摘要单独一个字段：它的输出会喂给下一次摘要，错一次会一路带到局终，
@@ -641,16 +635,16 @@ async def _maybe_summarize(session_id: int, thread_id: int | None) -> bool:
         sess = await store.get(RpgSession, session_id)
         if sess is None:
             return False
-        if thread_id is None:
+        if focus_npc_id:
+            sess.thread_summaries = {
+                **(sess.thread_summaries or {}), str(focus_npc_id): text.strip(),
+            }
+            sess.thread_upto = {
+                **(sess.thread_upto or {}), str(focus_npc_id): last_id,
+            }
+        else:
             sess.summary = text.strip()
             sess.summarized_upto_id = last_id
-        else:
-            # JSON 列就地改动 SQLAlchemy 认不出来（没上 MutableDict），
-            # 必须换成新字典才会写回去
-            sess.thread_summaries = {
-                **(sess.thread_summaries or {}), str(thread_id): text.strip(),
-            }
-            sess.thread_upto = {**(sess.thread_upto or {}), str(thread_id): last_id}
         await store.commit()
     return True
 
@@ -879,17 +873,18 @@ SUGGEST_WINDOW = 8
 
 async def suggest_actions(
     module: RpgModule, sess: RpgSession, history: list[RpgMessage],
-    thread_id: int | None = None,
+    focus_npc_id: int | None = None,
 ) -> list[str]:
     """「帮我想想」：给出 3 条玩家接下来可以做的事。
 
     和每轮结算顺带产出的 suggestions 是两条独立的路：那条是被动等来的，
     这条是玩家按按钮要的。返回空列表表示没能生成，前端提示一下就好。
 
-    history 由调用方按线筛过，thread_id 用来取对的那一份概要——拿错了会把
-    别的线的往事当成这条线的前情，而建议看上去仍然很合理。
+    history 是全部历史，同 build_rpg_messages——两个调用点必须看同一份东西，
+    否则建议会提「问问她后山的事」这种和眼前无关的选项（那正是 §30 当初把
+    scene_history 一起接进来的理由）。现在没有第二条线了，两边天然一致。
     """
-    recent = history_window(module, sess, history, thread_id)[-SUGGEST_WINDOW:]
+    recent = history_window(module, sess, history, focus_npc_id)[-SUGGEST_WINDOW:]
     if not recent:
         return []
 
@@ -901,7 +896,7 @@ async def suggest_actions(
         char_name=(sess.char_name or "").strip() or DEFAULT_CHAR_NAME,
         location=sess.location or "",
         summary=truncate_to_token_budget(
-            thread_summary(sess, thread_id), SUMMARY_TOKEN_BUDGET
+            summary_for_focus(sess, focus_npc_id), SUMMARY_TOKEN_BUDGET
         ),
         transcript=transcript,
     )
@@ -937,15 +932,18 @@ async def run_turn(
     item_name: str = "",
     move_to: str = "",
     target_npc: str = "",
-    thread_id: int | None = None,
+    present: list[int] | None = None,
+    place: str = "",
+    focus_npc_id: int | None = None,
 ) -> AsyncIterator[tuple[str, object]]:
     """跑完一轮，yield (事件名, 数据)，由路由编码成 SSE。
 
     玩家那条消息已经由路由落库了（网络断了也得留下）。action_id / item_name /
     move_to 是「点出来的」行动，走引擎；三个都空就是自由打字，走 AI 结算。
 
-    thread_id 是这一轮归哪条对话线，由路由解析一次后传进来（见 resolve_thread_id），
-    这里只照着用：装配上下文时只取这条线的历史，回复也落回这条线。
+    present / place 是路由在写玩家那条消息时快照下来的在场名单和地点，原样
+    转给 assistant 那条。**这里不重算**：结算会把人物挪走，重算拿到的是这一轮
+    结束后谁在，一问一答就分进两拨名单里了。
     """
     facts: list[str] = []
     engine_note = ""
@@ -971,9 +969,6 @@ async def run_turn(
             .where(
                 RpgMessage.session_id == session_id,
                 RpgMessage.role == "assistant",
-                # 裁决的「最近一段剧情」也要取这条线的，否则在老兵线里判定
-                # 时旁边酒馆那几句会干扰语境
-                _thread_clause(thread_id),
             )
             .order_by(RpgMessage.id.desc())
             .limit(1)
@@ -989,6 +984,9 @@ async def run_turn(
     # 引擎已经算准了的行动不再判定：点「奖励」按钮不该有失手的余地，
     # 数字都是作者写死的
     if module.check_mode != "never" and not facts:
+        # 前端据此显示「裁决中…」。玩家自己指定数值那条是零延迟的，也发，
+        # 一闪而过没关系，反正下一条 stage 会立刻盖掉
+        yield "stage", "adjudicating"
         stats = sess.stats or {}
         if attr_override and attr_override in stats:
             # 玩家自己指定了数值：零延迟零成本，还给了掌控感
@@ -1045,11 +1043,12 @@ async def run_turn(
             )
             .order_by(RpgMessage.id)
         )).scalars().all())
-        # 线过滤在调用点做，history_window 的签名一个字不改：传进去的就是
-        # 「这条线的消息」，它只管按摘要指针和条数切。这样既有用例全部照旧
-        history = [m for m in history if _in_thread(m, thread_id)]
+        # 整份历史原样交给上下文，不切。原先这里切两半（这一条线的 + 场面线的），
+        # 那是为了「角色的历史里不该有别人的私聊」——而她同时也就看不到开场白
+        # 和你刚才做过什么，§30 又得把场面线借回去。线拆了之后这一段没有分支
         messages, diag = await build_rpg_messages(
-            store, fresh_module, fresh_sess, history, content, judgement, facts, thread_id
+            store, fresh_module, fresh_sess, history, content, judgement, facts,
+            focus_npc_id,
         )
         # 外貌已经随这次上下文发出去了，就地记一笔，下一轮不再重复发。
         # 放在开流之前而不是之后：叙事失败也算见过，模型确实已经拿到过那段描写。
@@ -1059,6 +1058,9 @@ async def run_turn(
         await store.commit()
     # 出了 with 块才开流：写锁不跨 LLM 调用
     yield "meta", diag
+    # 上下文已经拼好，正要调叙述模型。这一条发出去之后到第一个 token 之间
+    # 就是最后一段静默期，前端据此显示「组织线索中…」
+    yield "stage", "building"
 
     # 模型解析放这里：模型配错时 resolve_model_ref 抛 ValueError，
     # 在生成器内抛才能变成一条 error 事件，放外面会变成 500 白屏
@@ -1088,17 +1090,24 @@ async def run_turn(
         # state_delta 留 null，前端给「补结算」按钮
         reply = "".join(buf).strip()
         if reply:
-            _spawn_detached(_store_reply(session_id, reply, in_tok, out_tok, thread_id))
+            _spawn_detached(_store_reply(
+                session_id, reply, in_tok, out_tok, present, place
+            ))
         raise
 
     reply = "".join(buf).strip()
-    message_id = await _store_reply(session_id, reply, in_tok, out_tok, thread_id)
+    message_id = await _store_reply(
+        session_id, reply, in_tok, out_tok, present, place
+    )
 
     if reply:
+        # 字已经吐完了，接下来是一次静默的结算调用。不发这条的话，前端会在
+        # 正文写完到数值跳变之间干等一段，看着像卡住了
+        yield "stage", "settling"
         label = OUTCOME_LABELS.get((judgement or {}).get("outcome") or "", "")
         try:
             result = await _settle(
-                session_id, message_id, reply, label, engine_note, thread_id
+                session_id, message_id, reply, label, engine_note
             )
             for warn in result["warnings"]:
                 yield "warning", warn
@@ -1118,7 +1127,9 @@ async def run_turn(
     # 压缩排在结算之后：这一轮的消息已经落库，它也该参与计数。
     # 失败不吭声——玩家没要求过这件事，报错只会让他以为这一轮出了问题
     try:
-        await _maybe_summarize(session_id, thread_id)
+        await _maybe_summarize(session_id)
+        if focus_npc_id:
+            await _maybe_summarize(session_id, focus_npc_id)
     except Exception:
         logger.exception("RPG 局 %s 概要生成失败，上下文退化为纯截断", session_id)
 
@@ -1129,12 +1140,11 @@ async def run_turn(
     try:
         # diag 是这一轮注入过设定的人（在场 + 被提到的）。他们归叙事模型管，
         # 调度器另写一份会和玩家刚经历的剧情对不上
+        # npcs_onstage 是「在场 + 被提到」，比 npcs_here 宽：被提到的人这一轮
+        # 也拿到了设定，调度器再替他们编一份「今天在干什么」会和刚写的对不上。
+        # 原先这里还要单独补一个 thread_id（线主），线没了——线主的定义本来就是
+        # 「你正在跟她说话的那个」，而她已经在这份名单里了
         engaged = {int(n["id"]) for n in diag.get("npcs_onstage") or []}
-        # 线主单独补一笔。模组一个地点都没定义时 here_npcs 恒为空，玩家在和她
-        # 私聊却没说她的名字，她就不在那份名单里——于是调度器会给一个**正在和
-        # 你说话的人**另写一份「她今天在干什么」，下一轮两句直接打架
-        if thread_id:
-            engaged.add(int(thread_id))
         await idle_npc_activities(session_id, engaged)
     except Exception:
         logger.exception("RPG 局 %s 角色调度失败", session_id)

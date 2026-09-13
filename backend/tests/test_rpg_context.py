@@ -9,7 +9,7 @@ import unittest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.rpg import (
-    RpgMessage, RpgModule, RpgNpc, RpgSession, RpgWorldEntry,
+    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession, RpgWorldEntry,
 )
 from app.services.rpg_context import (
     build_rpg_messages, here_npcs, onstage_npcs, triggered_entries,
@@ -23,7 +23,9 @@ class _Base(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite://")
         async with self.engine.begin() as connection:
-            for model in (RpgModule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage):
+            for model in (
+                RpgModule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage, RpgLocation,
+            ):
                 await connection.run_sync(model.__table__.create)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.db = self.sessions()
@@ -69,9 +71,12 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         await self.db.commit()
         return obj
 
-    async def _build(self, text, judgement=None, history=None, facts=None):
+    async def _build(self, text, judgement=None, history=None, facts=None, focus_npc_id=None):
+        """history 就是全部历史。原先这里还要传 thread_id 和 scene_history
+        （这一轮归哪条线、把场面线借给角色线），线拆掉之后两个概念都没了。"""
         return await build_rpg_messages(
-            self.db, self.module, self.sess, history or [], text, judgement, facts
+            self.db, self.module, self.sess, history or [], text, judgement, facts,
+            focus_npc_id,
         )
 
 
@@ -93,6 +98,21 @@ class SafetyTests(_Base):
         messages, _ = await self._build("我撬开那把锁", _roll())
         blob = "\n".join(m["content"] for m in messages)
         self.assertNotIn(SENTINEL, blob)
+
+    async def test_focus_view_injects_only_the_selected_npc_card(self):
+        alice = await self._add(RpgNpc(
+            module_id=self.module.id, name="Alice", description="ALICE_CARD",
+            persona="ALICE_PERSONA",
+        ))
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="Bob", description="BOB_CARD",
+            persona="BOB_PERSONA",
+        ))
+        messages, diag = await self._build("Hello", focus_npc_id=alice.id)
+        system = messages[0]["content"]
+        self.assertIn("ALICE_CARD", system)
+        self.assertNotIn("BOB_CARD", system)
+        self.assertEqual(diag["focus_npc_id"], alice.id)
 
 
 class OrderTests(_Base):
@@ -502,6 +522,99 @@ class StateBlockTests(_Base):
         self.assertLessEqual(diag["state_tokens"], 800)
         # 按数量降序保留，数量最多的那件一定在
         self.assertIn("杂物59", system)
+
+
+class SceneTests(_Base):
+    """【场面】：眼前这一幕**在消息里没有**的那些信息。
+
+    历史统一成一条之后，这一块不再是「把场面线的原文借给别的线」——模型本来
+    就看得见全部消息，开场白和你刚做的事都在同一条时间线上。它只补两样：地点
+    长什么样、谁站在这里（§31）。
+
+    它是**读时拼的**：只进 system，一个字都不落进任何消息。
+    """
+
+    async def _here(self, name="赫敏"):
+        return await self._add(RpgNpc(module_id=self.module.id, name=name, location="地窖"))
+
+    async def test_it_carries_the_place_and_who_is_here(self):
+        await self._add(RpgLocation(
+            module_id=self.module.id, name="地窖", description="一半泡在水里的旧矿井。",
+        ))
+        await self._here()
+        messages, diag = await self._build("我往前走")
+        system = messages[0]["content"]
+        self.assertIn("【场面】", system)
+        # 地点描述作者写好了却从来没进过上下文，这一块就是为它开的
+        self.assertIn("地点：地窖", system)
+        self.assertIn("一半泡在水里的旧矿井。", system)
+        self.assertIn("在场：赫敏", system)
+        self.assertGreater(diag["scene_tokens"], 0)
+
+    async def test_an_empty_room_says_so(self):
+        # 「没有别人」和「没提」对模型是两回事：不写的话它会照着上下文里的
+        # 角色自己安排一个站到跟前
+        await self._add(RpgLocation(module_id=self.module.id, name="地窖"))
+        messages, _ = await self._build("我往前走")
+        self.assertIn("在场：只有你一个人", messages[0]["content"])
+
+    async def test_a_module_without_a_place_gets_no_block(self):
+        # 纯对话模组一个地点都没建：位置是空的，这块整个不拼，不要留个空壳
+        self.sess.location = ""
+        messages, diag = await self._build("我往前走")
+        self.assertNotIn("【场面】", messages[0]["content"])
+        self.assertEqual(diag["scene_tokens"], 0)
+
+    async def test_the_block_sits_right_after_the_chronicle(self):
+        self.sess.chronicle = ["〔开场〕你睁开眼，地窖里只有一盏摇晃的灯。"]
+        messages, _ = await self._build("我往前走")
+        system = messages[0]["content"]
+        self.assertIn("【外场】", system)
+        self.assertLess(system.index("【外场】"), system.index("【场面】"))
+
+    async def test_the_place_description_is_never_scanned_for_keywords(self):
+        # 地点描述不许参与关键词扫描：写地窖的模组每进一次地窖就命中那条词条，
+        # 而模型自己写的旁白又会让它下一轮再命中，自己喂自己
+        await self._add(RpgLocation(
+            module_id=self.module.id, name="地窖", description="墙上挂着一盏摇晃的灯。",
+        ))
+        await self._add(RpgWorldEntry(
+            module_id=self.module.id,
+            content="那盏灯是个暗号。", keywords="摇晃的灯",
+        ))
+        messages, _ = await self._build("我往前走")
+        self.assertIn("墙上挂着一盏摇晃的灯。", messages[0]["content"])
+        self.assertNotIn("那盏灯是个暗号。", messages[0]["content"])
+
+    async def test_it_is_assembled_at_read_time(self):
+        # 一条消息都不许多出来，否则「读时拼」就变成了写进历史
+        await self._add(RpgLocation(
+            module_id=self.module.id, name="地窖", description="一半泡在水里的旧矿井。",
+        ))
+        plain, _ = await self._build("我往前走")
+        messages, _ = await self._build("我往前走", history=[
+            RpgMessage(id=1, session_id=self.sess.id, role="user", content="我盯着老兵的靴子看"),
+        ])
+        self.assertEqual(len(messages), len(plain) + 1)
+        blob = "\n".join(m["content"] for m in messages[1:])
+        self.assertNotIn("一半泡在水里的旧矿井。", blob)
+
+    async def test_the_block_cannot_starve_the_rest(self):
+        # 这一块排在 system 中段，而整体截断是从尾部切的。它再大也不能把玩家
+        # 自己和作者写的东西挤掉——那一挤，玩家会以为是新加的块把记忆弄没了
+        from app.services.rpg_context import SCENE_TOKEN_BUDGET
+
+        await self._add(RpgLocation(
+            module_id=self.module.id, name="地窖", description="又下了一夜的雨。" * 200,
+        ))
+        self.sess.summary = "场面上的往事。" * 20
+        self.module.narration_sample = "雨还在下。" * 40
+        messages, diag = await self._build("我往前走")
+        system = messages[0]["content"]
+        # 额度：这一块的预算就是它自己的上限（末尾那个省略号也算字，留一点余量）
+        self.assertLessEqual(diag["scene_tokens"], SCENE_TOKEN_BUDGET + 5)
+        self.assertIn("【你】", system)
+        self.assertIn("场面上的往事。", system)
 
 
 class HistoryTests(_Base):

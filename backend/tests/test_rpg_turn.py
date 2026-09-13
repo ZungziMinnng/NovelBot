@@ -49,7 +49,7 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
              patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake_dispatch):
             result = await rpg_turn.suggest_actions(
-                module or _module(), sess or _session(), history or []
+                module or _module(), sess or _session(), history or [],
             )
         return result, captured
 

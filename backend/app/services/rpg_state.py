@@ -752,24 +752,23 @@ def advance_slot(module, sess) -> list[str]:
 
 
 def apply_state_delta(
-    module, sess, delta, npcs=None, allow_move: bool = True, note_npcs=None,
-    move_npcs=None,
+    module, sess, delta, npcs=None, note_npcs=None, move_npcs=None,
 ) -> list[str]:
     """把模型提议的一整份改动落到 session 上，返回给玩家看的 warning。
 
     每一项独立 try：背包格式写错不该让数值一起丢。
 
-    allow_move=False 时丢掉 location：分线之后「在老兵线里被叙述走到别处」
-    会变成看得见的 bug——老兵不在了，他的输入框永久置灰。场面线照旧放行，
-    「自由打字绕过地图」这个决定（见文档 §13）的边界正好画在这里。
-    **人物位置跟着同一个开关走**，理由一字不差：角色线里线主被叙述走开，
-    她那条线的输入框就永久置灰了。
+    这里原先有个 allow_move 开关，用来在私聊线里丢掉玩家的 location 变化：
+    分线的时候「在老兵线里被叙述走到别处」会变成看得见的 bug——老兵不在了，
+    他那条线的输入框永久置灰。线拆掉之后那个 bug 没有了，开关也就没了——
+    「自由打字绕过地图」是文档 §13 的既有决定，它当初的边界画在「场面线放行、
+    私聊线不放行」上，现在没有别的线可分了。
 
     note_npcs 是**允许被记近况的人**，默认就是 npcs。调用方传的是这一轮真的
-    摆在模型眼前的那几个（在场的 + 线主），比关系数值那一路窄。理由是两者
-    的代价不对称：关系是个数字，写错了下一轮就被盖掉；近况是长期事实，会
-    原样画在角色卡上、每轮注入那个人的设定块，而剧情里随口提一句「老板」
-    就足以让隔壁镇的老板凭空多出一条伤。
+    摆在模型眼前的那几个（在场的），比关系数值那一路窄。理由是两者的代价
+    不对称：关系是个数字，写错了下一轮就被盖掉；近况是长期事实，会原样画在
+    角色卡上、每轮注入那个人的设定块，而剧情里随口提一句「老板」就足以让
+    隔壁镇的老板凭空多出一条伤。
 
     move_npcs 是**允许被改位置的人**，默认空 = 一个都不准改（老调用点行为
     不变）。调用方传的是刚写出来的正文里真的出现过的人（named_npcs），比
@@ -815,36 +814,36 @@ def apply_state_delta(
             continue
         npc_id = who.id
         if npc_id not in note_ids:
-            warnings.append(f"「{name}」这一轮不在场，关于他的近况没有记下")
+            # 说「不在你跟前」而不是「不在场」：后者是界面上的词，指「和你在
+            # 同一个地点」，两者混用会让玩家在诊断行和这条提示之间自相矛盾。
+            # 也刻意和下面位置那条（「没在剧情里露面」）用不同措辞——一个说的是
+            # 人在别处，一个说的是正文里压根没这个人，拒绝的理由不是一回事
+            warnings.append(f"「{name}」不在你跟前，关于他的近况没有记下")
             continue
         try:
             warnings.extend(apply_npc_notes(sess, npc_id, changes))
         except Exception:
             warnings.append(f"{name}的近况没能记下")
 
-    # 人物位置：剧情把谁挪到哪儿了。空串 = 放她回作息表安排的地方
+    # 人物位置：剧情把谁挪到哪儿了。空串 = 放她回作息表安排的地方。
+    # 不看 allow_move——那个开关只管玩家自己的位置（见函数说明）
     places = delta.get("npc_places")
     if isinstance(places, dict) and places:
-        if not allow_move:
-            warnings.append("这一轮的人物走动被忽略了（你正在和人单独说话）")
-        else:
-            allowed = {n.id for n in (move_npcs or [])}
-            for name, place in places.items():
-                who = match_npc(name, npcs)
-                if who is None:
-                    warnings.append(f"找不到角色「{name}」，位置变化没能应用")
-                    continue
-                if who.id not in allowed:
-                    # 只是嘴上被提到、正文里没露面的人不许挪：模型据此把
-                    # 一个没出场的人放到玩家跟前，就是纯凭空的编造
-                    warnings.append(f"「{name}」这一轮没在剧情里露面，他的位置没有改")
-                    continue
-                apply_npc_place(sess, who.id, place)
+        allowed = {n.id for n in (move_npcs or [])}
+        for name, place in places.items():
+            who = match_npc(name, npcs)
+            if who is None:
+                warnings.append(f"找不到角色「{name}」，位置变化没能应用")
+                continue
+            if who.id not in allowed:
+                # 只是嘴上被提到、正文里没露面的人不许挪：模型据此把
+                # 一个没出场的人放到玩家跟前，就是纯凭空的编造
+                warnings.append(f"「{name}」这一轮没在剧情里露面，他的位置没有改")
+                continue
+            apply_npc_place(sess, who.id, place)
 
     location = str(delta.get("location") or "").strip()
-    if location and not allow_move:
-        warnings.append("这一轮的地点变化被忽略了（你正在和人单独说话）")
-    elif location:
+    if location:
         sess.location = location
         note_visited(sess, location)
 

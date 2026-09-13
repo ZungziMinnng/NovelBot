@@ -1,10 +1,13 @@
-"""分线对话与大事记。
+"""大事记、开场白、瞬移。
 
-两条线各自的历史不能串台，这是「真分线」的全部意义；而大事记恰恰相反，
-它**必须**跨线——不然后山挖出尸首这种事，换个地方问就没人听说过了。
+大事记**必须**跨地点跨场景——不然后山挖出尸首这种事，换个地方问就没人听说过了，
+而它当年立起来正是为了给「线各自独立」补窟窿。同时钉住那个反过来会出事的方向：
+大事记每一轮都注入，等于所有 NPC 全知，所以它的口吻必须是「已经传开的传闻」
+而不是「发生过的事」。
 
-同时钉住那个反过来会出事的方向：大事记注入每一条线，等于所有 NPC 全知，
-所以它的口吻必须是「已经传开的传闻」而不是「发生过的事」。
+这个文件原名「分线对话与大事记」。线拆掉之后，测分线的那几组（归属解析、门控、
+按线切历史）跟着它们测的代码一起删了——一段叙事归谁看，现在由消息上的 present
+快照决定，见 test_rpg_timeline.py。
 """
 import shutil
 import tempfile
@@ -51,49 +54,12 @@ def _npc(npc_id=7, name="老兵", location="地窖"):
     return RpgNpc(id=npc_id, module_id=1, name=name, location=location)
 
 
-class ThreadResolutionTests(unittest.TestCase):
-    """这一轮归哪条线：只在一个地方解析，别处不要重算。"""
+class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
+    """「帮我想想」看的是整条时间线。
 
-    def test_an_explicit_thread_wins(self):
-        npcs = [_npc(7), _npc(9, "老板娘")]
-        self.assertEqual(rpg_turn.resolve_thread_id(_sess(), npcs, 9, "老兵"), 9)
-
-    def test_a_thread_id_that_is_not_ours_is_dropped(self):
-        self.assertIsNone(rpg_turn.resolve_thread_id(_sess(), [_npc(7)], 999, ""))
-
-    def test_a_target_in_scene_becomes_the_thread(self):
-        # 不传 thread_id 时按动作对象兜底。这是给不带线的调用方留的那条路
-        self.assertEqual(rpg_turn.resolve_thread_id(_sess(), [_npc(7)], None, "老兵"), 7)
-
-    def test_a_target_who_is_elsewhere_does_not_become_the_thread(self):
-        # 兜底必须和 thread_blocker 用同一条判据（人在不在这儿）。
-        # 否则「对远处的人用动作」会先被解析成他那条线、再被门控拒成 400，
-        # 而它本来是个合法操作：数值照加，叙事留在你脚下这条线上
-        npcs = [_npc(7, "老兵", location="铁匠铺")]
-        self.assertIsNone(rpg_turn.resolve_thread_id(_sess(location="地窖"), npcs, None, "老兵"))
-
-    def test_no_thread_no_target_is_the_scene_line(self):
-        self.assertIsNone(rpg_turn.resolve_thread_id(_sess(), [_npc(7)], None, ""))
-        self.assertIsNone(rpg_turn.resolve_thread_id(_sess(), [_npc(7)], None, "查无此人"))
-
-
-class ThreadGateTests(unittest.TestCase):
-    def test_a_line_whose_owner_left_takes_no_input(self):
-        why = rpg_turn.thread_blocker(
-            _sess(location="地窖"), [_npc(7, "老兵", location="铁匠铺")], 7
-        )
-        self.assertIn("铁匠铺", why)
-        self.assertIn("老兵", why)
-
-    def test_a_line_whose_owner_is_here_passes(self):
-        self.assertEqual(rpg_turn.thread_blocker(_sess(), [_npc(7)], 7), "")
-
-    def test_the_scene_line_is_never_blocked(self):
-        self.assertEqual(rpg_turn.thread_blocker(_sess(), [_npc(7, location="远方")], None), "")
-
-
-class ThreadIsolationTests(unittest.IsolatedAsyncioTestCase):
-    """线和消息的关系：thread_id 落在消息上，NULL 就是场面线。"""
+    它当年按线取，是为了「在老兵屋里给的建议不该来自隔壁酒馆刚聊的那些话」。
+    那个理由随线一起没了：现在全场只有一条历史，隔壁酒馆那几句就是你的前情。
+    """
 
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite://")
@@ -107,7 +73,12 @@ class ThreadIsolationTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.dispose()
 
     async def _seed(self):
-        module = RpgModule(user_id=1, name="测试模组", stat_defs=STAT_DEFS, relation_stat_defs=[])
+        user = User(username="alice", password_hash="x")
+        self.db.add(user)
+        await self.db.commit()
+        module = RpgModule(
+            user_id=user.id, name="测试模组", stat_defs=STAT_DEFS, relation_stat_defs=[],
+        )
         self.db.add(module)
         await self.db.commit()
         sess = RpgSession(module_id=module.id, char_name="阿隼", stats={}, location="地窖")
@@ -115,60 +86,28 @@ class ThreadIsolationTests(unittest.IsolatedAsyncioTestCase):
         await self.db.commit()
         self.db.add_all([
             RpgMessage(session_id=sess.id, role="user", content="场面上的一句"),
-            RpgMessage(session_id=sess.id, role="user", content="对老兵说的", thread_id=7),
-            RpgMessage(session_id=sess.id, role="user", content="对老板娘说的", thread_id=9),
+            RpgMessage(session_id=sess.id, role="user", content="对老兵说的"),
+            RpgMessage(session_id=sess.id, role="user", content="对老板娘说的"),
         ])
         await self.db.commit()
-        return sess
+        return sess, user
 
-    async def _in(self, sess, thread_id):
-        return (await self.db.execute(
-            select(RpgMessage)
-            .where(RpgMessage.session_id == sess.id, rpg_turn._thread_clause(thread_id))
-            .order_by(RpgMessage.id)
-        )).scalars().all()
-
-    async def test_each_line_gets_only_its_own_messages(self):
-        sess = await self._seed()
-        self.assertEqual([m.content for m in await self._in(sess, 7)], ["对老兵说的"])
-        self.assertEqual([m.content for m in await self._in(sess, 9)], ["对老板娘说的"])
-
-    async def test_null_is_the_scene_line(self):
-        # NULL 和「空」必须同一个意思：老数据整份都是 NULL，
-        # 它们要自动变成一条完整的场面线，一个字都不用回填
-        sess = await self._seed()
-        self.assertEqual([m.content for m in await self._in(sess, None)], ["场面上的一句"])
-
-    async def test_the_suggest_endpoint_only_reads_the_current_line(self):
-        """「帮我想想」取的是这条线的最近几轮。
-
-        在老兵屋里给的建议，不该来自隔壁酒馆刚聊的那些话。
-        """
+    async def test_the_endpoint_hands_over_the_whole_timeline(self):
         from app.api.routes.rpg import suggest_actions
 
-        sess = await self._seed()
-        user = User(username="alice", password_hash="x")
-        self.db.add(user)
-        await self.db.commit()
-        sess.module_id = sess.module_id  # 归属检查要能过
-        await self.db.commit()
-        module = await self.db.get(RpgModule, sess.module_id)
-        module.user_id = user.id
-        await self.db.commit()
-
+        sess, user = await self._seed()
         seen = {}
 
-        async def fake(_module, _sess, history, thread_id=None):
+        async def fake(_module, _sess, history):
             seen["contents"] = [m.content for m in history]
-            seen["thread_id"] = thread_id
             return []
 
         with patch.object(rpg_turn, "suggest_actions", fake):
-            await suggest_actions(sess.id, user, 7, self.db)
+            await suggest_actions(sess.id, user, self.db)
 
-        self.assertEqual(seen["contents"], ["对老兵说的"])
-        # 线号也要传进去：概要是按线存的，拿错线会把别人的往事当成前情
-        self.assertEqual(seen["thread_id"], 7)
+        self.assertEqual(
+            seen["contents"], ["场面上的一句", "对老兵说的", "对老板娘说的"],
+        )
 
 
 class ChronicleTests(unittest.IsolatedAsyncioTestCase):
@@ -291,13 +230,14 @@ class ChronicleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OpeningSceneTests(unittest.IsolatedAsyncioTestCase):
-    """开场白归谁。
+    """开场白怎么落。
 
-    它是**场面线**的第一条旁白，不复制到任何人的私聊线——复制的话每条线各自
-    演化、各自被总结，同一段话在不同线里会被改写成不同的事实。
+    它现在是时间线上的**第一条普通消息**（role=assistant），只有一条——从前它
+    是「场面线的第一条旁白」，还得防着被复制进各条私聊线；线拆掉之后没有复制
+    这回事，它就是这段历史的开头，模型顺着读下来自然看得见。
 
-    但那一幕是这一局最公共的事实（「你在校长办公室、赫敏就在跟前」），所以
-    同时压一条进大事记：那条通道本来就是跨线共享的，私聊线才知道刚发生了什么。
+    同时压一条进大事记：那一幕是这一局最公共的事实（「你在校长办公室、赫敏就在
+    跟前」），而大事记是跨地点共享的那一路。
     """
 
     async def asyncSetUp(self):
@@ -324,10 +264,9 @@ class OpeningSceneTests(unittest.IsolatedAsyncioTestCase):
         )).scalars().all()
         return sess, msgs
 
-    async def test_it_lands_on_the_scene_line_only(self):
+    async def test_it_lands_once_as_the_first_message(self):
         sess, msgs = await self._open("你在校长办公室，赫敏抬头看你。")
         self.assertEqual(len(msgs), 1)
-        self.assertIsNone(msgs[0].thread_id)
         self.assertEqual(msgs[0].role, "assistant")
 
     async def test_it_also_becomes_one_public_fact(self):
@@ -346,74 +285,27 @@ class OpeningSceneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msgs, [])
         self.assertEqual(sess.chronicle or [], [])
 
+    async def test_the_opening_reaches_the_model_as_a_message(self):
+        """它是时间线的开头，不是某块读时拼进去的背景。
 
-class SceneAndThreadBlockTests(unittest.IsolatedAsyncioTestCase):
-    """【当前线】：没有它，模型会把在场三个人写成一锅粥。"""
+        从前私聊线里根本没有开场白——那条线看的是自己的历史——只能靠【场面近况】
+        把全文借过去。现在没有别的历史：传进来的那份里就有它，原文一字不少。
+        """
+        opening = "你在校长办公室。赫敏抬头看你。" + "窗外的雨敲着玻璃，她说她等你很久了。" * 10
+        self.assertGreater(len(opening), OPENING_CHARS + 40)
+        sess, msgs = await self._open(opening)
+        module = await self.db.get(RpgModule, sess.module_id)
 
-    async def asyncSetUp(self):
-        self.engine = create_async_engine("sqlite+aiosqlite://")
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.db = self.sessions()
-
-    async def asyncTearDown(self):
-        await self.db.close()
-        await self.engine.dispose()
-
-    async def _setup(self):
-        module = _module()
-        self.db.add(module)
-        await self.db.commit()
-        npc = RpgNpc(module_id=module.id, name="老兵", location="地窖")
-        self.db.add(npc)
-        await self.db.commit()
-        sess = _sess(location="地窖")
-        sess.module_id = module.id
-        self.db.add(sess)
-        await self.db.commit()
-        return module, sess, npc
-
-    async def test_a_character_line_names_who_you_are_talking_to(self):
-        module, sess, npc = await self._setup()
-        messages, diag = await build_rpg_messages(
-            self.db, module, sess, [], "你好", thread_id=npc.id
-        )
-        self.assertIn("老兵", messages[0]["content"])
-        self.assertEqual(diag["thread"], {"id": npc.id, "name": "老兵"})
-
-    async def test_the_scene_line_says_so(self):
-        # 场面线不只是「独处」：三人同桌、群戏、环境描写都落这里，
-        # 所以文案得说「公共场面」，否则玩家不知道该把群戏放哪
-        module, sess, _npc = await self._setup()
-        messages, diag = await build_rpg_messages(self.db, module, sess, [], "我看看四周")
-        self.assertIn("公共场面", messages[0]["content"])
-        self.assertIsNone(diag["thread"])
+        messages, _ = await build_rpg_messages(self.db, module, sess, msgs, "赫敏，你怎么看")
+        self.assertEqual(messages[1]["content"], opening)
 
 
-class AllowMoveTests(unittest.TestCase):
-    """分线之后「在老兵线里被叙述走到别处」会变成看得见的 bug：
+class NoteGateTests(unittest.TestCase):
+    """近况比关系数值收得更紧：数字下一轮会被盖掉，近况是长期事实。"""
 
-    老兵不在了，他的输入框永久置灰。所以角色线里丢掉 location。
-    """
-
-    def test_a_character_line_ignores_a_proposed_move(self):
-        sess = _sess(location="地窖")
-        warnings = apply_state_delta(
-            _module(), sess, {"location": "铁匠铺"}, [], allow_move=False
-        )
-        self.assertEqual(sess.location, "地窖")
-        self.assertTrue(any("地点" in w for w in warnings))
-
-    def test_the_scene_line_still_moves(self):
-        # 「自由打字绕过地图」是文档里明确保留的决定，边界就画在这里
-        sess = _sess(location="地窖")
-        apply_state_delta(_module(), sess, {"location": "铁匠铺"}, [])
-        self.assertEqual(sess.location, "铁匠铺")
-
-    def test_a_line_will_not_write_notes_about_someone_who_is_not_there(self):
-        # 近况比关系数值收得更紧：数字下一轮会被盖掉，近况是长期事实，会一直
-        # 画在角色卡上、每轮注入那个人的设定块。剧情里随口提一句名字不该算数
+    def test_a_note_about_someone_who_is_not_there_is_refused(self):
+        # 剧情里随口提一句名字不该算数：近况会一直画在角色卡上、每轮注入
+        # 那个人的设定块，隔着一个镇的人凭一句话就多出一条伤
         npcs = [RpgNpc(id=3, module_id=1, name="赫敏")]
         sess = _sess(location="地窖", npc_notes={})
         warnings = apply_state_delta(
@@ -422,6 +314,15 @@ class AllowMoveTests(unittest.TestCase):
         )
         self.assertEqual(sess.npc_notes, {})
         self.assertTrue(any("赫敏" in w for w in warnings))
+
+    def test_a_note_about_someone_in_front_of_you_lands(self):
+        npcs = [RpgNpc(id=3, module_id=1, name="赫敏")]
+        sess = _sess(location="地窖", npc_notes={})
+        apply_state_delta(
+            _module(), sess, {"npc_notes": {"赫敏": {"伤势": "左肩中刀"}}},
+            npcs, note_npcs=npcs,
+        )
+        self.assertEqual(sess.npc_notes, {"3": {"伤势": "左肩中刀"}})
 
 
 class SilentMoveTests(unittest.IsolatedAsyncioTestCase):

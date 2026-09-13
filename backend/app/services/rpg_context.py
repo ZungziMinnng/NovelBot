@@ -12,7 +12,9 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.rpg import RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry
+from app.models.rpg import (
+    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry,
+)
 from app.services.context_budget import estimate_tokens, truncate_to_token_budget
 from app.services.rpg_dice import OUTCOME_LABELS
 from app.services.rpg_play_style import style_block
@@ -34,6 +36,11 @@ CHRONICLE_TOKEN_BUDGET = 800
 # 【数值的含义】是作者写死的一小段，每轮一遍。给得紧：它只该是几行钥匙，
 # 真要长篇解释数值该写在世界观里
 MEANING_TOKEN_BUDGET = 400
+# 【场面】的额度。原先这里是给「借场面线的原文」留的三份额度（原文 600 +
+# 开场白 600 + 概要 300），历史统一成一条之后没得借了——那些原文本来就在
+# 窗口里。现在这一块只放**不在消息里的东西**：地点描述和在场名单，
+# 几百 token 足够，额度小是因为它真的只剩这么点内容
+SCENE_TOKEN_BUDGET = 400
 
 # 【外场】的抬头。这段固定话术是**口吻的一部分**，不是客套：大事记注入每
 # 一条线，等于所有 NPC 全知，所以必须明说「听说」不等于「亲眼见过」，
@@ -41,6 +48,15 @@ MEANING_TOKEN_BUDGET = 400
 CHRONICLE_PREAMBLE = (
     "以下是这一带已经传开的事。人尽皆知的传闻，不等于每个人亲眼见过——"
     "谁在场、谁只是听说，按各自的位置来。"
+)
+
+# 【场面】的抬头。它挡的是一件单独的事：**模型是 GM，知道全场，但在场的
+# 角色不是全知**。统一时间线之后它看得见玩家独自做的事、也看得见别人和玩家
+# 的私聊，而它写的是面前这几个人的反应——没人愿意看到 NPC 张口就是她不该
+# 知道的事。所以「谁知道什么」的判据必须写在这里
+SCENE_PREAMBLE = (
+    "在场的人只知道**自己也在场**的那些事。你在别处、或在别人不在场时做的事，"
+    "他们不知道，除非有人告诉过他们——不要让他们主动提起。"
 )
 
 DEFAULT_CHAR_NAME = "冒险者"
@@ -186,6 +202,27 @@ def here_npcs(
     ]
 
 
+def present_ids(
+    npcs: list[RpgNpc], location: str, slot: str = "", places: dict | None = None,
+) -> list[int]:
+    """这一刻在场的 NPC id 列表。写进消息的 present 列（见 RpgMessage.present）。
+
+    和 here_npcs 同源、不另算一套：「谁在场」全项目只有一个定义。它和
+    onstage_npcs 的差别正是这里要的差别——**被提到但不在跟前的人不算在场**。
+    算进去的话，你在酒馆提一句老兵，老兵就成了这场戏的见证人。
+
+    **没有地点 = 所有人都在同一个场面里**，这条读法照抄 _settle 里那一份
+    （那边管它叫 who）：模组一个地点都没建时 here_npcs 恒为空，不兜底的话
+    这类纯对话模组的每条消息都会变成「只有玩家一个人」，每个 NPC 的视图全空。
+
+    调用方必须在**写消息的那一刻**调它：npc_places 会被作息表和剧情改动，
+    事后拿 sess 回查算出来的是「现在谁在」，不是「当时谁在」。
+    """
+    if not (location or "").strip():
+        return [n.id for n in world_npcs(npcs)]
+    return [n.id for n in here_npcs(npcs, location, slot, places)]
+
+
 def onstage_npcs(
     npcs: list[RpgNpc], location: str, scan_text: str, slot: str = "",
     places: dict | None = None,
@@ -285,7 +322,7 @@ def _meaning_block(module: RpgModule) -> str:
 
 def _compose_state(
     sess: RpgSession, specs: dict[str, dict], items: list[dict], keep: int,
-    thread_npc: RpgNpc | None = None,
+    here: list[RpgNpc] | None = None,
 ) -> str:
     lines = [f"【你】{(sess.char_name or '').strip() or DEFAULT_CHAR_NAME}"]
     if (sess.char_desc or "").strip():
@@ -304,12 +341,17 @@ def _compose_state(
     slot = str(getattr(sess, "slot", "") or "").strip()
     if slot:
         lines.append(f"时间：第 {max(1, int(getattr(sess, 'day', 1) or 1))} 天 · {slot}")
-    # 这一段归哪条线。没有它模型会把在场三个人写成一锅粥——
-    # 玩家进了老兵的门就是想单独跟老兵说话
-    if thread_npc is not None:
-        lines.append(f"此刻：你正在与{(thread_npc.name or '').strip()}单独说话")
-    else:
-        lines.append("此刻：没有特定的说话对象，这是公共场面，在场的人都在")
+    # 这一幕是几个人。判据取**实际在跟前的人**，不再取「这条线是谁的」——线
+    # 已经不存在了。原先那条理由（「没有它模型会把在场三个人写成一锅粥」）现在
+    # 由人数直接回答，而且答得更准：多人在场时玩家确实是在对大家说话
+    if here is not None:
+        if len(here) == 1:
+            lines.append(f"此刻：你正在与{(here[0].name or '').strip()}单独说话")
+        elif here:
+            names = "、".join((n.name or "").strip() for n in here)
+            lines.append(f"此刻：在场的是你与{names}，这是群戏")
+        else:
+            lines.append("此刻：没有别人在场，只有你一个人")
 
     shown, rest = items[:keep], len(items) - keep
     rows = [
@@ -327,7 +369,7 @@ def _compose_state(
     return "\n".join(lines)
 
 
-def _state_block(sess: RpgSession, module: RpgModule, thread_npc: RpgNpc | None = None) -> str:
+def _state_block(sess: RpgSession, module: RpgModule, here: list[RpgNpc] | None = None) -> str:
     """【你】段。超预算时先裁背包，不让截断的刀切在数值上。
 
     背包按数量降序保留——囤了 20 支箭比捡了一块石头更可能被用上。
@@ -340,7 +382,7 @@ def _state_block(sess: RpgSession, module: RpgModule, thread_npc: RpgNpc | None 
     ordered = sorted(items, key=lambda it: -_qty(it))
     block = ""
     for keep in range(len(ordered), -1, -1):
-        block = _compose_state(sess, specs, ordered, keep, thread_npc)
+        block = _compose_state(sess, specs, ordered, keep, here)
         if estimate_tokens(block) <= STATE_TOKEN_BUDGET:
             return block
     # 背包裁空了还超，说明是角色描述太长，这时才允许截断
@@ -494,40 +536,92 @@ def _inject_judgement(messages: list[dict], judgement: dict) -> None:
     last["content"] = f"{head}\n\n{last['content']}\n\n{tail}"
 
 
-def thread_summary(sess: RpgSession, thread_id: int | None) -> str:
-    """这条线的滚动概要。场面线走 summary 列，角色线走 thread_summaries。"""
-    if thread_id is None:
-        return sess.summary or ""
-    return (sess.thread_summaries or {}).get(str(thread_id), "") or ""
-
-
-def thread_summarized_upto(sess: RpgSession, thread_id: int | None) -> int:
-    """这条线已经压缩到哪条消息。含义同上，分开存。"""
-    if thread_id is None:
-        return sess.summarized_upto_id or 0
-    try:
-        return int((sess.thread_upto or {}).get(str(thread_id), 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def history_window(
     module: RpgModule,
     sess: RpgSession,
     history: list[RpgMessage],
-    thread_id: int | None = None,
+    focus_npc_id: int | None = None,
 ) -> list[RpgMessage]:
     """发原文的窗口：已压缩进概要的消息不再重复发。
 
     公开而不是私有：「帮我想想」也要按同一套规则取最近发生的事，
     两边各切一次的话，窗口的边界迟早对不上。
 
-    history 已经由调用方按线筛过了，thread_id 在这里只用来取对的那个指针——
-    传错线会让窗口按另一条线的进度去切，边界看着还很正常。
+    只剩一份概要指针了（历史统一成一条），所以不再按线取。原先那个 thread_id
+    参数是「传错线会让窗口按另一条线的进度去切，边界看着还很正常」的来源之一
     """
-    upto = thread_summarized_upto(sess, thread_id)
+    if focus_npc_id:
+        try:
+            upto = int((sess.thread_upto or {}).get(str(focus_npc_id), 0) or 0)
+        except (TypeError, ValueError):
+            upto = 0
+        visible = [
+            m for m in history
+            if m.present is None or focus_npc_id in (m.present or [])
+        ]
+    else:
+        upto = sess.summarized_upto_id or 0
+        # 无目标时是公共场景上下文，只保留公开消息和群戏消息。
+        # 单人私聊由对应 NPC 线承接，避免重新回到全量历史泄露问题。
+        first_message_id = min((m.id for m in history), default=0)
+        visible = [
+            m for m in history
+            if m.present is None
+            or len(m.present or []) > 1
+            or (m.id == first_message_id and m.role == "assistant")
+        ]
     limit = max(1, module.context_turns or 20) * 2
-    return [m for m in history if m.id > upto][-limit:]
+    return [m for m in visible if m.id > upto][-limit:]
+
+
+def summary_for_focus(sess: RpgSession, focus_npc_id: int | None = None) -> str:
+    """Return the summary visible to the current narration scope."""
+    if focus_npc_id:
+        return (sess.thread_summaries or {}).get(str(focus_npc_id), "") or ""
+    return sess.summary or ""
+
+
+def scene_block(sess: RpgSession, description: str, here: list[RpgNpc]) -> str:
+    """【场面】：当前这一幕不在消息里的那些信息。空串 = 这一轮不拼。
+
+    历史统一成一条之后，这一块**不再是「借历史」**——原先它干的是把场面线的
+    原文读时复制给角色线，那是在补「历史被切开了」的窟窿。现在没有窟窿可补：
+    所有消息都在同一条时间线上，模型本来就看得见开场白、看见你刚才做了什么、
+    看见群戏里谁说了什么。
+
+    剩下的只有**消息里没有的东西**：
+
+    - **地点描述**。`_compose_state` 里只有地点名（「所在：地窖」），描述从来
+      没进过上下文——作者写了一整段地窖的样子，模型一个字没见过
+    - **在场名单**。`_npc_block` 给了每个人的设定，但那是「这一轮要注入的人」，
+      含被提到但不在跟前的人；这一行专门回答「眼前站着谁」
+
+    description 由调用方查好传进来（`build_rpg_messages` 顺手查了 RpgLocation），
+    这里保持纯函数：能直接测，也不用把整个 module 塞进来。
+
+    两样都从**活状态**读，不从消息读。这是它和旧 scene_background 的根本差别：
+    那个读的是历史，所以必须防「复制进别的线会让同一段戏各演化一遍」；这个读的
+    是当前状态，拼多少次都一样，一个字都不写回任何地方。
+    """
+    name = (sess.location or "").strip()
+    parts: list[str] = []
+    if name:
+        text = (description or "").strip()
+        parts.append(f"地点：{name}" + (f"\n{text}" if text else ""))
+
+    # 在场名单。空名单也要写出来——「没有别人」和「没提」对模型是两回事，
+    # 不写的话它会照着上下文里的角色自己安排一个站到跟前
+    if here:
+        parts.append("在场：" + "、".join((n.name or "").strip() for n in here))
+    elif name:
+        parts.append("在场：只有你一个人")
+
+    if not parts:
+        return ""
+    return truncate_to_token_budget(
+        "【场面】\n" + SCENE_PREAMBLE + "\n\n" + "\n\n".join(parts),
+        SCENE_TOKEN_BUDGET,
+    )
 
 
 async def resolve_rules(
@@ -559,7 +653,7 @@ async def build_rpg_messages(
     new_input: str,
     judgement: dict | None = None,
     facts: list[str] | None = None,
-    thread_id: int | None = None,
+    focus_npc_id: int | None = None,
 ) -> tuple[list[dict], dict]:
     """组装发给叙事模型的 messages，返回 (messages, diag)。
 
@@ -569,12 +663,13 @@ async def build_rpg_messages(
     facts 是引擎已经结算完的事实（用了药水回 20 精力、门锁着进不去）。它和
     judgement 走同一条通道：都是「不可更改的已定结果」，模型只负责落成画面。
 
-    thread_id 是这一轮归哪条对话线（值是 NPC 的 id），None = 场面线。线主从
-    本函数已经查到的 npcs 里取，不额外查库。
+    history 是**全部**历史，调用方不再按线切——线已经不存在了。原先那两个参数
+    （thread_id、scene_history）一个管「这一轮归哪条线」、一个管「把场面线借给
+    角色线」，现在都没得借：所有消息本来就在同一条时间线上。
 
     creator_note 永不出现在返回值里。
     """
-    window = history_window(module, sess, history, thread_id)
+    window = history_window(module, sess, history, focus_npc_id)
     # scan_depth=1 就只扫玩家刚发的这句。往回扫得越多，GM 自己的旁白越容易
     # 让词条反复命中——它提到了那个词，下一轮扫描又扫到，自己喂自己
     back = max(0, int(module.scan_depth or 3) - 1)
@@ -603,11 +698,18 @@ async def build_rpg_messages(
     # 真的在跟前的那几个。标记见过面只认这一份：npcs_onstage 里还含被提到的
     # 人，他们的外貌这一轮发了，但人并没见到，不能算见过
     here = here_npcs(list(npcs), sess.location, sess.slot, sess.npc_places)
-    # 线主。主角模板不登场，不该有自己的线
-    thread_npc = (
-        next((n for n in world_npcs(list(npcs)) if n.id == thread_id), None)
-        if thread_id else None
-    )
+    # 当前地点的描述。只按名字查一条——用不上整张表，多查的每一条都会在
+    # 每轮上下文里凭空多算一次 token
+    place_description = ""
+    if (sess.location or "").strip():
+        place_description = (await session.execute(
+            select(RpgLocation.description)
+            .where(
+                RpgLocation.module_id == module.id,
+                RpgLocation.name == (sess.location or "").strip(),
+            )
+            .limit(1)
+        )).scalars().first() or ""
 
     sections: list[str] = []
     sections.append(render(
@@ -636,10 +738,14 @@ async def build_rpg_messages(
 
     # 【你】排在【世界设定】之前：状态每轮都在变，世界书是静态背景，
     # 硬事实靠前。整体截断从尾部切，靠前的不会被切掉
-    state_block = _state_block(sess, module, thread_npc)
+    state_block = _state_block(sess, module, here)
     sections.append(state_block)
 
-    npc_block = _npc_block(onstage, sess, module) if onstage else ""
+    if focus_npc_id:
+        context_npcs = [n for n in npcs if n.id == focus_npc_id]
+    else:
+        context_npcs = onstage
+    npc_block = _npc_block(context_npcs, sess, module) if context_npcs else ""
     if npc_block:
         sections.append(npc_block)
 
@@ -657,6 +763,17 @@ async def build_rpg_messages(
         )
         sections.append(chronicle_block)
 
+    # 【场面】紧跟在【外场】后面：两块都是「不在消息里的背景」，位置的理由也
+    # 一样（整体截断从尾部切，背景要排前面）。差别是【外场】讲的是传开的传闻，
+    # 这一块讲的是眼前这一幕——地点长什么样、谁站在这里
+    #
+    # **必须在扫完 scan_text 之后**才拼：地点描述扫进关键词的话，写地窖的模组
+    # 每进一次地窖就命中那条词条；而模型自己写的旁白又会让它下一轮再命中，
+    # 自己喂自己。旧的 scene_background 有同一条规矩，理由照旧
+    scene = scene_block(sess, place_description or "", here)
+    if scene:
+        sections.append(scene)
+
     # depth=0 拼进 system，depth>0 留到下面按深度插进对话流
     system_hits = [e for e in hits if (e.depth or 0) <= 0]
     depth_hits = [e for e in hits if (e.depth or 0) > 0]
@@ -673,7 +790,7 @@ async def build_rpg_messages(
 
     # 取这条线自己那一份。**不能用一份全局概要**：概要注入的是 system，
     # 一份全局概要注入每一条线，等于把你在密室里跟 A 说的话原样告诉 B
-    prior = thread_summary(sess, thread_id).strip()
+    prior = summary_for_focus(sess, focus_npc_id).strip()
     if prior:
         sections.append(
             "【此前剧情】\n" + truncate_to_token_budget(prior, SUMMARY_TOKEN_BUDGET)
@@ -706,11 +823,12 @@ async def build_rpg_messages(
         "meaning_tokens": estimate_tokens(meaning_block),
         "npc_tokens": estimate_tokens(npc_block),
         "chronicle_tokens": estimate_tokens(chronicle_block),
+        # 【场面】那一段的字数。它不再随「进没进私聊线」跳变——线没了，
+        # 它每轮都在，大小只跟地点描述写多长有关
+        "scene_tokens": estimate_tokens(scene),
         "history_count": len(window),
-        # 这一轮归哪条线、时钟走到哪了。前端那一行诊断读这几个字段
-        "thread": (
-            {"id": thread_npc.id, "name": thread_npc.name} if thread_npc else None
-        ),
+        "focus_npc_id": focus_npc_id,
+        # 时钟走到哪了。前端那一行诊断读这几个字段
         "slot": str(getattr(sess, "slot", "") or ""),
         "day": max(1, int(getattr(sess, "day", 1) or 1)),
         "triggered": [
@@ -722,7 +840,7 @@ async def build_rpg_messages(
             }
             for e in hits
         ],
-        "npcs_onstage": [{"id": n.id, "name": n.name} for n in onstage],
+        "npcs_onstage": [{"id": n.id, "name": n.name} for n in context_npcs],
         "npcs_here": [{"id": n.id, "name": n.name} for n in here],
         "intent_used": intent,
         # 这一轮实际注入了写作规则没有，方便核对勾选是否生效
