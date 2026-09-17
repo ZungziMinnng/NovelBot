@@ -22,7 +22,11 @@ env/
 
 # ── Backend runtime data (do NOT commit) ────────────────────────────────────
 backend/data/
-backend/.env
+# 写 .env* 而不是 .env：精确名字只能挡住那一个文件，带后缀的备份
+# （.env.bak.proxy / .env.local / .env.old）全都会漏过去——真漏过一次，
+# 三个真 key 跟着上了公开仓库。模板文件保留在库里给人抄
+backend/.env*
+!backend/.env.example
 tmp_*
 data/
 
