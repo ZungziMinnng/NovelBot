@@ -58,12 +58,14 @@ export function CommaInput({
 /** 面板的公共壳。侧栏那四张重复的 rounded-xl border bg-card/70 p-3 也用它 */
 export const PANEL = 'rpg-panel rounded-xl border bg-card/70'
 
-/** 板块色。变量定在 index.css 的 .mode-rpg 里，18 套主题下是同一个身份——
+/** 板块色。变量定在 index.css 的 .mode-game 里，18 套主题下是同一个身份——
  *  换个主题就找不到道具在哪的话，这套辨识度就白做了。
- *  不传 accent 的板块跟主题主色走（RPG 下是紫） */
+ *  不传 accent 的板块跟主题主色走（游戏下是紫） */
 export const ACCENT = {
   cast: 'var(--rpg-cast)',
   bag: 'var(--rpg-bag)',
+  skill: 'var(--rpg-skill)',
+  task: 'var(--rpg-task)',
   save: 'var(--rpg-save)',
   map: 'var(--rpg-map)',
 } as const
@@ -210,7 +212,7 @@ export function Assist({
 /** AI 结果就地展开，可改、可重试，确认后才替换原文。
  *
  *  不直接 import 酒馆那个（`TavernCard.tsx`）：它把 `border-pink-500/30`、
- *  `bg-pink-500/[0.04]` 写死了，在 RPG 的紫色和另外 17 套主题下是一块粉斑。
+ *  `bg-pink-500/[0.04]` 写死了，在游戏的紫色和另外 17 套主题下是一块粉斑。
  *  这里跟主题主色走。 */
 function AssistDraft({
   original, draft, onDiscard, onApply, onRetry, retrying,

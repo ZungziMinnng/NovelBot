@@ -27,16 +27,15 @@ from app.services.context_budget import (
 )
 from app.services.relevance_selector import (
     OVERFETCH,
-    bm25_rank,
     cfg_top_k,
     diversify_historical_hits,
     keyword_hits,
     rag_hits_by_type,
     rerank_by_importance,
-    rrf_fuse,
     select_by_name_then_rag,
     select_notes_by_title_then_rag,
 )
+from app.services.text_ranking import bm25_rank, rrf_fuse
 from app.services.thread_selector import cap_glossary, select_story_threads
 from app.services import prompt_rules
 from app.prompts import genre_cards

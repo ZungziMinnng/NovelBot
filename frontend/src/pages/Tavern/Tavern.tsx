@@ -9,7 +9,6 @@ import { tavernApi, type TavernCard } from '@/api/client'
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
 import CardAvatar from './CardAvatar'
 import CardMultiSelect from './CardMultiSelect'
@@ -42,11 +41,6 @@ export default function Tavern() {
 
   return (
     <div className="mode-tavern min-h-screen bg-background relative">
-      {/* 和 Landing 那张紫粉色酒馆卡呼应，进来不至于像换了个软件 */}
-      <div className="fixed inset-0 z-0 opacity-[0.13] pointer-events-none">
-        <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
-      </div>
-
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
         <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择">
           <ArrowLeft className="w-4 h-4" />

@@ -9,7 +9,8 @@ import unittest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.rpg import (
-    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession, RpgWorldEntry,
+    RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession, RpgSkill,
+    RpgWorldEntry,
 )
 from app.services.rpg_context import (
     build_rpg_messages, here_npcs, onstage_npcs, triggered_entries,
@@ -23,8 +24,11 @@ class _Base(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite://")
         async with self.engine.begin() as connection:
+            # 道具表和技能表是【道具与技能】那一块要查的，即使这些用例一条都不建，
+            # 表也得在——build_rpg_messages 每轮都会整表取一次
             for model in (
                 RpgModule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage, RpgLocation,
+                RpgItem, RpgSkill,
             ):
                 await connection.run_sync(model.__table__.create)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -71,12 +75,15 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         await self.db.commit()
         return obj
 
-    async def _build(self, text, judgement=None, history=None, facts=None, focus_npc_id=None):
+    async def _build(
+        self, text, judgement=None, history=None, facts=None,
+        mode="group", private_with=None,
+    ):
         """history 就是全部历史。原先这里还要传 thread_id 和 scene_history
         （这一轮归哪条线、把场面线借给角色线），线拆掉之后两个概念都没了。"""
         return await build_rpg_messages(
             self.db, self.module, self.sess, history or [], text, judgement, facts,
-            focus_npc_id,
+            mode, private_with,
         )
 
 
@@ -99,20 +106,63 @@ class SafetyTests(_Base):
         blob = "\n".join(m["content"] for m in messages)
         self.assertNotIn(SENTINEL, blob)
 
-    async def test_focus_view_injects_only_the_selected_npc_card(self):
+    async def test_a_private_aside_narrows_all_three_places_at_once(self):
+        """把一个人叫到一边：在场名单、人设卡、记忆归属**一起**收窄。
+
+        只收窄记忆那一处的话，模型看见屋里还站着 Bob 就会让他插话，而那句话
+        按私聊记进 Alice 名下——Bob 说过的话 Bob 自己不记得。
+        """
         alice = await self._add(RpgNpc(
             module_id=self.module.id, name="Alice", description="ALICE_CARD",
-            persona="ALICE_PERSONA",
+            persona="ALICE_PERSONA", location="地窖",
         ))
         await self._add(RpgNpc(
             module_id=self.module.id, name="Bob", description="BOB_CARD",
-            persona="BOB_PERSONA",
+            persona="BOB_PERSONA", location="地窖",
         ))
-        messages, diag = await self._build("Hello", focus_npc_id=alice.id)
+        messages, diag = await self._build(
+            "Alice，借一步说话", mode="private", private_with=alice.id,
+        )
         system = messages[0]["content"]
         self.assertIn("ALICE_CARD", system)
         self.assertNotIn("BOB_CARD", system)
-        self.assertEqual(diag["focus_npc_id"], alice.id)
+        self.assertNotIn("Bob", system)
+        self.assertIn("叫到一边", system)
+        self.assertEqual(diag["private_with"], alice.id)
+        self.assertEqual([n["name"] for n in diag["npcs_here"]], ["Alice"])
+
+    async def test_a_group_turn_gives_everyone_in_the_room_their_card(self):
+        # 群聊时同屋的每个人都要拿到自己的设定，否则模型只能现编他的性格。
+        # 这里原先按「玩家在面包屑上点了谁」筛，和历史按在场筛是两套口径
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="Alice", description="ALICE_CARD",
+            location="地窖",
+        ))
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="Bob", description="BOB_CARD",
+            location="地窖",
+        ))
+        system = (await self._build("你们都听着"))[0][0]["content"]
+        self.assertIn("ALICE_CARD", system)
+        self.assertIn("BOB_CARD", system)
+        self.assertIn("这是群戏", system)
+
+    async def test_acting_alone_does_not_hide_you_from_the_room(self):
+        """「独自行动」不等于「没人看见」。
+
+        她眼睁睁看着你从箱底翻出剑谱。判成没人在场的话，下一轮她不知道你有
+        剑谱——那是失忆 bug 的镜像版，一样难查。
+        """
+        alice = await self._add(RpgNpc(
+            module_id=self.module.id, name="Alice", description="ALICE_CARD",
+            location="地窖",
+        ))
+        messages, diag = await self._build("我翻箱底", mode="solo")
+        system = messages[0]["content"]
+        self.assertIn("在旁边看着", system)
+        self.assertIn("没有在跟谁说话", system)
+        # 在场名单一个人都没少：这段记忆照样记给她
+        self.assertEqual([n["id"] for n in diag["npcs_here"]], [alice.id])
 
 
 class OrderTests(_Base):
@@ -239,7 +289,12 @@ class ThresholdTests(_Base):
         self.assertIn("你累得站不稳了。", messages[0]["content"])
 
     async def test_a_relation_threshold_reads_that_npcs_own_numbers(self):
-        npc = await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        # relation_enabled 默认是 False（关系数值默认关），不打开的话
+        # check_condition 一律判「没有追踪关系数值」，这条阈值永远不成立
+        npc = await self._add(RpgNpc(
+            module_id=self.module.id, name="老兵", location="地窖",
+            relation_enabled=True, relation_stat_names=["好感"],
+        ))
         await self._add(RpgWorldEntry(
             module_id=self.module.id, constant=True, content="他开始把你当自己人。",
             trigger_condition={
@@ -266,6 +321,23 @@ class ThresholdTests(_Base):
 
 
 class NpcTests(_Base):
+    async def test_current_place_roster_survives_location_whitespace(self):
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="园丁甲", location="灵药园　",
+            persona="负责照料灵药。",
+        ))
+        await self._add(RpgNpc(
+            module_id=self.module.id, name="园丁乙", location="灵药园",
+            persona="正在清点药材。",
+        ))
+        self.sess.location = " 灵药园 "
+        messages, diag = await self._build("我走进这里")
+        self.assertEqual([n["name"] for n in diag["npcs_here"]], ["园丁甲", "园丁乙"])
+        system = messages[0]["content"]
+        self.assertIn("地点角色名册", system)
+        self.assertIn("园丁甲(ID:", system)
+        self.assertIn("园丁乙(ID:", system)
+
     async def test_npc_in_the_same_place_is_onstage(self):
         await self._add(RpgNpc(
             module_id=self.module.id, name="老兵", location="地窖", persona="警惕，话少。"
@@ -551,6 +623,23 @@ class SceneTests(_Base):
         self.assertIn("在场：赫敏", system)
         self.assertGreater(diag["scene_tokens"], 0)
 
+    async def test_what_the_player_did_to_the_room_shows_up_under_the_description(self):
+        # 地点描述是作者写死的原样，被玩家改过的部分只在这一句里。它单独一行：
+        # 混进描述里模型就分不清哪句是设定、哪句是这一局才成立的
+        await self._add(RpgLocation(
+            module_id=self.module.id, name="地窖", description="一半泡在水里的旧矿井。",
+        ))
+        self.sess.place_notes = {"地窖": "门被你踹坏了，合不上"}
+        system = (await self._build("我往前走"))[0][0]["content"]
+        self.assertIn("一半泡在水里的旧矿井。", system)
+        self.assertIn("现在：门被你踹坏了，合不上", system)
+
+    async def test_another_places_note_stays_where_it_belongs(self):
+        # 一个地方一格。串了的话你站在地窖，模型却在写酒馆掀翻的桌子
+        await self._add(RpgLocation(module_id=self.module.id, name="地窖"))
+        self.sess.place_notes = {"酒馆": "桌子掀了一地"}
+        self.assertNotIn("桌子掀了一地", (await self._build("我往前走"))[0][0]["content"])
+
     async def test_an_empty_room_says_so(self):
         # 「没有别人」和「没提」对模型是两回事：不写的话它会照着上下文里的
         # 角色自己安排一个站到跟前
@@ -618,6 +707,18 @@ class SceneTests(_Base):
 
 
 class HistoryTests(_Base):
+    async def test_current_scene_anchor_overrides_stale_location_in_history(self):
+        history = [
+            RpgMessage(id=1, session_id=self.sess.id, role="assistant", content="你刚从柴房出来。"),
+        ]
+        self.sess.location = "太玄白玉广场"
+        messages, _ = await self._build("打听消息", history=history)
+        system = messages[0]["content"]
+        self.assertTrue(system.endswith("当前没有登记在场角色。"))
+        self.assertIn("【本轮当前场景 · 硬事实】", system)
+        self.assertIn("太玄白玉广场", system)
+        self.assertIn("历史消息中的地点属于过去", system)
+
     async def test_summarized_messages_are_not_sent_again(self):
         history = [
             RpgMessage(id=1, session_id=self.sess.id, role="user", content="第一句"),
@@ -630,6 +731,43 @@ class HistoryTests(_Base):
         self.assertEqual(diag["history_count"], 1)
         self.assertEqual([m["content"] for m in messages[1:]], ["第三句", "第四句"])
         self.assertIn("【此前剧情】", messages[0]["content"])
+
+    async def test_the_window_keeps_your_own_past_and_heres_too(self):
+        """端到端钉住那两个失忆 bug，一路从 build_rpg_messages 走。
+
+        ① 筛历史的依据是**在场名单**，不是玩家在面包屑上点了谁。原先没点人时
+           走「只留群戏」那一支，于是跟她一对一聊十轮之后随口再说一句，模型
+           眼前只剩开场白。错在**调用方选错了分支**，所以必须走整条路，单测
+           history_window 拦不住。
+        ② 判据改成「此刻谁在跟前」之后，一场 1v1 的戏会被地点切换整个甩掉
+           （只记在对方名下，一走动那一格就整个不进）。所以玩家格现在装**全部**
+           消息：你亲身经历过的，不管此刻谁站在跟前，都在窗口里。
+
+        在场的人那一格是**额外**把她自己的更早记忆也捞进来；她们之间照旧隔开。
+        """
+        veteran = await self._add(RpgNpc(module_id=self.module.id, name="老兵", location="地窖"))
+        keeper = await self._add(RpgNpc(module_id=self.module.id, name="老板娘", location="酒馆"))
+        history = [
+            RpgMessage(id=1, session_id=self.sess.id, role="user", content="开场白", present=None),
+            RpgMessage(id=2, session_id=self.sess.id, role="user", content="一个人翻箱子", present=[]),
+            RpgMessage(
+                id=3, session_id=self.sess.id, role="user", content="只跟老兵说的",
+                present=[veteran.id],
+            ),
+            RpgMessage(
+                id=4, session_id=self.sess.id, role="user", content="只跟老板娘说的",
+                present=[keeper.id],
+            ),
+        ]
+        # 玩家在地窖，站在跟前的只有老兵。没有 focus_npc_id——这正是默认态
+        messages, _ = await self._build("接着说", history=history)
+        sent = [m["content"] for m in messages[1:]]
+        # 你自己经历过的全在（含背着老兵跟老板娘说的那句——你自己做的事，
+        # 你和叙述你的 GM 都得看得见），刚说的那句在最后
+        self.assertEqual(
+            sent,
+            ["开场白", "一个人翻箱子", "只跟老兵说的", "只跟老板娘说的", "接着说"],
+        )
 
 
 if __name__ == "__main__":

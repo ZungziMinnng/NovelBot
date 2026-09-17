@@ -163,6 +163,10 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
         yield _sse("error", "小说不存在")
         return
 
+    # 构思温度：作者在小说设置里调的那个，覆盖下面地点/势力/角色/功法原先的硬编码 0.7。
+    # 标题那一处（Step 2）仍是 0.9——标题只有一行，和构思散文不是一回事
+    build_temp = getattr(novel, "build_temperature", 0.7)
+
     # 构建流程会写入大量实体向量（角色/地点/势力/功法/世界观）。必须先按小说配置装载
     # 嵌入函数，否则缓存未命中会兜底到 384 维本地默认模型，与已建的远程模型维度集合冲突
     # （InvalidDimensionException）。失败仅告警：嵌入是附带同步，不应打断构建。
@@ -256,7 +260,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                 {"role": "system", "content": "你是世界观编辑，只输出结构化、克制、可解析的地点列表。"},
                 {"role": "user", "content": loc_prompt},
             ],
-            model=model, api_format=api_format, temperature=0.7, max_tokens=1200)
+            model=model, api_format=api_format, temperature=build_temp, max_tokens=1200)
         loc_items = _parse_json_array(loc_raw)
         loc_lines = []
         for item in loc_items:
@@ -285,7 +289,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                 {"role": "system", "content": "你是世界观编辑，只输出结构化、克制、可解析的势力列表。"},
                 {"role": "user", "content": fac_prompt},
             ],
-            model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
+            model=model, api_format=api_format, temperature=build_temp, max_tokens=1000)
         fac_items = _parse_json_array(fac_raw)
         fac_lines = []
         for item in fac_items:
@@ -323,7 +327,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                 {"role": "system", "content": "你是角色策划编辑，只输出结构化角色列表。"},
                 {"role": "user", "content": char_prompt},
             ],
-            model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
+            model=model, api_format=api_format, temperature=build_temp, max_tokens=1000)
         char_items = _parse_json_array(char_raw)
         existing_names = {c.name for c in existing_chars}
         chars_created = []
@@ -407,7 +411,7 @@ async def run_novel_build(db: AsyncSession, novel_id: int, nsfw_mode: bool = Fal
                     {"role": "system", "content": "你是力量体系编辑，只输出结构化、克制、可解析的功法列表。"},
                     {"role": "user", "content": tech_prompt},
                 ],
-                model=model, api_format=api_format, temperature=0.7, max_tokens=1000)
+                model=model, api_format=api_format, temperature=build_temp, max_tokens=1000)
             tech_items = _parse_json_array(tech_raw)
             tech_lines = []
             techs_created = []

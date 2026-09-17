@@ -5,7 +5,6 @@ import toast from 'react-hot-toast'
 import { BookOpen, Plus, Settings, Trash2, ChevronRight, PenTool, Edit3, Info, Eye, EyeOff, Copy, LogOut, ArrowLeft } from 'lucide-react'
 import { novelsApi, writerPresetsApi, authApi, type Novel, type WriterPreset, type ExampleTurn } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useAuthStore } from '@/store/authStore'
@@ -183,25 +182,8 @@ export default function Home() {
     deletePreset.mutate(id)
   }
 
-  const silkColor = useMemo(() => {
-    if (nsfwMode) return '#4A1942'
-    const root = document.documentElement
-    const style = getComputedStyle(root)
-    const h = style.getPropertyValue('--primary').trim().split(' ')[0] || '220'
-    const hue = parseFloat(h)
-    const r = Math.round(128 + 40 * Math.cos((hue * Math.PI) / 180))
-    const g = Math.round(128 + 40 * Math.cos(((hue - 120) * Math.PI) / 180))
-    const b = Math.round(128 + 40 * Math.cos(((hue - 240) * Math.PI) / 180))
-    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`
-  }, [nsfwMode])
-
   return (
     <div className="min-h-screen bg-background relative">
-      {/* Silk Background */}
-      <div className="fixed inset-0 z-0 opacity-20 pointer-events-none">
-        <Silk speed={3} scale={1} color={silkColor} noiseIntensity={1.2} rotation={0} className="w-full h-full" />
-      </div>
-
       {/* Header */}
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">

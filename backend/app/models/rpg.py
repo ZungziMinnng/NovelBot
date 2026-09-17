@@ -48,9 +48,9 @@ class RpgModule(Base):
     # 但它决定了模型的整体基调，比任何参数都管用
     genre: Mapped[str] = mapped_column(String(100), default="")
 
-    # 玩法类别：sim（模拟）/ rpg（探索冒险，默认）/ slg（经营策略）。
+    # 玩法类别：sim（模拟器）/ rpg（探索冒险，默认）/ slg（角色养成）。
     # 和 genre 是两根正交的轴：genre 说「世界长什么样」，它说「这局怎么玩」。
-    # 同一个魔法学院，可以是模拟养成也可以是探索冒险，两者说的不是一回事。
+    # 同一个魔法学院，可以是身份模拟器、角色养成或探索冒险。
     # 取值见 services/rpg_play_style.py
     play_style: Mapped[str] = mapped_column(String(20), default="rpg")
 
@@ -69,6 +69,11 @@ class RpgModule(Base):
     # 时段表，如 ["早", "中", "晚"]。空 = 这个模组不用时段，一切照旧。
     # 这里是默认值，建局时可以改，改完存进 session 自己那一份
     time_slots: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 主角的名字和出身由模组定死，玩家在建局界面改不动。默认关 = 玩家自己填，
+    # 和加这一列之前一样。**开了也必须有那张主角模板卡才生效**：没有卡就没有
+    # 「定死的值」可用，锁着一个空名字等于谁都开不了局
+    lock_protagonist: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 作废：数值系统换成 stat_defs 之后这两列没人读了。项目没有 Alembic，
     # create_all 不删列，而它们建成了 NOT NULL，从模型里拿掉会让老库插入直接
@@ -110,10 +115,64 @@ class RpgModule(Base):
     # 单独拎出来是因为摘要和裁决的要求不一样：裁决要快要便宜，摘要错一次
     # 会把错的东西一路带到局终（它的输出会喂给下一次摘要）
     summary_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    # 把中文源文转成 danbooru tag 用。这一路输出是 tag 串、过白名单校验、
+    # 而且转完要给用户过目能删，所以最便宜的模型就够——单独拎出来是因为它
+    # 从前跟着 model_ref 走，白花叙事模型的钱。空 = 跟着 fast_model_ref 走
+    image_model_ref: Mapped[str] = mapped_column(String(100), default="")
 
     # 推时段时写一句「别处的传闻」进大事记。**默认关**：开了之后「结束这个
     # 时段」就不再是零模型调用了，这个承诺写在文档、按钮提示和测试里
     offscreen_brief: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 勾上之后，AI 调度那次调用会顺带问一句「这个人有没有话想找玩家说」，
+    # 有就挂进 session.npc_inbox 等玩家点开（见那一列的说明）。
+    #
+    # **不多花一次调用**：它复用 idle_npc_activities 已有的那一次，只是多一行
+    # 输出。所以它的前提是角色勾了 ai_scheduled——没人被调度就没有留言，
+    # 这里勾了也不会有任何事发生。
+    #
+    # 默认关，理由同 offscreen_brief 和 ai_scheduled：老模组的行为要逐字不变
+    npc_initiative: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ── 时段推进的两个提醒阈值 ──
+    # 起因是「有时候会忘记跳过时段」。时钟原先只能手动拨，忘了按世界就冻住：
+    # 作息表不换班、npc_places 永久盖住作者排的班、跨天恢复永远不发生。
+    #
+    # 一个时段最多几格**行动**（点动作/道具/技能/移动，纯对话不算）。攒满
+    # 自动推一格。**0 = 关**，一格都不会自己走。
+    # 只数行动是有意的：turn_count 对每条玩家消息无差别 +1，拿它当预算等于
+    # 「话多的人时间流逝快」；而「世界真的动了」引擎自己就知道，不用问模型
+    #
+    # 新模组默认 3 而不是 0：默认 0 时时钟只有玩家主动按才走，而推时段又带
+    # 跨天恢复，于是「歇一晚」成了零成本回血，数值消耗不构成任何压力。老模组
+    # 存的那个 0 不动（迁移时就写进行里了），行为逐字不变
+    slot_budget: Mapped[int] = mapped_column(Integer, default=3)
+    # 纯对话攒到几条就把「结束这个时段」这颗按钮点亮。**只提醒，不推时间**——
+    # 聊得久不等于世界该变，那种判断交给结算里 GM 的 scene_wrapped 提议。
+    # 0 = 关
+    chat_nudge: Mapped[int] = mapped_column(Integer, default=0)
+    # 自由打字要不要吃掉一格行动。开着时**不是每条都吃**：只有结算里 GM 报
+    # scene_wrapped（这一幕收尾了）的那一轮才算一格。闲聊三句不收尾就是 0 格，
+    # 一次演完的事才算一格。
+    #
+    # 默认关：老模组行为逐字不变，而且这条开关会让 scene_wrapped 从「只点亮
+    # 按钮」变成真的动时间，那是对 chat_nudge 那条注释的有意破例——破例得由
+    # 作者自己开。模拟器和角色养成两档才需要它，探索冒险基本不用
+    free_costs_slot: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ── NPC 立绘出图设置 ──
+    # {"workflow": "npc_portrait", "style": "photorealistic, realistic",
+    #  "extra": "absurdres", "prompt_form": "sd_tags", "frame": "cg_wide"}
+    # 全项可空，老模组是 {}。style / pose 存的是展开后的 tag 串而不是选项 key，
+    # 这样后端和拼提示词的地方都不用认识前端那张风格表。
+    # 题材**不存在这里**——module.genre 已经是主字段，出图时现读，两处存会不同步
+    #
+    # prompt_form: 'natural_zh'（缺省）或 'sd_tags'。光辉这类 SDXL 系工作流走
+    #   CLIP-L 只认英文 Danbooru tag，Z-Image 走 Qwen-3-4B 吃中文，两种提示词
+    #   形态不通用。**缺省必须等于中文**，否则老模组的图会悄悄全变样。
+    # frame: imageFrames.ts 里的 key（存 key 是因为它还带 width/height 两个数字，
+    #   展开成一个 tag 串装不下），出图时前端回表查出尺寸传进请求体。
+    image_config: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -136,6 +195,107 @@ class RpgRule(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgInstructionPreset(Base):
+    """常用 GM 指令：攒顺手的一段 GM 指令，换个模组也能拿来用。
+
+    与 TavernInstructionPreset 分表，理由同 RpgRule：酒馆那批是按逐轮陪聊调的，
+    RPG 这批要管数值、判定、结算，混一张表会让两边的列表互相污染。
+
+    取用是**拷贝一次就断开**：模组只存 system_instruction 那段文本，不存 preset_id。
+    存了 id 会看着像活链接，而实际没有任何代码顺着它回写（理由详见 RpgStatPreset）。
+
+    没有 enabled：它从不被自动注入，只有作者点一下才填进表单，停用没有含义。
+    """
+    __tablename__ = "rpg_instruction_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgStatPreset(Base):
+    """数值套装：作者攒顺手的一整套数值系统，换个模组也能拿来用。
+
+    归属根是 user_id 不是 module_id（照 RpgRule 那套）：它从头到尾的全部用处
+    就是「换个模组也能拿来用」，挂在某个模组下等于宣布它只属于那个模组。
+
+    套用是**拷贝一次就断开**：这张表里没有任何模组 id，模组那边也不存套装 id。
+    不是图省事——建局时存档里的数值是**按名字**从 stat_defs 快照下来的，而改名
+    或删掉一项数值没有任何迁移逻辑：老存档里的旧键成孤儿、check_condition 缺键
+    静默按 0 算。一条「改库→回写已建模组」的路会让改一个字就悄悄改坏别人正在
+    玩的局，而且全程不报错。
+
+    为什么和 RpgActionPreset 分两张表而不是一张加 kind 列：A 的数值配 B 的动作
+    是明确要支持的用法，两边本来就各查各的列表，合表之后每次查询都要带 kind
+    过滤，而数值那两列对动作套装永远是空的。
+
+    为什么没有 enabled：RpgRule 有它是因为规则会被自动注入 prompt，需要「暂时
+    不用但别删」。预设从来不被自动消费，只有作者主动点「套用」才动，停用没有
+    任何含义。
+
+    为什么只有 note 没有结构化的 genre：一个 genre 字段会诱使套用时顺手改掉模组
+    的题材那一行，那是拷贝之外的隐式写入。note 只给作者在列表里认人用，
+    永远不进 prompt。
+    """
+    __tablename__ = "rpg_stat_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+
+    # 形状与 RpgModule.stat_defs / relation_stat_defs 逐字一致，套用就是整份拷
+    # 过去、中间不做任何转换——多一层映射就多一处两边会悄悄漂移的地方
+    stat_defs: Mapped[list] = mapped_column(JSON, default=list)
+    relation_stat_defs: Mapped[list] = mapped_column(JSON, default=list)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgActionPreset(Base):
+    """动作套装：一组调顺手的动作按钮，换个模组也能拿来用。
+
+    归属根、拷贝断开、为什么不和 RpgStatPreset 合表、为什么没有 enabled、
+    为什么只有 note：见 RpgStatPreset 的注释，逐条同样适用。
+
+    actions 存整包，不建子表：库里一套动作永远是整体读写，拆子表只多一套 CRUD。
+    """
+    __tablename__ = "rpg_action_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+
+    # [{name, prompt_hint, effects, relation_effects, needs_target}]，
+    # 即 RpgAction 去掉 requires。可用条件引用的是某个模组自己的剧情标记、道具名、
+    # 角色名和时段，搬到别的模组一条都对不上，存进库只会变成「套完就永远不满足」
+    # 的死条件——按钮永远灰着，作者还得回去一个个翻为什么。
+    #
+    # 也刻意不存 stat_names 之类的派生字段：它是 effects 键的派生物，存一份就会和
+    # actions 漂移，缺哪些属性由前端当场算
+    actions: Mapped[list] = mapped_column(JSON, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -194,6 +354,15 @@ class RpgNpc(Base):
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     avatar_url: Mapped[str] = mapped_column(String(300), default="")
+    # 当前这张立绘用的随机种子，0 = 没记录（自己上传的、或者还没生成过）。
+    # 只由生成接口写，不进 Create/Update schema——否则会被表单那份整体 PATCH 冲掉
+    avatar_seed: Mapped[int] = mapped_column(Integer, default=0)
+    # 只给这个人的出图设置。形状和 RpgModule.image_config 一模一样，但**是稀疏的**：
+    # 某个 key 不在 = 这一项跟随模组，在 = 只这个人覆写。所以 {} 是常态，
+    # 不是「没配置」的坏值——模组那份才是总览和默认，这里只放微调。
+    # 合并规则在 services/rpg_image.py，前端同一套在 pages/Rpg/imageConfig.ts
+    # ——一份配置在两处按不同规则合并，预览和实际出的图就不是一回事
+    image_config: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # npc = 世界里的人 / protagonist = 主角模板，开局时预填玩家角色。
     # 两者共用同一个卡片编辑器，不写两套
@@ -227,6 +396,8 @@ class RpgNpc(Base):
     # 这个人的关系数值起点。空 = 按模组的 relation_stat_defs 取 initial；
     # 填了就覆盖对应项（「她一开始就恨你」）
     initial_state: Mapped[dict] = mapped_column(JSON, default=dict)
+    relation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    relation_stat_names: Mapped[list] = mapped_column(JSON, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -258,6 +429,73 @@ class RpgItem(Base):
     start_with: Mapped[bool] = mapped_column(Boolean, default=False)
     # {"精力": 20, "资金": -50}，键必须是 stat_defs 里有的名字
     effects: Mapped[dict] = mapped_column(JSON, default=dict)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgSkill(Base):
+    """技能。和道具是同一类东西——点一下数值由引擎精确增减，AI 碰不到这个数。
+
+    和道具的差别只有两处：技能不会用掉（没有 consumable），但有**冷却**和
+    **可用条件**。条件格式抄 RpgAction.requires，一处写完三处共用。
+    """
+    __tablename__ = "rpg_skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    module_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("rpg_modules.id"), nullable=False, index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # 主动 / 被动。只用来分组显示；被动的 usable 设 false 就点不动
+    category: Mapped[str] = mapped_column(String(20), default="主动")
+
+    usable: Mapped[bool] = mapped_column(Boolean, default=True)
+    # {"精力": -10, "怀疑度": 5}，键必须是 stat_defs 里有的名字
+    effects: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 可用条件，格式同世界书/RpgAction.requires。不满足时前端置灰并显示原因
+    requires: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 用完要歇几个回合。0 = 随便用
+    cooldown: Mapped[int] = mapped_column(Integer, default=0)
+    # 开局就会。没有的技能得靠剧情学（「新发现」那条路）
+    start_with: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class RpgTask(Base):
+    """任务。小说侧「伏笔」在 RPG 这边的对应物：剧情里冒出来的待办，
+    有人替玩家记着，AI 判断该收线了就弹窗问一句，**玩家点头才算完成**。
+
+    这张表是**定义**（模组资产，跨局共用）。某一局进行到哪一步存在
+    RpgSession.tasks 里，两者靠名字对上，同道具/技能那一套。
+    """
+    __tablename__ = "rpg_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    module_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("rpg_modules.id"), nullable=False, index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # 「怎样才算办完」。这一句是判定的唯一依据，会原样喂给结算那步的模型
+    objective: Mapped[str] = mapped_column(Text, default="")
+    # 主线 / 支线 / 日常。只用来分组显示
+    category: Mapped[str] = mapped_column(String(20), default="支线")
+    # 办完之后的数值奖励，键必须是 stat_defs 里有的名字
+    effects: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 开局就挂在待办上。没勾的要靠剧情接下（「新发现」那条路）
+    auto_start: Mapped[bool] = mapped_column(Boolean, default=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -323,6 +561,19 @@ class RpgAction(Base):
     requires: Mapped[dict] = mapped_column(JSON, default=dict)
     # 要不要先选一个在场角色。relation_effects 非空时基本都要
     needs_target: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 分栏用的自由文本，如「经营」「人事」。空 = 归到「其他」那一栏。
+    # 不做成外键表：作者手上一共十几个动作，为了分栏建一张表加一套 CRUD
+    # 不值得，而自由文本改名就是改名，不用管孤儿引用
+    group: Mapped[str] = mapped_column(String(50), default="")
+    # 点一下推进一格时段。默认 False——老动作一格时间都不该多花，
+    # 而模拟器/养成那套「一个指令吃一格」的节奏靠作者逐个勾
+    cost_slot: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 限定只在这个地点可用。空 = 随处可用。
+    # 存名字不存 location_id：全项目的地点引用都是按名字归一（RpgNpc.location、
+    # RpgSession.location、move_by_name 都走 norm_name），这里存 id 会是唯一的例外
+    at_location: Mapped[str] = mapped_column(String(100), default="")
+
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -364,6 +615,13 @@ class RpgSession(Base):
     # [{"name": "生锈的铁钥匙", "qty": 1, "note": "从守卫身上摸到"}]
     # note 强烈建议有：模型看到它会自然复用这个细节
     inventory: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 这一局已经会的技能：[{"name": "听风辨位", "cooldown_left": 0}]
+    # 形状对齐 inventory，理由一样——按名字认，模组那边改了 id 也不影响这一局。
+    #
+    # 不进 STATE_FIELDS：冷却是引擎扣的，让结算那步整列覆写会把刚用掉的技能
+    # 冷却抹回去。和 discoveries 一样单独写（见 rpg_turn._use_skill）
+    skills: Mapped[list] = mapped_column(JSON, default=list)
     location: Mapped[str] = mapped_column(String(100), default="")
 
     # ── 时间。玩家自己拨的时钟，只有「结束这个时段」能推动它 ──
@@ -376,10 +634,26 @@ class RpgSession(Base):
     # 先例是 RpgLocation.connections 存名字不存 id
     slot: Mapped[str] = mapped_column(String(20), default="")
     day: Mapped[int] = mapped_column(Integer, default=1)
+    # 这一格里已经用掉的行动数 / 说过的纯对话条数，都由 advance_slot 归零。
+    # 前者攒到 module.slot_budget 就自动推一格，后者只用来点亮按钮。
+    # **两个都必须进 SNAPSHOT_FIELDS**：它们会随回合自己变，漏了不报错，
+    # 只会让读档之后的时段预算错位（见 routes/rpg.py 那张表上的通则）
+    slot_actions: Mapped[int] = mapped_column(Integer, default=0)
+    slot_chats: Mapped[int] = mapped_column(Integer, default=0)
 
     # 剧情开关，扁平不嵌套。模型对嵌套结构做增量改动极不可靠；扁平键值的
     # 合并语义唯一：同键覆盖、新键追加、值为 null 表示删除
     flags: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 每个 flag **第一次**立起来那天是第几天。{"聊过电机": 4}
+    #
+    # 单独一列而不是把 flags 变成 {值, 天数} 的嵌套：上面那条注释就是理由——
+    # 模型对嵌套结构做增量改动极不可靠，而 flags 是它每轮都在写的东西。
+    # 这一列模型碰不到，只有引擎在 apply_flags 里记，所以能安全地嵌套演进。
+    #
+    # 只记第一次：同一个 flag 被重复写 True 不刷新天数，否则「聊过之后第三天」
+    # 会被一次无关的重复置位推到永远不到。删掉 flag 时这里也删——那件事等于
+    # 没发生过，留着日期会让重新触发时立刻满足三天
+    flag_days: Mapped[dict] = mapped_column(JSON, default=dict)
     # {"3": {"好感": 2, "信任": 40, "met": true}}，键是 npc_id 的字符串——
     # 名字会改，id 不会。数值项按模组的 relation_stat_defs 初始化，
     # met 是内部标记（控制首次见面才注入外貌），渲染面板时跳过
@@ -403,6 +677,35 @@ class RpgSession(Base):
     # 和 npc_notes 分开同理，那张表是 GM 从叙事里读出来的近况，这张是调度替
     # 不在场的人编的行动，两个写手共用一个键空间迟早互相盖
     npc_activities: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 不在场的人想找玩家说的话，等玩家点开才落成真消息：
+    # [{"id": "a1b2...", "npc_id": 3, "text": "在门口等你，有话说",
+    #   "day": 4, "slot": "晚", "place": "图书馆"}]
+    #
+    # 和 npc_activities 同一次调度调用产出（一次调用，多一行输出），但**必须
+    # 分开存**：那一列是「她这一阵子在做什么」，每人只有一句、新的盖掉旧的；
+    # 这一列是待玩家处理的**事件**，一个人可以攒好几条，而且处理掉就该消失。
+    # 合成一列的话，「盖掉旧的」会把玩家还没看的留言悄悄吃掉。
+    #
+    # day/slot/place 是留言写下那一刻的快照，只用来在界面上说「她昨晚在图书馆
+    # 找过你」，不参与任何判断——事后拿 sess 回查算的是「现在」，人早走了。
+    #
+    # **不进 STATE_FIELDS**（结算不碰它，否则玩家还没看的留言会被下一轮整列
+    # 覆写掉），但**进 SNAPSHOT_FIELDS**（读档要跟着回滚，否则档读回三天前，
+    # 侧栏还挂着一条三天后才写下的留言）。理由同 item_claims
+    npc_inbox: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 地点近况：{"地窖": "门被你踹坏了，合不上"}，键是**地名**，值是一句话。
+    #
+    # 这不是第四个记忆格。记忆按格子分（玩家一格、每个 NPC 各一格，见 summary /
+    # thread_summaries），再给地点开一格意味着摘要次数翻倍，而且和玩家那一格
+    # 大面积重叠——你在地窖干的事本来就写在你自己那一份里。这一列只装
+    # **留在这个地方本身、下次回来还看得见**的那一句：门踹坏了、桌子掀了、
+    # 血迹还在。它是事实，不是叙事，所以一句话够了，也不需要压缩。
+    #
+    # 每个地点只有一句，新的直接盖掉旧的（同 npc_activities），理由也一样：
+    # 这是「现在这儿什么样」，不是流水账。
+    place_notes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 剧情把谁挪到哪儿了：{"3": "校长办公室"}，键同 npc_states。
     #
@@ -431,14 +734,64 @@ class RpgSession(Base):
     # 存名字不存 id，理由同 connections
     visited: Mapped[list] = mapped_column(JSON, default=list)
 
-    # 滚动摘要，含义同酒馆。历史统一成一条之后只剩这一份
+    # 玩家那一格的滚动摘要：你亲身经历过的**全部**（你就是你自己故事的唯一
+    # 目击者，不管当时谁在场，见 rpg_context.message_slots）。它永远注入
+    # （见 rpg_context.summary_block），所以老库一个字都不会丢
     summary: Mapped[str] = mapped_column(Text, default="")
     summarized_upto_id: Mapped[int] = mapped_column(Integer, default=0)
 
-    # NPC 独立摘要与各自已压缩到的消息指针，按 NPC id 存储。
-    # 保留为 JSON 映射，兼容已有数据库与没有独立线的旧会话。
+    # 每个 NPC 自己那一格：{"5": "与柳如烟的长期记忆"} / {"5": 已压到的消息 id}。
+    # 她在跟前时才注入她这一份——「和角色的对话单独存」就落在这两列上。
+    # 键是 NPC id 的字符串（JSON 的键只能是字符串）
     thread_summaries: Mapped[dict] = mapped_column(JSON, default=dict)
     thread_upto: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 结算顺带认出来的、模组里还没登记的人/地方/东西，等作者勾选：
+    # [{"id": "a1b2...", "kind": "npc|place|item", "name": "老周", "hint": "正文原话", "message_id": 88}]
+    #
+    # 只是待办，不是游戏状态——所以不进 STATE_FIELDS（结算不碰它），
+    # 但进 SNAPSHOT_FIELDS（读档要跟着回滚，否则档读回去了，角标还挂着
+    # 一条指向已经不存在的剧情的发现）。
+    #
+    # 作者点「加入」之后才真的建行；建出来的 NPC/地点/道具是模组资产，
+    # 回滚不会撤销它们（和存档是两回事，模组本来就跨局共用）
+    discoveries: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 这一局的待办清单：
+    # [{"name": "去后巷见老周", "desc": "...", "status": "open|done|failed",
+    #   "task_id": 3|None, "source": "module|story",
+    #   "opened_turn": 4, "closed_turn": 0}]
+    #
+    # task_id 指向模组里的定义（剧情里临时接下的没有定义，就是 None）。
+    # 不进 STATE_FIELDS：**完成与否必须玩家点头**，让结算那步整列覆写
+    # 等于模型可以自说自话地把事办了
+    tasks: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 模型提议「这桩事看着办完了」，等玩家确认：
+    # [{"id": "a1b2...", "name": "去后巷见老周", "action": "done|failed",
+    #   "reason": "正文原话", "message_id": 88}]
+    #
+    # 提议和事实分开存，和小说侧伏笔回收是同一个做法：模型只有建议权。
+    # 形状刻意对齐 discoveries，前端那套勾选 UI 能照抄
+    task_proposals: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 结算说「你拿到了一件新东西」，等玩家认领：
+    # [{"id": "a1b2...", "name": "固元丹", "qty": 1, "note": "...",
+    #   "hint": "正文原话", "message_id": 88, "known_item_id": 12|None}]
+    #
+    # 为什么不直接进 inventory：这是模型从正文里读出来的判断，读歪的路子太多
+    # （把别人手里的东西读成你的、把你明确拒绝的读成收下）。而背包只有「加」和
+    # 「用掉」两个口子，东西一旦进去，玩家就没有「这不是我拿的」这个出口了。
+    #
+    # 只拦「正数 + 背包里还没有同名」：负数（用掉、交出、失去）永远直接应用，
+    # 拦下来等于把已经写出来的剧情推回去；已有同名的直接 +qty，否则捡第二根箭
+    # 还要再点一次确认。
+    #
+    # 和 discoveries 一样是待办而不是游戏状态：**不进 STATE_FIELDS**（结算不碰
+    # 它，否则玩家还没处理的会被下一轮整列覆写掉），但**进 SNAPSHOT_FIELDS**
+    # （读档要跟着回滚，否则档读回去了，道具格上还挂着一件来自已经不存在的
+    # 剧情的东西）
+    item_claims: Mapped[list] = mapped_column(JSON, default=list)
 
     # 难度台账：[{"key": "撬锁", "attr": "敏捷", "band": "hard"}]，留最近 20 条。
     # 裁决时注入当一致性锚，挡住「同一个动作难度来回跳」
@@ -498,6 +851,7 @@ class RpgMessage(Base):
     # 本回合状态变化，只挂在 assistant 行上。
     # null = 未结算（中断或结算失败），要和「结算出来是空变化」区分开
     state_delta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    settlement: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 结算顺带产出的 3 条建议行动，不为此单开一次 LLM 调用
     suggestions: Mapped[list | None] = mapped_column(JSON, nullable=True)
 

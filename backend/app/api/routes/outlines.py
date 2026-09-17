@@ -190,7 +190,8 @@ async def draft_chapter_outline(
             {"role": "system", "content": "你是专业小说策划师，只返回 JSON，不要其他文字。"},
             {"role": "user", "content": prompt},
         ],
-        model, api_format, temperature=0.7, max_tokens=1500,
+        model, api_format,
+        temperature=getattr(novel, "build_temperature", 0.7), max_tokens=1500,
     )
     try:
         item = json.loads(repair_json(raw, expect="object"))
@@ -316,7 +317,10 @@ async def expand_outline(outline_id: int, user: CurrentUser, db: AsyncSession = 
         {"role": "user", "content": prompt},
     ]
 
-    raw = await llm_client.dispatch_chat_complete(messages, model, api_format, temperature=0.7, max_tokens=4096)
+    raw = await llm_client.dispatch_chat_complete(
+        messages, model, api_format,
+        temperature=getattr(novel, "build_temperature", 0.7), max_tokens=4096,
+    )
 
     # Parse JSON from LLM response
     try:

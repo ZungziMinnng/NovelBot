@@ -1,5 +1,5 @@
 /** 角色头像。没图就用名字首字，保证状态栏里永远不出现空洞。
- *  酒馆那个 CardAvatar 写死了粉色，RPG 侧走主题色，所以各自一份。 */
+ *  酒馆那个 CardAvatar 写死了粉色，游戏侧走主题色，所以各自一份。 */
 export default function RpgAvatar({
   name, url, size = 'md', className = '',
 }: {

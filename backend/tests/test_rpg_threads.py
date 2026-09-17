@@ -98,8 +98,9 @@ class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
         sess, user = await self._seed()
         seen = {}
 
-        async def fake(_module, _sess, history):
+        async def fake(_module, _sess, history, here_ids):
             seen["contents"] = [m.content for m in history]
+            seen["here_ids"] = here_ids
             return []
 
         with patch.object(rpg_turn, "suggest_actions", fake):
@@ -108,6 +109,9 @@ class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             seen["contents"], ["场面上的一句", "对老兵说的", "对老板娘说的"],
         )
+        # 路由必须自己把在场名单算出来递进去：suggest_actions 拿不到 db，
+        # 递 None 的话「帮我想想」会提到隔壁屋里才说过的事
+        self.assertIsNotNone(seen["here_ids"])
 
 
 class ChronicleTests(unittest.IsolatedAsyncioTestCase):

@@ -241,6 +241,8 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_npcs ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE rpg_npcs ADD COLUMN profile_sections JSON DEFAULT '{}'",
         "ALTER TABLE rpg_npcs ADD COLUMN dialogue_examples JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_npcs ADD COLUMN relation_enabled BOOLEAN DEFAULT 1",
+        "ALTER TABLE rpg_npcs ADD COLUMN relation_stat_names JSON DEFAULT '[]'",
         # 道具 / 地点 / 动作按钮（表由 create_all 建，这里只补索引）
         "CREATE INDEX IF NOT EXISTS idx_rpg_items_module ON rpg_items(module_id)",
         "CREATE INDEX IF NOT EXISTS idx_rpg_locations_module ON rpg_locations(module_id)",
@@ -269,12 +271,16 @@ async def _run_migrations() -> None:
         # 道具定义上的「开局就有」。老库拿到 0 = 一件都不带，开局背包照旧只看
         # rpg_modules.default_inventory，和加这一列之前一模一样
         "ALTER TABLE rpg_items ADD COLUMN start_with BOOLEAN DEFAULT 0",
-        # 玩法类别（模拟 / 探索冒险 / 经营策略）。老库拿到 'rpg'，而 'rpg' 的
+        # 玩法类别（模拟器 / 探索冒险 / 角色养成）。老库拿到 'rpg'，而 'rpg' 的
         # 玩法规则就是照着现在这套 GM 提示词写的，所以老模组行为完全不变
         "ALTER TABLE rpg_modules ADD COLUMN play_style VARCHAR(20) DEFAULT 'rpg'",
         # 摘要专用模型。老库拿到 ''，而消费端一律写 summary_model_ref or
         # fast_model_ref，空串就是跟着裁决模型走，和没有这一列时一样
         "ALTER TABLE rpg_modules ADD COLUMN summary_model_ref VARCHAR(100) DEFAULT ''",
+        # 立绘 tag 转换专用模型。老库拿到 ''，消费端写 image_model_ref or
+        # fast_model_ref or model_ref，所以老模组从此跟着裁决模型走——这一列
+        # 就是为了不再让它花叙事模型的钱，回落到 fast 是有意的行为变化
+        "ALTER TABLE rpg_modules ADD COLUMN image_model_ref VARCHAR(100) DEFAULT ''",
         # 分线概要。老库拿到 '{}' = 每条角色线都还没压缩过，从头开始滚，
         # 场面线继续用原来的 summary / summarized_upto_id 两列
         "ALTER TABLE rpg_sessions ADD COLUMN thread_summaries JSON DEFAULT '{}'",
@@ -292,18 +298,37 @@ async def _run_migrations() -> None:
         # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。老库拿到 '{}' =
         # 谁都没被调度过，角色卡上不出现这一行
         "ALTER TABLE rpg_sessions ADD COLUMN npc_activities JSON DEFAULT '{}'",
+        # 不在场的人想找玩家说的话，等玩家点开。老库拿到 '[]' = 没有任何留言，
+        # 侧栏不出现红点，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_inbox JSON DEFAULT '[]'",
+        # 调度顺带写留言的开关。老模组拿到 0 = 关，那次调用的输出和以前一样，
+        # 多出来的那一行永远不会产生
+        "ALTER TABLE rpg_modules ADD COLUMN npc_initiative BOOLEAN DEFAULT 0",
         # 剧情挪动的人物位置：{"3": "校长办公室"}。老库拿到 '{}' = 谁的位置
         # 都没被剧情改过，一律按作息表 / 常驻地点算，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_places JSON DEFAULT '{}'",
+        # 地点近况：{"地窖": "门被你踹坏了，合不上"}。老库拿到 '{}' = 哪个地方
+        # 都没被记过一笔，场面块少一行，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN place_notes JSON DEFAULT '{}'",
         # RPG 写作规则（rpg_rules 表由 create_all 建，这里只补索引）+ 模组勾选的
         # 规则 id。老库拿到 '[]' = 不勾任何规则、不注入，行为与加这列之前一致
         "CREATE INDEX IF NOT EXISTS idx_rpg_rules_user ON rpg_rules(user_id)",
         "ALTER TABLE rpg_modules ADD COLUMN enabled_rule_ids JSON DEFAULT '[]'",
+        # 预设库（两张表同样由 create_all 建，这里只补索引，理由同上面 rpg_rules）。
+        # 模组表**一列都没加**：套用是拷贝一次就断开，存个 preset_id 会看着像活链接，
+        # 实际没有任何代码顺着它回写，将来一定有人照着它写「同步」
+        # 常用 GM 指令（表由 create_all 建，这里只补索引，理由同 rpg_rules）。
+        # 模组表一列都没加：取用是拷贝那段文本，同上面预设库那条注释
+        "CREATE INDEX IF NOT EXISTS idx_rpg_instruction_presets_user "
+        "ON rpg_instruction_presets(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_stat_presets_user ON rpg_stat_presets(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rpg_action_presets_user ON rpg_action_presets(user_id)",
         # 统一时间线：消息自带地点和在场名单（都是写入时快照，理由见 RpgMessage）。
         # 老库拿到 '' 和 NULL——**NULL 的语义是「不知道」，当所有人可见**，
         # 所以老存档里没有任何一条消息会因为这次改动消失
         "ALTER TABLE rpg_messages ADD COLUMN location VARCHAR(100) DEFAULT ''",
         "ALTER TABLE rpg_messages ADD COLUMN present JSON DEFAULT NULL",
+        "ALTER TABLE rpg_messages ADD COLUMN settlement JSON DEFAULT NULL",
         # 老消息按线回填在场名单：从角色线来的就是那一个人。用字符串拼而不是
         # json_array()，免得依赖 SQLite 编译时带没带 JSON1
         #
@@ -314,6 +339,50 @@ async def _run_migrations() -> None:
         # 幂等：填过的行 present 非空，不再匹配；新消息 thread_id 恒为 NULL
         "UPDATE rpg_messages SET present = '[' || thread_id || ']' "
         "WHERE thread_id IS NOT NULL AND present IS NULL",
+        # 构思/设定生成的温度。老库拿到 0.7 = 原先那一链的硬编码值，逐字一致
+        "ALTER TABLE novels ADD COLUMN build_temperature REAL DEFAULT 0.7",
+        # 结算认出来的、还没登记进模组的人/地方/东西，等作者勾选
+        "ALTER TABLE rpg_sessions ADD COLUMN discoveries JSON DEFAULT '[]'",
+        # 这一局已经会的技能。DEFAULT 只管新插入的行，老局这一列是 NULL，
+        # 所有读它的地方都得写成 `sess.skills or []`
+        "ALTER TABLE rpg_sessions ADD COLUMN skills JSON DEFAULT '[]'",
+        # 待办清单和「模型觉得办完了」的待确认提议。同上，读的地方要 `or []`
+        "ALTER TABLE rpg_sessions ADD COLUMN tasks JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_sessions ADD COLUMN task_proposals JSON DEFAULT '[]'",
+        # 结算说「你拿到了新东西」、等玩家认领的那几件。同上，读的地方要 `or []`
+        "ALTER TABLE rpg_sessions ADD COLUMN item_claims JSON DEFAULT '[]'",
+        # NPC 立绘的出图设置：挑哪份工作流、什么画风、额外补什么词。
+        # 老库拿到 '{}' = 走默认工作流、提示词里不追加任何风格词，
+        # 和加这一列之前逐字一致
+        "ALTER TABLE rpg_modules ADD COLUMN image_config JSON DEFAULT '{}'",
+        # 这张立绘是哪个随机种子出的，填回同一个值能复现同一张脸。
+        # 老 NPC 拿到 0 = 没记录过，界面上那一行不显示，和加这一列之前一致
+        "ALTER TABLE rpg_npcs ADD COLUMN avatar_seed INTEGER DEFAULT 0",
+        # 只给某个人的出图设置（稀疏覆写）。老 NPC 读回来就是 '{}'——SQLite 的
+        # ADD COLUMN 带常量 DEFAULT 时，已有行读到的也是这个默认值。
+        # 而 {} 的语义恰好就是「整份跟着模组走」，和加这一列之前逐字一致
+        "ALTER TABLE rpg_npcs ADD COLUMN image_config JSON DEFAULT '{}'",
+        # 动作的分栏、时间开销和地点限定。三个 DEFAULT 恰好就是「加这三列之前」
+        # 的行为：不分栏、不推时间、随处可用，所以老模组一个字都不用改
+        "ALTER TABLE rpg_actions ADD COLUMN \"group\" TEXT DEFAULT ''",
+        "ALTER TABLE rpg_actions ADD COLUMN cost_slot INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_actions ADD COLUMN at_location TEXT DEFAULT ''",
+        # 时段推进的两个阈值，和这一局在当前时段里的两个计数器。
+        # 四个 DEFAULT 0 恰好就是「加这四列之前」的行为：不自动推时段、
+        # 不点亮按钮、计数从零起，所以老模组和老局一个字都不用改
+        "ALTER TABLE rpg_modules ADD COLUMN slot_budget INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_modules ADD COLUMN chat_nudge INTEGER DEFAULT 0",
+        # 自由打字收尾时吃掉一格行动。DEFAULT 0 = 老模组照旧只点亮按钮、不推时间
+        "ALTER TABLE rpg_modules ADD COLUMN free_costs_slot BOOLEAN DEFAULT 0",
+        "ALTER TABLE rpg_sessions ADD COLUMN slot_actions INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_sessions ADD COLUMN slot_chats INTEGER DEFAULT 0",
+        # 主角设定由模组锁定。老库拿到 0 = 玩家在建局界面自己填名字和出身，
+        # 和加这一列之前逐字一致
+        "ALTER TABLE rpg_modules ADD COLUMN lock_protagonist BOOLEAN DEFAULT 0",
+        # 每个 flag 第一次立起来是第几天，给「某事之后 N 天」的条件用。
+        # 老局拿到空字典 = 那些已经立着的 flag 没有日期，after_days 条件判不过；
+        # 这正是想要的——引擎不知道它是哪天发生的，就别假装知道
+        "ALTER TABLE rpg_sessions ADD COLUMN flag_days JSON DEFAULT '{}'",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

@@ -81,7 +81,7 @@ async def generate_chapter_outlines(
         ],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=_outline_max_tokens(volume_count if novel.enable_volume_split else chapter_count),
     )
     if not (raw or "").strip():

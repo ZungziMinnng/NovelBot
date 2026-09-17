@@ -103,6 +103,8 @@ export interface Novel {
   writer_temperature: number
   writer_use_custom_temperature: boolean
   writer_max_tokens: number
+  /** 构思/设定生成的温度（世界观、大纲、角色卡、自动构建）。负数 = 整个参数不发 */
+  build_temperature: number
   rolling_summary_count: number
   rag_top_k: number
   chat_context_rounds: number
@@ -257,6 +259,25 @@ export const findModelEntry = (
 export const modelSelectValue = (models: ModelEntry[], stored: string): string => {
   const entry = findModelEntry(models, stored)
   return entry ? String(entry.id) : ''
+}
+
+// 按供应商分组，给 <optgroup> 用。同一个 model_id 在几家都有的时候，光看
+// 模型名分不出这一条是哪家的（编辑器和酒馆的模型下拉就是这么排的）
+export function groupModelsByProvider(models: ModelEntry[]) {
+  const groups = new Map<string, ModelEntry[]>()
+  for (const m of models.filter(m => m.model_type !== 'embedding')) {
+    const key = m.provider || '未分组'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(m)
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b, 'zh-Hans-CN'))
+    .map(([provider, items]) => ({
+      provider,
+      items: items.sort((a, b) =>
+        (a.display_name || a.model_id).localeCompare(b.display_name || b.model_id, 'zh-Hans-CN'),
+      ),
+    }))
 }
 
 export interface ApiProvider {
@@ -844,11 +865,18 @@ export interface ProxyStatus {
   detail: string
 }
 
+export interface ComfyStatus {
+  reachable: boolean
+  base_url: string
+  detail: string
+}
+
 export const settingsApi = {
   get: () => api.get('/settings/').then(r => r.data),
   update: (data: object) => api.patch('/settings/', data).then(r => r.data),
   test: (model?: string) => api.post('/settings/test', { model: model ?? '' }).then(r => r.data),
   proxyStatus: () => api.get<ProxyStatus>('/settings/proxy-status').then(r => r.data),
+  comfyStatus: () => api.get<ComfyStatus>('/settings/comfyui-status').then(r => r.data),
 }
 
 // ── Provider APIs ────────────────────────────────────────────────────────────
@@ -1107,10 +1135,15 @@ export interface RpgStatDef {
   for_check?: boolean
   /** 无 / 死亡 / 标记 */
   on_zero?: string
+  /** 填满时。无 / 标记——立一条「{名字}满」的 flag，这项就成了进度时钟。
+   *  只在有上限的项上有意义：没上限的永远填不满 */
+  on_full?: string
   /** 条 / 数字 / 隐藏 */
   display?: string
-  /** 跨天回满（回到 max）。只在有上限的项上有意义 */
+  /** 跨天恢复（抬到 max 的七成，只往上抬不往下压）。只在有上限的项上有意义 */
   reset_daily?: boolean
+  /** AI 每轮最多让这一项动几点。留空 = 不限；写 0 = AI 一点都不许动 */
+  step_max?: number | null
   /** 这个数值影响什么。每轮发给模型一句，作者不写就没有 */
   effect?: string
   /** 分档。空数组和没写是一回事 */
@@ -1128,6 +1161,10 @@ export interface RpgCondition {
   slots?: string[]
   /** 天数门槛，形状同 stats */
   day?: { op: string; value: number }
+  /** 「某件事之后 N 天」。day 是绝对天数（第 10 天），这条是相对的——
+   *  AI 推进的剧情没有写死的时间线，能锚的只有那件事发生的那天。
+   *  没记过日期的 flag（加 flag_days 之前的老局）判不成立 */
+  after_days?: { flag: string; days: number }[]
 }
 
 /** 玩法类别。和 genre 是两根正交的轴：genre 说「世界长什么样」，
@@ -1139,7 +1176,8 @@ export type RpgPlayStyle = 'sim' | 'rpg' | 'slg'
 export type RpgAssistField =
   | 'worldview' | 'opening_scene' | 'system_instruction' | 'narration_sample'
   | 'npc_persona' | 'npc_appearance' | 'npc_description'
-  | 'location_description' | 'item_description'
+  | 'location_description' | 'item_description' | 'skill_description'
+  | 'task_description'
 
 /** 模组（剧本）：一份可反复开局的世界设定，对应酒馆的角色卡 */
 export interface RpgModule {
@@ -1168,6 +1206,9 @@ export interface RpgModule {
   default_location: string
   /** 默认时段表，如 ["早","中","晚"]。空 = 这个模组不用时段 */
   time_slots: string[]
+  /** 主角的名字和出身由模组定死，玩家在建局界面改不动。**只在有主角模板卡时
+   *  生效**：后端建局那一步也会照卡覆写，所以界面只读不是唯一的防线 */
+  lock_protagonist: boolean
   /** 档位 → 成功率(%)。绝对难度由模组作者锁定，模型只管相对档位 */
   rate_table: Record<RpgBand, number>
   /** 整体难度旋钮，加到成功率上。-10 轻松 / +10 手软 */
@@ -1186,14 +1227,105 @@ export interface RpgModule {
   fast_model_ref: string
   /** 压缩旧剧情用。空 = 跟着 fast_model_ref 走 */
   summary_model_ref: string
+  /** 立绘 tag 转换用。空 = 跟着 fast_model_ref 走 */
+  image_model_ref: string
   /** 推时段时写一句「别处此刻在发生什么」进大事记。**默认关**：
    *  开了之后「结束这个时段」就不再是零模型调用了 */
   offscreen_brief: boolean
+  /** 一个时段最多几格**行动**（点动作/道具/技能/移动，纯对话不算）。
+   *  攒满自动推一格。0 = 关，老模组一格都不会自己走 */
+  slot_budget: number
+  /** 纯对话攒到几条就把「结束这个时段」点亮。**只提醒，不推时间**。0 = 关 */
+  chat_nudge: number
+  /** 自由打字收尾时吃掉一格行动。**不是每条都吃**：只有结算判定「这一幕收尾了」
+   *  那一轮才算一格，闲聊三句不收尾就是 0 格。默认关 */
+  free_costs_slot: boolean
+  /** NPC 立绘的出图设置。老模组是 {}，三项都要判空 */
+  image_config: RpgImageConfig
   session_count: number
   npc_count: number
   entry_count: number
   created_at: string
   updated_at: string
+}
+
+/**
+ * 模组的出图设置。全可选——老模组这一列是 {}。
+ *
+ * 题材**不在这里**：module.genre 已经是主字段，出图时现读，两处存会不同步。
+ */
+export interface RpgImageConfig {
+  /** comfy_workflows/ 下的文件名（不带 .json）。空 = 后端默认 npc_portrait */
+  workflow?: string
+  /** 展开后的英文画风 tag 串，不是 imageStyles 里的 key */
+  style?: string
+  /**
+   * 展开后的中文姿势 tag。三态，取值一律用 `?? DEFAULT_POSE` 不能用 `||`：
+   * undefined = 没设过（走默认站姿全身像），'' = 明确「不指定」（什么都不加）
+   */
+  pose?: string
+  /** 用户自己补的词：hentai、质量词、画师串之类 */
+  extra?: string
+  /**
+   * 提示词发出去时是什么形态。undefined = 中文自然语言（老模组的行为，逐字不变）。
+   *
+   * `'sd_tags'` 是给光辉（Illustrious）这类 SDXL 系工作流用的：它们走 CLIP-L，
+   * **只认英文 Danbooru tag**，喂中文散文基本等于喂噪声。Z-Image 相反，
+   * 它的文本编码器是 Qwen-3-4B，中文才是它的主场。
+   *
+   * 为什么是显式选而不是嗅探工作流里的模型名：文件名是用户自己命的，
+   * 改个名或换个加载器判断就失效，而失效的表现是「图悄悄变差」，没有报错。
+   */
+  prompt_form?: 'natural_zh' | 'sd_tags'
+  /**
+   * 出图画幅，存的是 imageFrames.ts 里的 **key**（不是展开值）。
+   * 和 style / pose 存展开值的做法故意不一样——画幅还带着两个数字，不是纯 tag。
+   */
+  frame?: string
+  /**
+   * LoRA 开关与权重的覆写，**按工作流名分组**：`{工作流名: {LoRA 文件名: {...}}}`。
+   * 只存调过的那几条，没动过的不落库——这样用户在 ComfyUI 里改了工作流默认值，
+   * 没调过的那些会跟着变。
+   */
+  loras?: Record<string, Record<string, RpgLoraOverride>>
+  /**
+   * 底模覆写，同样**按工作流名分组**：`{工作流名: checkpoint 文件名}`。
+   *
+   * 只在 `prompt_form === 'sd_tags'`（光辉那类 SDXL 工作流）下生效——后端出图时
+   * 会再判一次这个条件，中文自然语言那套不吃 checkpoint，配了也不发出去。
+   * 覆盖的是工作流里写死的底模，而且**一处不落**：光辉那份工作流里三个加载器
+   * 各写一遍 `ckpt_name`、高清修复脚本里还有一个 `hires_ckpt_name`，只改一处
+   * 就是「主模型换了、高清还在用旧的」。
+   */
+  checkpoints?: Record<string, string>
+}
+
+/** 工作流文件里一条 LoRA 的原始状态。lora 是带目录的文件名，当 key 用 */
+export interface RpgLoraSlot {
+  lora: string
+  on: boolean
+  strength: number
+}
+
+export interface RpgLoraOverride {
+  on: boolean
+  strength: number
+}
+
+/** 工作流文件里一处写死的底模。空 slots = 这份工作流不认底模，别画控件 */
+export interface RpgCkptSlot {
+  /** 节点 id，只用来在提示里数「覆盖后这 N 处会统一」 */
+  node: string
+  class: string
+  /** ckpt_name 或 hires_ckpt_name */
+  key: string
+  name: string
+}
+
+export interface RpgCkptInfo {
+  /** 本机 ComfyUI 里可选的 checkpoint，来自它的 /object_info */
+  available: string[]
+  slots: RpgCkptSlot[]
 }
 
 /** RPG 写作规则。独立规则库，不复用酒馆 / 小说侧那两张表 */
@@ -1206,6 +1338,52 @@ export interface RpgRule {
   created_at: string
   updated_at: string
 }
+
+/** 常用 GM 指令。取用是拷贝文本，模组不存 id */
+export interface RpgInstructionPreset {
+  id: number
+  name: string
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+/** 数值套装：攒在用户名下的一整套数值定义，新模组一键套用。
+ *  套用是拷贝一次就断开——套完这份和模组里那份再无关系 */
+export interface RpgStatPreset {
+  id: number
+  name: string
+  /** 「适合什么局」，只给自己在列表里认人用，永不进 prompt */
+  note: string
+  stat_defs: RpgStatDef[]
+  relation_stat_defs: RpgStatDef[]
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 动作套装。存的是 RpgAction 去掉 requires——可用条件引用的是某个模组自己的
+ *  标记和角色名，搬过去只会变成永远灰着的死按钮 */
+export interface RpgActionPreset {
+  id: number
+  name: string
+  note: string
+  actions: RpgActionSeed[]
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 库里存的一个动作。= RpgAction 去掉 id/module_id/requires/at_location/sort_order。
+ *  at_location 和 requires 一起被排除，理由逐字相同：它绑的是某个模组自己的地点名，
+ *  搬过去只会变成永远灰着的死按钮。
+ *  group 和 cost_slot 留着：一个是纯文本，一个是布尔，都不引用模组里的任何名字。
+ *  套进没配时段的模组时 cost_slot 自动没有效果（advance_slot 会空转），不会变成坏按钮 */
+export type RpgActionSeed = Pick<
+  RpgAction,
+  'name' | 'prompt_hint' | 'effects' | 'relation_effects' | 'needs_target'
+  | 'group' | 'cost_slot'
+>
 
 /** 背包里的一行。和模组的道具定义 RpgItem 是两回事 */
 export interface RpgInvItem {
@@ -1229,6 +1407,78 @@ export interface RpgItem {
   start_with: boolean
   /** 数值增减 {"精力": 20, "资金": -50} */
   effects: Record<string, number>
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 技能栏里的一行。和模组的技能定义 RpgSkill 是两回事，同 RpgInvItem */
+export interface RpgLearnedSkill {
+  name: string
+  /** 还要歇几个回合才能再用。0 = 现在就能使 */
+  cooldown_left: number
+}
+
+/** 模组定义的技能。和道具同一条链：引擎按 effects 精确增减，AI 碰不到 */
+export interface RpgSkill {
+  id: number
+  module_id: number
+  name: string
+  description: string
+  /** 主动 / 被动。被动的不出「使用」按钮 */
+  category: string
+  usable: boolean
+  /** 数值增减 {"精力": -10} */
+  effects: Record<string, number>
+  /** 使用条件，形状同 RpgAction.requires */
+  requires: RpgCondition
+  /** 用完要歇几个回合。0 = 随便用 */
+  cooldown: number
+  /** 开局就会 */
+  start_with: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 任务栏里的一行。和模组的任务定义 RpgTask 是两回事，同 RpgInvItem */
+export interface RpgSessionTask {
+  name: string
+  desc: string
+  /** 「怎样才算办完」。接下这桩事的时候从定义拷过来，之后不跟着定义变 */
+  goal: string
+  status: 'open' | 'done' | 'failed'
+  /** 对应模组里那一行；剧情里冒出来的差事没有，也就没有奖励 */
+  task_id: number | null
+  source: string
+  opened_turn: number
+  closed_turn: number
+}
+
+/** 模型提议「这桩事看着办完了」，等玩家点头。改不改状态由玩家定 */
+export interface RpgTaskProposal {
+  id: string
+  name: string
+  action: 'done' | 'failed'
+  /** 正文原话，是这条提议的全部依据 */
+  reason: string
+  message_id: number
+}
+
+/** 模组定义的任务。小说侧「伏笔」在 RPG 这边的对应物 */
+export interface RpgTask {
+  id: number
+  module_id: number
+  name: string
+  description: string
+  /** 做到什么才算办完。判定完成与否只看这一句 */
+  objective: string
+  /** 主线 / 支线 / 日常 */
+  category: string
+  /** 办成之后的数值奖励 */
+  effects: Record<string, number>
+  /** 开局就接下 */
+  auto_start: boolean
   sort_order: number
   created_at: string
   updated_at: string
@@ -1264,6 +1514,12 @@ export interface RpgAction {
   requires: RpgCondition
   /** 要不要先选一个在场角色 */
   needs_target: boolean
+  /** 分栏用的自由文本，空 = 归到「其他」那一栏 */
+  group: string
+  /** 点一下推进一格时段 */
+  cost_slot: boolean
+  /** 限定只在这个地点可用，空 = 随处可用 */
+  at_location: string
   sort_order: number
   created_at: string
   updated_at: string
@@ -1293,6 +1549,14 @@ export interface RpgNpc {
   /** protagonist = 主角模板，开局时预填玩家角色 */
   role: 'npc' | 'protagonist'
   avatar_url: string
+  /** 当前这张立绘用的随机种子，0 = 没记录（自己上传的、或还没生成过）。只读 */
+  avatar_seed: number
+  /**
+   * 只给这个人的出图设置。形状和 `RpgModule.image_config` 一模一样，但**是稀疏的**：
+   * 某个 key 不在 = 这一项跟随模组，在 = 只这个人覆写。`{}` 是常态。
+   * 合并规则在 pages/Rpg/imageConfig.ts，后端同一套在 services/rpg_image.py
+   */
+  image_config: RpgImageConfig
   description: string
   persona: string
   /** 只在首次见面时注入，之后省掉这段 token */
@@ -1312,12 +1576,40 @@ export interface RpgNpc {
   dialogue_examples: { user: string; assistant: string }[]
   /** 覆盖这个角色的关系数值起点（青梅竹马开局好感就该更高） */
   initial_state: Record<string, number | boolean>
+  relation_enabled: boolean
+  relation_stat_names: string[]
   sort_order: number
   created_at: string
   updated_at: string
 }
 
 /** 一局存档。世界的权威状态（数值/背包/地点）就在这上面 */
+/** 结算认出来的、还没登记进模组的一个东西。只是待办，不是游戏状态 */
+export interface RpgDiscovery {
+  id: string
+  kind: 'npc' | 'place' | 'item' | 'skill' | 'task'
+  name: string
+  /** 正文里能看出它是什么的那一句。后端校验过确实是原文，不是模型编的 */
+  hint: string
+  /** 哪一段剧情认出来的。补全时拿它回去取正文当依据 */
+  message_id: number
+}
+
+/** 结算说「你拿到了这件东西」、还没认领的一条。同 RpgDiscovery 只是待办：
+ *  认下来才进背包，划掉就什么都不留 */
+export interface RpgItemClaim {
+  id: string
+  name: string
+  qty: number
+  /** 这件东西的来历或样子。认下来时会写进定义的描述里 */
+  note: string
+  /** 正文里提到它的那一句。可能是空串——名字往往只是个称呼，靠这句话认 */
+  hint: string
+  message_id: number
+  /** 模组道具表里已经有的同名定义。非空 = 不必再问「一次性还是重复使用」 */
+  known_item_id: number | null
+}
+
 export interface RpgSession {
   id: number
   module_id: number
@@ -1329,13 +1621,25 @@ export interface RpgSession {
   /** 玩家数值，键由模组的 stat_defs 决定 */
   stats: Record<string, number>
   inventory: RpgInvItem[]
+  /** 这一局会的技能和各自的冷却。形状同 inventory */
+  skills: RpgLearnedSkill[]
+  /** 这一局的待办清单，和等玩家点头的收线提议 */
+  tasks: RpgSessionTask[]
+  task_proposals: RpgTaskProposal[]
   location: string
   /** 这一局自己的时段表，建局时从模组拷来。空 = 不用时段 */
   time_slots: string[]
   /** 当前时段，存的是名字。空 = 没有时钟 */
   slot: string
   day: number
+  /** 这一格已经用掉几格行动、聊了几条。advance_slot 归零。
+   *  按钮的提醒读它们，配模组的 slot_budget / chat_nudge 看 */
+  slot_actions: number
+  slot_chats: number
   flags: Record<string, string | number | boolean | null>
+  /** 每个 flag 第一次立起来是第几天。{"聊过电机": 4}。引擎单方面记，模型碰不到；
+   *  after_days 条件靠它算「之后 N 天」。老局读出来是 {} */
+  flag_days: Record<string, number>
   /** {"3": {"好感": 62, "met": true}}，键是 npc_id 的字符串 */
   npc_states: Record<string, Record<string, number | boolean>>
   /** GM 这一局边玩边记下的 NPC 近况。{"3": {"伤势": "左肩中刀"}}，值一律是字符串。
@@ -1348,10 +1652,17 @@ export interface RpgSession {
    *  结算从刚写出的正文里读出她的新位置写在这——它优先于作息表，推时段清空。
    *  取值口径见 condition.npcPlace（后端 rpg_context.npc_place 的镜像） */
   npc_places: Record<string, string>
+  /** 这个地方现在什么样：{"地窖": "门被你踹坏了，合不上"}，键是**地名**。
+   *  不是第四个记忆格，就是结算顺手记的一句，你走进去它才进上下文 */
+  place_notes: Record<string, string>
   /** 大事记：已经「传开」的事，跨对话线共享。注入时排在【外场】 */
   chronicle: string[]
   /** 去过的地点名。地图的迷雾按它散开 */
   visited: string[]
+  /** 结算顺带认出来、模组里还没登记的人/地方/东西，等作者勾选。侧栏「新发现」那一格读它 */
+  discoveries: RpgDiscovery[]
+  /** 结算说「你拿到了」、还没认领的道具。道具那一格最上面那块读它 */
+  item_claims: RpgItemClaim[]
   summary: string
   summarized_upto_id: number
   turn_count: number
@@ -1388,6 +1699,19 @@ export interface RpgRoll {
 /** 五档结果。narrow = 险胜：做成了但付出看得见的代价 */
 export type RpgOutcome = 'crit_success' | 'success' | 'narrow' | 'fail' | 'crit_fail'
 
+export interface RpgSettlement {
+  status: 'pending' | 'running' | 'done' | 'partial' | 'failed' | 'stale'
+  revision?: string
+  attempts?: number
+  domains?: Record<string, { status: string; warnings: string[] }>
+  changes?: string[]
+  warnings?: string[]
+  facts?: { kind: string; summary: string; quote: string; witnesses: number[]; visibility: string }[]
+  applied?: Record<string, { before: unknown; after: unknown }>
+  proposed?: Record<string, unknown>
+  retryable?: boolean
+}
+
 export interface RpgMessage {
   id: number
   session_id: number
@@ -1401,6 +1725,7 @@ export interface RpgMessage {
   present: number[] | null
   roll: RpgRoll | null
   state_delta: Record<string, unknown> | null
+  settlement: RpgSettlement | null
   suggestions: string[] | null
   /** 叙事那次调用的消耗 */
   input_tokens: number
@@ -1414,6 +1739,8 @@ export interface RpgMessage {
 type RpgEntryInput = Partial<Omit<RpgWorldEntry, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
 type RpgNpcInput = Partial<Omit<RpgNpc, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
 type RpgItemInput = Partial<Omit<RpgItem, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgSkillInput = Partial<Omit<RpgSkill, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
+type RpgTaskInput = Partial<Omit<RpgTask, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
 type RpgLocationInput = Partial<Omit<RpgLocation, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
 type RpgActionInput = Partial<Omit<RpgAction, 'id' | 'module_id' | 'created_at' | 'updated_at'>>
 
@@ -1433,7 +1760,7 @@ function moduleChild<T, I>(prefix: string) {
 /** 构思向导抽取时喂给后端的白名单：前面几步已经定过的名字。
  *  后端用它过滤角色/道具/动作引用的数值名和地点名 */
 /** 单摊一键生成支持的类别，同后端 rpg_wizard.KINDS */
-export type RpgGenerateKind = 'location' | 'npc' | 'item' | 'action'
+export type RpgGenerateKind = 'location' | 'npc' | 'item' | 'skill' | 'task' | 'action'
 
 export interface RpgWizardKnown {
   stat_names?: string[]
@@ -1464,9 +1791,20 @@ export interface RpgWizardExtract {
     name: string; description: string; category: string
     consumable: boolean; start_with: boolean; effects: Record<string, number>
   }>
+  skills?: Array<{
+    name: string; description: string; category: string
+    cooldown: number; start_with: boolean; effects: Record<string, number>
+  }>
+  tasks?: Array<{
+    name: string; description: string; objective: string; category: string
+    auto_start: boolean; effects: Record<string, number>
+  }>
   actions?: Array<{
     name: string; prompt_hint: string; needs_target: boolean
     effects: Record<string, number>; relation_effects: Record<string, number>
+    /** 分栏名。只有它进抽取，cost_slot / at_location 不让模型生成
+     *  （见 rpg_wizard._clean_things 里那条注释） */
+    group?: string
   }>
   dropped: string[]
 }
@@ -1502,14 +1840,21 @@ export const rpgApi = {
      *  后端按它过滤角色/道具引用的数值名和地点名，对不上的进 dropped */
     wizardExtract: (
       moduleId: number,
-      data: { stage: string; messages: ChatMessage[]; known?: RpgWizardKnown; model?: string },
+      /** temperature 是抽取的**起始**温度；不传就按后端默认 0.3，0.1 那一档兜底始终保留 */
+      data: {
+        stage: string; messages: ChatMessage[]; known?: RpgWizardKnown
+        model?: string; temperature?: number
+      },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/extract`, data, {
         timeout: 180000,
       }).then(r => r.data),
     wizardGenerate: (
       moduleId: number,
-      data: { instruction: string; nsfw?: boolean; model?: string; world_scope?: RpgWorldScope },
+      data: {
+        instruction: string; nsfw?: boolean; model?: string
+        world_scope?: RpgWorldScope; temperature?: number
+      },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/generate`, data, {
         timeout: 180000,
@@ -1519,7 +1864,7 @@ export const rpgApi = {
     generate: (
       moduleId: number,
       kind: RpgGenerateKind,
-      data: { instruction?: string; count?: number; nsfw?: boolean; model?: string },
+      data: { instruction?: string; count?: number; nsfw?: boolean; model?: string; temperature?: number },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/generate/${kind}`, data, {
         timeout: 180000,
@@ -1551,10 +1896,44 @@ export const rpgApi = {
     },
     deleteAvatar: (id: number) =>
       api.delete<RpgNpc>(`/rpg/npcs/${id}/avatar`).then(r => r.data),
+    /** 调本机 ComfyUI 出立绘。冷启动要把模型加载进显存，实测百秒级，
+     *  所以超时给到 5 分钟——默认 30s 必被掐断 */
+    generateAvatar: (id: number, prompt: string, seed?: number, width = 1024, height = 1536) =>
+      api.post<RpgNpc>(
+        `/rpg/npcs/${id}/avatar/generate`,
+        // seed 不传 = 后端摇一个随机的；给了值就是复现同一张脸
+        { prompt, seed, width, height },
+        { timeout: 300000 },
+      ).then(r => r.data),
+    /** 中文源文转 Danbooru tag，给光辉这类 SDXL 工作流用。返回命中的 tag 和
+     *  两趟都没转成功、原样交回来的词（dropped）——这些要显示给用户，不能偷偷扔。
+     *  跑两趟 LLM + 查表，比出图快但也不是瞬时，超时放到 60s。 */
+    promptAsTags: (id: number, source: string, nsfw = false, includeCharName = false) =>
+      api.post<{ tags: string[]; dropped: string[] }>(
+        `/rpg/npcs/${id}/prompt-as-tags`,
+        { source, nsfw, include_char_name: includeCharName },
+        { timeout: 60000 },
+      ).then(r => r.data),
   },
   items: moduleChild<RpgItem, RpgItemInput>('items'),
+  skills: moduleChild<RpgSkill, RpgSkillInput>('skills'),
+  tasks: moduleChild<RpgTask, RpgTaskInput>('tasks'),
   locations: moduleChild<RpgLocation, RpgLocationInput>('locations'),
   actions: moduleChild<RpgAction, RpgActionInput>('actions'),
+  /** data/comfy_workflows/ 下有哪些工作流，给出图设置的下拉用。空数组 = 还没放 */
+  comfyWorkflows: () => api.get<string[]>('/rpg/comfy-workflows').then(r => r.data),
+  /**
+   * 某份工作流里有哪些 LoRA，返回的是**文件里的原始状态**。
+   * 模组调过的值在 image_config.loras 里，要自己叠上去，别直接当当前值用。
+   */
+  comfyLoras: (workflow: string) =>
+    api.get<RpgLoraSlot[]>('/rpg/comfy-loras', { params: { workflow } }).then(r => r.data),
+  /**
+   * 某份工作流认不认底模、现在写死的是哪个，外加本机有哪些可选。
+   * slots 为空说明这份工作流走的是 UNETLoader 单文件，底模控件不该画出来。
+   */
+  comfyCheckpoints: (workflow: string) =>
+    api.get<RpgCkptInfo>('/rpg/comfy-checkpoints', { params: { workflow } }).then(r => r.data),
   rules: {
     list: () => api.get<RpgRule[]>('/rpg/rules/').then(r => r.data),
     create: (data: { name: string; content?: string; enabled?: boolean; sort_order?: number }) =>
@@ -1562,6 +1941,37 @@ export const rpgApi = {
     update: (id: number, data: { name?: string; content?: string; enabled?: boolean; sort_order?: number }) =>
       api.patch<RpgRule>(`/rpg/rules/${id}`, data).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/rules/${id}`).then(r => r.data),
+  },
+  /** 常用 GM 指令。用户级，照酒馆 instructionPresets */
+  instructionPresets: {
+    list: () =>
+      api.get<RpgInstructionPreset[]>('/rpg/instruction-presets/').then(r => r.data),
+    create: (data: { name: string; content: string }) =>
+      api.post<RpgInstructionPreset>('/rpg/instruction-presets/', data).then(r => r.data),
+    update: (id: number, data: { name?: string; content?: string }) =>
+      api.patch<RpgInstructionPreset>(`/rpg/instruction-presets/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/instruction-presets/${id}`).then(r => r.data),
+  },
+  /** 数值套装库。用户级，不带 moduleId——所以套不上 moduleChild 那个工厂 */
+  statPresets: {
+    list: () => api.get<RpgStatPreset[]>('/rpg/stat-presets/').then(r => r.data),
+    create: (data: {
+      name: string; note?: string
+      stat_defs?: RpgStatDef[]; relation_stat_defs?: RpgStatDef[]; sort_order?: number
+    }) => api.post<RpgStatPreset>('/rpg/stat-presets/', data).then(r => r.data),
+    update: (id: number, data: {
+      name?: string; note?: string
+      stat_defs?: RpgStatDef[]; relation_stat_defs?: RpgStatDef[]; sort_order?: number
+    }) => api.patch<RpgStatPreset>(`/rpg/stat-presets/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/stat-presets/${id}`).then(r => r.data),
+  },
+  actionPresets: {
+    list: () => api.get<RpgActionPreset[]>('/rpg/action-presets/').then(r => r.data),
+    create: (data: { name: string; note?: string; actions?: RpgActionSeed[]; sort_order?: number }) =>
+      api.post<RpgActionPreset>('/rpg/action-presets/', data).then(r => r.data),
+    update: (id: number, data: { name?: string; note?: string; actions?: RpgActionSeed[]; sort_order?: number }) =>
+      api.patch<RpgActionPreset>(`/rpg/action-presets/${id}`, data).then(r => r.data),
+    delete: (id: number) => api.delete(`/rpg/action-presets/${id}`).then(r => r.data),
   },
   sessions: {
     list: (moduleId: number) =>
@@ -1588,11 +1998,48 @@ export const rpgApi = {
      *  「AI 调度」开关是模组作者的决定，改它要回模组页 */
     deleteNpcActivity: (id: number, npcId: number) =>
       api.delete<RpgSession>(`/rpg/sessions/${id}/npc-activity/${npcId}`).then(r => r.data),
+    /** 划掉 GM 给某个地方记错的那一句近况。理由同 deleteNpcNote：这一句每次你
+     *  走进这个地方都会进上下文，记错了没有这个口子就只能读档 */
+    deletePlaceNote: (id: number, place: string) =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}/place-note`, { key: place }).then(r => r.data),
+    /** 把勾中的新发现补全成完整档案并建进模组。这是**第二次**模型调用——
+     *  提取是结算那一次顺带的，不花钱；补属性、连地图才在这里花。
+     *  超时同向导的 3 分钟：它是一次完整的设定生成 */
+    applyDiscoveries: (id: number, data: { ids: string[]; model?: string; temperature?: number }) =>
+      api.post<RpgDiscoveryApply>(`/rpg/sessions/${id}/discoveries/apply`, data, {
+        timeout: 180000,
+      }).then(r => r.data),
+    /** 「不要这个」。只从待办里划掉，不影响剧情 */
+    dismissDiscovery: (id: number, discoveryId: string) =>
+      api.delete<RpgSession>(`/rpg/sessions/${id}/discoveries/${discoveryId}`).then(r => r.data),
+    /** 认下一件新道具：进背包，并在模组道具表里落一条定义。
+     *  consumable 只在模组里还没有同名定义时才用得上，有定义的按那一行走 */
+    confirmItemClaim: (id: number, claimId: string, consumable: boolean) =>
+      api.post<RpgSession>(`/rpg/sessions/${id}/item_claims/${claimId}/confirm`, { consumable })
+        .then(r => r.data),
+    /** 「这不是我拿到的东西」。只划掉这一条，背包不动 */
+    dismissItemClaim: (id: number, claimId: string) =>
+      api.delete<RpgSession>(`/rpg/sessions/${id}/item_claims/${claimId}`).then(r => r.data),
+    /** 玩家在确认窗里勾完了。勾中的按提议改状态并发奖励，没勾的只是不再弹 */
+    resolveTasks: (id: number, accepts: Array<{ id: string; accept: boolean }>) =>
+      api.post<RpgSession>(`/rpg/sessions/${id}/tasks/resolve`, { accepts }).then(r => r.data),
+    /** 玩家自己改一条待办：标完成/失败、改回进行中，status 给空串是划掉 */
+    setTaskState: (id: number, name: string, status: '' | 'open' | 'done' | 'failed') =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}/tasks`, { name, status }).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/sessions/${id}`).then(r => r.data),
   },
   messages: {
     list: (sessionId: number) =>
       api.get<RpgMessage[]>(`/rpg/sessions/${sessionId}/messages/`).then(r => r.data),
+    /** 只改正文。地点、在场名单、判定结果都是写入时的快照，不跟着改 */
+    update: (id: number, content: string) =>
+      api.patch<RpgMessage>(`/rpg/messages/${id}`, { content }).then(r => r.data),
+    settle: (id: number) =>
+      api.post<RpgMessage>(`/rpg/messages/${id}/settle`, {}, { timeout: 300000 }).then(r => r.data),
+    /** 回到这条消息之前：它和它之后的消息全删，数值/背包/时段一起回滚。
+     *  改自己说过的话必须走这个，光删消息会留下「话没说过，代价还在」 */
+    rewind: (id: number) =>
+      api.post<RpgSession>(`/rpg/messages/${id}/rewind`).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/messages/${id}`).then(r => r.data),
   },
   saves: {
@@ -1607,11 +2054,9 @@ export const rpgApi = {
   },
   /** 「帮我想想」看的是整条时间线：全场只有一条历史，隔壁刚聊的那几句
    *  就是你的前情 */
-  suggest: (sessionId: number, focusNpcId?: number | null) =>
+  suggest: (sessionId: number) =>
     api.post<{ suggestions: string[] }>(
-      `/rpg/sessions/${sessionId}/suggest`,
-      focusNpcId ? { focus_npc_id: focusNpcId } : {},
-      { timeout: 120000 },
+      `/rpg/sessions/${sessionId}/suggest`, {}, { timeout: 120000 },
     ).then(r => r.data),
 }
 
@@ -1977,7 +2422,11 @@ async function readSseStream<T>(
   }
   if (!response.ok) {
     const text = await response.text().catch(() => '')
-    throw new Error(text || `HTTP ${response.status} ${response.statusText}`)
+    // FastAPI 的报错是 {"detail": "..."}。整串 JSON 甩到界面上，玩家看到的是
+    // 一行大括号；detail 才是那句人话
+    let detail = ''
+    try { detail = JSON.parse(text)?.detail || '' } catch { /* 不是 JSON，原样用 */ }
+    throw new Error(detail || text || `HTTP ${response.status} ${response.statusText}`)
   }
   if (!response.body) {
     throw new Error('服务器未返回流式响应')
@@ -2208,6 +2657,8 @@ export interface RpgTurnMeta {
   user_message_id?: number
   system_tokens?: number
   state_tokens?: number
+  /** 【道具与技能】那一块占了多少 token：模组定义过的东西的说明书，每轮都在 */
+  catalog_tokens?: number
   npc_tokens?: number
   /** 【外场】那一块占了多少 token */
   chronicle_tokens?: number
@@ -2229,17 +2680,45 @@ export interface RpgTurnMeta {
 export interface RpgStatePatch {
   stats: Record<string, number>
   inventory: RpgInvItem[]
+  /** 技能和冷却。不带回来的话点完技能要等整页重拉才灰 */
+  skills: RpgLearnedSkill[]
+  /** 待办清单。同理，不带的话任务格要整页重拉才更新 */
+  tasks: RpgSessionTask[]
   flags: Record<string, string | number | boolean | null>
+  /** flag 的立起日期。同上，不带的话「某事之后 N 天」的按钮要整页重拉才解锁 */
+  flag_days: Record<string, number>
   location: string
   npc_states: Record<string, Record<string, number | boolean>>
   npc_notes: Record<string, Record<string, string>>
   npc_activities: Record<string, string>
   npc_places: Record<string, string>
+  place_notes: Record<string, string>
   status: 'alive' | 'dead' | 'ended'
   /** 时钟也跟着走，否则按完「结束这个时段」要等整页重拉才动 */
   time_slots: string[]
   slot: string
   day: number
+  /** 这一格的两个计数器，同理：不带的话「还剩一格」要等整页重拉才显示 */
+  slot_actions: number
+  slot_chats: number
+}
+
+/** 勾选「加入模组」之后后端回的东西：建成了哪几行 + 哪些被拦下了。
+ *  dropped 必须显示出来——白名单过滤和重名拦截都是静默的，不说等于骗作者 */
+export interface RpgDiscoveryApply {
+  npcs: RpgNpc[]
+  locations: RpgLocation[]
+  items: RpgItem[]
+  /** 这一次**新建了定义**的技能和任务 */
+  skills: RpgSkill[]
+  tasks: RpgTask[]
+  /** 这一局真的学会 / 接下的名字。和上面两项不是一回事：模组里早就有定义、
+   *  这一次只补上「这一局也拿到」的那些只出现在这里。非空就得重拉会话 */
+  learned: string[]
+  opened: string[]
+  dropped: string[]
+  /** 处理完之后还剩的待确认项，直接拿来覆盖角标 */
+  remaining: RpgDiscovery[]
 }
 
 export type RpgSSEMessage =
@@ -2252,7 +2731,16 @@ export type RpgSSEMessage =
   | { event: 'stage'; data: string }
   | { event: 'warning'; data: string }
   | { event: 'state'; data: RpgStatePatch }
+  | { event: 'settlement'; data: { message_id: number; report: RpgSettlement | null } }
   | { event: 'suggestions'; data: string[] }
+  /** 这一轮认出来的、模组里还没有的人/地方/东西。只挂角标，不打断 */
+  | { event: 'discoveries'; data: RpgDiscovery[] }
+  | { event: 'item_claims'; data: RpgItemClaim[] }
+  /** 模型觉得这几桩事办完了。弹窗问玩家，点头才算 */
+  | { event: 'task_proposals'; data: RpgTaskProposal[] }
+  /** 模型觉得这一幕收尾了，可以推时段。**只点亮按钮，不推时间**——
+   *  时钟仍然只有玩家能拨。data 是给玩家看的那句理由 */
+  | { event: 'slot_hint'; data: string }
   | { event: 'done'; data: { message_id: number; input_tokens: number; output_tokens: number; aux_input_tokens: number; aux_output_tokens: number } }
   | { event: 'error'; data: string }
 
@@ -2264,9 +2752,13 @@ export function streamRpgTurn(
     /** 「点出来的」行动。给了任意一个就走引擎，数字由模组定义算死 */
     action_id?: number | null
     item_name?: string
+    skill_name?: string
     move_to?: string
-    /** 当前查看的 NPC，用于选择该角色可见的历史与摘要 */
-    focus_npc_id?: number | null
+    /** 这一轮怎么说话：group 群聊 / private 私聊 / solo 独自行动。
+     *  它决定这段戏记进谁的记忆，和「界面正在筛谁」是两件事 */
+    mode?: 'group' | 'private' | 'solo'
+    /** 私聊对象，只在 mode=private 时有意义。她必须此刻就在跟前 */
+    private_with?: number | null
     /** 动作用在谁身上（好感加给他）。和「这段叙事归谁看」无关——
      *  那个由消息上的 present 快照决定，不由请求参数决定 */
     target_npc?: string
@@ -2286,7 +2778,8 @@ export function streamRpgTurn(
     onClose()
   }).catch((err) => {
     if (err.name !== 'AbortError') {
-      onMessage({ event: 'error', data: String(err) })
+      // message 而不是 String(err)：后者带一个「Error: 」前缀
+      onMessage({ event: 'error', data: err?.message || String(err) })
     }
     onClose()
   })

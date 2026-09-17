@@ -1,6 +1,6 @@
 import type { RpgAction, RpgItem, RpgLocation, RpgStatDef } from '@/api/client'
 
-type ActionSeed = Pick<RpgAction, 'name' | 'prompt_hint' | 'effects' | 'relation_effects' | 'needs_target'>
+export type ActionSeed = Pick<RpgAction, 'name' | 'prompt_hint' | 'effects' | 'relation_effects' | 'needs_target'>
 type ItemSeed = Pick<
   RpgItem, 'name' | 'description' | 'category' | 'effects' | 'consumable' | 'start_with'
 >

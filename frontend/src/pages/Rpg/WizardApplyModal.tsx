@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Check, X, AlertTriangle } from 'lucide-react'
+import { Check, X, AlertTriangle, Loader2 } from 'lucide-react'
 import type { RpgWizardExtract } from '@/api/client'
 
 /** 勾选后要写进表单的那份，形状同 RpgWizardExtract 但只含勾上的项 */
@@ -10,6 +10,7 @@ interface Props {
   onCancel: () => void
   onApply: (picked: WizardPicked) => void
   onRegenerate?: () => void
+  applying?: boolean
 }
 
 const TEXT_FIELDS: Array<[keyof RpgWizardExtract, string]> = [
@@ -27,7 +28,7 @@ const TEXT_FIELDS: Array<[keyof RpgWizardExtract, string]> = [
  * 引用校验——后端只按「聊定时的白名单」过滤过，作者在这里取消勾选某个数值之后，
  * 引用它的道具就悬空了，那是后端拦不到的，得当场提示。
  */
-export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerate }: Props) {
+export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerate, applying = false }: Props) {
   // 每一项一个稳定 key：文本用字段名，列表项用 "类型:下标"
   const allKeys = useMemo(() => collectKeys(draft), [draft])
   const [picked, setPicked] = useState<Set<string>>(() => new Set(allKeys))
@@ -79,6 +80,7 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
   }, [draft, picked, live])
 
   const apply = () => {
+    if (applying) return
     const out: WizardPicked = {}
     for (const [key] of TEXT_FIELDS) {
       if (picked.has(key as string) && draft[key]) (out as Record<string, unknown>)[key] = draft[key]
@@ -104,7 +106,7 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
   const nothing = allKeys.length === 0
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={applying ? undefined : onCancel}>
       <div
         className="bg-background rounded-xl border shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -117,13 +119,18 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
                 ? '先看一下这套设定。满意就回填，不满意可以换一套。'
                 : '勾掉不想要的。数值是地基，取消某个数值会让引用它的道具悬空。'}
             </p>
+            <p className="text-xs text-muted-foreground mt-0.5">已存在的同名条目会跳过，保留模组中的现有内容。</p>
           </div>
-          <button onClick={onCancel} className="p-1.5 rounded-md hover:bg-muted shrink-0">
+          <button onClick={onCancel} disabled={applying} className="p-1.5 rounded-md hover:bg-muted shrink-0 disabled:opacity-40">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        {/* 滚动容器必须是 div：fieldset 当 flex 子项时不认 min-height:0，会顶着内容
+            高度把面板撑破 max-h，一句话生成整套那种大草案就此既超出屏幕又滚不动。
+            disabled 挪到里层的 fieldset 上，语义不变 */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        <fieldset disabled={applying} className="space-y-4">
           {nothing && (
             <p className="text-sm text-muted-foreground py-6 text-center">
               没从对话里抽到能填的内容。多聊几轮，把设定聊具体些再试。
@@ -211,7 +218,7 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
           <Group title="动作按钮">
             {(draft.actions || []).map((a, i) => (
               <Row key={i} on={picked.has(`action:${i}`)} onToggle={() => toggle(`action:${i}`)}
-                title={a.name}
+                title={a.group ? `[${a.group}] ${a.name}` : a.name}
                 sub={[effectsText(a.effects), effectsText(a.relation_effects)].filter(Boolean).join(' · ') || undefined} />
             ))}
           </Group>
@@ -225,24 +232,25 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
               <p className="text-muted-foreground/70">照样能写进去，但那些数值增减不会生效。</p>
             </div>
           )}
+        </fieldset>
         </div>
 
         <div className="px-5 py-3 border-t flex justify-end gap-2 shrink-0">
-          <button onClick={onCancel} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          <button onClick={onCancel} disabled={applying} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted disabled:opacity-40">
             {onRegenerate ? '暂不回填' : '取消'}
           </button>
           {onRegenerate && (
-            <button onClick={onRegenerate} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+            <button onClick={onRegenerate} disabled={applying} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted disabled:opacity-40">
               随机换一套
             </button>
           )}
           <button
             onClick={apply}
-            disabled={picked.size === 0}
+            disabled={applying || picked.size === 0}
             className="flex items-center gap-1 text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
           >
-            <Check className="w-3.5 h-3.5" />
-            {onRegenerate ? '回填到模组' : '填进模组'}（{picked.size}）
+            {applying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+            {applying ? '回填中…' : `${onRegenerate ? '回填到模组' : '填进模组'}（${picked.size}）`}
           </button>
         </div>
       </div>

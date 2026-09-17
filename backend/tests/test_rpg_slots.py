@@ -87,13 +87,20 @@ class AdvanceTests(unittest.TestCase):
 
 
 class ResetDailyTests(unittest.TestCase):
-    def test_it_refills_to_the_ceiling_not_the_initial_value(self):
-        # 「回满」只在有上限时才成立。用 initial 的话，建局时把初始值改过的
-        # 玩家会得到一个既不是初始也不是满的怪数字
+    def test_it_recovers_to_seven_tenths_of_the_ceiling_not_to_full(self):
+        # **不回满**是有意的：睡一觉就满血，等于消耗根本不疼。按上限算而不是
+        # 按 initial 算，是为了绕开「建局时玩家把初始值改过」的归属问题
         sess = _sess(stats={"精力": 12, "资金": 300, "声望": 5, "怀疑度": 80})
         notes = reset_daily(_module(), sess)
-        self.assertEqual(sess.stats["精力"], 100)
+        self.assertEqual(sess.stats["精力"], 70)
         self.assertIn("精力", " ".join(notes))
+
+    def test_a_stat_above_the_floor_is_not_dragged_down(self):
+        # 只往上抬，从不往下压。昨天省着用的人睡一觉不该反而掉到七成——
+        # 那会让「养精蓄锐」变成惩罚
+        sess = _sess(stats={"精力": 90, "资金": 300, "声望": 0, "怀疑度": 0})
+        self.assertEqual(reset_daily(_module(), sess), [])
+        self.assertEqual(sess.stats["精力"], 90)
 
     def test_uncapped_and_unchecked_stats_are_left_alone(self):
         sess = _sess(stats={"精力": 12, "资金": 300, "声望": 5, "怀疑度": 80})
@@ -103,7 +110,7 @@ class ResetDailyTests(unittest.TestCase):
         self.assertEqual(sess.stats["怀疑度"], 80)     # 有上限但没勾
 
     def test_an_already_full_stat_is_not_reported(self):
-        # 满着的时候不该冒一句「精力回到 100」，那是噪音
+        # 满着的时候不该冒一句「精力回到 70」，那既是噪音又是假话
         sess = _sess(stats={"精力": 100, "资金": 300, "声望": 0, "怀疑度": 0})
         self.assertEqual(reset_daily(_module(), sess), [])
 
@@ -113,11 +120,11 @@ class ResetDailyTests(unittest.TestCase):
         reset_daily(_module(), sess)
         self.assertEqual(sess.stats["旧数值"], 7)
 
-    def test_rollover_drives_the_refill(self):
-        # 两件事必须串起来：这才是「花掉精力 → 睡一觉 → 回满」的循环
+    def test_rollover_drives_the_recovery(self):
+        # 两件事必须串起来：这才是「花掉精力 → 睡一觉 → 恢复一部分」的循环
         sess = _sess(slot="晚", stats={"精力": 3, "资金": 300, "声望": 0, "怀疑度": 0})
         facts = advance_slot(_module(), sess)
-        self.assertEqual(sess.stats["精力"], 100)
+        self.assertEqual(sess.stats["精力"], 70)
         self.assertTrue(any("精力" in f for f in facts))
 
 

@@ -34,7 +34,7 @@ class RpgPromptTests(unittest.TestCase):
     def test_every_default_template_validates(self):
         # 12 = GM / 裁决 / 判定注入 / 结算 / 建议 / 梗概 / 外场简报 / 角色自由行动 / 帮我写
         #      / 构思向导对话 / 构思向导抽取 / 一键生成
-        self.assertEqual(len(rpg_prompts.PROMPTS), 13)
+        self.assertEqual(len(rpg_prompts.PROMPTS), 14)
         for name in rpg_prompts.PROMPTS:
             with self.subTest(name=name):
                 rpg_prompts.validate(name, rpg_prompts.default_content(name))
@@ -102,7 +102,7 @@ class RpgPromptRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_defaults_validate_and_list(self):
         prompts = await list_prompts(self.owner)
-        self.assertEqual(len(prompts), 13)
+        self.assertEqual(len(prompts), 14)
         for prompt in prompts:
             self.assertFalse(prompt.customized)
             self.assertEqual(prompt.content, prompt.default_content)

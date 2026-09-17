@@ -57,7 +57,7 @@ export default function StatePanel({
 }) {
   const visible = (defs || []).filter(d => d.name && d.display !== HIDDEN)
   const rels = (relationDefs || []).filter(d => d.name && d.display !== HIDDEN)
-  const met = rels.length > 0 ? npcs : []
+  const met = rels.length > 0 ? npcs.filter(npc => npc.relation_enabled !== false) : []
 
   if (visible.length === 0 && met.length === 0) return null
 
@@ -73,7 +73,10 @@ export default function StatePanel({
       {met.map(npc => (
         <div key={npc.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="text-xs font-medium">{npc.name}</span>
-          {rels.map(def => (
+          {(npc.relation_stat_names?.length
+            ? rels.filter(def => npc.relation_stat_names.includes(def.name))
+            : rels
+          ).map(def => (
             <Stat
               key={def.name}
               def={def}

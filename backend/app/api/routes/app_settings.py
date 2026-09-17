@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models.api_provider import ApiProvider
 from app.models.model_library import ModelEntry
 from app.api.deps import CurrentUser, require_admin
+from app.services import comfyui
 
 router = APIRouter()
 
@@ -48,6 +49,7 @@ class SettingsUpdate(BaseModel):
     https_proxy: str = ""
     http_proxy: str = ""
     deepseek_fast_thinking: str = "off"
+    comfyui_base_url: str = ""
 
 
 class SettingsOut(BaseModel):
@@ -67,6 +69,7 @@ class SettingsOut(BaseModel):
     https_proxy: str
     http_proxy: str
     deepseek_fast_thinking: str
+    comfyui_base_url: str
 
 
 @router.get("/", response_model=SettingsOut, dependencies=[Depends(require_admin)])
@@ -88,6 +91,7 @@ async def get_settings():
         https_proxy=settings.https_proxy,
         http_proxy=settings.http_proxy,
         deepseek_fast_thinking=settings.deepseek_fast_thinking,
+        comfyui_base_url=settings.comfyui_base_url,
     )
 
 
@@ -128,7 +132,23 @@ async def update_settings(data: SettingsUpdate):
     if data.deepseek_fast_thinking in ("off", "high", "max"):
         settings.deepseek_fast_thinking = data.deepseek_fast_thinking
         _write_env("DEEPSEEK_FAST_THINKING", data.deepseek_fast_thinking)
+    if data.comfyui_base_url:
+        settings.comfyui_base_url = data.comfyui_base_url
+        _write_env("NOVELBOT_COMFYUI_URL", data.comfyui_base_url)
     return {"ok": True}
+
+
+class ComfyStatusOut(BaseModel):
+    reachable: bool
+    base_url: str
+    detail: str = ""
+
+
+@router.get("/comfyui-status", response_model=ComfyStatusOut, dependencies=[Depends(require_admin)])
+async def comfyui_status():
+    """设置页「测试连接」：确认本机 ComfyUI 起没起。"""
+    ok, detail = await comfyui.ping()
+    return ComfyStatusOut(reachable=ok, base_url=settings.comfyui_base_url, detail=detail)
 
 
 class ProxyStatusOut(BaseModel):

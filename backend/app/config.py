@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     https_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTPS_PROXY")
     http_proxy: str = Field(default="", validation_alias="NOVELBOT_HTTP_PROXY")
 
+    # ── 本地 ComfyUI（RPG 立绘生成）────────────────────────────────────────────
+    # 本机服务，调用时必须绕开上面的代理，否则请求会被送进代理
+    comfyui_base_url: str = Field(
+        default="http://127.0.0.1:8188", validation_alias="NOVELBOT_COMFYUI_URL"
+    )
+
     # ── 嵌入模型超时（秒）：端点慢/不可达时快速失败，避免拖垮整章生成 ─────────
     embedding_timeout: float = 20.0
 

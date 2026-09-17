@@ -4,7 +4,10 @@
 
 他的要求：{{ instruction or '（没写具体要求，按这一摊该有的样子生成）' }}
 目标数量：{{ count }} 个左右，宁可少也别硬凑。
-{% if nsfw %}他开了成人模式，情色向的设定直接写，用词不用绕。{% endif %}
+内容尺度以作者提供的模组设定和生成要求为准，不主动添加或回避题材内容。
+
+玩法类别：{{ play_style }}
+{% if play_style == 'sim' %}这是模拟器模组，优先生成身份、系统运行和日常管理中会用到的内容。{% elif play_style == 'slg' %}这是角色养成模组，优先生成目标角色、日程、指令、训练和关系推进中会用到的内容。{% else %}这是探索冒险模组，优先生成探索、线索、风险和行动中会用到的内容。{% endif %}
 
 {% if kind == 'location' %}
 生成「地点」：
@@ -46,15 +49,41 @@
 
 {% if existing_names %}- 已经有的道具：{{ existing_names }}，别重复生成。{% endif %}
 {% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
+{% elif kind == 'skill' %}
+生成「技能」：
+
+{
+  "skills": [
+    {"name": "技能名", "description": "怎么施展、什么感觉、管什么用", "category": "主动/被动 二选一", "cooldown": 用完要歇几个回合的数字（0 表示随便用）, "start_with": 开局就会true/false, "effects": {"数值名": 增减数字}}
+  ]
+}
+
+{% if existing_names %}- 已经有的技能：{{ existing_names }}，别重复生成。{% endif %}
+{% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
+- 被动技能（category 是「被动」）不该有 cooldown，填 0。
+- 别输出使用条件，那由作者自己设。
+{% elif kind == 'task' %}
+生成「任务」：
+
+{
+  "tasks": [
+    {"name": "任务名", "description": "这桩事的来龙去脉、谁托付的", "objective": "做到什么才算办完，一句话", "category": "主线/支线/日常 三选一", "auto_start": 开局就接下true/false, "effects": {"数值名": 办完之后的增减数字}}
+  ]
+}
+
+{% if existing_names %}- 已经有的任务：{{ existing_names }}，别重复生成。{% endif %}
+{% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
+- objective 是判定完成与否的**唯一依据**，必须写成一件看得见的事（「把信交到老周手上」），不能是感受或形容（「取得他的信任」）。
 {% elif kind == 'action' %}
 生成「动作按钮」：
 
 {
   "actions": [
-    {"name": "动作名", "prompt_hint": "点了等于玩家说了这句话", "needs_target": 要不要先选在场角色true/false, "effects": {"数值名": 增减数字}, "relation_effects": {"关系数值名": 增减数字}}
+    {"name": "动作名", "prompt_hint": "点了等于玩家说了这句话", "needs_target": 要不要先选在场角色true/false, "effects": {"数值名": 增减数字}, "relation_effects": {"关系数值名": 增减数字}, "group": "分栏名，不分栏就留空"}
   ]
 }
 
+{% if play_style == 'sim' %}- 这是模拟器，这些按钮就是玩家的主界面，按 group 分栏摆出来，所以每个都要填 group（例如「经营」「人事」「私人」）。留空的会挤到「其他」那一栏。{% endif %}
 {% if existing_names %}- 已经有的动作：{{ existing_names }}，别重复生成。{% endif %}
 {% if stat_names %}- effects 的键只能从这几个玩家数值里选：{{ stat_names }}。写了别的，那个键删掉。{% else %}- 模组还没定玩家数值，effects 一律留空对象 {}。{% endif %}
 {% if relation_names %}- relation_effects 的键只能从这几个关系数值里选：{{ relation_names }}。写了别的，那个键删掉。{% else %}- 模组还没定关系数值，relation_effects 一律留空对象 {}。{% endif %}

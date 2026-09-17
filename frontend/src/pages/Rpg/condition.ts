@@ -1,4 +1,4 @@
-import type { RpgCondition, RpgLocation, RpgNpc, RpgSession } from '@/api/client'
+import type { RpgAction, RpgCondition, RpgLocation, RpgNpc, RpgSession } from '@/api/client'
 
 export const norm = (s: string) => (s || '').trim().toLowerCase()
 
@@ -60,6 +60,14 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
       || lit.has(norm(loc.name))
       || locations.some(p => lit.has(norm(p.name)) && linked(loc, p, p.name))
     if (near) out.add(loc.id)
+  }
+
+  const byId = new Map(locations.map(loc => [loc.id, loc]))
+  let parentId = here.parent_id
+  while (parentId != null) {
+    if (out.has(parentId)) break
+    out.add(parentId)
+    parentId = byId.get(parentId)?.parent_id ?? null
   }
   return out
 }
@@ -176,10 +184,44 @@ export function checkCondition(
     }
   }
 
+  // 「某件事之后 N 天」。同后端：flag 没立过、或立过但没记日期（老局）都判不成立
+  const flagDays = sess.flag_days || {}
+  for (const rule of cond.after_days || []) {
+    const key = (rule.flag || '').trim()
+    if (!key) continue
+    if (!flags[key]) return [false, `还没有「${key}」`]
+    const since = flagDays[key]
+    if (since == null) return [false, `没记下「${key}」是哪天发生的`]
+    const left = Number(since) + Number(rule.days || 0) - Number(sess.day || 1)
+    if (left > 0) return [false, `「${key}」之后还要等 ${left} 天`]
+  }
+
   const owned = new Set((sess.inventory || []).map(it => norm(it.name)))
   for (const want of cond.items || []) {
     if (!owned.has(norm(want))) return [false, `没有「${(want || '').trim()}」`]
   }
 
   return [true, '']
+}
+
+/**
+ * 这个行动此刻能不能点。空串 = 能点，否则是给玩家看的那一句「差在哪」。
+ *
+ * 三条判据和后端 `_action_gate` 一一对应：requires → at_location → needs_target。
+ * at_location 不在 RpgCondition 里，是 RpgAction 自己的一列，所以只能在这儿单独判。
+ *
+ * 收成一份是因为有两个调用方（对话页的快捷行动、模拟器主页），而两处各写一遍
+ * 已经漂过一次：模拟器那份有 at_location，对话页那份漏了——「限客卧」的动作
+ * 走到别处照样亮着，点下去后端才拦。判定权始终在后端（`_run_action` 会拦），
+ * 这里只管别让玩家点到一个必然失败的按钮。
+ */
+export function actionBlocked(
+  action: RpgAction, sess: RpgSession, npcs: RpgNpc[], target = '',
+): string {
+  const [ok, why] = checkCondition(action.requires, sess, npcs)
+  if (!ok) return why
+  const need = (action.at_location || '').trim()
+  if (need && norm(need) !== norm(sess.location || '')) return `得在${need}才行`
+  if (action.needs_target && !target) return '先选一个对象'
+  return ''
 }

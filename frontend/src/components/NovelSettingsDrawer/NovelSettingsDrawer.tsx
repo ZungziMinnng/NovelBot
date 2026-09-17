@@ -153,6 +153,12 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [writerTemperature, setWriterTemperature] = useState(novel.writer_temperature ?? 0.85)
   const [writerUseCustomTemperature, setWriterUseCustomTemperature] = useState(novel.writer_use_custom_temperature ?? true)
   const [writerMaxTokens, setWriterMaxTokens] = useState(novel.writer_max_tokens ?? 16384)
+  // 构思温度只有一列，负数 = 不发这个参数。拆成「值 + 开关」两个 state 是为了关掉再
+  // 打开时还记得原来那个数字（存回去时才合成 -1），交互和上面的写作温度一致
+  const [buildTemperature, setBuildTemperature] = useState(
+    (novel.build_temperature ?? 0.7) >= 0 ? (novel.build_temperature ?? 0.7) : 0.7)
+  const [buildUseCustomTemperature, setBuildUseCustomTemperature] = useState(
+    (novel.build_temperature ?? 0.7) >= 0)
   const [rollingSummaryCount, setRollingSummaryCount] = useState(novel.rolling_summary_count ?? 8)
   const [ragTopK, setRagTopK] = useState(novel.rag_top_k ?? 6)
   const [chatContextRounds, setChatContextRounds] = useState(novel.chat_context_rounds ?? 20)
@@ -196,6 +202,8 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
     setWriterTemperature(novel.writer_temperature ?? 0.85)
     setWriterUseCustomTemperature(novel.writer_use_custom_temperature ?? true)
     setWriterMaxTokens(novel.writer_max_tokens ?? 16384)
+    setBuildTemperature((novel.build_temperature ?? 0.7) >= 0 ? (novel.build_temperature ?? 0.7) : 0.7)
+    setBuildUseCustomTemperature((novel.build_temperature ?? 0.7) >= 0)
     setRollingSummaryCount(novel.rolling_summary_count ?? 8)
     setRagTopK(novel.rag_top_k ?? 6)
     setChatContextRounds(novel.chat_context_rounds ?? 20)
@@ -330,6 +338,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
         writer_temperature: writerTemperature,
         writer_use_custom_temperature: writerUseCustomTemperature,
         writer_max_tokens: writerMaxTokens,
+        build_temperature: buildUseCustomTemperature ? buildTemperature : -1,
         rolling_summary_count: rollingSummaryCount,
         rag_top_k: ragTopK,
         chat_context_rounds: chatContextRounds,
@@ -979,6 +988,41 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                         </button>
                         <span className="text-xs text-muted-foreground">
                           {writerUseCustomTemperature ? '发送温度参数（关闭以兼容不支持温度的模型）' : '不发送温度参数（使用模型默认值）'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="border-t pt-5">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium">构思温度</label>
+                        <span className="text-sm font-mono text-muted-foreground">{buildTemperature.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1.5}
+                        step={0.05}
+                        value={buildTemperature}
+                        onChange={e => setBuildTemperature(Number(e.target.value))}
+                        disabled={!buildUseCustomTemperature}
+                        className={`w-full accent-primary ${!buildUseCustomTemperature ? 'opacity-30' : ''}`}
+                      />
+                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                        <span>保守 0.1</span>
+                        <span>1.5 发散</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1.5">
+                        管的是世界观扩写、大纲、角色卡、自动构建这一条链，不影响正文（那个是上面的生成温度）。默认 0.70
+                      </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button
+                          onClick={() => setBuildUseCustomTemperature(v => !v)}
+                          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${buildUseCustomTemperature ? 'bg-primary' : 'bg-muted'}`}
+                        >
+                          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${buildUseCustomTemperature ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </button>
+                        <span className="text-xs text-muted-foreground">
+                          {buildUseCustomTemperature ? '发送温度参数（关闭以兼容不支持温度的模型）' : '不发送温度参数（使用模型默认值）'}
                         </span>
                       </div>
                     </div>

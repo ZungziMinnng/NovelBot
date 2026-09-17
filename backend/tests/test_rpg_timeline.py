@@ -23,7 +23,7 @@ from app.models import novel as _novel, chapter as _chapter, character as _chara
 from app.models.rpg import RpgMessage, RpgModule, RpgNpc, RpgSession
 from app.models.user import User
 from app.schemas.rpg import RpgSessionCreate
-from app.services.rpg_context import present_ids
+from app.services.rpg_context import present_ids, turn_present
 
 STAT_DEFS = [{"name": "精力", "initial": 100, "min": 0, "max": 100}]
 
@@ -64,6 +64,44 @@ class PresentSnapshotTests(unittest.TestCase):
         npc.slot_locations = {"夜": "酒馆"}
         self.assertEqual(present_ids([npc], "酒馆", "夜"), [7])
         self.assertEqual(present_ids([npc], "地窖", "夜"), [])
+
+
+class TurnModeTests(unittest.TestCase):
+    """三个模式怎么改在场名单。
+
+    **路由写 present 和拼上下文共用 turn_present 这一个函数。** 两边各写一遍
+    迟早会分叉，而分叉的那一次是「他说过的话他自己不记得」：模型看见他站在屋里
+    让他插了句话，那句话却按私聊只记进了另一个人名下。
+    """
+
+    def _sess(self, location="地窖"):
+        return RpgSession(
+            module_id=1, char_name="阿隼", stats={}, location=location, npc_places={},
+        )
+
+    def _npcs(self):
+        return [_npc(7, "老兵", "地窖"), _npc(9, "老板娘", "地窖")]
+
+    def test_a_group_turn_keeps_everyone_in_the_room(self):
+        ids = [n.id for n in turn_present(self._npcs(), self._sess(), "group", None)]
+        self.assertEqual(sorted(ids), [7, 9])
+
+    def test_a_private_aside_narrows_to_that_one_person(self):
+        ids = [n.id for n in turn_present(self._npcs(), self._sess(), "private", 7)]
+        self.assertEqual(ids, [7])
+
+    def test_acting_alone_still_counts_everyone_who_can_see_you(self):
+        # 「独自行动」只是这一轮不跟人说话，不是「没人看见」。判成没人在场的话，
+        # 她眼睁睁看着你翻出剑谱，下一轮却不知道你有——失忆 bug 的镜像版
+        ids = [n.id for n in turn_present(self._npcs(), self._sess(), "solo", None)]
+        self.assertEqual(sorted(ids), [7, 9])
+
+    def test_a_private_aside_with_someone_who_is_not_here_falls_back(self):
+        # 路由会先挡掉这种请求。真漏过来也不能收窄成「只有她」——那会凭空
+        # 造出一段两人根本不在同一个地方的对话。退回群聊是最小伤害
+        npcs = [_npc(7, "老兵", "地窖"), _npc(9, "老板娘", "酒馆")]
+        ids = [n.id for n in turn_present(npcs, self._sess(), "private", 9)]
+        self.assertEqual(ids, [7])
 
 
 class OpeningNarrationTests(unittest.IsolatedAsyncioTestCase):

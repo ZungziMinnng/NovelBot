@@ -32,7 +32,7 @@ async def expand_world_setting(
         ],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=800,
     )
     return result.strip()
@@ -51,7 +51,7 @@ async def optimize_world_setting(novel: Novel, core_setting: str) -> str:
         messages=[{"role": "user", "content": prompt}],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=1000,
     )
     return result.strip()
@@ -80,7 +80,7 @@ async def optimize_world_section(novel: Novel, section: str, content: str) -> st
         messages=[{"role": "user", "content": prompt}],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=500,
     )
     return result.strip()

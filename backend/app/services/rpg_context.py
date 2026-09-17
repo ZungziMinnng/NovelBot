@@ -13,24 +13,37 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rpg import (
-    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry,
+    RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession,
+    RpgSkill, RpgWorldEntry,
 )
 from app.services.context_budget import estimate_tokens, truncate_to_token_budget
 from app.services.rpg_dice import OUTCOME_LABELS
+from app.services.rpg_memory import event_memory
 from app.services.rpg_play_style import style_block
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
     EFFECT_CHARS, TIER_LABEL_CHARS, check_condition, chronicle_lines, def_map,
-    npc_activity, tier_list, tier_of,
+    norm_name, npc_activity, place_note, tier_list, tier_of,
 )
 
-SYSTEM_TOKEN_BUDGET = 8000
+# 跟着 NPC_TOKEN_BUDGET 一起从 8000 抬到 9800、12000，这次到 20000。这是**整段
+# system 的总闸**，从尾部切；只把【在场】的额度放大而不动它，多出来的就是从
+# 尾巴上抢的，而尾巴正是写作规则、概要、长期记忆和世界设定——等于拆东墙补西墙。
+# 定这个数的办法是拿各块额度之和反推：下面八块加起来 18100，留约 8% 余量给
+# 抬头话术和写作规则。改任何一块额度都要回来重算这个数，别只改一边
+SYSTEM_TOKEN_BUDGET = 20000
 WORLD_TOKEN_BUDGET = 3000
 SUMMARY_TOKEN_BUDGET = 2000
 # 【你】和【在场】是新增的两块。各自先限额再拼，否则总量超标时从尾部切，
 # 先切掉的正好是排在后面的叙事样例和此前剧情
 STATE_TOKEN_BUDGET = 800
-NPC_TOKEN_BUDGET = 1200
+# 全体在场角色分这一份。一个写全了的角色（简介+人设+四栏档案）自己就能吃掉
+# 两三千字，所以 3000 token 时**一个人写满就超**，五六个人同框必然走降级链；
+# 而降级是**整块砍掉所有人的档案段**、不是按人截短，于是写得越长模型看到的
+# 反而越少。10000 约合 6600 字，够五六个人各带一份完整档案——这正是
+# _npc_block 的注释一直声称、但 3000 根本兑现不了的目标。
+# 抬这个数必须同时抬 SYSTEM_TOKEN_BUDGET，否则多出来的是从尾巴上抢的
+NPC_TOKEN_BUDGET = 10000
 # 【外场】是「已经传开的事」，和状态同类：都是已发生的硬事实
 CHRONICLE_TOKEN_BUDGET = 800
 # 【数值的含义】是作者写死的一小段，每轮一遍。给得紧：它只该是几行钥匙，
@@ -41,6 +54,22 @@ MEANING_TOKEN_BUDGET = 400
 # 窗口里。现在这一块只放**不在消息里的东西**：地点描述和在场名单，
 # 几百 token 足够，额度小是因为它真的只剩这么点内容
 SCENE_TOKEN_BUDGET = 400
+# 【道具与技能】的额度。它是**静态的模组说明书**，每轮一模一样，所以给得紧：
+# 一条只占「名字 + 一句话」，700 大约能放五六十条，够绝大多数模组一次列全
+CATALOG_TOKEN_BUDGET = 700
+# 每条说明留多少字。作者的道具描述可能写了两百字，整段塞进来就是把世界观
+# 又抄了一遍——模型这里要的只是「这东西长什么样」
+CATALOG_DESC_CHARS = 40
+
+# 【道具与技能】的抬头。这段话挡的是这一块自带的两个风险：一是模型看见清单
+# 就默认玩家全都有（于是主角凭空掏出还没拿到的药水），二是它照着 effects 在
+# 正文里自己报数字（数值是引擎按 effects 算的，两边一定对不上）
+CATALOG_PREAMBLE = (
+    "以下是这个模组里定义过的道具和本事，作用是让你知道这世界上到底有哪些东西，"
+    "好在剧情里安排它们出现。**背包和技能栏的实况以【你】那一段为准**，"
+    "标着「还没到他手里」「还没学会」的，只有剧情真让他拿到或学到才算数，别默认他有。"
+    "数值增减一律由引擎结算，你不要在正文里报数字。"
+)
 
 # 【外场】的抬头。这段固定话术是**口吻的一部分**，不是客套：大事记注入每
 # 一条线，等于所有 NPC 全知，所以必须明说「听说」不等于「亲眼见过」，
@@ -58,6 +87,13 @@ SCENE_PREAMBLE = (
     "在场的人只知道**自己也在场**的那些事。你在别处、或在别人不在场时做的事，"
     "他们不知道，除非有人告诉过他们——不要让他们主动提起。"
 )
+
+# 玩家在输入框上方明着选的三个模式。群聊=在场的都参与；私聊=只跟那一个人说话，
+# 这段话也只记进她的记忆；独自行动=这一轮不跟人说话，但在场的人看着（见 turn_present）
+GROUP_MODE = "group"
+PRIVATE_MODE = "private"
+SOLO_MODE = "solo"
+TURN_MODES = (GROUP_MODE, PRIVATE_MODE, SOLO_MODE)
 
 DEFAULT_CHAR_NAME = "冒险者"
 
@@ -193,12 +229,12 @@ def here_npcs(
     slot 传空（没设时段、或调用方不关心时间）时作息表不参与，一律按常驻地点算，
     和没有这个功能时逐字一致。
     """
-    here = (location or "").strip()
+    here = norm_name(location)
     if not here:
         return []
     return [
         npc for npc in world_npcs(npcs)
-        if npc_place(npc, slot, places) == here
+        if norm_name(npc_place(npc, slot, places)) == here
     ]
 
 
@@ -221,6 +257,24 @@ def present_ids(
     if not (location or "").strip():
         return [n.id for n in world_npcs(npcs)]
     return [n.id for n in here_npcs(npcs, location, slot, places)]
+
+
+def turn_present(
+    npcs: list[RpgNpc], sess: RpgSession, mode: str, private_with: int | None,
+) -> list[RpgNpc]:
+    """这一轮算「在场」的那几个人。**写消息的 present 列和拼上下文共用这一份。**
+
+    群聊和独自行动都是屋里站着谁就是谁——「独自行动」只是这一轮不跟人说话，
+    不是「没人看见」。她眼睁睁看着你从箱底翻出剑谱，判成没人在场的话，下一轮
+    她不知道你有剑谱，那是失忆 bug 的镜像版。
+
+    私聊把名单收窄到那一个人，于是这段话只记进她的记忆。要求她**本来就在场**：
+    不在跟前的人叫不到一边去，否则会凭空造出一段两人都不在同一个地方的对话。
+    """
+    ids = set(present_ids(npcs, sess.location, sess.slot, sess.npc_places))
+    if mode == PRIVATE_MODE and private_with in ids:
+        ids = {private_with}
+    return [n for n in npcs if n.id in ids]
 
 
 def onstage_npcs(
@@ -320,9 +374,33 @@ def _meaning_block(module: RpgModule) -> str:
     return truncate_to_token_budget("【数值的含义】\n" + "\n".join(lines), MEANING_TOKEN_BUDGET)
 
 
+def _scene_line(here: list[RpgNpc], mode: str) -> str:
+    """【你】里的「此刻」那一行：这一轮到底是在干什么。
+
+    三个模式是玩家在输入框上方**明着选的**，不是猜出来的。它必须写进提示词
+    而不只是拿去筛在场名单——不写的话，选了「独自行动」模型照样会让旁边那位
+    搭话，而那句话是她说的、她自己却不该记得（她这一轮压根没被当成对话方）。
+
+    「独自行动」**不等于「没人看见」**：屋里站着谁就写谁在旁边看着。判成没人的
+    话会出上一个失忆 bug 的镜像版——她亲眼看着你翻出剑谱，下一轮却不知道你有。
+    """
+    names = "、".join((n.name or "").strip() for n in here)
+    if mode == PRIVATE_MODE and here:
+        return f"此刻：你把{names}叫到一边单独说话，旁人听不见这一段"
+    if mode == SOLO_MODE:
+        if here:
+            return f"此刻：你在做自己的事，没有在跟谁说话；{names}在旁边看着"
+        return "此刻：没有别人在场，只有你一个人"
+    if len(here) == 1:
+        return f"此刻：你正在与{names}单独说话"
+    if here:
+        return f"此刻：在场的是你与{names}，这是群戏"
+    return "此刻：没有别人在场，只有你一个人"
+
+
 def _compose_state(
     sess: RpgSession, specs: dict[str, dict], items: list[dict], keep: int,
-    here: list[RpgNpc] | None = None,
+    here: list[RpgNpc] | None = None, mode: str = GROUP_MODE,
 ) -> str:
     lines = [f"【你】{(sess.char_name or '').strip() or DEFAULT_CHAR_NAME}"]
     if (sess.char_desc or "").strip():
@@ -341,17 +419,10 @@ def _compose_state(
     slot = str(getattr(sess, "slot", "") or "").strip()
     if slot:
         lines.append(f"时间：第 {max(1, int(getattr(sess, 'day', 1) or 1))} 天 · {slot}")
-    # 这一幕是几个人。判据取**实际在跟前的人**，不再取「这条线是谁的」——线
-    # 已经不存在了。原先那条理由（「没有它模型会把在场三个人写成一锅粥」）现在
-    # 由人数直接回答，而且答得更准：多人在场时玩家确实是在对大家说话
+    # 这一幕是几个人、在干什么。判据取**实际在跟前的人**加玩家选的模式，不再
+    # 取「这条线是谁的」——线已经不存在了
     if here is not None:
-        if len(here) == 1:
-            lines.append(f"此刻：你正在与{(here[0].name or '').strip()}单独说话")
-        elif here:
-            names = "、".join((n.name or "").strip() for n in here)
-            lines.append(f"此刻：在场的是你与{names}，这是群戏")
-        else:
-            lines.append("此刻：没有别人在场，只有你一个人")
+        lines.append(_scene_line(here, mode))
 
     shown, rest = items[:keep], len(items) - keep
     rows = [
@@ -363,13 +434,43 @@ def _compose_state(
         rows.append(f"- 以及其他 {rest} 件杂物")
     lines.append("背包：\n" + "\n".join(rows) if rows else "背包：空")
 
+    # 会哪些招。冷却中的也列出来并标明——GM 知道这一招正歇着，才会写
+    # 「你伸手去掐诀，指尖还是麻的」而不是让玩家凭空又来一遍
+    skills = [
+        s for s in (sess.skills or [])
+        if isinstance(s, dict) and str(s.get("name") or "").strip()
+    ]
+    if skills:
+        lines.append("技能：" + "　".join(
+            f"{str(s['name']).strip()}"
+            + (f"（还要歇 {int(s['cooldown_left'])} 回合）"
+               if int(s.get("cooldown_left") or 0) > 0 else "")
+            for s in skills
+        ))
+
+    # 手上还挂着的事。GM 知道这些，才会让剧情往这几条上靠，而不是每一轮
+    # 都开一摊新的。状态块统共只有 800 token，列多了会把别的挤掉，所以封顶 8 条
+    todo = [
+        str(t.get("name") or "").strip() for t in (sess.tasks or [])
+        if isinstance(t, dict) and str(t.get("status") or "open") == "open"
+        and str(t.get("name") or "").strip()
+    ]
+    if todo:
+        line = "手上的事：" + "　".join(todo[:8])
+        if len(todo) > 8:
+            line += f"　以及其他 {len(todo) - 8} 桩事"
+        lines.append(line)
+
     flags = {k: v for k, v in (sess.flags or {}).items() if v is not None}
     if flags:
         lines.append("当前处境：\n" + "\n".join(f"- {k}：{_flag_text(v)}" for k, v in flags.items()))
     return "\n".join(lines)
 
 
-def _state_block(sess: RpgSession, module: RpgModule, here: list[RpgNpc] | None = None) -> str:
+def _state_block(
+    sess: RpgSession, module: RpgModule, here: list[RpgNpc] | None = None,
+    mode: str = GROUP_MODE,
+) -> str:
     """【你】段。超预算时先裁背包，不让截断的刀切在数值上。
 
     背包按数量降序保留——囤了 20 支箭比捡了一块石头更可能被用上。
@@ -382,11 +483,69 @@ def _state_block(sess: RpgSession, module: RpgModule, here: list[RpgNpc] | None 
     ordered = sorted(items, key=lambda it: -_qty(it))
     block = ""
     for keep in range(len(ordered), -1, -1):
-        block = _compose_state(sess, specs, ordered, keep, here)
+        block = _compose_state(sess, specs, ordered, keep, here, mode)
         if estimate_tokens(block) <= STATE_TOKEN_BUDGET:
             return block
     # 背包裁空了还超，说明是角色描述太长，这时才允许截断
     return truncate_to_token_budget(block, STATE_TOKEN_BUDGET)
+
+
+def _owned(rows) -> set[str]:
+    """这一局已经在手上 / 已经会了的那些名字。"""
+    return {
+        norm_name(str(row.get("name") or ""))
+        for row in rows or []
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+
+
+def _catalog_group(rows, owned: set[str], label: str, yes: str, no: str,
+                   desc_chars: int, keep_rest: bool) -> list[str]:
+    """一类东西的行。已经有的排前面：超预算时降级先丢的该是他还没有的那些。"""
+    mine: list[str] = []
+    rest: list[str] = []
+    for row in rows or []:
+        name = str(getattr(row, "name", "") or "").strip()
+        if not name:
+            continue
+        has = norm_name(name) in owned
+        desc = " ".join(str(getattr(row, "description", "") or "").split())[:desc_chars]
+        line = f"- {name}（{yes if has else no}）" + (f"：{desc}" if desc else "")
+        (mine if has else rest).append(line)
+    if not keep_rest:
+        rest = []
+    return [f"{label}：", *mine, *rest] if (mine or rest) else []
+
+
+def catalog_block(items, skills, sess: RpgSession) -> str:
+    """【道具与技能】——这个模组定义过的东西的说明书。
+
+    没有这一块的话，没勾「开局就有」/「开局就会」的道具和技能，GM 压根不知道
+    它们存在，于是这一局里**永远不会出现**——作者辛苦定义的一摊东西，除非手动
+    写进开局背包，否则玩家一辈子见不着。这是它存在的唯一理由。
+
+    只给名字加一句话，**不给 effects**：数值增减是引擎按 effects 算的，把数字
+    摆进提示词只会诱导模型在正文里自己报一遍，两边一定对不上。
+
+    超预算时三级降级：先砍掉说明只留名字，再砍掉「他还没有的」那一半，
+    最后才真截断——切掉的顺序是从最不要紧的开始。
+    """
+    owned_items = _owned(getattr(sess, "inventory", None))
+    owned_skills = _owned(getattr(sess, "skills", None))
+    block = ""
+    for desc_chars, keep_rest in ((CATALOG_DESC_CHARS, True), (0, True), (0, False)):
+        lines = [
+            *_catalog_group(items, owned_items, "道具", "他身上有", "还没到他手里",
+                            desc_chars, keep_rest),
+            *_catalog_group(skills, owned_skills, "本事", "他已经会", "还没学会",
+                            desc_chars, keep_rest),
+        ]
+        if not lines:
+            return ""
+        block = "【道具与技能】\n" + CATALOG_PREAMBLE + "\n" + "\n".join(lines)
+        if estimate_tokens(block) <= CATALOG_TOKEN_BUDGET:
+            return block
+    return truncate_to_token_budget(block, CATALOG_TOKEN_BUDGET)
 
 
 def _one_npc(
@@ -447,9 +606,9 @@ def _npc_block(npcs: list[RpgNpc], sess: RpgSession, module: RpgModule) -> str:
 
     同 _state_block 的道理，但这里的后果更重：截断是从尾部切的，切掉的是
     整整一个人——而 mark_met 按「谁在场」标记、不看他的文字有没有活下来，
-    于是那个人的外貌**从此再也不会注入**。预算只有 NPC_TOKEN_BUDGET，
-    中文按 1.5 token/字算，全体在场角色加起来只有约 800 字，三个人同框
-    就已经到崖边了。
+    于是那个人的外貌**从此再也不会注入**。预算 NPC_TOKEN_BUDGET，中文按
+    1.5 token/字算，全体在场角色加起来约 6600 字——够五六个人各带一份完整
+    档案，但再多仍然会走到这条降级链上。
 
     在场的排前面：onstage_npcs 是按 sort_order 追加的，一个只是被提到名字
     的人能把真正站在跟前的人挤到后面、进而挤出预算。
@@ -458,11 +617,34 @@ def _npc_block(npcs: list[RpgNpc], sess: RpgSession, module: RpgModule) -> str:
     here = (sess.location or "").strip()
     # 稳定排序：同组内仍按 sort_order。地点为空时全员等价，不重排
     ordered = sorted(
-        npcs, key=lambda n: (npc_place(n, sess.slot, sess.npc_places) != here) if here else False
+        npcs,
+        key=lambda n: (
+            norm_name(npc_place(n, sess.slot, sess.npc_places)) != norm_name(here)
+            if here else False
+        ),
     )
 
+    roster = ""
+    if here:
+        local = [
+            n for n in ordered
+            if norm_name(npc_place(n, sess.slot, sess.npc_places)) == norm_name(here)
+        ]
+        if local:
+            roster = (
+                f"当前地点：{here}\n"
+                "下面列出的是地图中已经登记、此刻就在当前地点的角色。"
+                "优先让这些角色出场和互动；不要为同一职位、同一功能或同一场景另造一个有名 NPC。\n"
+                "如果玩家刚抵达或只是观察环境，开场先从这份名册中选合适的角色回应；"
+                "只有玩家明确避开人群、独处或要求新角色时才不让他们出场。\n"
+                "括号里的 ID 只供系统识别，不要写进正文。\n"
+                "地点角色名册：" + "、".join(
+                    f"{n.name}(ID:{n.id})" for n in local
+                ) + "\n\n"
+            )
+
     for examples, profile in ((True, True), (False, True), (False, False)):
-        block = "【在场】\n" + "\n\n".join(
+        block = "【在场】\n" + roster + "\n\n".join(
             _one_npc(n, sess, specs, examples, profile) for n in ordered
         )
         if estimate_tokens(block) <= NPC_TOKEN_BUDGET:
@@ -524,6 +706,24 @@ def facts_block(facts: list[str]) -> str:
     )
 
 
+def current_scene_block(sess: RpgSession, here: list[RpgNpc], mode: str) -> str:
+    location = (sess.location or "").strip() or "未登记地点"
+    lines = [
+        "【本轮当前场景 · 硬事实】",
+        f"玩家本轮开始时位于「{location}」。",
+        "历史消息中的地点属于过去；除非玩家本轮明确要求移动，不要把当前行动写成刚从其他地点出来。",
+    ]
+    slot = str(getattr(sess, "slot", "") or "").strip()
+    if slot:
+        lines.append(f"当前时间：第 {max(1, int(getattr(sess, 'day', 1) or 1))} 天 · {slot}。")
+    names = "、".join((npc.name or "").strip() for npc in here if (npc.name or "").strip())
+    if names:
+        lines.append(f"当前在场角色：{names}。")
+    elif mode != SOLO_MODE:
+        lines.append("当前没有登记在场角色。")
+    return "\n".join(lines)
+
+
 def _inject_judgement(messages: list[dict], judgement: dict) -> None:
     """判定块夹在玩家那句话的头和尾。必须在 _inject_by_depth 之后调用——
     depth=1 的世界书也落在这条消息上，判定块得排在它前面。
@@ -536,49 +736,124 @@ def _inject_judgement(messages: list[dict], judgement: dict) -> None:
     last["content"] = f"{head}\n\n{last['content']}\n\n{tail}"
 
 
+PLAYER_SLOT = "player"
+
+
+def message_slots(message: RpgMessage) -> list[str]:
+    """这条消息该记在哪几个格子里。
+
+    一个格子就是「一套独立的最近 N 条 + 一份自己的概要」：玩家一个，每个 NPC
+    一个。**记忆按格子分，而不是按一条大流水账切**——这是玩家要的那件事：
+    「和角色的对话单独存，上下文是她那边单独的最近 N 条外加摘要」。
+
+    - **玩家格永远有份**：发生在你眼前的事，没有你记不得的道理。这一条是
+      「走到别处就忘了刚才」那个 bug 的正解——原先 `present` 有人时只记进在场
+      那几个 NPC 的格子、玩家格不收，于是主卧那场戏只躺在对方名下；一走到别的
+      地点，窗口按**新地点**现算在场名单，对方那一格整个不进，原文和她那份概要
+      两头落空，模型转头就从更早的状态重讲。老消息（`present` 为 null / `[]`）
+      照旧进玩家格，等于维持「null = 对所有人可见」的老口径。
+    - `present` 有人 → **再**记进在场每一个人的格子。一场三个人的戏在三个格子
+      里各留一份，散场之后单独再遇见其中任何一个，她都还记得那场戏。
+
+    玩家格装全部，不等于她们互相知道：NPC 格仍然只收她自己在场的那些，压出来
+    的那份概要也只在她在跟前时注入。**GM 看得见全貌，她们看不见。**
+
+    群戏在多个格子里各留一份**是有意的**：她们各自记得自己那个角度。代价是
+    那一段会被压进好几份概要（各压各的），换来的是散场之后不丢。
+    """
+    slots = [PLAYER_SLOT]
+    if message.present:
+        slots.extend(str(i) for i in message.present)
+    return slots
+
+
+def slot_upto(sess: RpgSession, slot: str) -> int:
+    """这个格子已经压到第几条了。玩家格用老那两列，NPC 格用按 id 分格的那两列。"""
+    if slot == PLAYER_SLOT:
+        return int(sess.summarized_upto_id or 0)
+    try:
+        return int((sess.thread_upto or {}).get(slot, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def slot_summary(sess: RpgSession, slot: str) -> str:
+    if slot == PLAYER_SLOT:
+        return (sess.summary or "").strip()
+    return str((sess.thread_summaries or {}).get(slot, "") or "").strip()
+
+
+def slot_window(
+    module: RpgModule, sess: RpgSession, history: list[RpgMessage], slot: str,
+) -> list[RpgMessage]:
+    """一个格子自己的最近 N 条（已经压进它那份概要的不再发原文）。
+
+    **压缩必须调用这同一个函数来判断溢出**（见 `rpg_turn._maybe_summarize`）。
+    两边各写一遍筛选迟早会分叉，而分叉的那一次是静默丢记忆：这边不发原文、
+    那边不压进概要，指针却照样往前走。
+    """
+    limit = max(1, module.context_turns or 20) * 2
+    upto = slot_upto(sess, slot)
+    return [m for m in history if m.id > upto and slot in message_slots(m)][-limit:]
+
+
+def summary_block(sess: RpgSession, here: list[RpgNpc]) -> str:
+    """【此前剧情】：你自己那一份，加此刻在跟前的每个人各自那一份。
+
+    分段标出来源，不糊成一团：模型看到「（与柳如烟）」这个抬头才知道下面那段
+    是她也经历过的，敢直接接话；混在一起它会拿不准哪些能说出口。
+
+    额度按份数均分再拼，而不是拼完再从尾部切：从尾部切先切掉的正是排在后面的
+    NPC 那几份——偏偏是你正在跟她说话的那一份。
+    """
+    slots: list[tuple[str, str]] = [("你的经历", slot_summary(sess, PLAYER_SLOT))]
+    for npc in here:
+        slots.append((f"与{npc.name}", slot_summary(sess, str(npc.id))))
+    parts = [(title, text) for title, text in slots if text]
+    if not parts:
+        return ""
+    share = max(1, SUMMARY_TOKEN_BUDGET // len(parts))
+    body = "\n\n".join(
+        f"（{title}）\n{truncate_to_token_budget(text, share)}" for title, text in parts
+    )
+    return "【此前剧情】\n" + body
+
+
 def history_window(
     module: RpgModule,
     sess: RpgSession,
     history: list[RpgMessage],
-    focus_npc_id: int | None = None,
+    here_ids: set[int] | None,
 ) -> list[RpgMessage]:
-    """发原文的窗口：已压缩进概要的消息不再重复发。
+    """发原文的窗口：玩家那一格，加此刻在跟前的每个人那一格，按时间并起来。
 
     公开而不是私有：「帮我想想」也要按同一套规则取最近发生的事，
     两边各切一次的话，窗口的边界迟早对不上。
 
-    只剩一份概要指针了（历史统一成一条），所以不再按线取。原先那个 thread_id
-    参数是「传错线会让窗口按另一条线的进度去切，边界看着还很正常」的来源之一
+    `here_ids` 传 `None` 和传空集合，结果**一样**。原先这两支是不同的行为
+    （`None` = 不筛，空集 = 屋里没人所以要筛），区分它们是有意义的；玩家格
+    改成装全部消息之后（见 `message_slots`），「筛」这一支本来就不再筛掉
+    玩家的东西，两支于是重合。参数留着是因为各调用方各自能拿到什么不一样。
+
+    在场名单是**当场算出来的**，不是玩家在界面上点了谁。这一条是玩家报过的
+    那个失忆 bug 的正解：原先按 `focus_npc_id` 走两支，点了人才取她在场的
+    那些，没点就只取「人数 > 1 的群戏」。而面包屑上的「看全部」本来就是默认
+    态，于是跟她一对一聊十轮（`present=[5]`）之后随口再说一句，模型眼前只剩
+    开场白——真实存档里实测，32 条消息只剩 1 条。点谁只是界面上的筛选。
+
+    在场的人那一格是**额外**带进来的：把**她自己的**更早记忆也捞进这一轮，
+    这样走进她跟前时不必等她开口就能接上旧事。
+
+    **每格各取各的 N 条，不在合并之后再砍一刀**。砍了就会重演上面那个 bug 的
+    另一个版本：你一个人赶路四十轮，她那十几轮对话会被自己的脚步声挤出窗口，
+    而她那份概要还没到压缩线——于是又一次谁也不记得。合并只去重和排序。
     """
-    if focus_npc_id:
-        try:
-            upto = int((sess.thread_upto or {}).get(str(focus_npc_id), 0) or 0)
-        except (TypeError, ValueError):
-            upto = 0
-        visible = [
-            m for m in history
-            if m.present is None or focus_npc_id in (m.present or [])
-        ]
-    else:
-        upto = sess.summarized_upto_id or 0
-        # 无目标时是公共场景上下文，只保留公开消息和群戏消息。
-        # 单人私聊由对应 NPC 线承接，避免重新回到全量历史泄露问题。
-        first_message_id = min((m.id for m in history), default=0)
-        visible = [
-            m for m in history
-            if m.present is None
-            or len(m.present or []) > 1
-            or (m.id == first_message_id and m.role == "assistant")
-        ]
-    limit = max(1, module.context_turns or 20) * 2
-    return [m for m in visible if m.id > upto][-limit:]
-
-
-def summary_for_focus(sess: RpgSession, focus_npc_id: int | None = None) -> str:
-    """Return the summary visible to the current narration scope."""
-    if focus_npc_id:
-        return (sess.thread_summaries or {}).get(str(focus_npc_id), "") or ""
-    return sess.summary or ""
+    slots = [PLAYER_SLOT] + [str(i) for i in sorted(here_ids or ())]
+    picked: dict[int, RpgMessage] = {}
+    for slot in slots:
+        for m in slot_window(module, sess, history, slot):
+            picked[m.id] = m
+    return [picked[i] for i in sorted(picked)]
 
 
 def scene_block(sess: RpgSession, description: str, here: list[RpgNpc]) -> str:
@@ -595,6 +870,9 @@ def scene_block(sess: RpgSession, description: str, here: list[RpgNpc]) -> str:
       没进过上下文——作者写了一整段地窖的样子，模型一个字没见过
     - **在场名单**。`_npc_block` 给了每个人的设定，但那是「这一轮要注入的人」，
       含被提到但不在跟前的人；这一行专门回答「眼前站着谁」
+    - **这个地方现在的样子**（`place_notes` 里那一句）。地点描述是作者写死的
+      原样，被玩家改过的部分只在这一句里：门踹坏了、桌子掀了。它不进任何
+      记忆格——那是事实，不是叙事，压成梗概只会丢字（见 RpgSession.place_notes）
 
     description 由调用方查好传进来（`build_rpg_messages` 顺手查了 RpgLocation），
     这里保持纯函数：能直接测，也不用把整个 module 塞进来。
@@ -607,10 +885,21 @@ def scene_block(sess: RpgSession, description: str, here: list[RpgNpc]) -> str:
     parts: list[str] = []
     if name:
         text = (description or "").strip()
-        parts.append(f"地点：{name}" + (f"\n{text}" if text else ""))
+        # 近况跟在描述后面、单独一行：作者写的那段是这地方本来的样子，这一句
+        # 是被玩家改过的地方，混成一段模型分不清哪句能改、哪句是设定
+        note = place_note(sess, name)
+        parts.append(
+            f"地点：{name}"
+            + (f"\n{text}" if text else "")
+            + (f"\n现在：{note}" if note else "")
+        )
 
     # 在场名单。空名单也要写出来——「没有别人」和「没提」对模型是两回事，
-    # 不写的话它会照着上下文里的角色自己安排一个站到跟前
+    # 不写的话它会照着上下文里的角色自己安排一个站到跟前。
+    #
+    # 私聊时这份名单已经由调用方收窄成那一个人了：三处（在场名单、人设卡、
+    # 记忆归属）必须一起收窄，只收窄记忆那一处的话，模型看见这里还站着别人
+    # 就会让他插话，而那句话按私聊记账——他说过的话他自己不记得
     if here:
         parts.append("在场：" + "、".join((n.name or "").strip() for n in here))
     elif name:
@@ -653,7 +942,8 @@ async def build_rpg_messages(
     new_input: str,
     judgement: dict | None = None,
     facts: list[str] | None = None,
-    focus_npc_id: int | None = None,
+    mode: str = GROUP_MODE,
+    private_with: int | None = None,
 ) -> tuple[list[dict], dict]:
     """组装发给叙事模型的 messages，返回 (messages, diag)。
 
@@ -667,9 +957,33 @@ async def build_rpg_messages(
     （thread_id、scene_history）一个管「这一轮归哪条线」、一个管「把场面线借给
     角色线」，现在都没得借：所有消息本来就在同一条时间线上。
 
+    mode 是玩家在输入框上方明着选的那三个模式之一（群聊 / 私聊 / 独自行动），
+    private_with 只在私聊时有值。**这里和路由写 present 时必须算出同一份在场
+    名单**——那边决定这段话记进谁的记忆，这边决定模型看见谁站在跟前，两边差
+    一个人就会出「他说过的话他自己不记得」。
+
     creator_note 永不出现在返回值里。
     """
-    window = history_window(module, sess, history, focus_npc_id)
+    npcs = (await session.execute(
+        select(RpgNpc)
+        .where(RpgNpc.module_id == module.id)
+        .order_by(RpgNpc.sort_order, RpgNpc.id)
+    )).scalars().all()
+    # 真的在跟前的那几个。标记见过面只认这一份：onstage 里还含被提到的人，
+    # 他们的外貌这一轮发了，但人并没见到，不能算见过
+    here = here_npcs(list(npcs), sess.location, sess.slot, sess.npc_places)
+    # 在场名单要在窗口之前算：窗口按它筛（见 history_window）。用 turn_present
+    # 而不是上面这份 here，是为了和**写**消息那一刻用的是同一个定义——尤其是
+    # 「一个地点都没建的模组 = 所有人都在同一个场面里」那条兜底，两边必须一致，
+    # 否则那类模组写进去的 present 全员都有、读出来却按空名单筛，整段历史消失
+    present_npcs = turn_present(list(npcs), sess, mode, private_with)
+    present_set = {n.id for n in present_npcs}
+    # 私聊把**三处一起**收窄：记忆归属（present，路由那边）、人设卡、【场面】
+    # 名单。只收窄记忆那一处的话，模型看见屋里还站着别人就会让他插话，而那句
+    # 话按私聊记账——他说过的话他自己不记得
+    if mode == PRIVATE_MODE:
+        here = present_npcs
+    window = history_window(module, sess, history, present_set)
     # scan_depth=1 就只扫玩家刚发的这句。往回扫得越多，GM 自己的旁白越容易
     # 让词条反复命中——它提到了那个词，下一轮扫描又扫到，自己喂自己
     back = max(0, int(module.scan_depth or 3) - 1)
@@ -685,21 +999,27 @@ async def build_rpg_messages(
         .where(RpgWorldEntry.module_id == module.id)
         .order_by(RpgWorldEntry.sort_order, RpgWorldEntry.id)
     )).scalars().all()
-    npcs = (await session.execute(
-        select(RpgNpc)
-        .where(RpgNpc.module_id == module.id)
-        .order_by(RpgNpc.sort_order, RpgNpc.id)
-    )).scalars().all()
-    # 词条的数值条件里可以写「赫敏的好感≥50」，所以要先拿到 npcs 再筛词条
+    # 词条的数值条件里可以写「赫敏的好感≥50」，所以要先拿到 npcs 再筛词条。
+    # npcs 和 here 在上面（窗口之前）已经取过，这里不重取
     hits = triggered_entries(list(entries), scan_text, sess, list(npcs))
     onstage = onstage_npcs(
         list(npcs), sess.location, scan_text, sess.slot, sess.npc_places,
     )
-    # 真的在跟前的那几个。标记见过面只认这一份：npcs_onstage 里还含被提到的
-    # 人，他们的外貌这一轮发了，但人并没见到，不能算见过
-    here = here_npcs(list(npcs), sess.location, sess.slot, sess.npc_places)
     # 当前地点的描述。只按名字查一条——用不上整张表，多查的每一条都会在
     # 每轮上下文里凭空多算一次 token
+    # 模组的道具表和技能表。整表取而不是按背包筛——这一块的用处恰恰是告诉 GM
+    # 「还有哪些他没拿到的东西」，筛掉就等于又回到了它看不见的老样子
+    module_items = (await session.execute(
+        select(RpgItem)
+        .where(RpgItem.module_id == module.id)
+        .order_by(RpgItem.sort_order, RpgItem.id)
+    )).scalars().all()
+    module_skills = (await session.execute(
+        select(RpgSkill)
+        .where(RpgSkill.module_id == module.id)
+        .order_by(RpgSkill.sort_order, RpgSkill.id)
+    )).scalars().all()
+
     place_description = ""
     if (sess.location or "").strip():
         place_description = (await session.execute(
@@ -738,11 +1058,20 @@ async def build_rpg_messages(
 
     # 【你】排在【世界设定】之前：状态每轮都在变，世界书是静态背景，
     # 硬事实靠前。整体截断从尾部切，靠前的不会被切掉
-    state_block = _state_block(sess, module, here)
+    state_block = _state_block(sess, module, here, mode)
     sections.append(state_block)
 
-    if focus_npc_id:
-        context_npcs = [n for n in npcs if n.id == focus_npc_id]
+    # 【道具与技能】紧跟【你】：它解释的正是【你】那一段里列出来的那几件东西，
+    # 隔开就得让模型自己跨段对名字。也因为靠前，整段超预算从尾部切时它不会先没
+    catalog = catalog_block(module_items, module_skills, sess)
+    if catalog:
+        sections.append(catalog)
+
+    # 私聊只发她一个人的卡；群聊和独自行动发在场的加这一轮被提到的。
+    # 原先这里按 focus_npc_id（玩家在面包屑上点了谁）筛，和历史那边按在场筛
+    # 是两套口径并存：同屋的另一个人这一轮拿不到自己的设定，模型只能现编他
+    if mode == PRIVATE_MODE:
+        context_npcs = present_npcs
     else:
         context_npcs = onstage
     npc_block = _npc_block(context_npcs, sess, module) if context_npcs else ""
@@ -788,13 +1117,18 @@ async def build_rpg_messages(
     if (module.narration_sample or "").strip():
         sections.append("【叙事样例】\n" + module.narration_sample.strip())
 
-    # 取这条线自己那一份。**不能用一份全局概要**：概要注入的是 system，
-    # 一份全局概要注入每一条线，等于把你在密室里跟 A 说的话原样告诉 B
-    prior = summary_for_focus(sess, focus_npc_id).strip()
+    # 概要按格子注入，名单跟窗口用**同一份** present_npcs 而不是 here：那类
+    # 一个地点都没建的模组里 here 是空的，拿 here 拼的话她的原文发了、她那份
+    # 长期记忆却不发——正是上下文对不上的那种裂
+    # window_ids 让回忆块跳过窗口内的消息：那几条整段正文已经原样发出去了，
+    # 再摘一次纯属重复占额度
+    memories = event_memory(history, present_set, new_input,
+                            window_ids={m.id for m in window})
+    if memories:
+        sections.append(memories)
+    prior = summary_block(sess, present_npcs)
     if prior:
-        sections.append(
-            "【此前剧情】\n" + truncate_to_token_budget(prior, SUMMARY_TOKEN_BUDGET)
-        )
+        sections.append(prior)
 
     # 写作规则放 sections 末尾，同酒馆：它约束的是「怎么写」，最贴近本轮生成，
     # 排最后离叙事最近、模型最不会忽略。空即不注入
@@ -802,7 +1136,13 @@ async def build_rpg_messages(
     if rules_block:
         sections.append(rules_block)
 
-    system_content = truncate_to_token_budget("\n\n".join(sections), SYSTEM_TOKEN_BUDGET)
+    scene_anchor = current_scene_block(sess, here, mode)
+
+    anchor_budget = estimate_tokens(scene_anchor) + 2
+    system_content = truncate_to_token_budget(
+        "\n\n".join(sections), max(1, SYSTEM_TOKEN_BUDGET - anchor_budget),
+    )
+    system_content = f"{system_content}\n\n{scene_anchor}"
 
     messages = [{"role": "system", "content": system_content}]
     for m in window:
@@ -820,6 +1160,7 @@ async def build_rpg_messages(
     diag = {
         "system_tokens": estimate_tokens(system_content),
         "state_tokens": estimate_tokens(state_block),
+        "catalog_tokens": estimate_tokens(catalog),
         "meaning_tokens": estimate_tokens(meaning_block),
         "npc_tokens": estimate_tokens(npc_block),
         "chronicle_tokens": estimate_tokens(chronicle_block),
@@ -827,7 +1168,8 @@ async def build_rpg_messages(
         # 它每轮都在，大小只跟地点描述写多长有关
         "scene_tokens": estimate_tokens(scene),
         "history_count": len(window),
-        "focus_npc_id": focus_npc_id,
+        "mode": mode,
+        "private_with": private_with if mode == PRIVATE_MODE else None,
         # 时钟走到哪了。前端那一行诊断读这几个字段
         "slot": str(getattr(sess, "slot", "") or ""),
         "day": max(1, int(getattr(sess, "day", 1) or 1)),

@@ -43,6 +43,7 @@ class NovelUpdate(BaseModel):
     writer_temperature: Optional[float] = None
     writer_use_custom_temperature: Optional[bool] = None
     writer_max_tokens: Optional[int] = None
+    build_temperature: Optional[float] = None
     rolling_summary_count: Optional[int] = Field(default=None, ge=3, le=12)
     rag_top_k: Optional[int] = Field(default=None, ge=0, le=10)
     chat_context_rounds: Optional[int] = None
@@ -91,6 +92,7 @@ class NovelOut(BaseModel):
     writer_temperature: float
     writer_use_custom_temperature: bool
     writer_max_tokens: int
+    build_temperature: float = 0.7
     rolling_summary_count: int
     rag_top_k: int
     chat_context_rounds: int

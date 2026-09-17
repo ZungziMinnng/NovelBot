@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bot, Loader2, ChevronRight, SkipForward } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -7,40 +7,71 @@ import {
   type ChatSSEMessage, type RpgWizardExtract, type RpgWizardKnown, type RpgPlayStyle, type RpgWorldScope,
 } from '@/api/client'
 import { rpgApi } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
 import ChatSurface from '@/components/ChatSurface/ChatSurface'
 import type { ChatSurfaceMessage } from '@/components/ChatSurface/types'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import WizardApplyModal, { type WizardPicked } from './WizardApplyModal'
-import { WIZARD_STAGES } from './wizardStages'
+import { wizardStagesFor } from './wizardStages'
 
 interface Props {
   moduleId: number
   playStyle: RpgPlayStyle
   /** 把勾选后的内容写进模组：主表字段走 set，子表走各自的 create */
-  onApply: (picked: WizardPicked) => void
+  onApply: (picked: WizardPicked) => Promise<void>
 }
 
 const EMPTY_DRAFT: RpgWizardExtract = { dropped: [] }
 
-export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
-  const nsfwMode = useSettingsStore((s) => s.nsfwMode)
+interface PersistedWizardState {
+  messages?: ChatSurfaceMessage[]
+  stage?: number
+  settledStages?: string[]
+  worldScope?: RpgWorldScope
+  oneShotMode?: boolean
+  fullInstruction?: string
+  draft?: RpgWizardExtract
+  preview?: RpgWizardExtract | null
+}
 
-  const [messages, setMessages] = useState<ChatSurfaceMessage[]>([])
-  const [stage, setStage] = useState(-1)
-  const [worldScope, setWorldScope] = useState<RpgWorldScope>('region')
-  const [oneShotMode, setOneShotMode] = useState(false)
+function wizardStorageKey(moduleId: number, playStyle: RpgPlayStyle) {
+  return `novelbot:rpg-wizard:${moduleId}:${playStyle}`
+}
+
+function readWizardState(key: string): PersistedWizardState {
+  try {
+    const raw = window.localStorage.getItem(key)
+    return raw ? JSON.parse(raw) as PersistedWizardState : {}
+  } catch {
+    return {}
+  }
+}
+
+export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
+  const storageKey = wizardStorageKey(moduleId, playStyle)
+  const initial = useMemo(() => readWizardState(storageKey), [storageKey])
+  const [messages, setMessages] = useState<ChatSurfaceMessage[]>(() => initial.messages || [])
+  const [stage, setStage] = useState(() => initial.stage ?? -1)
+  const [worldScope, setWorldScope] = useState<RpgWorldScope>(() => initial.worldScope || 'region')
+  const [oneShotMode, setOneShotMode] = useState(() => !!initial.oneShotMode)
   const [generatingFull, setGeneratingFull] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [waiting, setWaiting] = useState(false)
   const [model, setModel] = useState('')
+  // 抽取/整套生成的**起始**温度。后端那个 0.1 的兜底档始终保留，调这个只影响第一次尝试。
+  // 不持久化——这个旋钮偶尔才动一次，聊天那一轮的温度用的是模组自己的温度字段
+  const [extractTemp, setExtractTemp] = useState(0.3)
   const [extracting, setExtracting] = useState(false)
-  const [fullInstruction, setFullInstruction] = useState('')
+  const [applying, setApplying] = useState(false)
+  const applyingRef = useRef(false)
+  const [fullInstruction, setFullInstruction] = useState(() => initial.fullInstruction || '')
   // 跨步累积的抽取结果。每步只抽自己那一摊，合并进来，最后一次性预览
-  const [draft, setDraft] = useState<RpgWizardExtract>(EMPTY_DRAFT)
-  const [preview, setPreview] = useState<RpgWizardExtract | null>(null)
+  const [draft, setDraft] = useState<RpgWizardExtract>(() => initial.draft || EMPTY_DRAFT)
+  const [preview, setPreview] = useState<RpgWizardExtract | null>(() => initial.preview || null)
+  const wizardStages = useMemo(() => wizardStagesFor(playStyle), [playStyle])
+  const [settledStages, setSettledStages] = useState<string[]>(() => initial.settledStages
+    ?? wizardStages.filter(step => countStage(initial.draft || EMPTY_DRAFT, step.id) > 0).map(step => step.id))
 
-  const lastStage = WIZARD_STAGES.length - 1
+  const lastStage = wizardStages.length - 1
 
   const { data: modelLibrary = [] } = useQuery({
     queryKey: ['model-library'],
@@ -51,6 +82,14 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   const abortRef = useRef<AbortController | null>(null)
   const fullRequestRef = useRef(0)
   useEffect(() => () => { abortRef.current?.abort() }, [])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify({
+        messages, stage, settledStages, worldScope, oneShotMode, fullInstruction, draft, preview,
+      } satisfies PersistedWizardState))
+    } catch { }
+  }, [storageKey, messages, stage, settledStages, worldScope, oneShotMode, fullInstruction, draft, preview])
 
   /** 前面几步已定的名字，喂给后面步骤的抽取当白名单 */
   const knownFromDraft = useCallback((d: RpgWizardExtract): RpgWizardKnown => ({
@@ -80,14 +119,13 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     setMessages([...history, { role: 'assistant', content: '' }])
     setIsStreaming(true)
     setWaiting(true)
-    const stageId = stageIndex >= 0 ? WIZARD_STAGES[stageIndex].id : ''
+    const stageId = stageIndex >= 0 ? wizardStages[stageIndex].id : ''
 
     abortRef.current = streamRpgWizard(
       moduleId,
       {
         messages: history.map(m => ({ role: m.role, content: m.content })),
         model,
-        nsfw: nsfwMode,
         stage: stageId,
         confirmed: stageId ? confirmed : '',
         play_style: playStyle,
@@ -107,7 +145,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
       },
       () => { setIsStreaming(false); setWaiting(false) },
     )
-  }, [moduleId, model, nsfwMode, playStyle, worldScope])
+  }, [moduleId, model, playStyle, worldScope, wizardStages])
 
   const generateFull = useCallback(async (text: string, originalInstruction = text) => {
     if (!text || isStreaming || generatingFull) return
@@ -120,9 +158,9 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     try {
       const result = await rpgApi.modules.wizardGenerate(moduleId, {
         instruction: text,
-        nsfw: nsfwMode,
         model,
         world_scope: worldScope,
+        temperature: extractTemp,
       })
       if (requestId !== fullRequestRef.current) return
       setMessages([...history, {
@@ -134,11 +172,14 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
       setPreview(result)
     } catch (err) {
       if (requestId !== fullRequestRef.current) return
+      const detail = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail
+      const message = detail || String(err)
       setMessages([...history, {
         role: 'assistant',
-        content: `[生成失败] ${String(err)}`,
+        content: `[生成失败] ${message}`,
       }])
-      toast.error(`整套生成失败：${String(err)}`)
+      toast.error(`整套生成失败：${message}`)
     } finally {
       if (requestId === fullRequestRef.current) {
         setGeneratingFull(false)
@@ -146,7 +187,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         setWaiting(false)
       }
     }
-  }, [messages, moduleId, model, nsfwMode, worldScope, isStreaming, generatingFull])
+  }, [messages, moduleId, model, worldScope, extractTemp, isStreaming, generatingFull])
 
   const send = useCallback((text: string, base?: ChatSurfaceMessage[]) => {
     if (!text || isStreaming || generatingFull) return
@@ -162,14 +203,14 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   }, [isStreaming, generatingFull, oneShotMode, generateFull, messages, stage, run, draft, confirmedText])
 
   const goToStage = useCallback((index: number, base?: ChatSurfaceMessage[], d?: RpgWizardExtract) => {
-    const target = WIZARD_STAGES[index]
+    const target = wizardStages[index]
     setOneShotMode(false)
     setStage(index)
     run([
       ...(base ?? messages),
       { role: 'user', content: target.opener, kind: 'stage', label: `第 ${index + 1} 步 · ${target.label}` },
     ], index, confirmedText(d ?? draft))
-  }, [messages, run, draft, confirmedText])
+  }, [messages, run, draft, confirmedText, wizardStages])
 
   const stop = useCallback(() => {
     abortRef.current?.abort()
@@ -180,54 +221,68 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   }, [])
 
   /** 抽当前这一步，合并进 draft。返回合并后的 draft（调用方接着用它进下一步） */
-  const extractCurrent = useCallback(async (): Promise<RpgWizardExtract> => {
-    const stageId = WIZARD_STAGES[stage].id
+  const extractCurrent = useCallback(async (index = stage, base = draft): Promise<RpgWizardExtract> => {
+    const target = wizardStages[index]
     const transcript = messages.filter(m => m.kind !== 'stage' && m.content)
-    const result = await rpgApi.modules.wizardExtract(moduleId, {
-      stage: stageId,
-      messages: transcript.map(m => ({ role: m.role, content: m.content })),
-      known: knownFromDraft(draft),
-      model,
-    })
-    const merged = mergeStage(draft, result)
-    setDraft(merged)
-    return merged
-  }, [stage, messages, moduleId, draft, knownFromDraft, model])
+    try {
+      const result = await rpgApi.modules.wizardExtract(moduleId, {
+        stage: target.id,
+        messages: transcript.map(m => ({ role: m.role, content: m.content })),
+        known: knownFromDraft(base),
+        model,
+        temperature: extractTemp,
+      })
+      const merged = mergeStage(base, result)
+      setDraft(merged)
+      setSettledStages(prev => Array.from(new Set([...prev, target.id])))
+      return merged
+    } catch (err) {
+      throw new Error(`「${target.label}」抽取失败：${wizardErrorMessage(err)}`)
+    }
+  }, [stage, messages, moduleId, draft, knownFromDraft, model, extractTemp, wizardStages])
 
   const handleNext = useCallback(async () => {
     if (isStreaming || extracting || stage >= lastStage) return
     setExtracting(true)
-    let merged = draft
     try {
-      merged = await extractCurrent()
-      const n = countStage(merged, WIZARD_STAGES[stage].id)
-      toast.success(n ? `这步收下了 ${n} 项` : '这步还没聊出能收的内容')
+      const merged = await extractCurrent()
+      const count = countStage(merged, wizardStages[stage].id)
+      if (!count) {
+        toast.error('这步没有抽取到内容，请补充或确认方案后重试；不需要这一步可点“跳过”')
+        return
+      }
+      toast.success(`这步收下了 ${count} 项`)
+      goToStage(stage + 1, undefined, merged)
     } catch (err) {
-      toast.error(`这步没抽出来，先往下走：${err}`)
+      toast.error(`${wizardErrorMessage(err)}。已保留当前步骤，请重试`)
     } finally {
       setExtracting(false)
     }
-    goToStage(stage + 1, undefined, merged)
-  }, [isStreaming, extracting, stage, lastStage, draft, extractCurrent, goToStage])
+  }, [isStreaming, extracting, stage, lastStage, extractCurrent, goToStage, wizardStages])
 
   const handleSkip = useCallback(() => {
     if (isStreaming || extracting || stage >= lastStage) return
+    setSettledStages(prev => Array.from(new Set([...prev, wizardStages[stage].id])))
     goToStage(stage + 1)
-  }, [isStreaming, extracting, stage, lastStage, goToStage])
+  }, [isStreaming, extracting, stage, lastStage, goToStage, wizardStages])
 
-  /** 最后一步：抽这步 + 弹全量预览 */
   const handleFinish = useCallback(async () => {
     if (isStreaming || extracting) return
     setExtracting(true)
     try {
-      const merged = stage >= 0 ? await extractCurrent() : draft
+      let merged = draft
+      for (let index = 0; index <= stage; index++) {
+        if (index === stage || !settledStages.includes(wizardStages[index].id)) {
+          merged = await extractCurrent(index, merged)
+        }
+      }
       setPreview(merged)
     } catch (err) {
-      toast.error(`抽取失败：${err}`)
+      toast.error(`${wizardErrorMessage(err)}。已保留对话和已抽取内容，请重试`)
     } finally {
       setExtracting(false)
     }
-  }, [isStreaming, extracting, stage, draft, extractCurrent])
+  }, [isStreaming, extracting, stage, draft, settledStages, wizardStages, extractCurrent])
 
   const handleEditAt = useCallback(async (index: number, text: string) => {
     if (messages[index]?.role === 'assistant') {
@@ -250,16 +305,29 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     stop()
     setMessages([])
     setStage(-1)
+    setSettledStages([])
     setOneShotMode(false)
     setWorldScope('region')
     setGeneratingFull(false)
     setFullInstruction('')
     setDraft(EMPTY_DRAFT)
-  }, [messages.length, stop])
-
-  const handleApply = useCallback((picked: WizardPicked) => {
     setPreview(null)
-    onApply(picked)
+    try { window.localStorage.removeItem(storageKey) } catch { }
+  }, [messages.length, stop, storageKey])
+
+  const handleApply = useCallback(async (picked: WizardPicked) => {
+    if (applyingRef.current) return
+    applyingRef.current = true
+    setApplying(true)
+    try {
+      await onApply(picked)
+      setPreview(null)
+    } catch (err) {
+      toast.error(`回填失败：${wizardErrorMessage(err)}。可重试，已写入的同名条目会自动跳过`)
+    } finally {
+      applyingRef.current = false
+      setApplying(false)
+    }
   }, [onApply])
 
   const handleRegenerate = useCallback(() => {
@@ -268,8 +336,8 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     void generateFull(`请基于上次想法重新随机生成一套不同方案：${fullInstruction}`, fullInstruction)
   }, [fullInstruction, generatingFull, generateFull])
 
-  const busy = isStreaming || extracting || generatingFull
-  const current = stage >= 0 ? WIZARD_STAGES[stage] : null
+  const busy = isStreaming || extracting || generatingFull || applying
+  const current = stage >= 0 ? wizardStages[stage] : null
 
   return (
     <>
@@ -289,22 +357,32 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
             ? '例如：一个发生在雨夜港口的失忆侦探故事'
             : '请选择一种构思方式后再输入...'}
         headerExtra={
-          <select
-            value={model}
-            onChange={e => setModel(e.target.value)}
-            disabled={isStreaming}
-            className="text-xs border rounded px-2 py-1 bg-background focus:outline-none max-w-[160px]"
-          >
-            <option value="">模组默认模型</option>
-            {chatModels.map(m => (
-              <option key={m.id} value={String(m.id)}>[{m.provider}] {m.display_name || m.model_id}</option>
-            ))}
-          </select>
+          <>
+            <select
+              value={model}
+              onChange={e => setModel(e.target.value)}
+              disabled={isStreaming}
+              className="text-xs border rounded px-2 py-1 bg-background focus:outline-none max-w-[160px]"
+            >
+              <option value="">模组默认模型</option>
+              {chatModels.map(m => (
+                <option key={m.id} value={String(m.id)}>[{m.provider}] {m.display_name || m.model_id}</option>
+              ))}
+            </select>
+            <input
+              type="number" min={0} max={1.5} step={0.05}
+              value={extractTemp}
+              onChange={e => setExtractTemp(Number(e.target.value))}
+              disabled={busy}
+              title="抽取和「一句话生成整套」的温度。低了字段更规整，高了内容更放得开；JSON 崩了仍会自动降到 0.1 重试一次。默认 0.30。聊天那一轮用的是模组自己的温度"
+              className="w-14 text-xs border rounded px-1.5 py-1 bg-background focus:outline-none disabled:opacity-40"
+            />
+          </>
         }
         belowHeader={current && (
           <div className="px-4 py-2.5 border-b bg-muted/30 shrink-0 space-y-2">
             <div className="flex items-center gap-1">
-              {WIZARD_STAGES.map((s, i) => (
+              {wizardStages.map((s, i) => (
                 <div
                   key={s.id}
                   title={s.label}
@@ -314,7 +392,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
             </div>
             <div className="flex items-end justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-xs font-medium">第 {stage + 1}/{WIZARD_STAGES.length} 步 · {current.label}</p>
+                <p className="text-xs font-medium">第 {stage + 1}/{wizardStages.length} 步 · {current.label}</p>
                 <p className="text-xs text-muted-foreground truncate">{current.hint}</p>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
@@ -411,7 +489,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
             )}
             {!oneShotMode && (
               <ol className="mt-4 space-y-1">
-                {WIZARD_STAGES.map((s, i) => (
+                {wizardStages.map((s, i) => (
                   <li key={s.id} className="text-xs text-muted-foreground/70">
                     {i + 1}. {s.label}<span className="text-muted-foreground/50">　{s.hint}</span>
                   </li>
@@ -424,6 +502,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
       {preview && (
         <WizardApplyModal
           draft={preview}
+          applying={applying}
           onCancel={() => setPreview(null)}
           onApply={handleApply}
           onRegenerate={oneShotMode ? handleRegenerate : undefined}
@@ -455,6 +534,12 @@ function patchLast(msgs: ChatSurfaceMessage[], updater: (content: string) => str
   const last = msgs[msgs.length - 1]
   if (!last || last.role !== 'assistant') return msgs
   return [...msgs.slice(0, -1), { ...last, content: updater(last.content) }]
+}
+
+function wizardErrorMessage(error: unknown): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** 把一步的抽取合并进累积 draft。每步字段不重叠，dropped 追加去重 */

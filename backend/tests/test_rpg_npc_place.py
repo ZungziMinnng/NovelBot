@@ -27,7 +27,8 @@ from app.agents.rpg_turn import _place_block
 from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
-from app.models.rpg import RpgLocation, RpgModule, RpgNpc, RpgSession
+from app.models.rpg import RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession
+from app.services.rpg_settlement import DOMAINS, capture, seed_settlement
 from app.services.rpg_context import here_npcs, named_npcs, npc_place, onstage_npcs
 from app.services.rpg_state import advance_slot, apply_npc_place, apply_state_delta
 
@@ -323,6 +324,17 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
     async def _run(self, narration: str, reply: dict):
         """跑一次结算，返回（结果, 模型收到的提示词）。"""
         prompts = []
+        async with self.sessions() as store:
+            sess = await store.get(RpgSession, self.session_id)
+            npc = await store.get(RpgNpc, self.npc_id)
+            present = [npc.id] if npc_place(npc, sess.slot, sess.npc_places) == sess.location else []
+            row = RpgMessage(session_id=sess.id, role="assistant", content=narration, present=present,
+                             settlement=seed_settlement(sess, 0, capture(sess), "", None, "group", None, present))
+            store.add(row)
+            await store.commit()
+            message_id = row.id
+        reply = {**reply, "checks": {domain: "changed" if any(reply.get(key) for key in keys) else "unchanged" for domain, keys in DOMAINS.items()},
+                 "events": [{"kind": "move", "quote": narration, "domains": ["scene"]}] if reply else []}
 
         async def fake_call_json(messages, *a, **kw):
             prompts.append(messages[0]["content"])
@@ -331,7 +343,7 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
              patch.object(rpg_turn, "call_json", fake_call_json):
             got = await rpg_turn._settle(
-                self.session_id, 0, narration, "", "",
+                self.session_id, message_id, narration, "", "",
             )
         return got, prompts[0]
 
@@ -351,7 +363,7 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_nobody_in_the_text_means_the_field_is_never_offered(self):
         # 一个字都不提，模型也就不会想起要挪谁
         _got, prompt = await self._run("你一个人在屋里坐了会儿。", {})
-        self.assertNotIn("npc_places", prompt)
+        self.assertIn("角色表：[]", prompt)
 
     async def test_the_move_lands_and_reaches_the_frontend(self):
         got, _prompt = await self._run(

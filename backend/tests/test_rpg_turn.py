@@ -48,8 +48,10 @@ class _Base(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
              patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake_dispatch):
+            # here_ids=None：这一组钉的是窗口怎么切和 prompt 里有什么，
+            # 在场筛选由 test_rpg_summary.py 的 WindowTests 单独钉
             result = await rpg_turn.suggest_actions(
-                module or _module(), sess or _session(), history or [],
+                module or _module(), sess or _session(), history or [], None,
             )
         return result, captured
 
@@ -124,7 +126,7 @@ class SuggestTests(_Base):
         with patch.object(rpg_turn.llm_client, "get_agent_client", side_effect=ValueError("模型不存在")):
             with self.assertRaises(ValueError):
                 await rpg_turn.suggest_actions(
-                    _module(), _session(), _history(("user", "我推开门"))
+                    _module(), _session(), _history(("user", "我推开门")), None,
                 )
 
 

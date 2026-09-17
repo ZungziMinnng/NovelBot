@@ -4,19 +4,26 @@
 
 === 玩家当前状态 ===
 {% for key, value in stats.items() %}{{ key }} {{ value }}　{% endfor %}
-位置：{{ location or "未知" }}
+位置：{{ location or "未知" }}{% if place_note %}（这个地方现在的样子：{{ place_note }}）{% endif %}
 背包：{% if inventory %}{% for item in inventory %}{{ item.name }}×{{ item.qty }}{% if not loop.last %}、{% endif %}{% endfor %}{% else %}空{% endif %}
 {%- if flags %}
 当前处境：{% for key, value in flags.items() %}{{ key }}={{ value }}{% if not loop.last %}；{% endif %}{% endfor %}
 {%- endif %}
 {%- if npcs %}
-在场角色：{% for npc in npcs %}{{ npc.name }}{% if npc.notes %}（{% for key, value in npc.notes.items() %}{{ key }}：{{ value }}{% if not loop.last %}；{% endif %}{% endfor %}）{% endif %}{% if not loop.last %}、{% endif %}{% endfor %}
+在场角色：
+{%- for npc in npcs %}
+- {{ npc.name }}{% if npc.relations %}｜当前关系：{% for key, value in npc.relations.items() %}{{ key }} {{ value }}{% if not loop.last %}、{% endif %}{% endfor %}{% endif %}{% if npc.notes %}｜近况：{% for key, value in npc.notes.items() %}{{ key }}：{{ value }}{% if not loop.last %}；{% endif %}{% endfor %}{% endif %}
+{%- endfor %}
 {%- endif %}
 {%- if note_keys %}
 已经在用的近况键名：{% for name in note_keys %}{{ name }}{% if not loop.last %}、{% endif %}{% endfor %}
 {%- endif %}
 {%- if relation_names %}
 可改的关系数值：{% for name in relation_names %}{{ name }}{% if not loop.last %}、{% endif %}{% endfor %}
+上面每个人的当前关系数字已经给你了。你写的是**增量**（这一轮变了多少），不是改成多少。已经很高的还要再涨，得是正文里真的又发生了够分量的事。
+{%- endif %}
+{%- if step_caps %}
+每轮变化上限：{% for name, cap in step_caps.items() %}{{ name }} 最多 ±{{ cap }}{% if not loop.last %}、{% endif %}{% endfor %}。超出的部分会被直接截掉，写多了没用。
 {%- endif %}
 {% if engine_note %}
 === 已经结算过的部分 ===
@@ -26,6 +33,15 @@
 {%- if outcome_label %}
 === 本回合的判定结果 ===
 {{ outcome_label }}
+{%- if outcome_failed %}
+**这是一次失败，失败必须留下代价。** 扣一项数值、立一条处境标记、或者降一段关系，至少要有一样，并在 events 里附上正文里对应的那句话。一份什么都没变的结算等于这次失败没有发生过。
+{%- endif %}
+{%- endif %}
+{%- if tasks %}
+
+=== 玩家手上还没办完的事 ===
+{% for task in tasks %}- {{ task.name }}{% if task.goal %}｜办完的标准：{{ task.goal }}{% endif %}
+{% endfor %}
 {%- endif %}
 {%- if chronicle %}
 
@@ -47,8 +63,16 @@
  "npc_notes": {"赫敏": {"伤势": "左肩中刀，没包扎", "身上带着": "一把猎枪"}},
  "inventory": [{"name": "铁钥匙", "qty": 1, "note": "沾着锈"}, {"name": "火把", "qty": -1}],
  "location": "地窖",
+ "place_notes": {"地窖": "门被踹坏了，合不上"},
  "flags": {"地窖门已开": true, "火把还亮着": null},
+ "discoveries": {"characters": [{"name": "老周", "hint": "守夜的老周提着灯从巷口过来"}], "places": [{"name": "地窖", "hint": "他掀开草席，底下是通往地窖的木梯"}], "items": [{"name": "石碾", "hint": "墙角立着一台半人高的石碾，缝里嵌着干透的黑渣"}], "skills": [], "tasks": []},
+{%- if tasks %}
+ "task_updates": [{"name": "去后巷见老周", "action": "done", "reason": "正文里能看出这桩事了结了的那一句"}],
+{%- endif %}
  "outcome_consistent": true,
+{%- if has_clock %}
+ "scene_wrapped": false,
+{%- endif %}
  "suggestions": ["顺着楼梯继续往下", "先把门闩回去", "喊一声看有没有人应"]}
 
 字段说明（没有变化的字段直接省略，不要写 0 或空对象）：
@@ -60,8 +84,25 @@
 - inventory：背包增减。qty 是**带符号的增量**，拿到写正数，用掉或失去写负数。name 尽量和背包里已有的写法一致。note 是这件东西的来历或样子，第一次加进背包时强烈建议写上。
   **只有真的不在手上了才写负数**：吃掉、烧掉、送人、被抢、丢了。收进口袋、藏起来、锁进自己的抽屉、寄存在自己房间——东西还是你的，一律**不要写负数**，那是描写，不是失去。
 - location：**只有玩家真的换了地方才写**，还在原地就省略。
+- place_notes：**留在这个地方本身、下次回来还看得见**的样子，按地名写，一个地方**只写一句**（20 字以内），新的会盖掉旧的。门被踹坏了、桌子掀翻了、血迹还在地上、灯被点亮了——这类人走了它还在的事才写。人的动作、对话、心情、随身的东西都不是这里的事（那是 npc_notes）。恢复原样了就写 null。没有这类变化就省略整个字段。
+  地名**只能写你这一轮待过的那个（或那两个）地方**，别去改一个只是被提起过的地方。
 - flags：剧情开关，**扁平的键值对，不要嵌套**。同名的键会被覆盖，新键会被追加，值写 null 表示这条不再成立、要删掉。键用一句短话（"地窖门已开"），别用英文缩写。
+- discoveries：这段剧情里**第一次出场、而且下面「正文实体候选」和角色表/地点表里都没有**的人、地方、东西、本事、差事。**这一项和上面几项一样重要**：漏报一个人，下一轮 GM 就不认识他，剧情会自己把他忘掉。所以**这一段有名有姓地出场过的人、走进去过的地方，都要报上来**。
+  分五类：characters（有名有姓、能再见到的人。有确定称呼的也算——"柳娘子""守夜的老周"都算，只有"一个路过的汉子"这种不算）、places（能走进去、以后还能再去的地方。**不必有专名**——小巷、公寓、卧室、后院、澡堂这种大白话地名照样要报，玩家这一段真的走进去过就算，路过也算。名字可以带个归属把它认出来：正文写「她的公寓门前」，就报「纲手的公寓」。一个已有地点里头的屋子（「卧室」在「纲手的公寓」里）也是一个地方，该报）、items（正文里**出场了、但玩家这一轮并没有拿走**的东西：墙上挂的刀、屋里那台机器、供桌上的铜炉。玩家真拿到手的东西**写在 inventory 里就够了，不要在这里再报一遍**，那一路会另外问玩家认不认）、skills（玩家这一段**真的学会或练成**的一招，有名字、以后还能再使）、tasks（玩家这一段**明确应承下来或被指派**的一桩事，有个办得完的目标。别人开口求你、托你、约你，你这一段点头了，就是一桩——不必等到出发。它的 name 由你自己起一句短标签，「陪雏田去集市」这样，**不必是正文里的原话**；hint 抄玩家应承的那一句）。
+  每条写 `{"name": "名字", "hint": "正文里能看出他是谁的那一句"}`。
+  **hint 必须从正文里整句抄下来，一个字都不能改、不能自己概括**——写"他好像教了你什么招式"这种总结句，这一条会被直接丢掉，等于没报。抄不出对应的原句，就说明这一条本来也不该报。
+  不报的只有这几种：**人**里没名字的统称（"一群山匪""一个路过的汉子"）、只被提到一嘴、这一段没真出场的传说人物、玩家随口打的比方。**这一条只管人，不管地方**——地方本来就大多是大白话名字，别拿它把地点筛掉。skills 只报玩家自己会了的，别人使的招不算；tasks 只报玩家点头接下的，心里想想、别人随口一提都不算。
+  重复报了不要紧——已经登记过的会在后面自动筛掉，**漏报才是要紧的**。真的什么新东西都没出现，才五类都给空数组。
+{%- if tasks %}
+- task_updates：上面「还没办完的事」里，这段剧情**看得出已经了结**的那几桩。name **必须原样抄自那份清单**，清单上没有的一律不写；action 只能是 done（办成了）或 failed（彻底办砸了、再也办不成了）；reason **必须逐字摘自正文**。
+  判定只看清单里给的「办完的标准」，差一步都不算——人还在路上、只是答应了、只是打听到消息，都不是 done。拿不准就不写。没有就省略这个字段。
+  这一项**不会直接改任何东西**，只是弹一句话问玩家「这桩事算办完了吗」，由玩家自己点头。
+{%- endif %}
 {%- if outcome_label %}
 - outcome_consistent：上面那段剧情，是不是真的体现了「{{ outcome_label }}」这个判定结果？如果剧情把失败写成了成功、或者把代价含糊过去了，这里写 false。**这一项要诚实，它不会被用来改写剧情，只是提醒玩家。**
+{%- endif %}
+{%- if has_clock %}
+- scene_wrapped：这一幕是不是收尾了——事情办完了、话说完了、人走了、场面自然静下来了。是就写 true，还在半途（话说到一半、正打着、正等着谁回答）就写 false 或省略。
+  写 true 至少会让界面上那颗「结束这个时段」的按钮亮一下；有些模组里它还会**真的占掉玩家一格时间**，格子用完时段就翻篇。所以拿不准就省略，不要为了让剧情"有进展"而写 true。
 {%- endif %}
 - suggestions：3 条玩家接下来可能做的事，每条 20 字以内，方向要拉开，用第一人称口吻，能直接当成一句话发出去。

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle, XCircle, Loader2, Save, Key, Radio, RadioTower, Plus, Pencil, Trash2, X, RefreshCw } from 'lucide-react'
-import { settingsApi, modelLibraryApi, providersApi, authApi, PROVIDER_PRESETS, modelSelectValue, findModelEntry, type ModelEntry, type ApiProvider } from '@/api/client'
+import { settingsApi, modelLibraryApi, providersApi, authApi, PROVIDER_PRESETS, modelSelectValue, findModelEntry, type ModelEntry, type ApiProvider, type ComfyStatus } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useAuthStore } from '@/store/authStore'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
@@ -86,6 +86,9 @@ export default function Settings() {
   const [deepseekFastThinking, setDeepseekFastThinking] = useState('off')
   const [httpsProxy, setHttpsProxy] = useState('')
   const [httpProxy, setHttpProxy] = useState('')
+  const [comfyUrl, setComfyUrl] = useState('')
+  const [comfyChecking, setComfyChecking] = useState(false)
+  const [comfyStatus, setComfyStatus] = useState<ComfyStatus | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testModel, setTestModel] = useState('')
@@ -148,6 +151,7 @@ export default function Settings() {
       review_interval: number
       https_proxy: string
       http_proxy: string
+      comfyui_base_url: string
       deepseek_fast_thinking: string
     }) => {
       if (cancelled) return
@@ -164,6 +168,7 @@ export default function Settings() {
       setReviewInterval(s.review_interval ?? 10)
       setHttpsProxy(s.https_proxy || '')
       setHttpProxy(s.http_proxy || '')
+      setComfyUrl(s.comfyui_base_url || '')
       setDeepseekFastThinking(s.deepseek_fast_thinking || 'off')
     }).catch(() => {})
     return () => { cancelled = true }
@@ -200,6 +205,7 @@ export default function Settings() {
     review_interval: reviewInterval,
     https_proxy: httpsProxy,
     http_proxy: httpProxy,
+    comfyui_base_url: comfyUrl,
     deepseek_fast_thinking: deepseekFastThinking,
   })
 
@@ -227,6 +233,20 @@ export default function Settings() {
       refetchProxy()
     } finally {
       setSaving(false)
+    }
+  }
+
+  /** 探的是后端内存里那份地址，不是输入框里的，所以先存再探。 */
+  const testComfy = async () => {
+    setComfyChecking(true)
+    setComfyStatus(null)
+    try {
+      await settingsApi.update(buildSettingsPayload())
+      setComfyStatus(await settingsApi.comfyStatus())
+    } catch {
+      setComfyStatus({ reachable: false, base_url: comfyUrl, detail: '探测请求失败' })
+    } finally {
+      setComfyChecking(false)
     }
   }
 
@@ -416,6 +436,87 @@ export default function Settings() {
     if (apiFormat === 'anthropic') return 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'
     return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
   }
+
+  const renderProviderForm = () => (
+    <div className="border rounded-lg p-4 bg-muted/30 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">{editingProviderId ? '编辑供应商' : '添加供应商'}</span>
+        <button onClick={resetProviderForm} className="p-1 rounded hover:bg-muted">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium mb-1 block">供应商名称 *</label>
+          <input
+            value={providerName}
+            onChange={e => setProviderName(e.target.value)}
+            placeholder="例：AiHubMix"
+            className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">API 格式</label>
+          <select
+            value={providerApiFormat}
+            onChange={e => setProviderApiFormat(e.target.value)}
+            className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value="openai">OpenAI 兼容</option>
+            <option value="gemini">Gemini</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-medium mb-1 block">Base URL</label>
+        <input
+          value={providerBaseUrl}
+          onChange={e => setProviderBaseUrl(e.target.value)}
+          placeholder="https://api.example.com/v1"
+          className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+        />
+      </div>
+      <div>
+        <label className="text-xs font-medium mb-1 block">API Key</label>
+        <input
+          type="password"
+          value={providerApiKey}
+          onChange={e => setProviderApiKey(e.target.value)}
+          placeholder={editingProviderId ? '留空保持当前 Key 不变' : '输入 API Key'}
+          className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium">经代理访问（socket）</p>
+          <p className="text-[0.6875rem] text-muted-foreground mt-0.5">
+            被墙的中转站（如 aihubmix）开启；可直连的（如 DeepSeek）关闭，即使配了全局代理也直连。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setProviderUseProxy(v => !v)}
+          className={`shrink-0 w-10 h-6 rounded-full transition-colors relative ${providerUseProxy ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+        >
+          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${providerUseProxy ? 'translate-x-5' : 'translate-x-1'}`} />
+        </button>
+      </div>
+      <div className="flex gap-2 justify-end">
+        <button onClick={resetProviderForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          取消
+        </button>
+        <button
+          onClick={handleProviderSubmit}
+          disabled={!providerName.trim() || providerSaving}
+          className="text-sm px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
+        >
+          {providerSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          {editingProviderId ? '保存修改' : '添加'}
+        </button>
+      </div>
+    </div>
+  )
 
   const renderModelForm = () => (
     <div className="border rounded-lg p-4 bg-muted/30 space-y-4">
@@ -626,86 +727,9 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Add / Edit provider form */}
-          {showProviderForm && (
-            <div className="border rounded-lg p-4 mb-4 bg-muted/30 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">{editingProviderId ? '编辑供应商' : '添加供应商'}</span>
-                <button onClick={resetProviderForm} className="p-1 rounded hover:bg-muted">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium mb-1 block">供应商名称 *</label>
-                  <input
-                    value={providerName}
-                    onChange={e => setProviderName(e.target.value)}
-                    placeholder="例：AiHubMix"
-                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium mb-1 block">API 格式</label>
-                  <select
-                    value={providerApiFormat}
-                    onChange={e => setProviderApiFormat(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                  >
-                    <option value="openai">OpenAI 兼容</option>
-                    <option value="gemini">Gemini</option>
-                    <option value="anthropic">Anthropic</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Base URL</label>
-                <input
-                  value={providerBaseUrl}
-                  onChange={e => setProviderBaseUrl(e.target.value)}
-                  placeholder="https://api.example.com/v1"
-                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">API Key</label>
-                <input
-                  type="password"
-                  value={providerApiKey}
-                  onChange={e => setProviderApiKey(e.target.value)}
-                  placeholder={editingProviderId ? '留空保持当前 Key 不变' : '输入 API Key'}
-                  className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-medium">经代理访问（socket）</p>
-                  <p className="text-[0.6875rem] text-muted-foreground mt-0.5">
-                    被墙的中转站（如 aihubmix）开启；可直连的（如 DeepSeek）关闭，即使配了全局代理也直连。
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setProviderUseProxy(v => !v)}
-                  className={`shrink-0 w-10 h-6 rounded-full transition-colors relative ${providerUseProxy ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${providerUseProxy ? 'translate-x-5' : 'translate-x-1'}`} />
-                </button>
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button onClick={resetProviderForm} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
-                  取消
-                </button>
-                <button
-                  onClick={handleProviderSubmit}
-                  disabled={!providerName.trim() || providerSaving}
-                  className="text-sm px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  {providerSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {editingProviderId ? '保存修改' : '添加'}
-                </button>
-              </div>
-            </div>
+          {/* Add provider form. 编辑供应商的表单在下面的列表里就地展开 */}
+          {showProviderForm && editingProviderId === null && (
+            <div className="mb-4">{renderProviderForm()}</div>
           )}
 
           {/* Provider list */}
@@ -716,7 +740,12 @@ export default function Settings() {
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
               {providers.map(p => (
-                <div key={p.id} className="flex items-center gap-3 border rounded-lg px-4 py-3">
+                <div
+                  key={p.id}
+                  // 列表是两列网格，就地展开的表单挤在半格里会太窄，编辑那一行整行铺开
+                  className={editingProviderId === p.id ? 'space-y-2 xl:col-span-2' : 'space-y-2'}
+                >
+                <div className="flex items-center gap-3 border rounded-lg px-4 py-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium">{p.name}</span>
@@ -756,6 +785,8 @@ export default function Settings() {
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
+                </div>
+                {showProviderForm && editingProviderId === p.id && renderProviderForm()}
                 </div>
               ))}
             </div>
@@ -1222,6 +1253,56 @@ export default function Settings() {
             )}
             <p className="text-[0.6875rem] text-muted-foreground mt-2">状态反映已保存的代理；改动输入框后需先「保存配置」再重新探测。</p>
           </div>
+        </section>
+        )}
+
+        {/* ── 7. 本地 ComfyUI（仅 admin）──────────────────────────────── */}
+        {isAdmin && (
+        <section>
+          <h2 className="font-semibold text-base mb-1">本地 ComfyUI</h2>
+          <p className="text-xs text-muted-foreground mb-4">
+            RPG 里「生成立绘」用的出图后端。它是本机服务，不走上面的代理。
+            还需要在 <span className="font-mono">backend/data/comfy_workflows/npc_portrait.json</span> 放一份
+            从 ComfyUI「工作流 → 导出（API）」导出的工作流，并把正向提示词那段文字换成 <span className="font-mono">%PROMPT%</span>。
+          </p>
+          <div className="flex items-end gap-3 flex-wrap">
+            <div className="flex-1 min-w-[16rem]">
+              <label className="text-sm font-medium mb-1 block">服务地址</label>
+              <input
+                value={comfyUrl}
+                onChange={e => setComfyUrl(e.target.value)}
+                placeholder="例：http://127.0.0.1:8188"
+                className="w-full border rounded-lg p-3 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              />
+            </div>
+            <button
+              onClick={testComfy}
+              disabled={comfyChecking || !comfyUrl}
+              className="flex items-center gap-1.5 text-sm px-4 py-3 border rounded-lg hover:bg-muted disabled:opacity-50 transition-colors"
+            >
+              {comfyChecking
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <RadioTower className="w-4 h-4" />}
+              保存并测试
+            </button>
+          </div>
+          {comfyStatus && (
+            <div className={`flex items-start gap-2 text-sm mt-3 ${
+              comfyStatus.reachable
+                ? 'text-green-600 dark:text-green-400'
+                : 'text-red-600 dark:text-red-400'
+            }`}>
+              {comfyStatus.reachable
+                ? <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                : <XCircle className="w-4 h-4 mt-0.5 shrink-0" />}
+              <div>
+                <p><span className="font-mono">{comfyStatus.base_url}</span> {comfyStatus.detail}</p>
+                {!comfyStatus.reachable && (
+                  <p className="text-xs text-muted-foreground mt-1">确认 ComfyUI 已启动，且端口与这里填的一致。</p>
+                )}
+              </div>
+            </div>
+          )}
         </section>
         )}
 

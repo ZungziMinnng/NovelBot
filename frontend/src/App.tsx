@@ -23,12 +23,15 @@ import RpgModule from '@/pages/Rpg/RpgModule'
 import RpgPlay from '@/pages/Rpg/RpgPlay'
 import RpgPrompts from '@/pages/Rpg/RpgPrompts'
 import RpgSettings from '@/pages/Rpg/RpgSettings'
+import RpgPresets from '@/pages/Rpg/RpgPresets'
 import BuildMode from '@/pages/Build/BuildMode'
 import Login from '@/pages/Auth/Login'
 import RequireAuth from '@/components/RequireAuth'
 import ConfirmHost from '@/components/ConfirmDialog/ConfirmDialog'
 import GenerationIndicator from '@/components/GenerationIndicator/GenerationIndicator'
 import BuildIndicator from '@/components/BuildIndicator/BuildIndicator'
+import RpgTurnIndicator from '@/components/GenerationIndicator/RpgTurnIndicator'
+import TavernTurnIndicator from '@/components/GenerationIndicator/TavernTurnIndicator'
 import { useSettingsStore } from '@/store/settingsStore'
 import { getThemeById } from '@/lib/themes'
 
@@ -68,9 +71,16 @@ export default function App() {
           <Route path="/tavern/settings" element={<TavernSettings />} />
           <Route path="/tavern/card/:id" element={<TavernCard />} />
           <Route path="/tavern/chat/:sessionId" element={<TavernChat />} />
-          <Route path="/rpg" element={<Rpg />} />
-          <Route path="/rpg/prompts" element={<RpgPrompts />} />
-          <Route path="/rpg/settings" element={<RpgSettings />} />
+          <Route path="/game" element={<Rpg />} />
+          <Route path="/game/prompts" element={<RpgPrompts />} />
+          <Route path="/game/settings" element={<RpgSettings />} />
+          {/* 没配 /rpg/presets 重定向：那批是给老书签用的，新页没有老书签 */}
+          <Route path="/game/presets" element={<RpgPresets />} />
+          <Route path="/game/module/:id" element={<RpgModule />} />
+          <Route path="/game/play/:sessionId" element={<RpgPlay />} />
+          <Route path="/rpg" element={<Navigate to="/game" replace />} />
+          <Route path="/rpg/prompts" element={<Navigate to="/game/prompts" replace />} />
+          <Route path="/rpg/settings" element={<Navigate to="/game/settings" replace />} />
           <Route path="/rpg/module/:id" element={<RpgModule />} />
           <Route path="/rpg/play/:sessionId" element={<RpgPlay />} />
           <Route path="/settings" element={<Settings />} />
@@ -79,8 +89,15 @@ export default function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <GenerationIndicator />
-      <BuildIndicator />
+      {/* 浮层药丸都挂在这儿，外层负责定位和堆叠。原先各自带 fixed bottom-5
+          right-5，同时开两件事就会精确叠在一起——同一时刻只可能有一件事在跑
+          的时候够不着，加了 RPG 和酒馆这两个就够得着了 */}
+      <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-2">
+        <GenerationIndicator />
+        <BuildIndicator />
+        <RpgTurnIndicator />
+        <TavernTurnIndicator />
+      </div>
       <ConfirmHost />
       {/* 跟着主题走：默认 toast 是写死的白底，换到深色主题就成了一块亮斑 */}
       <Toaster

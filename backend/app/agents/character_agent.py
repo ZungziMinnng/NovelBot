@@ -73,7 +73,7 @@ async def generate_character_sheet(
         ],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=800,
     )
 
@@ -134,7 +134,7 @@ async def refresh_appearance(
         messages=[{"role": "user", "content": prompt}],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=400,
     )
     return raw.strip()
@@ -162,7 +162,7 @@ async def enhance_character(
         messages=[{"role": "user", "content": prompt}],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=1200,
     )
     try:
@@ -307,7 +307,7 @@ async def generate_image_prompt(novel: Novel, char: Character, style: str) -> st
         ],
         model=model,
         api_format=api_format,
-        temperature=0.7,
+        temperature=getattr(novel, "build_temperature", 0.7),
         max_tokens=1024,
     )
     return result.strip()

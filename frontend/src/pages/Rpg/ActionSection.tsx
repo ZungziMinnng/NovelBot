@@ -8,26 +8,25 @@ import {
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import { AddRow, DeleteButton, INPUT, Section } from './rpgUi'
 import ConditionEditor from './ConditionEditor'
-import EffectEditor from './EffectEditor'
+import ActionFields, { type ActionDraft } from './ActionFields'
+import { ActionPresetBar } from './PresetTools'
 import BatchGenerate from './BatchGenerate'
 import { effectChips } from './effectChips'
 
-interface ActionForm {
-  name: string
-  prompt_hint: string
-  effects: Record<string, number>
-  relation_effects: Record<string, number>
-  requires: RpgCondition
-  needs_target: boolean
-}
+/** 表单体在 ActionFields 里，这儿多两样只属于本模组的：可用条件和地点限定。
+ *  两者引用的角色名、道具名、时段、地点名都是这个模组特有的，搬到别的模组
+ *  一条都对不上，所以都不跟着动作套装走 */
+type ActionForm = ActionDraft & { requires: RpgCondition; at_location: string }
 
 const EMPTY: ActionForm = {
   name: '', prompt_hint: '', effects: {}, relation_effects: {}, requires: {}, needs_target: false,
+  group: '', cost_slot: false, at_location: '',
 }
 
 /** 动作按钮。点一次数值由引擎算死，AI 完全碰不到，只拿到「已经发生的事实」去写文字。 */
 export default function ActionSection({
-  moduleId, statDefs, relationDefs, npcs, slotNames, example = '奖励',
+  moduleId, statDefs, relationDefs, npcs, slotNames, example = '奖励', onAddStats,
+  title = '动作按钮', desc,
 }: {
   moduleId: number
   statDefs: RpgStatDef[]
@@ -36,12 +35,24 @@ export default function ActionSection({
   slotNames: string[]
   /** 空格子里的示例词，按玩法类别换（见 stylePresets.STYLE_EXAMPLES） */
   example?: string
+  /** 套动作套装时一键补建缺的数值。数值表不在这一层，得让模组页去写 */
+  onAddStats: (stats: RpgStatDef[], relations: RpgStatDef[]) => void
+  /** 模拟器里这些按钮就是主界面本身，不是「额外给的快捷路」，所以标题和说明可换 */
+  title?: string
+  desc?: string
 }) {
   const qc = useQueryClient()
   const { data: actions = [] } = useQuery({
     queryKey: ['rpg-actions', moduleId],
     queryFn: () => rpgApi.actions.list(moduleId),
   })
+  // 地点只用来填 at_location 那个下拉。列表本身在 LocationSection 里管，
+  // 这里跟着同一个 queryKey 走，那边增删地点这边的下拉自动跟上
+  const { data: locations = [] } = useQuery({
+    queryKey: ['rpg-locations', moduleId],
+    queryFn: () => rpgApi.locations.list(moduleId),
+  })
+  const groups = [...new Set(actions.map(a => (a.group || '').trim()).filter(Boolean))]
 
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
@@ -56,6 +67,8 @@ export default function ActionSection({
       name: action.name, prompt_hint: action.prompt_hint,
       effects: action.effects || {}, relation_effects: action.relation_effects || {},
       requires: action.requires || {}, needs_target: action.needs_target,
+      group: action.group || '', cost_slot: !!action.cost_slot,
+      at_location: action.at_location || '',
     })
     setShowForm(true)
   }
@@ -89,21 +102,102 @@ export default function ActionSection({
     }
   }
 
+  const renderForm = () => (
+    <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">{editingId ? '编辑动作' : '新增动作'}</span>
+        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+      </div>
+      <ActionFields
+        value={form}
+        onChange={next => setForm({ ...form, ...next })}
+        statDefs={statDefs}
+        relationDefs={relationDefs}
+        example={example}
+        groups={groups}
+        hasClock={slotNames.length > 0}
+      />
+      {locations.length > 0 && (
+        <div>
+          <label className="text-xs font-medium mb-1.5 block">只在这个地点可用</label>
+          <select
+            value={form.at_location}
+            onChange={e => setForm({ ...form, at_location: e.target.value })}
+            className={INPUT}
+          >
+            <option value="">随处可用</option>
+            {locations.map(l => <option key={l.id} value={l.name}>{l.name}</option>)}
+          </select>
+          <p className="text-xs text-muted-foreground mt-1.5">
+            人不在那儿时按钮置灰。改了地点名记得回来重选一次——这里存的是名字。
+          </p>
+        </div>
+      )}
+      <div>
+        <label className="text-xs font-medium mb-1.5 block">可用条件</label>
+        <ConditionEditor
+          value={form.requires}
+          onChange={v => setForm({ ...form, requires: v })}
+          statDefs={statDefs}
+          relationDefs={relationDefs}
+          npcs={npcs}
+          slotNames={slotNames}
+        />
+        <p className="text-xs text-muted-foreground mt-1.5">
+          不满足时按钮置灰，鼠标移上去会写明差在哪。
+        </p>
+      </div>
+      <div className="flex gap-2 justify-end">
+        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+        <button
+          onClick={submit}
+          disabled={!form.name.trim()}
+          className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+        >
+          {editingId ? '保存' : '添加'}
+        </button>
+      </div>
+    </div>
+  )
+
   return (
     <Section
-      title="动作按钮"
-      desc="玩家一直能自由打字，这些按钮是额外给的快捷路：点一次数字精确变化，不经过 AI。"
+      title={title}
+      desc={desc ?? '玩家一直能自由打字，这些按钮是额外给的快捷路：点一次数字精确变化，不经过 AI。'}
       icon={MousePointerClick}
     >
       <div className="space-y-2">
+        <ActionPresetBar
+          moduleId={moduleId}
+          actions={actions}
+          statDefs={statDefs}
+          relationDefs={relationDefs}
+          onAddStats={onAddStats}
+        />
         {actions.map(action => (
-          <div key={action.id} className="border rounded-lg px-3 py-2 flex items-start gap-3">
+          <div key={action.id} className="space-y-2">
+          <div className="border rounded-lg px-3 py-2 flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-1.5">
+                {action.group && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                    {action.group}
+                  </span>
+                )}
                 <span className="text-sm font-medium">{action.name}</span>
                 {action.needs_target && (
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                     要选对象
+                  </span>
+                )}
+                {action.cost_slot && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                    费一格时段
+                  </span>
+                )}
+                {action.at_location && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                    限{action.at_location}
                   </span>
                 )}
                 {Object.entries(action.effects || {}).map(([k, v]) => (
@@ -128,95 +222,29 @@ export default function ActionSection({
               <DeleteButton onClick={() => remove(action)} />
             </div>
           </div>
+          {showForm && editingId === action.id && renderForm()}
+          </div>
         ))}
 
-        {showForm ? (
-          <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">{editingId ? '编辑动作' : '新增动作'}</span>
-              <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
-            </div>
-            <input
-              value={form.name}
-              onChange={e => setForm({ ...form, name: e.target.value })}
-              placeholder={`按钮上的字，如：${example}`}
-              className={INPUT}
-            />
-            <div>
-              <textarea
-                value={form.prompt_hint}
-                onChange={e => setForm({ ...form, prompt_hint: e.target.value })}
-                placeholder="你摸了摸她的头，夸了她一句。"
-                className={`${INPUT} resize-y min-h-[4rem]`}
-              />
-              <p className="text-xs text-muted-foreground mt-1.5">
-                点了按钮等于玩家说了这句话。用第二人称写，写得具体一点，GM 就照着这个往下展开。
-              </p>
-            </div>
-            <EffectEditor
-              label="玩家数值变化"
-              defs={statDefs}
-              value={form.effects}
-              onChange={v => setForm({ ...form, effects: v })}
-            />
-            <EffectEditor
-              label="对方的关系数值变化"
-              defs={relationDefs}
-              value={form.relation_effects}
-              onChange={v => setForm({
-                ...form,
-                relation_effects: v,
-                // 关系变化必须知道改谁，否则这一栏点了也不生效
-                needs_target: Object.keys(v).length > 0 ? true : form.needs_target,
-              })}
-            />
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.needs_target}
-                onChange={e => setForm({ ...form, needs_target: e.target.checked })}
-                disabled={Object.keys(form.relation_effects).length > 0}
-                className="accent-[hsl(var(--primary))] disabled:opacity-50"
-              />
-              <span className="text-xs">点之前先选一个在场角色</span>
-            </label>
-            <div>
-              <label className="text-xs font-medium mb-1.5 block">可用条件</label>
-              <ConditionEditor
-                value={form.requires}
-                onChange={v => setForm({ ...form, requires: v })}
-                statDefs={statDefs}
-                relationDefs={relationDefs}
-                npcs={npcs}
-                slotNames={slotNames}
-              />
-              <p className="text-xs text-muted-foreground mt-1.5">
-                不满足时按钮置灰，鼠标移上去会写明差在哪。
-              </p>
-            </div>
-            <div className="flex gap-2 justify-end">
-              <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
-              <button
-                onClick={submit}
-                disabled={!form.name.trim()}
-                className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
-              >
-                {editingId ? '保存' : '添加'}
-              </button>
-            </div>
-          </div>
-        ) : (
+        {showForm && editingId === null && renderForm()}
+        {!showForm && (
           <div className="space-y-2">
             <AddRow onClick={() => setShowForm(true)}>添加动作</AddRow>
             <BatchGenerate<{
               name: string; prompt_hint: string; needs_target: boolean
               effects: Record<string, number>; relation_effects: Record<string, number>
+              group?: string
             }>
               moduleId={moduleId}
               kind="action"
               placeholder="想生成什么动作按钮？比如：几个和 NPC 拉近关系的社交动作"
               renderRow={(a) => (
                 <>
+                  {a.group && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                      {a.group}
+                    </span>
+                  )}
                   {effectChips(a.effects)}
                   {effectChips(a.relation_effects, true)}
                 </>
@@ -226,6 +254,7 @@ export default function ActionSection({
                   await rpgApi.actions.create(moduleId, {
                     name: a.name, prompt_hint: a.prompt_hint, needs_target: a.needs_target,
                     effects: a.effects, relation_effects: a.relation_effects,
+                    group: a.group || '',
                     sort_order: actions.length + 1,
                   })
                 }

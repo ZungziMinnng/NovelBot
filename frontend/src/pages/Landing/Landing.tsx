@@ -1,10 +1,9 @@
-import { useMemo, useCallback } from 'react'
+import { useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { BookOpen, Beer, Dices, ChevronRight, LogOut, Settings } from 'lucide-react'
 import { authApi } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useAuthStore } from '@/store/authStore'
@@ -41,13 +40,13 @@ const MODES = [
     dot: 'bg-pink-400',
   },
   {
-    key: 'rpg',
-    label: 'RPG',
-    desc: '文字冒险',
-    detail: '带状态与判定的回合制叙事，你出招、AI 接着往下讲。',
+    key: 'game',
+    label: '游戏',
+    desc: '互动游戏模组',
+    detail: '模拟器、角色养成和探索冒险，共用状态、行动和存档系统。',
     features: ['属性与判定', '状态逐轮推进', '存档回溯'],
     icon: Dices,
-    path: '/rpg',
+    path: '/game',
     bar: 'bg-violet-500',
     iconWrap: 'bg-violet-500/15 text-violet-400',
     glow: 'rgba(167, 139, 250, 0.10)',
@@ -69,23 +68,8 @@ export default function Landing() {
     navigate('/login', { replace: true })
   }, [navigate])
 
-  const silkColor = useMemo(() => {
-    if (nsfwMode) return '#4A1942'
-    const style = getComputedStyle(document.documentElement)
-    const h = style.getPropertyValue('--primary').trim().split(' ')[0] || '220'
-    const hue = parseFloat(h)
-    const r = Math.round(128 + 40 * Math.cos((hue * Math.PI) / 180))
-    const g = Math.round(128 + 40 * Math.cos(((hue - 120) * Math.PI) / 180))
-    const b = Math.round(128 + 40 * Math.cos(((hue - 240) * Math.PI) / 180))
-    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`
-  }, [nsfwMode])
-
   return (
     <div className="min-h-screen bg-background relative">
-      <div className="fixed inset-0 z-0 opacity-20 pointer-events-none">
-        <Silk speed={3} scale={1} color={silkColor} noiseIntensity={1.2} rotation={0} className="w-full h-full" />
-      </div>
-
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2 select-none">
           <BookOpen className="w-6 h-6 text-primary" />

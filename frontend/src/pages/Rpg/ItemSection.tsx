@@ -93,6 +93,98 @@ export default function ItemSection({
     }
   }
 
+  const renderForm = () => (
+    <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">{editingId ? '编辑道具' : '新增道具'}</span>
+        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={form.name}
+          onChange={e => setForm({ ...form, name: e.target.value })}
+          placeholder="道具名，如：治伤药水"
+          className={INPUT}
+        />
+        <select
+          value={form.category}
+          onChange={e => {
+            const category = e.target.value
+            setForm({ ...form, category, consumable: consumableByCategory(category) })
+          }}
+          className={INPUT}
+        >
+          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      <div>
+        <textarea
+          value={form.description}
+          onChange={e => setForm({ ...form, description: e.target.value })}
+          placeholder="它长什么样、哪来的、用起来是什么感觉……"
+          className={`${INPUT} resize-y min-h-[4rem]`}
+        />
+        <Assist
+          moduleId={moduleId}
+          field="item_description"
+          context={() => ({ ...assistContext(), 道具名: form.name, 分类: form.category })}
+          value={form.description}
+          onApply={v => setForm(f => ({ ...f, description: v }))}
+        />
+      </div>
+      <EffectEditor
+        label="使用时的数值变化"
+        defs={statDefs}
+        value={form.effects}
+        onChange={v => setForm({ ...form, effects: v })}
+      />
+      <div className="flex gap-4">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.usable}
+            onChange={e => setForm({ ...form, usable: e.target.checked })}
+            className="accent-[hsl(var(--primary))]"
+          />
+          <span className="text-xs">背包里能点「使用」</span>
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.consumable}
+            onChange={e => setForm({ ...form, consumable: e.target.checked })}
+            className="accent-[hsl(var(--primary))]"
+          />
+          <span className="text-xs">用一次就少一个</span>
+        </label>
+      </div>
+      {/* 单独一行，因为这一条的后果和前两条不在一处：前两条管「怎么用」，
+          这条管「有没有」。没勾的话，这件道具只是个定义，开局身上不会有 */}
+      <label className="flex items-center gap-1.5 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={form.start_with}
+          onChange={e => setForm({ ...form, start_with: e.target.checked })}
+          className="accent-[hsl(var(--primary))]"
+        />
+        <span className="text-xs">
+          开局就带在身上
+          <span className="text-muted-foreground">（不勾的话，新开的局里不会有这件）</span>
+        </span>
+      </label>
+      <div className="flex gap-2 justify-end">
+        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+        <button
+          onClick={submit}
+          disabled={!form.name.trim()}
+          className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+        >
+          {editingId ? '保存' : '添加'}
+        </button>
+      </div>
+    </div>
+  )
+
   return (
     <Section
       title="道具"
@@ -102,7 +194,8 @@ export default function ItemSection({
     >
       <div className="space-y-2">
         {items.map(item => (
-          <div key={item.id} className="border rounded-lg px-3 py-2 flex items-start gap-3">
+          <div key={item.id} className="space-y-2">
+          <div className="border rounded-lg px-3 py-2 flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-sm font-medium">{item.name}</span>
@@ -134,99 +227,12 @@ export default function ItemSection({
               <DeleteButton onClick={() => remove(item)} />
             </div>
           </div>
+          {showForm && editingId === item.id && renderForm()}
+          </div>
         ))}
 
-        {showForm ? (
-          <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">{editingId ? '编辑道具' : '新增道具'}</span>
-              <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                value={form.name}
-                onChange={e => setForm({ ...form, name: e.target.value })}
-                placeholder="道具名，如：治伤药水"
-                className={INPUT}
-              />
-              <select
-                value={form.category}
-                onChange={e => {
-                  const category = e.target.value
-                  setForm({ ...form, category, consumable: consumableByCategory(category) })
-                }}
-                className={INPUT}
-              >
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <textarea
-                value={form.description}
-                onChange={e => setForm({ ...form, description: e.target.value })}
-                placeholder="它长什么样、哪来的、用起来是什么感觉……"
-                className={`${INPUT} resize-y min-h-[4rem]`}
-              />
-              <Assist
-                moduleId={moduleId}
-                field="item_description"
-                context={() => ({ ...assistContext(), 道具名: form.name, 分类: form.category })}
-                value={form.description}
-                onApply={v => setForm(f => ({ ...f, description: v }))}
-              />
-            </div>
-            <EffectEditor
-              label="使用时的数值变化"
-              defs={statDefs}
-              value={form.effects}
-              onChange={v => setForm({ ...form, effects: v })}
-            />
-            <div className="flex gap-4">
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.usable}
-                  onChange={e => setForm({ ...form, usable: e.target.checked })}
-                  className="accent-[hsl(var(--primary))]"
-                />
-                <span className="text-xs">背包里能点「使用」</span>
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.consumable}
-                  onChange={e => setForm({ ...form, consumable: e.target.checked })}
-                  className="accent-[hsl(var(--primary))]"
-                />
-                <span className="text-xs">用一次就少一个</span>
-              </label>
-            </div>
-            {/* 单独一行，因为这一条的后果和前两条不在一处：前两条管「怎么用」，
-                这条管「有没有」。没勾的话，这件道具只是个定义，开局身上不会有 */}
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.start_with}
-                onChange={e => setForm({ ...form, start_with: e.target.checked })}
-                className="accent-[hsl(var(--primary))]"
-              />
-              <span className="text-xs">
-                开局就带在身上
-                <span className="text-muted-foreground">（不勾的话，新开的局里不会有这件）</span>
-              </span>
-            </label>
-            <div className="flex gap-2 justify-end">
-              <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
-              <button
-                onClick={submit}
-                disabled={!form.name.trim()}
-                className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
-              >
-                {editingId ? '保存' : '添加'}
-              </button>
-            </div>
-          </div>
-        ) : (
+        {showForm && editingId === null && renderForm()}
+        {!showForm && (
           <div className="space-y-2">
             <AddRow onClick={() => setShowForm(true)}>添加道具</AddRow>
             <BatchGenerate<{

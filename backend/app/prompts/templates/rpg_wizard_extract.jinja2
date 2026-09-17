@@ -20,9 +20,11 @@
     {"name": "数值名", "initial": 起始值数字, "min": 下限数字, "max": 上限数字或null, "for_check": 能否用于判定true/false, "on_zero": "无/死亡/标记", "display": "条/数字/隐藏", "effect": "这个数值管什么，一句话，可留空串"}
   ],
   "relation_stat_defs": [
-    {"name": "关系数值名", "initial": 起始值数字, "min": 下限数字, "max": 上限数字或null, "display": "条/数字/隐藏"}
+    {"name": "通用关系维度名", "initial": 起始值数字, "min": 下限数字, "max": 上限数字或null, "display": "条/数字/隐藏"}
   ]
 }
+
+- relation_stat_defs 的 name 必须适用于所有 NPC，例如“好感”“信任”“服从”“敬畏”。不要把具体角色名写进关系数值名，不要输出“某人的好感度”这类名称。
 
 - on_zero 只能填「无」「死亡」「标记」三者之一，拿不准填「无」。
 - display 只能填「条」「数字」「隐藏」，钱和声望这类没上限的填「数字」，其余填「条」。

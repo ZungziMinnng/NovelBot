@@ -14,7 +14,6 @@ import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import CardAvatar from './CardAvatar'
 import CardMultiSelect from './CardMultiSelect'
 import TavernParamFields from './TavernParams'
@@ -148,10 +147,6 @@ export default function TavernCard() {
 
   return (
     <div className="mode-tavern min-h-screen bg-background relative">
-      <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
-        <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
-      </div>
-
       <header className="sticky top-0 z-20 border-b border-border/50 bg-background/80 backdrop-blur-md px-6 py-3.5 flex items-center gap-3">
         <button onClick={() => navigate('/tavern')} className="p-2 rounded-md hover:bg-muted" title="返回角色卡列表">
           <ArrowLeft className="w-4 h-4" />

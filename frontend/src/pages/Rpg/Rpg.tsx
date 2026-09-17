@@ -2,11 +2,10 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText, Settings2, X } from 'lucide-react'
+import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText, Settings2, Library, X } from 'lucide-react'
 import { rpgApi, type RpgModule, type RpgPlayStyle } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
 import { INPUT, PANEL } from './rpgUi'
 import { PLAY_STYLES, STYLE_DEFAULTS, styleLabel } from './stylePresets'
@@ -41,30 +40,27 @@ export default function Rpg() {
       // 就留下一个类别不对的模组，而作者根本不知道有这回事
       const created = await rpgApi.modules.create({
         name: name.trim() || '未命名模组',
-        play_style: playStyle,
         ...STYLE_DEFAULTS[playStyle],
+        play_style: playStyle,
       })
+      qc.setQueryData(['rpg-module', created.id], created)
       qc.invalidateQueries({ queryKey: ['rpg-modules'] })
-      navigate(`/rpg/module/${created.id}`)
+      navigate(`/game/module/${created.id}`)
     } catch {
       toast.error('创建模组失败')
     }
   }
 
   return (
-    <div className="mode-rpg min-h-screen bg-background relative">
-      <div className="fixed inset-0 z-0 opacity-[0.13] pointer-events-none">
-        <Silk speed={2} scale={1.4} color="#6d3ab0" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
-      </div>
-
+    <div className="mode-game min-h-screen bg-background relative">
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
         <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择">
           <ArrowLeft className="w-4 h-4" />
         </button>
         <Dices className="w-5 h-5 text-violet-500" />
-        <h1 className="font-bold text-lg">RPG</h1>
+        <h1 className="font-bold text-lg">游戏</h1>
         <button
-          onClick={() => navigate('/rpg/prompts')}
+          onClick={() => navigate('/game/prompts')}
           className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
             text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           title="改写给模型的指令：主持人、裁决、结算、帮我想想"
@@ -72,12 +68,20 @@ export default function Rpg() {
           <ScrollText className="w-3.5 h-3.5" /> 提示词
         </button>
         <button
-          onClick={() => navigate('/rpg/settings')}
+          onClick={() => navigate('/game/settings')}
           className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
             text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           title="写作规则：管住叙事的用词用语"
         >
           <Settings2 className="w-3.5 h-3.5" /> 设定
+        </button>
+        <button
+          onClick={() => navigate('/game/presets')}
+          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
+            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          title="通用的数值和动作，攒一套下次直接套"
+        >
+          <Library className="w-3.5 h-3.5" /> 套装
         </button>
         <div className="ml-auto">
           <ThemePicker />
@@ -128,10 +132,10 @@ export default function Rpg() {
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={() => navigate(`/rpg/module/${module.id}`)}
+                  onClick={() => navigate(`/game/module/${module.id}`)}
                   onKeyDown={e => {
                     if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault(); navigate(`/rpg/module/${module.id}`)
+                      e.preventDefault(); navigate(`/game/module/${module.id}`)
                     }
                   }}
                   className="pl-7 pr-5 py-5 flex flex-col gap-4 h-full cursor-pointer focus:outline-none"
@@ -161,7 +165,7 @@ export default function Rpg() {
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       <button
-                        onClick={e => { e.stopPropagation(); navigate(`/rpg/module/${module.id}`) }}
+                        onClick={e => { e.stopPropagation(); navigate(`/game/module/${module.id}`) }}
                         className="p-1.5 rounded hover:bg-muted"
                         title="编辑模组"
                       >
@@ -198,7 +202,7 @@ export default function Rpg() {
  *
  * 原来是零表单直接建一个空壳。问题不在于少一步，而在于类别决定了一堆默认开关
  * （随机数、时段表），建完再改要作者自己去翻设置页——而他这时候还不知道有这些
- * 开关。留在树里不用 portal：--rpg-* 那些变量定在外面那个 .mode-rpg 上。
+ * 开关。留在树里不用 portal：--rpg-* 那些变量定在外面那个 .mode-game 上。
  */
 function CreateDialog({
   onCancel, onCreate,

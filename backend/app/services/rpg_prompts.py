@@ -29,7 +29,7 @@ PROMPTS = {
     "rpg_settle.jinja2": {
         "label": "回合结算",
         "description": "从刚写出的剧情里读出状态变化，并顺带给出三条建议行动。请保持 JSON 输出格式和字段名，后端按字段名解析。数值名不在模组定义里的会被丢弃。",
-        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "stats": "玩家当前数值表", "location": "当前位置", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算", "chronicle": "已经传开的事，最近几条，提示模型不要重复记录"},
+        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "outcome_failed": "这一轮是不是判定失败（失败/大失败）。为真时多一句「失败必须留下代价」——后端也会按这一条校验，空结算会被打回重做", "stats": "玩家当前数值表", "location": "当前位置", "place_note": "这个地方已经记下的那一句近况，提示模型别重复写", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）、relations（这个人当前的关系数字）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "step_caps": "作者定了每轮变化上限的数值，{名字: 上限}，没定过的不在里面", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算", "chronicle": "已经传开的事，最近几条，提示模型不要重复记录", "tasks": "手上还没办完的事，每项含 name、goal（怎样才算办完）；模型只能在这份清单里提议收线", "has_clock": "这个模组有没有时段。只有有时段时才问模型「这一幕收尾了吗」（scene_wrapped）"},
     },
     "rpg_suggest.jinja2": {
         "label": "帮我想想",
@@ -39,7 +39,7 @@ PROMPTS = {
     "rpg_summary.jinja2": {
         "label": "剧情梗概",
         "description": "把较早的剧情压缩为长期记忆。建议保留禁止编造的要求；修改只影响下一次压缩。",
-        "variables": {"previous_summary": "已有剧情梗概", "transcript": "需要压缩的剧情"},
+        "variables": {"previous_summary": "已有剧情梗概", "transcript": "需要压缩的剧情", "scope": "这一份梗概属于谁（你自己的经历，还是与某个角色之间的事）"},
     },
     "rpg_offscreen.jinja2": {
         "label": "外场简报",
@@ -71,10 +71,15 @@ PROMPTS = {
         "description": "根据一句话想法和选择的世界规模一次生成模组编辑页已有的全部字段；完整世界会铺开大陆、区域、组织和多人物，区域故事则聚焦一个局部。返回草案供用户勾选回填。可在 RPG 提示词页面直接编辑。",
         "variables": {"instruction": "作者的一句话想法", "nsfw": "是否开启成人模式", "play_style": "玩法类别（sim/rpg/slg）", "world_scope": "世界规模（world=完整世界，region=单一区域故事）"},
     },
+    "rpg_image_tags.jinja2": {
+        "label": "中文转 Danbooru tag",
+        "description": "出图设置里把提示词形态选成「英文 tag」时用的。把中文描述翻成 Danbooru tag，只在光辉（Illustrious）这类 SDXL 工作流上需要——它们只认英文 tag。每个 tag 都会拿本地词表核一遍，核不上的会带着候选词回来让模型重挑，所以第二段里的「不要再造新词」建议保留。",
+        "variables": {"source": "要转换的中文描述", "nsfw": "是否开成人模式", "char_name": "同人角色名，非空时让模型转成 Danbooru 角色 tag；原创角色留空", "unknown": "上一轮没能在词表里查到的词，每项含 tag、candidates（词表里相近的词，可能为空）；第一轮是空的"},
+    },
     "rpg_generate.jinja2": {
         "label": "一键生成（模组编辑）",
         "description": "在地点/角色/道具/动作那一摊点「AI 生成」时用的。按作者一句话的要求批量生成，引用的数值名、地点名要和模组里已有的对得上，对不上的会被后端丢掉。请保持 JSON 输出格式和字段名。",
-        "variables": {"kind": "生成哪一摊（location/npc/item/action）", "instruction": "作者的要求，如「生成霍格沃兹的五个地点」", "count": "目标数量", "nsfw": "是否开成人模式", "stat_names": "模组已有的玩家数值名，供道具/动作 effects 校验", "relation_names": "模组已有的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "模组已有的地点名，供角色 location 校验", "existing_names": "这一摊里模组已有的名字，提示模型别重复生成"},
+        "variables": {"kind": "生成哪一摊（location/npc/item/action）", "instruction": "作者的要求，如「生成霍格沃兹的五个地点」", "count": "目标数量", "nsfw": "是否开成人模式", "play_style": "玩法类别（sim/rpg/slg）", "stat_names": "模组已有的玩家数值名，供道具/动作 effects 校验", "relation_names": "模组已有的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "模组已有的地点名，供角色 location 校验", "existing_names": "这一摊里模组已有的名字，提示模型别重复生成"},
     },
 }
 
@@ -100,29 +105,38 @@ def validate(name: str, content: str) -> None:
         inventory=[{"name": "火把", "qty": 1}], flags={"地窖门已开": True},
         npcs=[{
             "id": 1, "name": "老兵", "notes": {"伤势": "左肩中刀"},
-            # place/persona/activity 只有「角色自由行动」那个模板用得上。
-            # 多给的键对别的模板无害，而少给一个键 StrictUndefined 会当场炸
+            # relations 只有「回合结算」用得上，place/persona/activity 只有
+            # 「角色自由行动」用得上。多给的键对别的模板无害，
+            # 而少给一个键 StrictUndefined 会当场炸
+            "relations": {"好感": 42},
             "place": "铁匠铺", "persona": "话少", "activity": "在磨刀",
-        }], note_keys=["伤势"],
+        }], note_keys=["伤势"], step_caps={"好感": 3},
         chronicle=["后山挖出了尸首"],
+        tasks=[{"name": "送信给老周", "goal": "把信交到老周手上"}],
         max_chars=400, is_generate=True,
         context_blocks=[{"label": "世界观", "content": "示例"}],
-        day=3, from_slot="中", slot="晚",
+        day=3, from_slot="中", slot="晚", has_clock=True,
         others=[{"name": "赫敏", "place": "图书馆", "persona": "好胜", "notes": "左肩中刀"}],
         stat_names=["精力", "资金"], location_names=["酒馆", "后巷"],
         count=3, existing_names=["酒馆", "后巷"],
+        char_name="日向雏田",
+        # candidates 给一条空的：词表里查不到相近词是常态（见 danbooru_tags.search
+        # 的说明），用户模板里那条分支得走到
+        unknown=[{"tag": "internal_cutaway", "candidates": ["cross-section", "x-ray"]},
+                 {"tag": "masterpiece", "candidates": []}],
     )
     template = _env.from_string(content)
     template.render(**values)
     values.update(
         reply_length=0, stats={}, ledger=[], inventory=[], flags={}, npcs=[],
-        note_keys=[], relation_names=[],
-        location="", recent="", summary="", previous_summary="", dice=0,
-        outcome_label="", engine_note="", chronicle=[],
+        note_keys=[], relation_names=[], step_caps={},
+        location="", recent="", summary="", previous_summary="", scope="", dice=0,
+        outcome_label="", outcome_failed=False, engine_note="", chronicle=[], tasks=[],
         is_generate=False, context_blocks=[],
-        from_slot="", slot="", others=[],
+        from_slot="", slot="", has_clock=False, others=[],
         stat_names=[], location_names=[],
         existing_names=[],
+        char_name="", unknown=[],
     )
     template.render(**values)
 

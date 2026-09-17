@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Loader2, Sparkles, X, AlertTriangle } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { rpgApi, type RpgGenerateKind, type RpgWizardExtract } from '@/api/client'
-import { useSettingsStore } from '@/store/settingsStore'
 import { INPUT, PANEL } from './rpgUi'
 
 /** 一摊里 kind 对应的字段名，取回来的那一摊列表就在这个键上 */
@@ -10,6 +9,8 @@ const LIST_KEY: Record<RpgGenerateKind, keyof RpgWizardExtract> = {
   location: 'locations',
   npc: 'npcs',
   item: 'items',
+  skill: 'skills',
+  task: 'tasks',
   action: 'actions',
 }
 
@@ -33,11 +34,11 @@ export default function BatchGenerate<T extends { name: string }>({
   /** 勾上的那些交给父组件建行 + 刷新 */
   onApply: (rows: T[]) => Promise<void>
 }) {
-  const nsfwMode = useSettingsStore((s) => s.nsfwMode)
-
   const [open, setOpen] = useState(false)
   const [instruction, setInstruction] = useState('')
   const [count, setCount] = useState(3)
+  // 这一次生成的**起始**温度。后端 0.1 的兜底档始终保留，调这个只影响第一次尝试
+  const [temperature, setTemperature] = useState(0.3)
   const [busy, setBusy] = useState(false)
   const [rows, setRows] = useState<T[] | null>(null)
   const [dropped, setDropped] = useState<string[]>([])
@@ -45,7 +46,7 @@ export default function BatchGenerate<T extends { name: string }>({
   const [applying, setApplying] = useState(false)
 
   const reset = () => {
-    setOpen(false); setInstruction(''); setCount(3)
+    setOpen(false); setInstruction(''); setCount(3); setTemperature(0.3)
     setRows(null); setDropped([]); setPicked(new Set())
   }
 
@@ -53,7 +54,7 @@ export default function BatchGenerate<T extends { name: string }>({
     setBusy(true)
     try {
       const res = await rpgApi.modules.generate(moduleId, kind, {
-        instruction, count, nsfw: nsfwMode,
+        instruction, count, temperature,
       })
       const list = (res[LIST_KEY[kind]] as T[] | undefined) || []
       setRows(list)
@@ -125,6 +126,14 @@ export default function BatchGenerate<T extends { name: string }>({
           onChange={e => setCount(Number(e.target.value))}
           disabled={busy}
           className="flex-1 accent-[hsl(var(--primary))]"
+        />
+        <input
+          type="number" min={0} max={1.5} step={0.05}
+          value={temperature}
+          onChange={e => setTemperature(Number(e.target.value))}
+          disabled={busy}
+          title="温度。低了更规整，高了更放得开；JSON 崩了仍会自动降到 0.1 重试一次。默认 0.30"
+          className="w-14 text-xs border rounded-md px-1.5 py-1 bg-background focus:outline-none disabled:opacity-40 shrink-0"
         />
         <button
           onClick={run}

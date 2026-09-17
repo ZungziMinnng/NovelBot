@@ -29,6 +29,11 @@ backend/.env*
 !backend/.env.example
 tmp_*
 data/
+# RPG 背景的调试对比图（带地点/不带地点），是排查时留下的，不是项目资产
+backend/_bg_对比/
+# SQLite 的 WAL/SHM 边车文件：跑一次就生成，主库没了它还留着，纯粹是残渣
+*.db-shm
+*.db-wal
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/
@@ -41,6 +46,17 @@ backend/web/
 # 分发包产物（打包脚本默认输出到仓库外，这里兜底防手滑）
 release/
 NovelBot-dist*/
+
+# ── Claude Code 技能 ─────────────────────────────────────────────────────────
+# 只挡 archify：它是从 tt-a1i/archify 装的第三方技能，跟 NovelBot 无关，
+# 214 个文件天天挂在 git status 里刷屏。
+# 注意别图省事写成 .claude/skills/ —— add-template / llm-trace / prompt-audit
+# 是本项目自己写的，要进库，那样会把它们一起圈进来
+.claude/skills/archify/
+# archify 跑出来的产物：架构图，外加它自己的视觉回归截图（不是项目文档）
+docs/novelbot-architecture.*
+# 技能安装器的锁文件，记的就是上面那个 archify
+skills-lock.json
 
 # ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store

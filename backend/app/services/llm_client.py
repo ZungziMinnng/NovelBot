@@ -283,6 +283,10 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list]:
             contents.append({"role": "model", "parts": [{"text": content}]})
         else:
             contents.append({"role": "user", "parts": [{"text": content}]})
+    if not contents and system_instruction:
+        # Gemini 要求 contents 非空。只发一条 system 的调用（RPG 一键生成那类
+        # 纯指令活）抽完 system 就什么都不剩了，会被 400 掉，把它当 user 轮发出去
+        return "", [{"role": "user", "parts": [{"text": system_instruction}]}]
     return system_instruction, contents
 
 
@@ -297,6 +301,9 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list]:
             system_prompt = content
         else:
             filtered.append({"role": role, "content": content})
+    if not filtered and system_prompt:
+        # 同 _to_gemini_contents：Anthropic 的 messages 也不能为空
+        return "", [{"role": "user", "content": system_prompt}]
     return system_prompt, filtered
 
 
@@ -337,12 +344,18 @@ async def dispatch_chat_complete(
 ) -> str:
     """根据 api_format 分发非流式调用，返回文本内容"""
     real_model, fmt, client = _resolve_dispatch(model, api_format)
+    # 同流式那条路：思考模型的 max_output_tokens 是「思考链 + 正文」共用的，
+    # 原样透传会让思考挤掉正文，正文说到一半就 MAX_TOKENS。
+    # 在分发**之前**算，openai 兼容那一路上也可能挂着思考模型
+    eff_max_tokens = _effective_max_tokens(real_model, fmt, max_tokens, "off", "off")
     if fmt == "gemini":
-        return await _gemini_complete(messages, real_model, temperature, max_tokens, client)
+        return await _gemini_complete(
+            messages, real_model, temperature, eff_max_tokens, client,
+        )
     elif fmt == "anthropic":
         return await _anthropic_complete(messages, real_model, temperature, max_tokens, client)
     else:
-        return await chat_complete(messages, real_model, client, temperature, max_tokens)
+        return await chat_complete(messages, real_model, client, temperature, eff_max_tokens)
 
 
 async def dispatch_chat_complete_with_usage(
@@ -354,12 +367,15 @@ async def dispatch_chat_complete_with_usage(
 ) -> tuple[str, int, int]:
     """根据 api_format 分发非流式调用，返回 (content, input_tokens, output_tokens)"""
     real_model, fmt, client = _resolve_dispatch(model, api_format)
+    eff_max_tokens = _effective_max_tokens(real_model, fmt, max_tokens, "off", "off")
     if fmt == "gemini":
-        return await _gemini_complete_with_usage(messages, real_model, temperature, max_tokens, client)
+        return await _gemini_complete_with_usage(
+            messages, real_model, temperature, eff_max_tokens, client,
+        )
     elif fmt == "anthropic":
         return await _anthropic_complete_with_usage(messages, real_model, temperature, max_tokens, client)
     else:
-        return await chat_complete_with_usage(messages, real_model, client, temperature, max_tokens)
+        return await chat_complete_with_usage(messages, real_model, client, temperature, eff_max_tokens)
 
 
 async def dispatch_chat_stream_with_usage(
@@ -516,7 +532,12 @@ def _gemini_thinking_headroom(model_id: str, thinking_level: str) -> int:
     """Gemini 的 max_output_tokens 覆盖「思考链 + 正文」。为使用户配置的
     max_tokens 实际作用于正文，这里返回需在其之上额外预留的思考预算。"""
     if thinking_level == "off":
-        return 0
+        # "off" 不等于不思考：_resolve_gemini_thinking 给 3.x 的是 MINIMAL/LOW，
+        # 给 2.x 的是 min_budget（pro 是 128）而不是 0。这里返回 0 的话，那点思考
+        # 就从正文预算里扣，短 max_tokens 的调用会说到一半就 MAX_TOKENS
+        if _is_gemini_3x(model_id):
+            return _GEMINI_3X_THINKING_HEADROOM["low"]
+        return _get_2x_thinking_limits(model_id)[0]
     if _is_gemini_3x(model_id):
         return _GEMINI_3X_THINKING_HEADROOM.get(thinking_level, 16384)
     # Gemini 2.x：思考预算显式可算
@@ -531,7 +552,10 @@ def _effective_max_tokens(model_id: str, api_format: str, max_tokens: int,
     """在用户配置的 max_tokens 之上叠加思考预算，避免思考链挤占正文导致截断。
     仅作上限放宽：若上游本就不把思考计入 max_output_tokens，多出的预算不会被用到。"""
     GEMINI_HARD_CAP = 65536
-    if api_format == "gemini":
+    # 也认 openai 格式下的 Gemini：中转站（AiHubMix 这类）把 Gemini 挂在
+    # OpenAI 兼容端点上，api_format 是 "openai"，但上游仍是 Gemini，
+    # max_output_tokens 照样覆盖思考链。只看 api_format 会把这一路漏掉
+    if api_format == "gemini" or "gemini" in model_id.lower():
         headroom = _gemini_thinking_headroom(model_id, gemini_thinking_level)
         return min(max_tokens + headroom, GEMINI_HARD_CAP)
     if _is_deepseek_model(model_id) and deepseek_thinking_level in ("high", "max"):
@@ -697,7 +721,14 @@ async def _gemini_complete(
         thinking_config=_resolve_gemini_thinking(model, thinking_level="off"),
         client=client,
     )
-    text, _, _, _ = _parse_gemini_response(response)
+    text, _, _, cut = _parse_gemini_response(response)
+    # 吐了一半也是截断，只是不为空所以下面那些 raise 都躲过去了。JSON 那条路
+    # repair_json 还会把残缺补成合法结构，静默得更彻底——至少留条日志能查
+    if text and cut == "MAX_TOKENS":
+        logger.warning(
+            "Gemini 非流式输出被截断: model=%s, max_tokens=%d, 已出 %d 字",
+            model, max_tokens, len(text),
+        )
     if not text:
         prompt_feedback = getattr(response, "prompt_feedback", None)
         block_reason = getattr(prompt_feedback, "block_reason", "") if prompt_feedback else ""
@@ -742,8 +773,8 @@ async def _gemini_complete_with_usage(
     text, in_tok, out_tok, finish_reason = _parse_gemini_response(response)
     if finish_reason and finish_reason not in ("STOP", "FINISH_REASON_UNSPECIFIED"):
         logging.getLogger(__name__).warning(
-            "Gemini 非流式调用异常结束: finish_reason=%s, model=%s, out_tok=%d",
-            finish_reason, model, out_tok,
+            "Gemini 非流式调用异常结束: finish_reason=%s, model=%s, out_tok=%d, 已出 %d 字",
+            finish_reason, model, out_tok, len(text),
         )
         if not text and finish_reason == "MAX_TOKENS":
             raise RuntimeError(
@@ -974,9 +1005,10 @@ async def _anthropic_complete(
     kwargs = {
         "model": model,
         "messages": filtered,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     if system_prompt:
         kwargs["system"] = system_prompt
     response = await client.messages.create(**kwargs)
@@ -1079,9 +1111,10 @@ async def chat_complete(
     kwargs: dict = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if temperature >= 0:
+        kwargs["temperature"] = temperature
     # DeepSeek 非流式任务思考档位由全局设置控制（默认关闭）
     if _is_deepseek_model(model):
         _apply_deepseek_fast_thinking(kwargs)

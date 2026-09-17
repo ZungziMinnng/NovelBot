@@ -7,7 +7,8 @@ import unittest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.rpg import (
-    RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession, RpgWorldEntry,
+    RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgRule, RpgSession,
+    RpgSkill, RpgWorldEntry,
 )
 from app.services.rpg_context import build_rpg_messages, resolve_rules
 
@@ -18,9 +19,11 @@ class _Base(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite://")
         async with self.engine.begin() as connection:
+            # 道具表和技能表是【道具与技能】那一块要查的，即使这些用例一条都不建，
+            # 表也得在——build_rpg_messages 每轮都会整表取一次
             for model in (
                 RpgModule, RpgRule, RpgWorldEntry, RpgNpc, RpgSession, RpgMessage,
-                RpgLocation,
+                RpgLocation, RpgItem, RpgSkill,
             ):
                 await connection.run_sync(model.__table__.create)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)

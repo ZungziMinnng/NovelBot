@@ -8,12 +8,16 @@ import unittest
 
 from app.models.rpg import RpgItem, RpgModule, RpgNpc, RpgSession
 from app.services.rpg_state import (
+    ON_FULL_FLAG,
     ON_ZERO_DEAD, ON_ZERO_FLAG,
-    apply_flags, apply_inventory, apply_npc_notes, apply_relations, apply_state_delta,
-    apply_stats, check_condition, check_zero, clamp, def_map, for_check_stats,
-    init_relation, init_stats, mark_met, match_npc, note_visited, starting_inventory,
+    apply_flags, apply_inventory, apply_npc_notes, apply_place_note, apply_relations,
+    apply_state_delta,
+    apply_stats, check_condition, check_full, check_zero, clamp, def_map, for_check_stats,
+    init_relation, init_stats, mark_met, match_npc, note_visited, place_note,
+    starting_inventory,
     tier_list, tier_of, visible_defs,
-    FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT, TIER_LABEL_CHARS, TIER_NOTE_CHARS, VISITED_LIMIT,
+    FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT, PLACE_CHARS, PLACE_LIMIT,
+    TIER_LABEL_CHARS, TIER_NOTE_CHARS, VISITED_LIMIT,
 )
 
 STAT_DEFS = [
@@ -38,6 +42,7 @@ def _sess(**kwargs):
         "stats": init_stats(STAT_DEFS),
         "inventory": [],
         "flags": {},
+        "flag_days": {},
         "npc_states": {},
         "npc_notes": {},
         "location": "",
@@ -355,6 +360,53 @@ class NpcNoteTests(unittest.TestCase):
         self.assertTrue(apply_npc_notes(sess, 3, "这不是字典"))
 
 
+class PlaceNoteTests(unittest.TestCase):
+    """地点近况：这地方被玩家弄成什么样了，一个地方一句。
+
+    它刻意**不是第四个记忆格**。记忆按格子分（玩家一格、每个 NPC 各一格），
+    给地点再开一格意味着摘要次数翻倍，而且和玩家那一格大面积重叠——你在地窖
+    干的事本来就写在你自己那一份里。「门被踹坏了」是事实，不是叙事。
+    """
+
+    def test_one_place_keeps_one_line_and_the_new_one_wins(self):
+        sess = _sess(place_notes={"地窖": "门开着"})
+        apply_place_note(sess, "地窖", "门被踹坏了，合不上")
+        self.assertEqual(sess.place_notes, {"地窖": "门被踹坏了，合不上"})
+
+    def test_an_empty_line_clears_it(self):
+        # 玩家手动划掉走的就是这条路（GM 记错了「整间屋子烧没了」）
+        sess = _sess(place_notes={"地窖": "门被踹坏了", "酒馆": "桌子掀了"})
+        apply_place_note(sess, "地窖", "")
+        self.assertEqual(sess.place_notes, {"酒馆": "桌子掀了"})
+
+    def test_the_same_place_spelled_differently_is_still_the_same_place(self):
+        # 不按 norm_name 比的话，「地窖」和「地窖 」会各占一格，两句话同时注入
+        sess = _sess(place_notes={"地窖": "门开着"})
+        apply_place_note(sess, " 地窖 ", "门被踹坏了")
+        self.assertEqual(list(sess.place_notes.values()), ["门被踹坏了"])
+        self.assertEqual(place_note(sess, "地窖"), "门被踹坏了")
+
+    def test_an_over_long_line_is_trimmed_instead_of_dropped(self):
+        sess = _sess()
+        apply_place_note(sess, "地窖", "门被踹坏了" * 50)
+        self.assertLessEqual(len(sess.place_notes["地窖"]), PLACE_CHARS + 1)
+
+    def test_a_refreshed_place_survives_the_cap_because_it_moves_to_the_end(self):
+        # 同 apply_npc_notes：dict 重新赋值不挪键的位置，于是每轮都在刷新的
+        # 那个地方会永远停在下标 0，先被砍掉的正是你正站着的这间屋
+        sess = _sess(place_notes={"地窖": "门开着", **{f"杂{i}": "x" for i in range(PLACE_LIMIT - 1)}})
+        apply_place_note(sess, "地窖", "门被踹坏了")
+        self.assertIn("地窖", sess.place_notes)
+        apply_place_note(sess, "新地方", "刚到")
+        self.assertIn("地窖", sess.place_notes)
+        self.assertNotIn("杂0", sess.place_notes)
+        self.assertEqual(len(sess.place_notes), PLACE_LIMIT)
+
+    def test_a_place_that_was_never_written_reads_as_empty(self):
+        self.assertEqual(place_note(_sess(), "地窖"), "")
+        self.assertEqual(place_note(_sess(place_notes={"地窖": "x"}), ""), "")
+
+
 class StartingInventoryTests(unittest.TestCase):
     """开局背包 = 模组的开局背包 + 定义里勾了「开局就有」的道具。
 
@@ -452,6 +504,91 @@ class FlagTests(unittest.TestCase):
         self.assertTrue(warnings)
 
 
+class FlagDayTests(unittest.TestCase):
+    """flag 立起来那天记在 flag_days 里，「某件事之后 N 天」全靠它。
+
+    这是 AI 驱动的剧情里唯一能锚的时间点：没有写死的时间线，但「那件事发生在
+    第几天」是引擎自己数的天，跟模型怎么写剧情无关。所以记的时机必须钉死。
+    """
+
+    def test_a_new_flag_records_today(self):
+        sess = _sess(day=4)
+        apply_flags(sess, {"聊过电机": True})
+        self.assertEqual(sess.flag_days, {"聊过电机": 4})
+
+    def test_setting_the_same_flag_again_does_not_push_the_date_forward(self):
+        # 「聊过之后第三天」要从第一次聊算起。重复置位刷新日期的话，
+        # 模型每轮顺手再写一遍 True 就能把那一天推到永远不到
+        sess = _sess(day=4)
+        apply_flags(sess, {"聊过电机": True})
+        sess.day = 9
+        apply_flags(sess, {"聊过电机": True})
+        self.assertEqual(sess.flag_days, {"聊过电机": 4})
+
+    def test_deleting_a_flag_clears_its_date(self):
+        # 那件事等于没发生过。留着日期的话重新立起来时「之后三天」当场就满足
+        sess = _sess(day=4)
+        apply_flags(sess, {"聊过电机": True})
+        sess.day = 9
+        apply_flags(sess, {"聊过电机": None})
+        self.assertEqual(sess.flag_days, {})
+        apply_flags(sess, {"聊过电机": True})
+        self.assertEqual(sess.flag_days, {"聊过电机": 9})
+
+    def test_a_falsy_value_counts_as_not_happened(self):
+        sess = _sess(day=4)
+        apply_flags(sess, {"聊过电机": True})
+        apply_flags(sess, {"聊过电机": False})
+        self.assertEqual(sess.flag_days, {})
+
+    def test_trimming_past_the_limit_takes_the_dates_along(self):
+        # 不清的话 flag_days 会攒下一堆指向不存在 flag 的日期，越玩越长
+        sess = _sess(day=1, flags={f"旧{i}": True for i in range(FLAG_LIMIT)})
+        apply_flags(sess, {"最新的一条": True})
+        self.assertEqual(set(sess.flag_days), set(sess.flags))
+        self.assertNotIn("旧0", sess.flag_days)
+
+    def test_the_zero_flag_gets_a_date_too(self):
+        # check_zero 是第二个写 flags 的地方。漏了它，「精力耗尽之后两天」判不过
+        module = _module(stat_defs=[{"name": "精力", "max": 100, "on_zero": ON_ZERO_FLAG}])
+        sess = _sess(stats={"精力": 0}, day=6)
+        check_zero(module, sess)
+        self.assertEqual(sess.flag_days, {"精力耗尽": 6})
+
+    def test_after_days_waits_and_then_opens(self):
+        sess = _sess(day=4, flags={"聊过电机": True}, flag_days={"聊过电机": 4})
+        cond = {"after_days": [{"flag": "聊过电机", "days": 3}]}
+        ok, why = check_condition(cond, sess)
+        self.assertFalse(ok)
+        # 原因串直接给玩家看，得写还差几天
+        self.assertIn("3 天", why)
+        sess.day = 6
+        self.assertIn("1 天", check_condition(cond, sess)[1])
+        sess.day = 7
+        self.assertTrue(check_condition(cond, sess)[0])
+        sess.day = 20
+        self.assertTrue(check_condition(cond, sess)[0])
+
+    def test_a_flag_that_never_fired_fails(self):
+        ok, why = check_condition(
+            {"after_days": [{"flag": "聊过电机", "days": 3}]}, _sess(day=99),
+        )
+        self.assertFalse(ok)
+        self.assertIn("还没有", why)
+
+    def test_an_old_save_without_a_date_fails_instead_of_passing(self):
+        # 加 flag_days 之前的存档：flag 立着但没有日期。引擎不知道那天是哪天，
+        # 放行等于凭空满足一个本该等待的条件
+        sess = _sess(day=99, flags={"聊过电机": True}, flag_days={})
+        ok, why = check_condition({"after_days": [{"flag": "聊过电机", "days": 3}]}, sess)
+        self.assertFalse(ok)
+        self.assertIn("哪天", why)
+
+    def test_zero_days_means_the_same_day(self):
+        sess = _sess(day=4, flags={"到了": True}, flag_days={"到了": 4})
+        self.assertTrue(check_condition({"after_days": [{"flag": "到了", "days": 0}]}, sess)[0])
+
+
 class ZeroTests(unittest.TestCase):
     def test_zero_can_end_the_run(self):
         module = _module(stat_defs=[{"name": "生命", "max": 100, "on_zero": ON_ZERO_DEAD}])
@@ -472,6 +609,79 @@ class ZeroTests(unittest.TestCase):
         sess = _sess(stats={"精力": 0})
         check_zero(module, sess)
         self.assertEqual(check_zero(module, sess), [])
+
+
+class FullTests(unittest.TestCase):
+    """填满的后果，check_zero 的镜像。这是「进度时钟」的全部机制。
+
+    一项 max = 8 的数值配上 on_full = 标记，推满就立一条 flag，世界书触发、
+    动作可用性、地点进入条件三处都能引用它——不需要新表、新列、新概念。
+    """
+
+    def test_filling_a_stat_raises_a_flag(self):
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 8})
+        notes = check_full(module, sess)
+        self.assertTrue(sess.flags["信任满"])
+        self.assertTrue(notes)
+
+    def test_overshooting_counts_too(self):
+        # 动作和道具写死的加减不受 step_max 管，能把值顶到上限之上
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 99})
+        check_full(module, sess)
+        self.assertTrue(sess.flags["信任满"])
+
+    def test_not_yet_full_raises_nothing(self):
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 7})
+        self.assertEqual(check_full(module, sess), [])
+        self.assertEqual(sess.flags, {})
+
+    def test_a_stat_without_a_ceiling_is_skipped(self):
+        # 钱、声望永远填不满。spec 里那个 on_full 是作者填错了，不是一条
+        # 永不触发的规则——真去比就会拿 None 当数字
+        module = _module(stat_defs=[{"name": "资金", "max": None, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"资金": 99999})
+        self.assertEqual(check_full(module, sess), [])
+        self.assertEqual(sess.flags, {})
+
+    def test_the_default_does_nothing(self):
+        # 没填 on_full 的项（也就是所有老模组的所有项）一个字都不动
+        module = _module(stat_defs=[{"name": "精力", "max": 100}])
+        sess = _sess(stats={"精力": 100})
+        self.assertEqual(check_full(module, sess), [])
+        self.assertEqual(sess.flags, {})
+
+    def test_the_flag_is_only_raised_once(self):
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 8})
+        check_full(module, sess)
+        self.assertEqual(check_full(module, sess), [])
+
+    def test_the_full_flag_gets_a_date_too(self):
+        # 漏了 _sync_flag_days，「她信任满了之后第 3 天」这条 after_days 判不过
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 8}, day=6)
+        check_full(module, sess)
+        self.assertEqual(sess.flag_days, {"信任满": 6})
+
+    def test_the_flag_it_raises_is_usable_as_a_condition(self):
+        """立 flag 而不是直接触发事件，理由就在这一条：三处条件都能引用它。"""
+        module = _module(stat_defs=[{"name": "信任", "max": 8, "on_full": ON_FULL_FLAG}])
+        sess = _sess(stats={"信任": 8})
+        self.assertFalse(check_condition({"flags": ["信任满"]}, sess)[0])
+        check_full(module, sess)
+        self.assertTrue(check_condition({"flags": ["信任满"]}, sess)[0])
+
+    def test_there_is_no_death_option(self):
+        """填满致死没有语义。要那个效果就用 on_zero 表达。"""
+        from app.services.rpg_state import ON_FULL_FLAG as flag, ON_FULL_NONE as none
+        module = _module(stat_defs=[{"name": "污染", "max": 8, "on_full": "死亡"}])
+        sess = _sess(stats={"污染": 8})
+        self.assertEqual(check_full(module, sess), [])
+        self.assertEqual(sess.status, "alive")
+        self.assertEqual((none, flag), ("无", "标记"))
 
 
 class ApplyDeltaTests(unittest.TestCase):
@@ -565,6 +775,57 @@ class ApplyDeltaTests(unittest.TestCase):
         self.sess.visited = ["出租屋"]
         apply_state_delta(self.module, self.sess, {"location": "  "})
         self.assertEqual(self.sess.visited, ["出租屋"])
+
+    def test_a_place_note_lands_on_where_you_are_standing(self):
+        self.sess.location = "地窖"
+        warnings = apply_state_delta(
+            self.module, self.sess, {"place_notes": {"地窖": "门被踹坏了"}}, self.npcs,
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.sess.place_notes["地窖"], "门被踹坏了")
+
+    def test_a_place_note_can_also_land_on_where_you_just_arrived(self):
+        # 同一轮里「走进地窖、顺手把门踹坏」：那一笔属于地窖，不属于你出发的地方
+        self.sess.location = "巷子"
+        apply_state_delta(
+            self.module, self.sess,
+            {"location": "地窖", "place_notes": {"地窖": "门被踹坏了"}}, self.npcs,
+        )
+        self.assertEqual(self.sess.place_notes["地窖"], "门被踹坏了")
+
+    def test_a_note_about_a_place_you_never_set_foot_in_is_refused(self):
+        # 剧情里提一句「铁匠铺」不该让隔着三条街的铁匠铺凭空塌一半：同 note_npcs，
+        # 这是长期事实，每次你走进去都会进【场面】，而玩家没有纠正的入口
+        self.sess.location = "地窖"
+        warnings = apply_state_delta(
+            self.module, self.sess, {"place_notes": {"铁匠铺": "炉子灭了"}}, self.npcs,
+        )
+        # 拒掉的那一路一个字都不写，连那张表都不该被建出来
+        self.assertFalse(self.sess.place_notes)
+        self.assertTrue(any("铁匠铺" in w for w in warnings))
+
+    def test_a_place_note_is_matched_back_to_the_real_place_name(self):
+        # 模型爱给地名加修饰。对不回真名的话这一笔会存成「外门藏经阁」那一格，
+        # 而你站在「藏经阁」，下次回来什么都看不到
+        self.sess.location = "藏经阁"
+        apply_state_delta(
+            self.module, self.sess, {"place_notes": {"外门藏经阁": "书架塌了一排"}},
+            self.npcs, places=["藏经阁"],
+        )
+        self.assertEqual(self.sess.place_notes["藏经阁"], "书架塌了一排")
+
+    def test_moving_someone_does_not_blind_the_place_name_matcher(self):
+        # npc_places 那一段原先用的局部变量就叫 places，把参数里的地点表盖掉了：
+        # 于是**只要这一轮带了人物位置**，「外门藏经阁 → 藏经阁」就对不回来了，
+        # 而那正是 match_place 存在要修的 bug
+        npcs = [RpgNpc(id=3, module_id=1, name="赫敏")]
+        apply_state_delta(
+            self.module, self.sess,
+            {"npc_places": {"赫敏": "外门藏经阁"}, "location": "外门藏经阁"},
+            npcs, move_npcs=npcs, places=["藏经阁"],
+        )
+        self.assertEqual(self.sess.location, "藏经阁")
+        self.assertEqual(self.sess.npc_places["3"], "藏经阁")
 
 
 class VisitedTests(unittest.TestCase):

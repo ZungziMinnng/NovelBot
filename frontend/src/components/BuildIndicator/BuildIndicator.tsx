@@ -21,7 +21,7 @@ export default function BuildIndicator() {
   return (
     <div
       onClick={() => navigate(`/novel/${novelId}/build`)}
-      className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 bg-primary text-primary-foreground px-4 py-2.5 rounded-full shadow-lg cursor-pointer hover:opacity-90 transition-opacity select-none"
+      className="flex items-center gap-2.5 bg-primary text-primary-foreground px-4 py-2.5 rounded-full shadow-lg cursor-pointer hover:opacity-90 transition-opacity select-none"
       title="点击查看构建详情"
     >
       <Loader2 className="w-4 h-4 animate-spin shrink-0" />

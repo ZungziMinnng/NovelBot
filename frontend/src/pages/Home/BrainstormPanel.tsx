@@ -44,7 +44,8 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
   const stage = useBrainstormStore((s) => s.stage)
   const messages = useBrainstormStore((s) => s.messages)
   const confirmed = useBrainstormStore((s) => s.confirmed)
-  const { setMode, setPurpose, setStage, setMessages, mergeConfirmed, clearConversation } = useBrainstormStore.getState()
+  const temperature = useBrainstormStore((s) => s.temperature)
+  const { setMode, setPurpose, setStage, setMessages, mergeConfirmed, clearConversation, setTemperature } = useBrainstormStore.getState()
 
   const stages = STAGES_BY_PURPOSE[purpose]
   const lastStage = stages.length - 1
@@ -83,6 +84,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
         purpose,
         stage: stageId,
         confirmed: stageId ? formatConfirmed(confirmed) : '',
+        temperature,
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {
@@ -98,7 +100,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       },
       () => { setIsStreaming(false); setWaiting(false) },
     )
-  }, [mode, model, nsfwMode, webSearch, purpose, stages, confirmed, setMessages])
+  }, [mode, model, nsfwMode, webSearch, purpose, stages, confirmed, temperature, setMessages])
 
   // base 显式传入：从中间某句重发时，闭包里的 messages 还是截断前的旧值
   const send = useCallback((text: string, base?: ChatSurfaceMessage[]) => {
@@ -334,6 +336,15 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
               </option>
             ))}
           </select>
+          {/* 构思对话的温度。后端一直收这个参数，只是以前前端没传，默认 0.9 */}
+          <input
+            type="number" min={0.1} max={1.5} step={0.05}
+            value={temperature}
+            onChange={e => setTemperature(Number(e.target.value))}
+            disabled={isStreaming}
+            title="这一轮对话的温度。低了更收敛，高了想法更野。默认 0.90"
+            className="w-14 text-xs border rounded px-1.5 py-1 bg-background focus:outline-none disabled:opacity-40"
+          />
         </>
       }
       belowHeader={isWizard && current && (

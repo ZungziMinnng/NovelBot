@@ -16,7 +16,7 @@
     {"name": "玩家数值名", "initial": 0, "min": 0, "max": 100, "for_check": false, "on_zero": "无", "display": "条", "effect": "这个数值具体影响什么"}
   ],
   "relation_stat_defs": [
-    {"name": "关系数值名", "initial": 0, "min": -100, "max": 100, "display": "条", "effect": "这个关系数值具体影响什么互动"}
+    {"name": "通用关系维度名", "initial": 0, "min": -100, "max": 100, "display": "条", "effect": "这个关系维度具体影响什么互动"}
   ],
   "locations": [
     {"name": "地点名", "description": "环境特征", "parent_name": "父地点名，没有父地点就留空", "connections": ["另一个同层地点名"]}
@@ -30,14 +30,15 @@
     {"name": "道具名", "description": "用途和特征", "category": "类别", "consumable": true, "start_with": false, "effects": {"玩家数值名": 1}}
   ],
   "actions": [
-    {"name": "动作名", "prompt_hint": "玩家点击时代表的话", "needs_target": false, "effects": {"玩家数值名": 1}, "relation_effects": {"关系数值名": 1}}
+    {"name": "动作名", "prompt_hint": "玩家点击时代表的话", "needs_target": false, "effects": {"玩家数值名": 1}, "relation_effects": {"关系数值名": 1}, "group": "分组名，不分组就留空"}
   ]
 }
 
-玩法类别：{{ play_style }}
+玩法类别：{{ play_style }}（sim=身份或系统模拟器，rpg=探索冒险，slg=角色养成）
 世界规模：{{ world_scope }}
 作者的一句话想法：{{ instruction }}
-{% if nsfw %}作者开启成人模式，可以直接处理成人向设定。{% endif %}
+内容尺度以作者提供的一句话想法和设定为准，不主动添加或回避题材内容。
 
-生成要求：每一项玩家数值和关系数值都必须填写 effect，说明它会如何影响判定、行动或互动，不能留空。每个角色都必须填写 persona、appearance、description 和 profile_sections 中的 appearance、background、abilities、relationships；角色档案要写具体事实，参考小说角色卡的写法，避免只写“神秘”“很强”这类空话。性格要有欲望、顾虑、优点和缺点，外貌要有可观察细节，背景要交代出身与关键经历，能力要写清边界和弱点，关系要写清与玩家及其他角色的连接。
+生成要求：关系数值是对所有 NPC 通用的关系维度，每个角色各自持有一份，例如“好感”“信任”“服从”“敬畏”。关系数值名称不能包含任何具体人物名，不能写成“某人的好感度”或“某角色的信任”。每一项玩家数值和关系数值都必须填写 effect，说明它会如何影响判定、行动或互动，不能留空。每个角色都必须填写 persona、appearance、description 和 profile_sections 中的 appearance、background、abilities、relationships；角色档案要写具体事实，参考小说角色卡的写法，避免只写“神秘”“很强”这类空话。性格要有欲望、顾虑、优点和缺点，外貌要有可观察细节，背景要交代出身与关键经历，能力要写清边界和弱点，关系要写清与玩家及其他角色的连接。
 {% if world_scope == 'world' %}这是“完整世界”方案：请生成一整个可持续游玩的玄幻世界，而不是单一宗门或单一场景。至少生成 5 个顶层区域或关键地点、1 个顶层地点下 3 个内部地点、6 名来自不同身份或组织的 NPC。宗门、皇朝、家族、商会等可以写入世界观和角色背景，但不要新增独立势力系统字段。{% else %}这是“单一区域故事”方案：聚焦一个区域或组织内部，至少生成 3 个地点、其中一个地点可有 2 个内部地点、3 名重要 NPC。{% endif %}
+{% if play_style == 'sim' %}模拟器的主界面就是这一屏动作按钮，所以 actions 是这份方案里最要紧的一项：至少给 6 个动作，每个都必须填 group，分组名用作者会说的词（例如“经营”“人事”“私人”），同一个分组下放两三个。留空 group 的按钮会全挤到“其他”那一栏，等于白分。地点在这一档只是“这件事在哪儿办”，玩家点一下就直接过去，所以 connections 可以留空，不用设计走法。{% endif %}

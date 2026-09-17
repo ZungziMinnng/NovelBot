@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { RpgBand, RpgOutcome, RpgRoll } from '@/api/client'
+import { playSfx } from './useSfx'
 
 /** 数字翻滚多久。这段等待是故意留的：判定那次调用本来就要花一两秒，
  *  「先看结果再看文字」是玩家期待的节奏，正好把延迟变成正反馈 */
@@ -62,6 +63,7 @@ export default function DiceRoll({ roll, animate = false }: { roll: RpgRoll; ani
       return
     }
     setRolling(true)
+    playSfx('dice')
     const flicker = setInterval(() => setFace(1 + Math.floor(Math.random() * 100)), 70)
     const stop = setTimeout(() => {
       clearInterval(flicker)

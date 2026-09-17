@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, type MutableRefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { X, ChevronRight, ChevronLeft, ChevronDown, Loader2 } from 'lucide-react'
-import { novelsApi, volumesApi, modelLibraryApi, modelSelectValue, type BrainstormExtract } from '@/api/client'
+import { novelsApi, volumesApi, modelLibraryApi, modelSelectValue, type BrainstormExtract, type Novel } from '@/api/client'
 import { ROLE_OPTIONS } from '@/constants/roles'
 import { PERSONALITY_GROUPS } from '@/constants/personality'
 import { WRITING_STYLES } from '@/constants/writingStyles'
@@ -131,6 +131,10 @@ export default function NovelWizard({ onCancel, onComplete, onBuild, snapshotRef
 
   // Track submissions
   const [charactersSubmitted, setCharactersSubmitted] = useState(false)
+
+  // 自动构建这一条链的温度。建号前就要用，所以向导里也给一个；后端默认也是 0.7，
+  // 没动过就不发这个字段（省掉一次无意义的写库）。之后想改去小说设置里的「构思温度」
+  const [buildTemperature, setBuildTemperature] = useState(0.7)
 
   const toggleTag = (groupKey: string, tag: string) => {
     setTags(prev => {
@@ -265,12 +269,13 @@ export default function NovelWizard({ onCancel, onComplete, onBuild, snapshotRef
   }
 
   const handleBuildInner = async (id: number) => {
+    const patch: Partial<Novel> = {}
     if (rawSetting.trim() || rawRules.trim()) {
-      await novelsApi.update(id, {
-        core_setting: rawSetting.trim(),
-        world_rules_seed: rawRules.trim(),
-      })
+      patch.core_setting = rawSetting.trim()
+      patch.world_rules_seed = rawRules.trim()
     }
+    if (buildTemperature !== 0.7) patch.build_temperature = buildTemperature
+    if (Object.keys(patch).length) await novelsApi.update(id, patch)
     onBuild(id)
   }
 
@@ -895,6 +900,20 @@ export default function NovelWizard({ onCancel, onComplete, onBuild, snapshotRef
           {step === 1 ? '取消' : '上一步'}
         </button>
         <div className="flex items-center gap-2">
+          {step >= 2 && (
+            <label
+              className="flex items-center gap-1.5 text-xs text-muted-foreground"
+              title="自动构建时世界观、大纲、角色卡用的温度。低了更规整，高了更放得开。默认 0.70"
+            >
+              构思温度
+              <input
+                type="number" min={0.1} max={1.5} step={0.05}
+                value={buildTemperature}
+                onChange={e => setBuildTemperature(Number(e.target.value))}
+                className="w-16 border rounded-md px-1.5 py-1 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </label>
+          )}
           <button
             onClick={handleSkip}
             disabled={loading}

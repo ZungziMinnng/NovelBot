@@ -13,7 +13,7 @@ import { Calculator, Dices, Loader2, Search, Sparkles } from 'lucide-react'
  * 到达本身就表示「在写」，那时由气泡里的光标接手。
  *
  * 刻意不复用小说侧的 AgentStatus / generationStore：那套带 novelId、章节号等
- * 小说专有字段。这里只要一个本地 stage 字符串，样式也落在 .mode-rpg 里。
+ * 小说专有字段。这里只要一个本地 stage 字符串，样式也落在 .mode-game 里。
  */
 const STAGE_CONFIG: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
   adjudicating: { label: '裁决中…', icon: Dices },

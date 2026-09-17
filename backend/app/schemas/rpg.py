@@ -27,6 +27,7 @@ class RpgModuleCreate(BaseModel):
     default_inventory: list = []
     default_location: str = ""
     time_slots: list = []
+    lock_protagonist: bool = False
     rate_table: dict = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
     difficulty_bias: int = 0
     check_mode: str = "never"
@@ -39,7 +40,16 @@ class RpgModuleCreate(BaseModel):
     model_ref: str = ""
     fast_model_ref: str = ""
     summary_model_ref: str = ""
+    image_model_ref: str = ""
     offscreen_brief: bool = False
+    # 时段推进的两个阈值，0 = 关，形状见 models.RpgModule
+    # slot_budget 默认 3：建模组这条路会把这份默认值原样传给 RpgModule(**dump)，
+    # 所以列上的默认管不到新建的模组，真正生效的是这一行
+    slot_budget: int = 3
+    chat_nudge: int = 0
+    free_costs_slot: bool = False
+    # NPC 立绘出图设置，形状见 models.RpgModule.image_config
+    image_config: dict = {}
 
 
 class RpgModuleUpdate(BaseModel):
@@ -58,6 +68,7 @@ class RpgModuleUpdate(BaseModel):
     default_inventory: Optional[list] = None
     default_location: Optional[str] = None
     time_slots: Optional[list] = None
+    lock_protagonist: Optional[bool] = None
     rate_table: Optional[dict] = None
     difficulty_bias: Optional[int] = None
     check_mode: Optional[str] = None
@@ -70,7 +81,12 @@ class RpgModuleUpdate(BaseModel):
     model_ref: Optional[str] = None
     fast_model_ref: Optional[str] = None
     summary_model_ref: Optional[str] = None
+    image_model_ref: Optional[str] = None
     offscreen_brief: Optional[bool] = None
+    slot_budget: Optional[int] = None
+    chat_nudge: Optional[int] = None
+    free_costs_slot: Optional[bool] = None
+    image_config: Optional[dict] = None
 
 
 class RpgModuleOut(BaseModel):
@@ -91,6 +107,8 @@ class RpgModuleOut(BaseModel):
     default_inventory: list
     default_location: str
     time_slots: list
+    # 给默认值：老模组的行读出来没有这一项，理由同下面 slot_budget
+    lock_protagonist: bool = False
     rate_table: dict
     difficulty_bias: int
     check_mode: str
@@ -103,7 +121,13 @@ class RpgModuleOut(BaseModel):
     model_ref: str
     fast_model_ref: str
     summary_model_ref: str
+    image_model_ref: str
     offscreen_brief: bool
+    # 给默认值：老模组的行读出来没有这两项，不给就整份校验失败
+    slot_budget: int = 0
+    chat_nudge: int = 0
+    free_costs_slot: bool = False
+    image_config: dict = {}
     session_count: int = 0
     npc_count: int = 0
     entry_count: int = 0
@@ -156,6 +180,88 @@ class RpgRuleOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── 常用 GM 指令 ──────────────────────────────────────────────────────────
+
+class RpgInstructionPresetCreate(BaseModel):
+    name: str
+    content: str = ""
+
+
+class RpgInstructionPresetUpdate(BaseModel):
+    name: Optional[str] = None
+    content: Optional[str] = None
+
+
+class RpgInstructionPresetOut(BaseModel):
+    id: int
+    name: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── 预设库 ────────────────────────────────────────────────────────────────
+
+# JSON 列一律是裸 list，不做嵌套结构校验。写入方只有自家前端，多一层 pydantic
+# 嵌套模型的唯一效果是「前端给数值定义加个字段，后端就开始 422」。
+
+class RpgStatPresetCreate(BaseModel):
+    name: str
+    note: str = ""
+    stat_defs: list = []
+    relation_stat_defs: list = []
+    sort_order: int = 0
+
+
+class RpgStatPresetUpdate(BaseModel):
+    name: Optional[str] = None
+    note: Optional[str] = None
+    stat_defs: Optional[list] = None
+    relation_stat_defs: Optional[list] = None
+    sort_order: Optional[int] = None
+
+
+class RpgStatPresetOut(BaseModel):
+    id: int
+    name: str
+    note: str
+    stat_defs: list
+    relation_stat_defs: list
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RpgActionPresetCreate(BaseModel):
+    name: str
+    note: str = ""
+    actions: list = []
+    sort_order: int = 0
+
+
+class RpgActionPresetUpdate(BaseModel):
+    name: Optional[str] = None
+    note: Optional[str] = None
+    actions: Optional[list] = None
+    sort_order: Optional[int] = None
+
+
+class RpgActionPresetOut(BaseModel):
+    id: int
+    name: str
+    note: str
+    actions: list
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ── 构思向导 ──────────────────────────────────────────────────────────────
 
 class WizardMessage(BaseModel):
@@ -184,6 +290,9 @@ class RpgWizardExtractIn(BaseModel):
     # {stat_names: [], relation_names: [], location_names: []}
     known: dict = {}
     model: str = ""
+    # 抽取的**起始**温度。None = 按 call_json 的默认 0.3 走（老前端不传就是这条路）；
+    # 0.1 那一档兜底始终保留，调这个只影响第一次尝试
+    temperature: Optional[float] = None
 
 
 class RpgWizardFullIn(BaseModel):
@@ -192,6 +301,7 @@ class RpgWizardFullIn(BaseModel):
     nsfw: bool = False
     model: str = ""
     world_scope: str = "region"
+    temperature: Optional[float] = None  # 同 RpgWizardExtractIn
 
 
 class RpgGenerateIn(BaseModel):
@@ -201,6 +311,7 @@ class RpgGenerateIn(BaseModel):
     count: int = 3
     nsfw: bool = False
     model: str = ""
+    temperature: Optional[float] = None  # 同 RpgWizardExtractIn
 
 
 class RpgWizardExtractOut(BaseModel):
@@ -218,6 +329,8 @@ class RpgWizardExtractOut(BaseModel):
     time_slots: Optional[list] = None
     npcs: Optional[list] = None
     items: Optional[list] = None
+    skills: Optional[list] = None
+    tasks: Optional[list] = None
     actions: Optional[list] = None
     dropped: list[str] = []
 
@@ -266,6 +379,9 @@ class RpgNpcCreate(BaseModel):
     name: str
     role: str = "npc"
     avatar_url: str = ""
+    # 只给这个人的出图设置。稀疏，形状同 RpgModule.image_config，
+    # {} = 整份跟着模组走。见 services/rpg_image.py
+    image_config: dict = {}
     description: str = ""
     persona: str = ""
     appearance: str = ""
@@ -276,6 +392,8 @@ class RpgNpcCreate(BaseModel):
     profile_sections: dict = {}
     dialogue_examples: list = []
     initial_state: dict = {}
+    relation_enabled: bool = False
+    relation_stat_names: list[str] = []
     sort_order: int = 0
 
 
@@ -283,6 +401,9 @@ class RpgNpcUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[str] = None
     avatar_url: Optional[str] = None
+    # 整份替换，不做深合并：「取消覆写某一项」在前端就是把那个 key 删掉再发
+    # 整份上来，后端要是合并就永远删不掉了
+    image_config: Optional[dict] = None
     description: Optional[str] = None
     persona: Optional[str] = None
     appearance: Optional[str] = None
@@ -293,7 +414,35 @@ class RpgNpcUpdate(BaseModel):
     profile_sections: Optional[dict] = None
     dialogue_examples: Optional[list] = None
     initial_state: Optional[dict] = None
+    relation_enabled: Optional[bool] = None
+    relation_stat_names: Optional[list[str]] = None
     sort_order: Optional[int] = None
+
+
+class RpgNpcAvatarGenerateIn(BaseModel):
+    """立绘生成。prompt 由前端从外貌字段预填后交用户过目，这里只收最终文本。"""
+    prompt: str
+    width: int = 1024
+    height: int = 1536
+    # None = 后端摇一个随机种子；给了值就是复现上一张脸
+    seed: Optional[int] = None
+
+
+class RpgPromptAsTagsIn(BaseModel):
+    """中文源文转 Danbooru tag。只给光辉这类 SDXL 工作流用。"""
+    source: str
+    # 成人内容照实转，但默认关：开不开是用户在出图弹窗里自己勾的，绝不自动开
+    nsfw: bool = False
+    # True = 把这个 NPC 的名字也转成 Danbooru 角色 tag（做同人游戏时用，如
+    # 日向雏田→hyuuga_hinata）。默认关：原创角色带上名字反而会污染出图
+    include_char_name: bool = False
+
+
+class RpgPromptAsTagsOut(BaseModel):
+    # 命中的规范 tag（保序），join 起来就是发给工作流的提示词
+    tags: list[str]
+    # 两趟都没在词表里查到的原样词，交前端显示——少画一样不告诉用户比明说糟
+    dropped: list[str]
 
 
 class RpgNpcOut(BaseModel):
@@ -302,6 +451,10 @@ class RpgNpcOut(BaseModel):
     name: str
     role: str
     avatar_url: str
+    # 这张立绘的随机种子，0 = 没记录。只读，写它的只有生成接口
+    avatar_seed: int = 0
+    # 只给这个人的出图设置，{} = 整份跟着模组走
+    image_config: dict = {}
     description: str
     persona: str
     appearance: str
@@ -312,6 +465,8 @@ class RpgNpcOut(BaseModel):
     profile_sections: dict
     dialogue_examples: list
     initial_state: dict
+    relation_enabled: bool
+    relation_stat_names: list[str]
     sort_order: int
     created_at: datetime
     updated_at: datetime
@@ -358,6 +513,110 @@ class RpgItemOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── 技能 ──────────────────────────────────────────────────────────────────
+
+class RpgSkillCreate(BaseModel):
+    name: str
+    description: str = ""
+    category: str = "主动"
+    usable: bool = True
+    effects: dict = {}
+    requires: dict = {}
+    cooldown: int = 0
+    start_with: bool = False
+    sort_order: int = 0
+
+
+class RpgSkillUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    usable: Optional[bool] = None
+    effects: Optional[dict] = None
+    requires: Optional[dict] = None
+    cooldown: Optional[int] = None
+    start_with: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class RpgSkillOut(BaseModel):
+    id: int
+    module_id: int
+    name: str
+    description: str
+    category: str
+    usable: bool
+    effects: dict
+    requires: dict
+    cooldown: int
+    start_with: bool
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── 任务 ──────────────────────────────────────────────────────────────────
+
+class RpgTaskCreate(BaseModel):
+    name: str
+    description: str = ""
+    objective: str = ""
+    category: str = "支线"
+    effects: dict = {}
+    auto_start: bool = False
+    sort_order: int = 0
+
+
+class RpgTaskUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    objective: Optional[str] = None
+    category: Optional[str] = None
+    effects: Optional[dict] = None
+    auto_start: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class RpgTaskOut(BaseModel):
+    id: int
+    module_id: int
+    name: str
+    description: str
+    objective: str
+    category: str
+    effects: dict
+    auto_start: bool
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RpgTaskResolveIn(BaseModel):
+    """玩家在确认窗里逐条勾完之后提交。只传 id 不传内容——提议的正文依据
+    存在 task_proposals 里，让前端把 action 改了再回传等于绕开校验。
+
+    没勾的那几条一并传上来（accept=False），后端照样从待确认里移掉：
+    「我看过了，这条不算完」和「还没看」是两回事，混在一起弹窗会反复跳。"""
+    accepts: list[dict] = []  # [{"id": "...", "accept": true}]
+
+
+class RpgItemClaimConfirmIn(BaseModel):
+    """认下一件新道具。consumable 只在模组道具表里**还没有**同名定义时才用得上
+    ——已经有定义的按那一行走，这个值会被忽略。"""
+    consumable: bool = True
+
+
+class RpgTaskStateIn(BaseModel):
+    """玩家自己在任务格里改一条：手动标完成/失败/重新进行，或者划掉。"""
+    name: str
+    # open / done / failed；给 "" 表示删掉这一条
+    status: str = ""
 
 
 # ── 地点 ──────────────────────────────────────────────────────────────────
@@ -412,6 +671,9 @@ class RpgActionCreate(BaseModel):
     relation_effects: dict = {}
     requires: dict = {}
     needs_target: bool = False
+    group: str = ""
+    cost_slot: bool = False
+    at_location: str = ""
     sort_order: int = 0
 
 
@@ -422,6 +684,9 @@ class RpgActionUpdate(BaseModel):
     relation_effects: Optional[dict] = None
     requires: Optional[dict] = None
     needs_target: Optional[bool] = None
+    group: Optional[str] = None
+    cost_slot: Optional[bool] = None
+    at_location: Optional[str] = None
     sort_order: Optional[int] = None
 
 
@@ -434,6 +699,9 @@ class RpgActionOut(BaseModel):
     relation_effects: dict
     requires: dict
     needs_target: bool
+    group: str
+    cost_slot: bool
+    at_location: str
     sort_order: int
     created_at: datetime
     updated_at: datetime
@@ -464,6 +732,34 @@ class RpgNoteDeleteIn(BaseModel):
     key: str
 
 
+class RpgDiscoveryApplyIn(BaseModel):
+    """把勾中的发现项建成模组资产。ids 是 RpgSession.discoveries 里那些条目的 id——
+    只传 id 不传内容，免得前端把名字改了、后端却按改过的名字去正文里找不到依据。"""
+    ids: list[str]
+    model: str = ""
+    temperature: Optional[float] = None  # 同 RpgWizardExtractIn
+
+
+class RpgDiscoveryApplyOut(BaseModel):
+    """建了哪些行 + 哪些被拦下了。前五项直接回前端用来刷新那几张表。"""
+    npcs: list[RpgNpcOut] = []
+    locations: list[RpgLocationOut] = []
+    items: list[RpgItemOut] = []
+    # 技能和任务除了建行，还会顺手写进这一局（学会 / 接下），所以前端拿到
+    # 非空的这两项时，会话本身也要跟着刷
+    skills: list[RpgSkillOut] = []
+    tasks: list[RpgTaskOut] = []
+    # 这一局真的学会 / 接下了哪几个名字。不等于上面的 skills / tasks：模组里
+    # 早就有定义、这一次只补「这一局也拿到」的那些不会出现在上面两项里，
+    # 但会话确实变了，前端得凭这个决定要不要重拉会话
+    learned: list[str] = []
+    opened: list[str] = []
+    # 被白名单过滤或重名拦下的说明。必须显示出来——静默丢弃等于骗作者
+    dropped: list[str] = []
+    # 处理完之后剩下的待确认项，前端拿它直接覆盖角标
+    remaining: list = []
+
+
 class RpgSessionOut(BaseModel):
     id: int
     module_id: int
@@ -473,17 +769,34 @@ class RpgSessionOut(BaseModel):
     char_desc: str
     stats: dict
     inventory: list
+    skills: list = []
     location: str
     time_slots: list
     slot: str
     day: int
+    # 这一格用掉的行动数 / 对话数。给默认值：老局读出来没有这两项。
+    # 按钮的提醒读它们，见 RpgSession.slot_actions
+    slot_actions: int = 0
+    slot_chats: int = 0
     flags: dict
+    # 每个 flag 第一次立起来那天。前端按钮的置灰判断要它算「之后 N 天」，
+    # 给默认值：老局读出来没有这一项。见 RpgSession.flag_days
+    flag_days: dict = {}
     npc_states: dict
     npc_notes: dict
     npc_activities: dict
     npc_places: dict
+    # {"地窖": "门被你踹坏了"}，键是地名。见 RpgSession.place_notes
+    place_notes: dict = {}
     chronicle: list
     visited: list
+    # 这一局的待办清单和「模型觉得办完了」的待确认提议。见 RpgSession.tasks
+    tasks: list = []
+    task_proposals: list = []
+    # 结算认出来、还没登记进模组的人/地方/东西，等作者勾选。见 RpgSession.discoveries
+    discoveries: list = []
+    # 结算说「你拿到了」、还没认领的新道具。见 RpgSession.item_claims
+    item_claims: list = []
     summary: str
     summarized_upto_id: int
     turn_count: int
@@ -501,6 +814,19 @@ class RpgAdvanceOut(BaseModel):
 
 # ── 消息与回合 ────────────────────────────────────────────────────────────
 
+class RpgSettlementOut(BaseModel):
+    status: str
+    revision: str = ""
+    attempts: int = 0
+    domains: dict = {}
+    changes: list[str] = []
+    warnings: list[str] = []
+    facts: list[dict] = []
+    applied: dict = {}
+    proposed: dict = {}
+    retryable: bool = False
+
+
 class RpgMessageOut(BaseModel):
     id: int
     session_id: int
@@ -515,6 +841,7 @@ class RpgMessageOut(BaseModel):
     present: Optional[list[int]] = None
     roll: Optional[dict] = None
     state_delta: Optional[dict] = None
+    settlement: Optional[RpgSettlementOut] = None
     suggestions: Optional[list] = None
     input_tokens: int
     output_tokens: int
@@ -525,18 +852,32 @@ class RpgMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RpgMessageUpdate(BaseModel):
+    """修改正文并将相关结算、摘要标记为过期。"""
+    content: str
+
+
 class RpgTurnRequest(BaseModel):
     content: str
     # 玩家自己指定用哪项数值判定。给了就跳过裁决那次调用，零延迟零成本
     attr: str = ""
-    # 「点出来的」行动。三个都空就是自由打字，走 AI 结算；给了任意一个
+    # 「点出来的」行动。全空就是自由打字，走 AI 结算；给了任意一个
     # 就走引擎，数字由模组定义算死，AI 只负责写成画面
     action_id: Optional[int] = None
     item_name: str = ""
+    skill_name: str = ""
     move_to: str = ""
     target_npc: str = ""
-    # 当前前端正在查看的 NPC。只决定上下文取哪条记忆，不影响动作目标。
-    focus_npc_id: Optional[int] = None
+    # 这一轮的对话模式，玩家在输入框上方明着选：
+    #   group   群聊——在场的人都参与，这段话记进他们每个人的记忆
+    #   private 私聊——只跟 private_with 那一个人说，只记进她的记忆
+    #   solo    独自行动——这一轮不跟人说话，但在场的人看着（照样记给他们）
+    # 它替掉了老的 focus_npc_id。那个字段名义上是「前端正在查看谁」，实际上
+    # 偷偷决定了模型能记住多少——玩家看见的是个筛选器，代码拿它当记忆开关，
+    # 于是一对一聊十轮之后她会突然说第一次见面的台词。模式必须是明牌的
+    mode: str = "group"
+    # 私聊对象，只在 mode=private 时有意义。她必须本来就在跟前
+    private_with: Optional[int] = None
     # 这一轮归哪条对话线，值是 NPC 的 id；不给 = 场面线。
     # 和 target_npc 是两件事：它管「这段叙事归哪条历史」，target_npc 管
     # 「这个动作用在谁身上」。在老兵线里对老板娘用动作是合法的

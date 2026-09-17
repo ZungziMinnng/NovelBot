@@ -2,14 +2,13 @@ import unittest
 from types import SimpleNamespace
 
 from app.services.relevance_selector import (
-    bm25_rank,
     keyword_hits,
     recency_factor,
     rerank_by_importance,
-    rrf_fuse,
     select_by_name_then_rag,
     select_notes_by_title_then_rag,
 )
+from app.services.text_ranking import bm25_rank, rrf_fuse
 
 
 def _items(n: int) -> list:

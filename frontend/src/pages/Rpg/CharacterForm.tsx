@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { Loader2, Sparkles, X } from 'lucide-react'
+import { Loader2, Lock, X } from 'lucide-react'
 import { rpgApi, type RpgModule, type RpgSession } from '@/api/client'
 import { INPUT, splitList } from './rpgUi'
+import { protagonistCard, protagonistDesc } from './protagonist'
 
 /** 开局：角色属于这一局而不是模组，所以每次开局都重填一遍。
  *  数值起点从模组的定义拷过来，模组里有主角卡的话名字和出身也预填好。
@@ -32,13 +33,20 @@ export default function CharacterForm({
     queryKey: ['rpg-npcs', module.id],
     queryFn: () => rpgApi.npcs.list(module.id),
   })
-  const template = npcs.find(n => n.role === 'protagonist')
+  const template = protagonistCard(npcs)
+  // 模组定了主角就是定了，锁不锁都照它预填——原来这里是一颗「套用主角卡」按钮，
+  // 而作者在「主角」面板里把人定出来之后，玩家还得再点一下才用得上
+  const locked = !!module.lock_protagonist && !!template
 
-  const usePreset = () => {
-    if (!template) return
+  // 角色卡是异步来的，所以只能等它到了再灌。**只灌一次**：这个弹窗的生命周期就是
+  // 一次建局，灌第二次只会把玩家刚敲的字盖回主角卡上那一份
+  const [filled, setFilled] = useState(false)
+  useEffect(() => {
+    if (!template || filled) return
+    setFilled(true)
     setName(template.name)
-    setDesc([template.description, template.persona].filter(Boolean).join('\n\n'))
-  }
+    setDesc(protagonistDesc(template))
+  }, [template, filled])
 
   const submit = async () => {
     const charName = name.trim()
@@ -76,14 +84,12 @@ export default function CharacterForm({
         </div>
 
         <div className="p-6 space-y-5">
-          {template && (
-            <button
-              onClick={usePreset}
-              className="w-full flex items-center justify-center gap-1.5 text-xs py-2 rounded-lg
-                bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20"
-            >
-              <Sparkles className="w-3.5 h-3.5" /> 套用主角卡「{template.name}」
-            </button>
+          {locked && (
+            <p className="flex items-start gap-1.5 text-xs text-muted-foreground rounded-lg
+              bg-muted/50 px-3 py-2">
+              <Lock className="w-3.5 h-3.5 shrink-0 mt-px" />
+              这个模组的主角是定好的，名字和出身改不了。下面的数值和时段还是你说了算。
+            </p>
           )}
 
           <div>
@@ -93,8 +99,9 @@ export default function CharacterForm({
               onChange={e => setName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') submit() }}
               placeholder="例：阿隼"
-              autoFocus
-              className={INPUT}
+              autoFocus={!locked}
+              readOnly={locked}
+              className={`${INPUT} ${locked ? 'text-muted-foreground' : ''}`}
             />
           </div>
 
@@ -104,12 +111,15 @@ export default function CharacterForm({
               value={desc}
               onChange={e => setDesc(e.target.value)}
               rows={3}
+              readOnly={locked}
               placeholder="你从哪来、会点什么、为什么非要蹚这趟浑水……"
-              className={INPUT}
+              className={`${INPUT} ${locked ? 'text-muted-foreground' : ''}`}
             />
-            <p className="text-xs text-muted-foreground mt-1.5">
-              GM 每轮都看得到这段，写得越具体，世界对你的反应越贴。
-            </p>
+            {!locked && (
+              <p className="text-xs text-muted-foreground mt-1.5">
+                GM 每轮都看得到这段，写得越具体，世界对你的反应越贴。
+              </p>
+            )}
           </div>
 
           {defs.length > 0 && (

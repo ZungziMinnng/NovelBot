@@ -15,6 +15,8 @@ interface BrainstormState {
   messages: ChatSurfaceMessage[]
   /** 各步抽出来的结论，回灌给模型防止它重复问已经定过的事 */
   confirmed: Partial<BrainstormExtract>
+  /** 构思对话的温度。后端默认也是 0.9，这里存住是为了跨会话记住作者调过的档 */
+  temperature: number
 }
 
 interface BrainstormStore extends BrainstormState {
@@ -26,6 +28,7 @@ interface BrainstormStore extends BrainstormState {
     next: ChatSurfaceMessage[] | ((prev: ChatSurfaceMessage[]) => ChatSurfaceMessage[]),
   ) => void
   mergeConfirmed: (patch: Partial<BrainstormExtract>) => void
+  setTemperature: (temperature: number) => void
   /** 清空对话重新构思，保留当前模式 */
   clearConversation: () => void
   /** 书已经建出来了，整个面板归零 */
@@ -38,6 +41,7 @@ const EMPTY: BrainstormState = {
   stage: -1,
   messages: [],
   confirmed: {},
+  temperature: 0.9,
 }
 
 export const useBrainstormStore = create<BrainstormStore>()(
@@ -56,10 +60,12 @@ export const useBrainstormStore = create<BrainstormStore>()(
 
       mergeConfirmed: (patch) => set((s) => ({ confirmed: { ...s.confirmed, ...patch } })),
 
+      setTemperature: (temperature) => set({ temperature }),
+
       clearConversation: () => set({ stage: -1, messages: [], confirmed: {} }),
 
-      // purpose 是作者的偏好，不跟着建完书一起归零
-      reset: () => set((s) => ({ ...EMPTY, purpose: s.purpose })),
+      // purpose 和温度都是作者的偏好，不跟着建完书一起归零
+      reset: () => set((s) => ({ ...EMPTY, purpose: s.purpose, temperature: s.temperature })),
     }),
     { name: 'novelbot-brainstorm' },
   ),

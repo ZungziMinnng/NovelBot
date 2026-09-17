@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { MapPin, X } from 'lucide-react'
+import { ArrowLeft, CornerDownRight, MapPin, X } from 'lucide-react'
 import {
   rpgApi, type RpgCondition, type RpgLocation, type RpgNpc, type RpgStatDef,
 } from '@/api/client'
@@ -49,6 +49,21 @@ export default function LocationSection({
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<LocForm>(EMPTY)
+  /** 正在看哪一层。null = 大地图（顶层地点），值是父地点 id */
+  const [level, setLevel] = useState<number | null>(null)
+
+  // 这一层要画的点。一次把三十个地点全铺在一块画布上谁也看不清，而且
+  // 「客栈」和「客栈二楼」摆在同一个平面上本来就不成立
+  const scoped = locations.filter(loc => (loc.parent_id ?? null) === level)
+  const childCount = (id: number) => locations.filter(loc => loc.parent_id === id).length
+  // 面包屑：从当前这一层一路往上找到顶
+  const trail: RpgLocation[] = []
+  for (let id = level; id != null;) {
+    const node = locations.find(loc => loc.id === id)
+    if (!node || trail.some(t => t.id === node.id)) break
+    trail.unshift(node)
+    id = node.parent_id ?? null
+  }
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-locations', moduleId] })
   const reset = () => { setForm(EMPTY); setEditingId(null); setShowForm(false) }
@@ -111,13 +126,16 @@ export default function LocationSection({
 
   /** 画布空白处双击：当场建一个占位地点，坐标就是落点，然后把表单打开让作者填名字。
    *
+   *  建在**当前这一层**里：在「客栈」的内部地图上双击，建出来的当然是客栈里的
+   *  一间房，不是又一个和客栈平级的地点。
+   *
    *  名字必须去重 —— connections 是按名字匹配的，两个「新地点」会让连接指向歧义。 */
   const createAt = async (x: number, y: number) => {
     let name = '新地点'
     for (let i = 2; locations.some(l => norm(l.name) === norm(name)); i++) name = `新地点 ${i}`
     try {
       const created = await rpgApi.locations.create(moduleId, {
-        name, x, y, sort_order: locations.length + 1,
+        name, x, y, parent_id: level, sort_order: locations.length + 1,
       })
       await refresh()
       startEdit(created)
@@ -172,6 +190,96 @@ export default function LocationSection({
       : [...prev.connections, name],
   }))
 
+  const renderForm = () => (
+    <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">{editingId ? '编辑地点' : '新增地点'}</span>
+        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+      </div>
+      <input
+        value={form.name}
+        onChange={e => setForm({ ...form, name: e.target.value })}
+        placeholder={`地点名，如：${example}`}
+        className={INPUT}
+      />
+      <div>
+        <label className="text-xs font-medium mb-1.5 block">所属地点（可选）</label>
+        <select
+          value={form.parent_id ?? ''}
+          onChange={e => setForm({ ...form, parent_id: e.target.value ? Number(e.target.value) : null })}
+          className={INPUT}
+        >
+          <option value="">顶层地点（大地图）</option>
+          {locations.filter(loc => loc.id !== editingId).map(loc => (
+            <option key={loc.id} value={loc.id}>{loc.name}</option>
+          ))}
+        </select>
+        <p className="text-xs text-muted-foreground mt-1">设置后，这个地点会显示在父地点的内部小地图中。</p>
+      </div>
+      <div>
+        <textarea
+          value={form.description}
+          onChange={e => setForm({ ...form, description: e.target.value })}
+          placeholder="走进来看到什么、闻到什么、有什么不对劲……"
+          className={`${INPUT} resize-y min-h-[4rem]`}
+        />
+        <Assist
+          moduleId={moduleId}
+          field="location_description"
+          context={() => ({ ...assistContext(), 地点名: form.name })}
+          value={form.description}
+          onApply={v => setForm(f => ({ ...f, description: v }))}
+        />
+      </div>
+      <div>
+        <label className="text-xs font-medium mb-1.5 block">和哪儿连着</label>
+        {others.length === 0 ? (
+          <p className="text-xs text-muted-foreground">先多加几个地点，才能连起来。</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {others.map(name => (
+              <button
+                key={name}
+                onClick={() => toggleLink(name)}
+                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                  form.connections.includes(name)
+                    ? 'bg-primary/15 text-primary border-primary/40'
+                    : 'hover:bg-muted text-muted-foreground'
+                }`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-muted-foreground mt-1.5">
+          连线是双向的，不用两头都点一遍。
+        </p>
+      </div>
+      <div>
+        <label className="text-xs font-medium mb-1.5 block">进入条件</label>
+        <ConditionEditor
+          value={form.enter_requires}
+          onChange={v => setForm({ ...form, enter_requires: v })}
+          statDefs={statDefs}
+          relationDefs={relationDefs}
+          npcs={npcs}
+          slotNames={slotNames}
+        />
+      </div>
+      <div className="flex gap-2 justify-end">
+        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+        <button
+          onClick={submit}
+          disabled={!form.name.trim()}
+          className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+        >
+          {editingId ? '保存' : '添加'}
+        </button>
+      </div>
+    </div>
+  )
+
   return (
     <Section
       title="地点"
@@ -180,21 +288,56 @@ export default function LocationSection({
       accent={ACCENT.map}
     >
       <div className="space-y-2">
+        {/* 在哪一层。顶层不显示——那时候没有「上一级」这回事 */}
+        {trail.length > 0 && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground flex-wrap">
+            <button
+              onClick={() => { reset(); setLevel(null) }}
+              className="flex items-center gap-1 hover:text-foreground shrink-0"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />大地图
+            </button>
+            {trail.map((node, i) => (
+              <span key={node.id} className="flex items-center gap-1.5">
+                <span className="opacity-40">/</span>
+                {i === trail.length - 1 ? (
+                  <span className="text-foreground font-medium">{node.name}</span>
+                ) : (
+                  <button
+                    onClick={() => { reset(); setLevel(node.id) }}
+                    className="hover:text-foreground"
+                  >
+                    {node.name}
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+
         <MapCanvas
-          locations={locations}
+          locations={scoped}
+          childCount={childCount}
           onPlace={place}
           onCreate={createAt}
           onLink={link}
           onUnlink={unlink}
+          onOpen={id => { reset(); setLevel(id) }}
+          empty={level === null
+            ? '还没有地点。在这块画布上双击就能建一个。'
+            : '这个地点里面还是空的。在画布上双击，建一间屋子。'}
         />
         <p className="text-xs text-muted-foreground">
-          玩家看到的地图就是这个样子。空白处<b>双击</b>建一个地点，拖着地点摆位置，
-          从地点右边那个小圆点拖到另一个地点连一条路，点已有的线可以断开。没摆过的先按格子排。
+          玩家看到的地图就是这个样子，一层一张。空白处<b>双击</b>建一个地点（建在当前这一层里），
+          拖着地点摆位置，从地点右边那个小圆点拖到另一个地点连一条路，点已有的线可以断开。
+          带 <CornerDownRight className="w-3 h-3 inline align-text-bottom" /> 的地点有内部地图，
+          点那个角标进去摆里面。没摆过的先按格子排。
           （摆位和连线只能用鼠标，手机上请用下面的表单。）
         </p>
 
-        {locations.map(loc => (
-          <div key={loc.id} className="border rounded-lg px-3 py-2 flex items-start gap-3">
+        {scoped.map(loc => (
+          <div key={loc.id} className="space-y-2">
+          <div className="border rounded-lg px-3 py-2 flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-sm font-medium">{loc.name}</span>
@@ -224,105 +367,33 @@ export default function LocationSection({
               )}
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {childCount(loc.id) > 0 && (
+                <button
+                  onClick={() => { reset(); setLevel(loc.id) }}
+                  title="摆它的内部地图"
+                  className="text-xs px-2 py-1 rounded border hover:bg-muted flex items-center gap-1"
+                >
+                  <CornerDownRight className="w-3 h-3" />内部 {childCount(loc.id)}
+                </button>
+              )}
               <button onClick={() => startEdit(loc)} className="text-xs px-2 py-1 rounded border hover:bg-muted">
                 编辑
               </button>
               <DeleteButton onClick={() => remove(loc)} />
             </div>
           </div>
+          {showForm && editingId === loc.id && renderForm()}
+          </div>
         ))}
 
-        {showForm ? (
-          <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">{editingId ? '编辑地点' : '新增地点'}</span>
-              <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
-            </div>
-            <input
-              value={form.name}
-              onChange={e => setForm({ ...form, name: e.target.value })}
-              placeholder={`地点名，如：${example}`}
-              className={INPUT}
-            />
-            <div>
-              <label className="text-xs font-medium mb-1.5 block">所属地点（可选）</label>
-              <select
-                value={form.parent_id ?? ''}
-                onChange={e => setForm({ ...form, parent_id: e.target.value ? Number(e.target.value) : null })}
-                className={INPUT}
-              >
-                <option value="">顶层地点（大地图）</option>
-                {locations.filter(loc => loc.id !== editingId).map(loc => (
-                  <option key={loc.id} value={loc.id}>{loc.name}</option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground mt-1">设置后，这个地点会显示在父地点的内部小地图中。</p>
-            </div>
-            <div>
-              <textarea
-                value={form.description}
-                onChange={e => setForm({ ...form, description: e.target.value })}
-                placeholder="走进来看到什么、闻到什么、有什么不对劲……"
-                className={`${INPUT} resize-y min-h-[4rem]`}
-              />
-              <Assist
-                moduleId={moduleId}
-                field="location_description"
-                context={() => ({ ...assistContext(), 地点名: form.name })}
-                value={form.description}
-                onApply={v => setForm(f => ({ ...f, description: v }))}
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium mb-1.5 block">和哪儿连着</label>
-              {others.length === 0 ? (
-                <p className="text-xs text-muted-foreground">先多加几个地点，才能连起来。</p>
-              ) : (
-                <div className="flex flex-wrap gap-1.5">
-                  {others.map(name => (
-                    <button
-                      key={name}
-                      onClick={() => toggleLink(name)}
-                      className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                        form.connections.includes(name)
-                          ? 'bg-primary/15 text-primary border-primary/40'
-                          : 'hover:bg-muted text-muted-foreground'
-                      }`}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <p className="text-xs text-muted-foreground mt-1.5">
-                连线是双向的，不用两头都点一遍。
-              </p>
-            </div>
-            <div>
-              <label className="text-xs font-medium mb-1.5 block">进入条件</label>
-              <ConditionEditor
-                value={form.enter_requires}
-                onChange={v => setForm({ ...form, enter_requires: v })}
-                statDefs={statDefs}
-                relationDefs={relationDefs}
-                npcs={npcs}
-                slotNames={slotNames}
-              />
-            </div>
-            <div className="flex gap-2 justify-end">
-              <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
-              <button
-                onClick={submit}
-                disabled={!form.name.trim()}
-                className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
-              >
-                {editingId ? '保存' : '添加'}
-              </button>
-            </div>
-          </div>
-        ) : (
+        {showForm && editingId === null && renderForm()}
+        {!showForm && (
           <div className="space-y-2">
-            <AddRow onClick={() => setShowForm(true)}>添加地点</AddRow>
+            {/* 新地点默认归到当前这一层：在客栈的内部地图上点「添加地点」，
+                想加的是客栈里的房间 */}
+            <AddRow onClick={() => { setForm({ ...EMPTY, parent_id: level }); setShowForm(true) }}>
+              {level === null ? '添加地点' : `在「${trail[trail.length - 1]?.name}」里添加地点`}
+            </AddRow>
             <BatchGenerate<{ name: string; description: string; connections: string[] }>
               moduleId={moduleId}
               kind="location"
@@ -334,7 +405,8 @@ export default function LocationSection({
                 for (const loc of locs) {
                   await rpgApi.locations.create(moduleId, {
                     name: loc.name, description: loc.description,
-                    connections: loc.connections, sort_order: locations.length + 1,
+                    connections: loc.connections, parent_id: level,
+                    sort_order: locations.length + 1,
                   })
                 }
                 await refresh()
@@ -349,17 +421,24 @@ export default function LocationSection({
 
 /**
  * 摆地图。和玩家看到的那张（LocationOverview）共用 mapLayout 里的两个纯函数，
- * 差别是：这里能拖、能建、能连、没有迷雾、全部显示。
+ * 差别是：这里能拖、能建、能连、没有迷雾。
+ *
+ * `locations` 只是**当前这一层**：父子地点摆在同一个平面上本来就不成立，
+ * 而且十几个地点全铺上来谁也看不清。有内部地图的点带一个角标，点进去换层。
  *
  * 只绑鼠标事件，也就是说摆位和连线只能在桌面上做——和编辑器里的关系图一样。
  * 手机上作者照样能用下面的表单建地点、点 chip 连路，只是排不了版。
  */
-function MapCanvas({ locations, onPlace, onCreate, onLink, onUnlink }: {
+function MapCanvas({ locations, childCount, onPlace, onCreate, onLink, onUnlink, onOpen, empty }: {
   locations: RpgLocation[]
+  /** 这个地点里面有几个子地点。>0 才画那个「进去」的角标 */
+  childCount: (id: number) => number
   onPlace: (id: number, x: number, y: number) => Promise<void>
   onCreate: (x: number, y: number) => Promise<void>
   onLink: (from: RpgLocation, to: RpgLocation) => Promise<void>
   onUnlink: (a: RpgLocation, b: RpgLocation) => Promise<void>
+  onOpen: (id: number) => void
+  empty: string
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
   // 拖到的位置先留在本地，等落库后的刷新回来才交还给服务端数据：
@@ -514,6 +593,21 @@ function MapCanvas({ locations, onPlace, onCreate, onLink, onUnlink }: {
           >
             <MapPin className="w-3 h-3 shrink-0" />
             {loc.name}
+            {/* 里面还有一层。同样只能用 span，而且要拦下 mousedown——
+                冒泡上去就变成拖节点了 */}
+            {childCount(loc.id) > 0 && (
+              <span
+                role="presentation"
+                onMouseDown={e => { e.preventDefault(); e.stopPropagation(); onOpen(loc.id) }}
+                onDoubleClick={e => e.stopPropagation()}
+                title={`进去看看（${childCount(loc.id)} 个内部地点）`}
+                className="flex items-center gap-0.5 shrink-0 px-1 -mr-0.5 rounded
+                  text-[0.625rem] text-muted-foreground hover:text-primary hover:bg-primary/10"
+              >
+                <CornerDownRight className="w-3 h-3" />
+                {childCount(loc.id)}
+              </span>
+            )}
             {/* 连线的把手。必须独立于节点：拖节点已经占了节点的 mousedown，
                 不给把手就只能按修饰键，没人会发现。用 span 不用 button
                 —— 它在一个 button 里面 */}
@@ -530,7 +624,7 @@ function MapCanvas({ locations, onPlace, onCreate, onLink, onUnlink }: {
 
       {locations.length === 0 && (
         <p className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-          还没有地点。在这块画布上双击就能建一个。
+          {empty}
         </p>
       )}
     </div>

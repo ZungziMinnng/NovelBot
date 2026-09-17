@@ -61,6 +61,14 @@ export default function ConditionEditor({
 
   const unusedStat = statDefs.some(d => !(d.name in stats))
 
+  const afterDays = value.after_days || []
+  const setAfter = (i: number, key: 'flag' | 'days', v: string) =>
+    patch({
+      after_days: afterDays.map((r, n) => (
+        n === i ? { ...r, [key]: key === 'days' ? Number(v) || 0 : v } : r
+      )),
+    })
+
   return (
     <div className="space-y-3 rounded-lg border border-dashed p-3">
       <p className="text-xs text-muted-foreground">
@@ -194,6 +202,38 @@ export default function ConditionEditor({
           />
           <p className="text-[11px] text-muted-foreground mt-1">背包里有就行，不会被扣掉。</p>
         </div>
+      </div>
+
+      {/* 标记名是自由文本，没有下拉可选：flag 是结算时模型现写的，
+          编辑器这边没有一份「合法标记名」的清单可查。同上面「需要的剧情标记」 */}
+      <div className="space-y-1.5">
+        <span className="text-xs font-medium">某件事之后过几天</span>
+        {afterDays.map((row, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <input
+              value={row.flag}
+              onChange={e => setAfter(i, 'flag', e.target.value)}
+              placeholder="聊过电机"
+              className={`${INPUT} flex-1 py-1.5`}
+            />
+            <span className="text-xs text-muted-foreground shrink-0">之后</span>
+            <input
+              type="number"
+              value={row.days}
+              onChange={e => setAfter(i, 'days', e.target.value)}
+              className={`${INPUT} w-20 py-1.5`}
+            />
+            <span className="text-xs text-muted-foreground shrink-0">天</span>
+            <DeleteButton onClick={() => patch({ after_days: afterDays.filter((_, n) => n !== i) })} />
+          </div>
+        ))}
+        <AddRow onClick={() => patch({ after_days: [...afterDays, { flag: '', days: 1 }] })}>
+          加一条等待
+        </AddRow>
+        <p className="text-[11px] text-muted-foreground">
+          上面的「限定天数」是第几天，这条是相对的：那个标记立起来之后再过几天。
+          标记还没立、或者是加这个功能之前的老存档（没记下是哪天立的），都算不满足。
+        </p>
       </div>
     </div>
   )

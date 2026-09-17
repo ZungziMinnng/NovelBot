@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
@@ -9,27 +9,20 @@ import {
 } from 'lucide-react'
 import {
   streamTavernTurn, tavernApi, modelLibraryApi, modelSelectValue,
-  type ModelEntry, type TavernCard, type TavernMessage, type TavernSSEMessage, type TavernTurnMeta,
+  type ModelEntry, type TavernCard, type TavernSSEMessage, type TavernTurnMeta,
 } from '@/api/client'
+import {
+  isTurnLive, tavernTurnActions, toBubble, useTavernTurn, useTavernTurnStore,
+  type TavernBubble,
+} from '@/store/tavernTurnStore'
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import CardAvatar from './CardAvatar'
 import TavernParamFields, { type TavernParams } from './TavernParams'
 
-/** 界面上的一条消息。id 为 null 表示流式过程中还没落库的占位气泡 */
-interface Bubble {
-  id: number | null
-  role: string
-  content: string
-  /** 说话人。null = 玩家消息，或群聊之前的老数据（渲染时回落到主卡） */
-  cardId: number | null
-}
-
-const toBubble = (m: TavernMessage): Bubble => ({
-  id: m.id, role: m.role, content: m.content, cardId: m.card_id,
-})
+// 气泡的形状和「消息 → 气泡」的转换都搬到 @/store/tavernTurnStore 了，
+// 和「正在生成的那一轮」那套状态放在一起
 
 /** 一轮里多个人发言时，meta 要合起来看，否则只剩最后一个人的数字 */
 function mergeMeta(prev: TavernTurnMeta | null, next: TavernTurnMeta): TavernTurnMeta {
@@ -71,16 +64,23 @@ export default function TavernChat() {
   const navigate = useNavigate()
   const qc = useQueryClient()
 
-  const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState(false)
-  // 首个 token 到达之前单独一个状态：光标闪在空气泡里看不出是在等还是卡了
-  const [waiting, setWaiting] = useState(false)
-  const [meta, setMeta] = useState<TavernTurnMeta | null>(null)
   const [title, setTitle] = useState('')
+
+  // 「正在生成的那一轮」整套状态在 store 里，不在这儿。理由同 RPG 那边
+  // （见 @/store/tavernTurnStore 顶部）：这一页切走是真的卸载，而流式回调还在
+  // 跑——状态留在组件里会跟着一起销毁，回到页面只剩空白。
+  // setter 的名字和原来逐个对齐，下面那些 setBubbles(...) 一行没改
+  const { bubbles, streaming, waiting, meta, suggestions } = useTavernTurn(sessionId)
+  const turnActions = useMemo(() => tavernTurnActions(sessionId), [sessionId])
+  const {
+    setBubbles, setStreaming, setWaiting, setMeta, setSuggestions,
+    appendToken, flushTokens, setController, start: startTurn,
+    abort: abortTurn, end: endTurn,
+  } = turnActions
+
   const [panel, setPanel] = useState<'card' | 'sessions' | null>(null)
   const [showParams, setShowParams] = useState(false)
-  const [suggestions, setSuggestions] = useState<string[]>([])
   const [suggesting, setSuggesting] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
@@ -90,10 +90,7 @@ export default function TavernChat() {
   // 露出一帧旧值，看起来就是"点了详细又跳回适中"。
   const [paramPatch, setParamPatch] = useState<Partial<TavernParams>>({})
 
-  const abortRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  // 当前说话人的气泡是否已经建好。事件回调里连着几个 setState，读 state 会拿到旧值
-  const openRef = useRef(false)
   // 预设按钮是"改完立刻存"，同一个事件里 setState 还没生效，commit 必须读 ref
   const paramPatchRef = useRef<Partial<TavernParams>>({})
 
@@ -123,13 +120,17 @@ export default function TavernChat() {
     if (loaded) setBubbles(loaded.map(toBubble))
   }, [loaded])
 
-  // 抽屉里换故事线时组件不重挂，得手动清掉上一条的气泡和面板状态
+  // 抽屉里换故事线时组件不重挂，得手动清掉上一条的气泡和面板状态。
+  // 但这一条线正跑着一轮就别清：从别处切回一条**正在生成**的线时，清空会把
+  // 已经吐出来的一半抹掉，而那半段后端还在接着写
   useEffect(() => {
-    setBubbles([])
-    setMeta(null)
-    setSuggestions([])
+    if (!isTurnLive(sessionId)) {
+      setBubbles([])
+      setMeta(null)
+      setSuggestions([])
+      setWaiting(false)
+    }
     setEditingId(null)
-    setWaiting(false)
     paramPatchRef.current = {}
     setParamPatch({})
   }, [sessionId])
@@ -138,34 +139,41 @@ export default function TavernChat() {
     if (sess) setTitle(sess.title)
   }, [sess])
 
-  useEffect(() => () => { abortRef.current?.abort() }, [])
+  // 这里原先挂着「卸载就 abort」。拆掉了：切页面不该掐断正在生成的那一轮，
+  // 而这一页切走就是卸载。真想停就按输入框上的停止按钮
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [bubbles])
 
   const send = useCallback((text: string) => {
+    // 先把这一条线重置成新的一轮再往里写：start 会清空气泡、挂上右下角那粒药丸
+    startTurn(sess?.title || '', `/tavern/chat/${sessionId}`)
     setSuggestions([])
     // 助手气泡不再预推：群聊一轮有几个人说话要等服务端说了才知道
     setBubbles(prev => [...prev, { id: null, role: 'user', content: text, cardId: null }])
     setStreaming(true)
     setWaiting(true)
     setMeta(null)
-    openRef.current = false
 
     // 正在流的那条永远是最后一条：气泡只往后追加
     const patchLast = (fn: (prev: string) => string) =>
       setBubbles(prev => prev.map((b, i) => (i === prev.length - 1 ? { ...b, content: fn(b.content) } : b)))
 
-    // 每个说话人开口前建一个空气泡。speaker 事件只在群聊发，单卡靠 meta 兜底
+    // 每个说话人开口前建一个空气泡。speaker 事件只在群聊发，单卡靠 meta 兜底。
+    // 「当前这位的气泡开过没有」**现查 store**，不用组件里的 ref：切走再切回来
+    // 时 ref 是全新的 false，可 store 里那颗气泡还开着，再开一颗会把后半句
+    // 切到另一颗里。判据是「最后一条是助手气泡且还没落库」——done 会给它写上
+    // 正式 id，那就算这一位说完了，下一位该开新的
     const openBubble = (cardId: number | null) => {
-      if (openRef.current) return
-      openRef.current = true
+      const current = useTavernTurnStore.getState().turns[sessionId]?.bubbles
+      const last = current?.[current.length - 1]
+      if (last?.role === 'assistant' && last.id === null) return
       setWaiting(true)
       setBubbles(prev => [...prev, { id: null, role: 'assistant', content: '', cardId }])
     }
 
-    abortRef.current = streamTavernTurn(
+    setController(streamTavernTurn(
       sessionId,
       { content: text },
       (msg: TavernSSEMessage) => {
@@ -174,7 +182,7 @@ export default function TavernChat() {
         } else if (msg.event === 'token') {
           openBubble(null)
           setWaiting(false)
-          patchLast(prev => prev + msg.data)
+          appendToken(msg.data)
         } else if (msg.event === 'meta') {
           setMeta(prev => mergeMeta(prev, msg.data))
           openBubble(msg.data.speaker?.card_id ?? null)
@@ -189,18 +197,26 @@ export default function TavernChat() {
           toast(msg.data)
         } else if (msg.event === 'done') {
           const id = msg.data.message_id
+          // 攒着的 token 先落地，否则一帧之后会追加到已经封口的气泡上
+          flushTokens()
           setBubbles(prev => prev.map((b, i) => (i === prev.length - 1 ? { ...b, id } : b)))
-          // 这一位说完了，下一位要开新气泡
-          openRef.current = false
+          // 这一位说完了。上面那行写上 id 就是封口——下一位开口时 openBubble
+          // 现查 store，会发现最后一条已经落了库，于是自然给他开一颗新的
         } else if (msg.event === 'error') {
+          flushTokens()
           openBubble(null)
           setWaiting(false)
           patchLast(prev => prev + `\n[错误] ${msg.data}`)
         }
       },
-      () => { setStreaming(false); setWaiting(false) },
-    )
-  }, [sessionId])
+      () => {
+        // 这一轮收尾。界面可能已经不在了（切走了），收尾照样做——药丸要摘掉、
+        // streaming 要落回 false，不然切回来会一直显示成「正在生成」
+        flushTokens()
+        endTurn()
+      },
+    ))
+  }, [sessionId, sess?.title, turnActions])
 
   const handleSend = () => {
     const text = input.trim()
@@ -239,13 +255,12 @@ export default function TavernChat() {
 
   // 停止：中断的半段后端会落库，所以刷新后仍在，本地不需要回滚气泡
   const stop = () => {
-    abortRef.current?.abort()
-    setStreaming(false)
-    setWaiting(false)
+    // 掐线和收尾都在 store 里（原来那两行 setStreaming/setWaiting 是 end 的一部分）
+    abortTurn()
     qc.invalidateQueries({ queryKey: ['tavern-messages', sessionId] })
   }
 
-  const startEdit = (b: Bubble) => {
+  const startEdit = (b: TavernBubble) => {
     if (streaming || !b.id) return
     setEditingId(b.id)
     setDraft(b.content)
@@ -371,10 +386,6 @@ export default function TavernChat() {
 
   return (
     <div className="mode-tavern h-screen flex flex-col bg-background relative">
-      <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
-        <Silk speed={1.5} scale={1.6} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
-      </div>
-
       <header className="relative z-10 border-b border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 flex items-center gap-3 shrink-0">
         <button
           onClick={() => navigate('/tavern')}

@@ -27,7 +27,7 @@ export default function GenerationIndicator() {
   return (
     <div
       onClick={() => navigate(`/novel/${novelId}?chapter=${chapterNum}`)}
-      className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 bg-primary text-primary-foreground px-4 py-2.5 rounded-full shadow-lg cursor-pointer hover:opacity-90 transition-opacity select-none"
+      className="flex items-center gap-2.5 bg-primary text-primary-foreground px-4 py-2.5 rounded-full shadow-lg cursor-pointer hover:opacity-90 transition-opacity select-none"
       title="点击返回编辑器查看生成进度"
     >
       <Loader2 className="w-4 h-4 animate-spin shrink-0" />

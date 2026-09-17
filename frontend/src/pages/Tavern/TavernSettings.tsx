@@ -10,7 +10,6 @@ import {
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import Silk from '@/components/Silk/Silk'
 import TavernPrompts from './TavernPrompts'
 
 type Tab = 'rules' | 'instructions' | 'prompts'
@@ -27,10 +26,6 @@ export default function TavernSettings() {
 
   return (
     <div className="mode-tavern min-h-screen bg-background relative">
-      <div className="fixed inset-0 z-0 opacity-[0.10] pointer-events-none">
-        <Silk speed={2} scale={1.4} color="#b02a7a" noiseIntensity={1.4} rotation={0} className="w-full h-full" />
-      </div>
-
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
         <button onClick={goBack} className="p-2 rounded-md hover:bg-muted" title="返回酒馆">
           <ArrowLeft className="w-4 h-4" />

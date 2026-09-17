@@ -211,6 +211,34 @@ export default function About() {
             </p>
           </div>
         </Section>
+
+        {/* Credits：CC BY 要求署名，这块不能删 */}
+        <Section icon={Sparkles} title="开源素材">
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p>
+              <span className="font-medium text-foreground">属性图标：</span>
+              来自{' '}
+              <a
+                href="https://game-icons.net/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary hover:underline"
+              >
+                game-icons.net
+              </a>
+              （作者 Lorc、Delapouite 等），经 react-icons 引入，授权 CC BY 3.0。
+            </p>
+            <p>
+              <span className="font-medium text-foreground">界面图标：</span>
+              lucide，授权 ISC。
+            </p>
+            <p>
+              <span className="font-medium text-foreground">音效：</span>
+              不随本项目分发。需要的话自己放进 <code>public/sfx/</code>，
+              那个目录里的说明写了文件名和推荐来源（Kenney 的 CC0 音效包）。
+            </p>
+          </div>
+        </Section>
       </main>
     </div>
   )

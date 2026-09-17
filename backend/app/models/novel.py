@@ -53,6 +53,9 @@ class Novel(Base):
     # 是否发送自定义温度参数（部分模型不支持 temperature，关闭后从请求中省略）
     writer_use_custom_temperature: Mapped[bool] = mapped_column(Boolean, default=True)
     writer_max_tokens: Mapped[int] = mapped_column(Integer, default=16384)
+    # 构思/设定生成的温度，覆盖世界观、大纲、角色卡、自动构建那一条链原先硬编码的 0.7。
+    # 负数 = 整个参数不发给供应商（同 RPG 模组 / 酒馆卡的约定）
+    build_temperature: Mapped[float] = mapped_column(Float, default=0.7)
 
     # 上下文配置（覆盖硬编码默认值）
     rolling_summary_count: Mapped[int] = mapped_column(Integer, default=8)
