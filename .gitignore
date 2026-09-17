@@ -47,6 +47,10 @@ backend/web/
 release/
 NovelBot-dist*/
 
+# ── Claude Code ──────────────────────────────────────────────────────────────
+# 本机的工具权限白名单，属于个人环境配置，不该跟着进公开库
+.claude/settings.local.json
+
 # ── Claude Code 技能 ─────────────────────────────────────────────────────────
 # 只挡 archify：它是从 tt-a1i/archify 装的第三方技能，跟 NovelBot 无关，
 # 214 个文件天天挂在 git status 里刷屏。
