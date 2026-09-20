@@ -15,6 +15,44 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
+# 详细档案的英文键 → 中文键。
+#
+# RPG 从编辑器到提示词认的一直是中文：编辑器按中文键取值（见 RpgModule.tsx 的
+# PROFILE_KEYS），rpg_context 把 key 当标签直接拼进提示词。可向导早期版本是照
+# **酒馆**那套写的——酒馆存英文键、显示时翻成中文，方向正好相反——于是向导生成的
+# 角色，档案内容在库里躺着、也进了提示词（标签是 background：），编辑器那三栏却
+# 永远是空的。这份映射就是用来把老数据读回中文的。
+PROFILE_ALIASES = {
+    "appearance": "外貌身材",
+    "background": "背景故事",
+    "abilities": "能力特长",
+    "relationships": "关系网络",
+}
+
+
+def normalize_profile_sections(sections, appearance: str = "") -> tuple[dict, str]:
+    """把详细档案归一到 RPG 的规矩：中文键，且**外貌不进分栏**。
+
+    返回 `(归一的档案, 顶层外貌)`。外貌那一格抽出来还给顶层的 appearance 字段：
+    那本来就是它的家（编辑器里「外貌」单独一栏），留在分栏里会被注入两遍，
+    立绘的提示词也会把同一段外貌拼两次。
+
+    只归一读出来的值，不回写库——作者在编辑器里存一次，中文键就落到库里了。
+    """
+    out: dict[str, str] = {}
+    for raw_key, raw_text in dict(sections or {}).items():
+        text = str(raw_text or "").strip()
+        if not text:
+            continue
+        key = PROFILE_ALIASES.get(str(raw_key).strip(), str(raw_key).strip())
+        if key == "外貌身材":
+            # 顶层填了就只留顶层那份；顶层空着才拿分栏这份补上，不丢内容
+            appearance = appearance or text
+            continue
+        out[key] = text
+    return out, appearance
+
+
 class RpgModule(Base):
     """模组（剧本），对应酒馆的角色卡：一份可反复开局的世界设定。"""
     __tablename__ = "rpg_modules"
@@ -65,6 +103,8 @@ class RpgModule(Base):
     # ── 开局默认值：建局时整份拷进 session ──
     default_inventory: Mapped[list] = mapped_column(JSON, default=list)
     default_location: Mapped[str] = mapped_column(String(100), default="")
+    opening_npc_ids: Mapped[list] = mapped_column(JSON, default=list)
+    opening_npc_locations: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 时段表，如 ["早", "中", "晚"]。空 = 这个模组不用时段，一切照旧。
     # 这里是默认值，建局时可以改，改完存进 session 自己那一份
@@ -74,6 +114,13 @@ class RpgModule(Base):
     # 和加这一列之前一样。**开了也必须有那张主角模板卡才生效**：没有卡就没有
     # 「定死的值」可用，锁着一个空名字等于谁都开不了局
     lock_protagonist: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 构思向导上一次回填写进来的东西，供下次回填先摘掉。
+    # 形状：{slots: [...], stats: [...], relation_stats: [...],
+    #        location_ids: [...], npc_ids: [...], item_ids: [...], action_ids: [...]}
+    # 没有它就分不清「这套数值是向导写的还是作者手打的」：重新生成再回填时
+    # 只能一律追加，于是模组里叠出两套。名字按 trim 后比对（同 newNamed）
+    wizard_state: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 作废：数值系统换成 stat_defs 之后这两列没人读了。项目没有 Alembic，
     # create_all 不删列，而它们建成了 NOT NULL，从模型里拿掉会让老库插入直接
@@ -108,9 +155,13 @@ class RpgModule(Base):
     reply_length: Mapped[int] = mapped_column(Integer, default=300)
 
     model_ref: Mapped[str] = mapped_column(String(100), default="")
-    # 裁决 / 结算 / 建议共用的便宜模型。酒馆只有摘要一个，
-    # RPG 一轮里有三处结构化调用，合用一个字段省得配四遍
     fast_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    settlement_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    adjudication_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    suggestion_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    activity_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    offscreen_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    discovery_model_ref: Mapped[str] = mapped_column(String(100), default="")
     # 压缩旧剧情用。空 = 跟着 fast_model_ref 走，所以老库行为不变。
     # 单独拎出来是因为摘要和裁决的要求不一样：裁决要快要便宜，摘要错一次
     # 会把错的东西一路带到局终（它的输出会喂给下一次摘要）
@@ -353,6 +404,9 @@ class RpgNpc(Base):
     )
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 自由文本，不是数字：「十七八岁」「三百岁」「看不出年纪」都得能写。
+    # 每轮随长相一起注入（见 _one_npc）
+    age: Mapped[str] = mapped_column(String(20), default="")
     avatar_url: Mapped[str] = mapped_column(String(300), default="")
     # 当前这张立绘用的随机种子，0 = 没记录（自己上传的、或者还没生成过）。
     # 只由生成接口写，不进 Create/Update schema——否则会被表单那份整体 PATCH 冲掉
@@ -370,13 +424,15 @@ class RpgNpc(Base):
 
     # 一句话简介，给作者在列表里认人用，也进提示词
     description: Mapped[str] = mapped_column(Text, default="")
-    # 分栏档案，键同酒馆：外貌身材 / 背景故事 / 能力特长 / 关系网络
+    # 分栏档案，存中文键：背景故事 / 能力特长 / 关系网络（外貌不进这里，它有自己
+    # 的字段）。老库里可能留着英文键，读的时候过 normalize_profile_sections
     profile_sections: Mapped[dict] = mapped_column(JSON, default=dict)
     # [{"user": ..., "assistant": ...}]，只作为文字引用进提示词
     dialogue_examples: Mapped[list] = mapped_column(JSON, default=list)
 
     persona: Mapped[str] = mapped_column(Text, default="")
-    # 只在首次见面时注入（npc_states 里该 npc 的 met 为假），之后省掉这段 token
+    # 每轮都注入。原先按 npc_states 里的 met 只在首次见面时给，代价是见过面
+    # 之后人去了别处、又被提到时模型手上没有长相，只能现编（见 _one_npc）
     appearance: Mapped[str] = mapped_column(Text, default="")
 
     # 常驻地点。等于 session.location 即视为在场
@@ -385,6 +441,8 @@ class RpgNpc(Base):
     # 没有（或整个表是空的）就落回 location。**不是第二个在场判据**——
     # 它只是给 location 换了个按时段取值的算法，谁在场仍然只有一种问法
     slot_locations: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 仅在这些时段执行随机移动；空列表保持旧行为，表示所有时段都可随机移动。
+    random_movement_slots: Mapped[list] = mapped_column(JSON, default=list)
     # 额外触发词：人不在场但被提到也注入，匹配方式同世界书
     keywords: Mapped[str] = mapped_column(String(500), default="")
 
@@ -392,6 +450,7 @@ class RpgNpc(Base):
     # 记在 session.npc_activities 里，下回见面时注入。**默认关**——它意味着
     # 每轮多一次模型调用，而这个模式此前只有玩家说话时才花钱
     ai_scheduled: Mapped[bool] = mapped_column(Boolean, default=False)
+    random_movement: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 这个人的关系数值起点。空 = 按模组的 relation_stat_defs 取 initial；
     # 填了就覆盖对应项（「她一开始就恨你」）
@@ -561,6 +620,14 @@ class RpgAction(Base):
     requires: Mapped[dict] = mapped_column(JSON, default=dict)
     # 要不要先选一个在场角色。relation_effects 非空时基本都要
     needs_target: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 目标可以是不在跟前的人（手机、传讯这类远程渠道）。默认 False：
+    # 「夸她」这种动作对象必须在场，放开等于允许隔着三条街摸头。
+    # 后端本来就不校验在场（_resolve_engine 在全量角色表里按名字找 target_npc），
+    # 所以这一列只影响前端给谁选、以及 needs_target 那条置灰判据
+    target_anywhere: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 点了把目标挪到玩家身边（写 sess.npc_places）。「召见秘书」就是这个：
+    # 原先只能指望结算模型自己想起来改位置，那是个概率。
+    summons_target: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 分栏用的自由文本，如「经营」「人事」。空 = 归到「其他」那一栏。
     # 不做成外键表：作者手上一共十几个动作，为了分栏建一张表加一套 CRUD
@@ -585,6 +652,9 @@ class RpgAction(Base):
 class RpgSession(Base):
     """一局游戏。世界的权威状态就存在这行上。"""
     __tablename__ = "rpg_sessions"
+
+    operation_token: Mapped[str] = mapped_column(String(40), default="")
+    operation_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     module_id: Mapped[int] = mapped_column(
@@ -634,6 +704,21 @@ class RpgSession(Base):
     # 先例是 RpgLocation.connections 存名字不存 id
     slot: Mapped[str] = mapped_column(String(20), default="")
     day: Mapped[int] = mapped_column(Integer, default=1)
+    # 上一个「时间还没被描写过」的起跳点，形如「第 1 天 · 早」，空 = 没有待补的时间。
+    # 推时段是纯引擎、不调模型，这一段天然没有叙事；不记一笔的话下一轮模型只看到
+    # 新的时段名，会接着上一轮的场景往下写（见 rpg_context.time_jump_block）。
+    # **必须进 SNAPSHOT_FIELDS**：读档回到推时段之前，这句提示不该还挂着
+    time_jump_from: Mapped[str] = mapped_column(String(40), default="")
+    # 上一幕发生在哪个地点，形如「织云阁」，空 = 没有待说的断场。
+    # 和 time_jump_from 是同一个病的两面：地点总览点【移动到这里】是纯引擎瞬移
+    # （move_by_name，零 LLM、不产生任何消息），这次离开在对话历史里一个字都不留，
+    # 下一轮模型眼前仍是「上一幕的长篇正文 + 玩家的下一句」，接着离开时那一幕往下
+    # 写（见 rpg_context.scene_break_block）。
+    #
+    # **只由纯引擎瞬移写**。走一整轮的移动（前端 moveByTurn → _resolve_engine 的
+    # move_to 分支）自己会产出「你走过去」那段正文，模型读得到，再贴一块提示是重复。
+    # **必须进 SNAPSHOT_FIELDS**：读档回到移动之前，这句提示不该还挂着
+    scene_break_from: Mapped[str] = mapped_column(String(40), default="")
     # 这一格里已经用掉的行动数 / 说过的纯对话条数，都由 advance_slot 归零。
     # 前者攒到 module.slot_budget 就自动推一格，后者只用来点亮按钮。
     # **两个都必须进 SNAPSHOT_FIELDS**：它们会随回合自己变，漏了不报错，
@@ -669,6 +754,24 @@ class RpgSession(Base):
     # 悄悄归零、所有「好感≥50」的门一起失效，而且全程没有任何报错。
     npc_notes: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # 这一局里**被改写掉的外貌**。{"3": {"胸部": "服丰元玉乳散后长出，已定形"}}，
+    # 外层键同 npc_states，内层是自由键值，值一律字符串。注入时紧贴
+    # RpgNpc.appearance 之后，并明说以它为准（见 rpg_context._one_npc）。
+    #
+    # 为什么不并进 npc_notes：那张表满 NOTE_LIMIT 条就**淘汰最久没更新的那条**，
+    # 而身体改造恰恰是写一次就再不刷新的——它永远排在淘汰队列最前面。温眠第 3
+    # 天服药长出的乳房就是这么没的：经历里那条被 NPC_HISTORY_LINES=5 挤出窗口，
+    # 卡上的 appearance 还写着平坦，于是模型每轮都照作者原文写。
+    #
+    # 为什么不直接改 RpgNpc.appearance：那是角色卡字段，作用域是**整个模组**。
+    # 同一个模组能开好几局，写进卡里等于 B 局第一次见到她就已经是 A 局玩出来的
+    # 样子。理由同 npc_activities，这一列因此和它一样挂在会话上。
+    #
+    # 满了**拒绝新的、保留旧的**，和 npc_notes 正好相反：那张表新的近况比旧的
+    # 要紧（伤好了就该被盖掉），这张表的每一条都没有自己消失的理由，该由玩家
+    # 决定划掉哪条（见 apply_npc_appearance）
+    npc_appearance: Mapped[dict] = mapped_column(JSON, default=dict)
+
     # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。键同 npc_states
     # （npc_id 的字符串），值是**一句**话，每个角色只有一个。
     #
@@ -677,6 +780,34 @@ class RpgSession(Base):
     # 和 npc_notes 分开同理，那张表是 GM 从叙事里读出来的近况，这张是调度替
     # 不在场的人编的行动，两个写手共用一个键空间迟早互相盖
     npc_activities: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 这一局里每个人身上过了什么事，只追加不覆盖：
+    # {"3": [{"day": 4, "slot": "晚", "content": "在图书馆翻了一下午旧报纸"}]}。
+    # 外层键同 npc_states，day/slot 由引擎在写入那一刻盖章，不信模型自己填的。
+    #
+    # 刻意不并进 npc_notes：那一列是「这个人**现在**什么样」（伤势、身上带着
+    # 什么），同一个键写第二遍就是覆盖，因为它本来就只该有一份现值。经历没有
+    # 「现值」——上次受伤和这次受伤是两件事，盖掉旧的等于把这个人走过的路删了。
+    # 一个 append 撞上一个 upsert，永远是 upsert 赢，而且全程不报错。
+    #
+    # 对齐小说侧 Character.full_sheet["character_history"]（那边是 {chapter,
+    # day, content}）；游戏侧没有「章」，用 day + slot 定位
+    npc_history: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 关系里程碑：这一局里「关系真的拐了个弯」的时刻。
+    # [{"day": 4, "slot": "晚", "type": "动心", "a": "你", "b": "赫敏",
+    #   "content": "..."}]，类型限定在 rpg_settlement._MILESTONE_TYPES 那七个，
+    # 逐字沿用小说侧 Memory(memory_type="relationship_milestone") 的那一套。
+    #
+    # 为什么不在 npc_history 上打个标记了事，三件事都不一样：
+    #  1. 它跨两个人。挂进某一个人的经历里等于只从一边记，另一边那一格拿不到，
+    #     而关系本来就是两边的事。
+    #  2. 它要**常驻注入**。经历是「这阵子在忙什么」，人不在场就不用管；里程碑是
+    #     这段关系**为什么长这样**的事实锚——缺了它，模型手上只有「好感 62」，
+    #     写「她为什么会信你」时只能现编一段旧事，下一轮又不记得，于是每轮编一个新的。
+    #  3. 预算和筛选规则不同：经历按人切、每人一小份；里程碑是全局共享的一小段。
+    #     混在一起之后，话多的那个人的经历会把别人的里程碑挤掉。
+    npc_milestones: Mapped[list] = mapped_column(JSON, default=list)
 
     # 不在场的人想找玩家说的话，等玩家点开才落成真消息：
     # [{"id": "a1b2...", "npc_id": 3, "text": "在门口等你，有话说",
@@ -717,9 +848,20 @@ class RpgSession(Base):
     # 存这一局而不是写进角色卡：同一个模组开两局，A 局把她叫到办公室，
     # B 局第一次见面不该从办公室开始。理由同 npc_activities。
     #
-    # **推时段清空**（rpg_state.advance_slot）：时段一变就回到「作息表说了算」，
-    # 否则模型随手写的一笔会永久盖掉作者排的作息表，而那是他唯一的排期手段。
     npc_places: Mapped[dict] = mapped_column(JSON, default=dict)
+    npc_random_places: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 谁跟着玩家走：[3, 7]，装的是 npc id。
+    #
+    # **只装 id，不记位置**：她的位置就是玩家的位置，由 npc_place 的取值链当场
+    # 算出来（剧情 → 跟随 → 作息表 → 常驻地）。再存一份位置就等于开了第二个
+    # 「她在哪儿」的真相，玩家一走动它就和 sess.location 分叉——而分叉的表现是
+    # 「人明明跟在你身后，侧栏说不在这儿」。
+    #
+    # **绝不进 rpg_settlement.STATE_FIELDS / DOMAINS**：模型一个字都不许碰它，
+    # 否则它就能随口给人永久加一个同伴，那正是上面那条注释要防的事。写入者只有
+    # 两个：引擎从玩家那句话里认出来、侧栏的 /follow 接口。
+    npc_followers: Mapped[list] = mapped_column(JSON, default=list)
 
     # 大事记：这一局里「已经传开」的事，跨对话线共享。存在的理由是分线之后
     # 「你在铁匠铺听说老兵他哥失踪了，回去找老兵，老兵没听过」——这不是摘要器
@@ -814,6 +956,8 @@ class RpgMessage(Base):
 
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
+    turn_request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    before_save_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # **已废弃：后端不再读这一列。** 保留只为不动老库的表结构（SQLite 删列要
     # 重建表）。原先它同时是三件事——历史分区键、隐私边界、界面视图，三件事

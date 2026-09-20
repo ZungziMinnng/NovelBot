@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Check, X, AlertTriangle, Loader2 } from 'lucide-react'
-import type { RpgWizardExtract } from '@/api/client'
+import type { RpgCondition, RpgWizardExtract } from '@/api/client'
+import type { WizardStatGroup } from './wizardApply'
 
 /** 勾选后要写进表单的那份，形状同 RpgWizardExtract 但只含勾上的项 */
 export type WizardPicked = Partial<Omit<RpgWizardExtract, 'dropped'>>
@@ -9,6 +10,7 @@ interface Props {
   draft: RpgWizardExtract
   onCancel: () => void
   onApply: (picked: WizardPicked) => void
+  onMoveStat?: (from: WizardStatGroup, index: number) => boolean
   onRegenerate?: () => void
   applying?: boolean
 }
@@ -28,7 +30,7 @@ const TEXT_FIELDS: Array<[keyof RpgWizardExtract, string]> = [
  * 引用校验——后端只按「聊定时的白名单」过滤过，作者在这里取消勾选某个数值之后，
  * 引用它的道具就悬空了，那是后端拦不到的，得当场提示。
  */
-export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerate, applying = false }: Props) {
+export default function WizardApplyModal({ draft, onCancel, onApply, onMoveStat, onRegenerate, applying = false }: Props) {
   // 每一项一个稳定 key：文本用字段名，列表项用 "类型:下标"
   const allKeys = useMemo(() => collectKeys(draft), [draft])
   const [picked, setPicked] = useState<Set<string>>(() => new Set(allKeys))
@@ -39,6 +41,24 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
       next.has(key) ? next.delete(key) : next.add(key)
       return next
     })
+
+  const moveStat = (from: WizardStatGroup, index: number) => {
+    const sourcePrefix = from === 'stat_defs' ? 'stat' : 'rel'
+    const targetPrefix = from === 'stat_defs' ? 'rel' : 'stat'
+    const target = from === 'stat_defs' ? 'relation_stat_defs' : 'stat_defs'
+    const targetIndex = (draft[target] || []).length
+    if (!onMoveStat?.(from, index)) return
+    setPicked(previous => {
+      const next = new Set([...previous].filter(key => !key.startsWith(`${sourcePrefix}:`)))
+      ;(draft[from] || []).forEach((_, position) => {
+        if (!previous.has(`${sourcePrefix}:${position}`)) return
+        next.add(position === index
+          ? `${targetPrefix}:${targetIndex}`
+          : `${sourcePrefix}:${position > index ? position - 1 : position}`)
+      })
+      return next
+    })
+  }
 
   // 当前勾着的数值名 / 关系名 / 地点名，用来算悬空引用
   const live = useMemo(() => {
@@ -65,6 +85,18 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
       if (!picked.has(`item:${i}`)) return
       Object.keys(it.effects || {}).forEach(k => {
         if (!live.stats.has(k)) out.push(`道具「${it.name}」影响的「${k}」没勾上`)
+      })
+    })
+    ;(draft.skills || []).forEach((s, i) => {
+      if (!picked.has(`skill:${i}`)) return
+      Object.keys(s.effects || {}).forEach(k => {
+        if (!live.stats.has(k)) out.push(`技能「${s.name}」影响的「${k}」没勾上`)
+      })
+    })
+    ;(draft.tasks || []).forEach((t, i) => {
+      if (!picked.has(`task:${i}`)) return
+      Object.keys(t.effects || {}).forEach(k => {
+        if (!live.stats.has(k)) out.push(`任务「${t.name}」的奖励「${k}」没勾上`)
       })
     })
     ;(draft.actions || []).forEach((a, i) => {
@@ -98,6 +130,10 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
     if (npcs.length) out.npcs = npcs
     const items = (draft.items || []).filter((_, i) => picked.has(`item:${i}`))
     if (items.length) out.items = items
+    const skills = (draft.skills || []).filter((_, i) => picked.has(`skill:${i}`))
+    if (skills.length) out.skills = skills
+    const tasks = (draft.tasks || []).filter((_, i) => picked.has(`task:${i}`))
+    if (tasks.length) out.tasks = tasks
     const actions = (draft.actions || []).filter((_, i) => picked.has(`action:${i}`))
     if (actions.length) out.actions = actions
     onApply(out)
@@ -119,7 +155,9 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
                 ? '先看一下这套设定。满意就回填，不满意可以换一套。'
                 : '勾掉不想要的。数值是地基，取消某个数值会让引用它的道具悬空。'}
             </p>
-            <p className="text-xs text-muted-foreground mt-0.5">已存在的同名条目会跳过，保留模组中的现有内容。</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              上一轮向导填的内容会被这一轮换掉；你自己手写的同名条目会跳过。
+            </p>
           </div>
           <button onClick={onCancel} disabled={applying} className="p-1.5 rounded-md hover:bg-muted shrink-0 disabled:opacity-40">
             <X className="w-4 h-4" />
@@ -140,7 +178,7 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
           {draft.dropped.length > 0 && (
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2.5 text-xs space-y-1">
               <div className="flex items-center gap-1.5 font-medium text-amber-600">
-                <AlertTriangle className="w-3.5 h-3.5" /> 生成时丢掉了这些对不上的引用
+                <AlertTriangle className="w-3.5 h-3.5" /> 生成时的修正与未采用内容
               </div>
               {draft.dropped.map((d, i) => <p key={i} className="text-muted-foreground">· {d}</p>)}
             </div>
@@ -156,21 +194,36 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
             )}
           </Group>
 
-          <Group title="玩家数值">
+          <Group title="玩家数值（全局一份）">
             {(draft.stat_defs || []).map((s, i) => (
+              <div key={i} className="space-y-1">
               <Row key={i} on={picked.has(`stat:${i}`)} onToggle={() => toggle(`stat:${i}`)}
                 title={s.name}
                 sub={`起始 ${s.initial}（${s.min}~${s.max ?? '∞'}）· ${s.display}${s.on_zero && s.on_zero !== '无' ? ` · 归零${s.on_zero}` : ''}`}
               />
+              {onMoveStat && <button type="button" onClick={() => moveStat('stat_defs', i)}
+                className="text-xs text-primary hover:underline disabled:opacity-40">
+                移至关系数值
+              </button>}
+              </div>
             ))}
           </Group>
 
-          <Group title="关系数值">
+          <Group title="关系数值（每个 NPC 一份）">
             {(draft.relation_stat_defs || []).map((s, i) => (
+              <div key={i} className="space-y-1">
               <Row key={i} on={picked.has(`rel:${i}`)} onToggle={() => toggle(`rel:${i}`)}
                 title={s.name} sub={`起始 ${s.initial}（${s.min}~${s.max ?? '∞'}）`} />
+              {onMoveStat && <button type="button" onClick={() => moveStat('relation_stat_defs', i)}
+                className="text-xs text-primary hover:underline disabled:opacity-40">
+                移至玩家数值
+              </button>}
+              </div>
             ))}
           </Group>
+          {onMoveStat && ((draft.stat_defs?.length || 0) + (draft.relation_stat_defs?.length || 0) > 0) && (
+            <p className="text-xs text-muted-foreground">调整归属会保留数值定义。回填前请核对动作引用和角色关系起点；回填后可在角色卡中启用关系数值。</p>
+          )}
 
           <Group title="地点">
             {draft.default_location && (
@@ -201,6 +254,14 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
                 {n.profile_sections && Object.entries(n.profile_sections).filter(([, text]) => text).map(([key, text]) => (
                   <p key={key} className="text-xs mt-1 text-muted-foreground line-clamp-2"><span className="font-medium">{key}</span>：{text}</p>
                 ))}
+                {/* 作息和说话样例都是无声写进卡里的东西，不列出来作者不知道多了这些 */}
+                {n.slot_locations && Object.keys(n.slot_locations).length > 0 && (
+                  <p className="text-xs mt-1 text-muted-foreground"><span className="font-medium">作息</span>：
+                    {Object.entries(n.slot_locations).map(([slot, place]) => `${slot}在${place}`).join('、')}</p>
+                )}
+                {!!n.dialogue_examples?.length && (
+                  <p className="text-xs mt-1 text-muted-foreground">说话样例 {n.dialogue_examples.length} 组</p>
+                )}
               </Row>
             ))}
           </Group>
@@ -215,11 +276,36 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onRegenerat
             ))}
           </Group>
 
+          <Group title="技能">
+            {(draft.skills || []).map((s, i) => (
+              <Row key={i} on={picked.has(`skill:${i}`)} onToggle={() => toggle(`skill:${i}`)}
+                title={s.name}
+                sub={[effectsText(s.effects), s.cooldown > 0 ? `冷却 ${s.cooldown} 回合` : '', requiresText(s.requires), s.category].filter(Boolean).join(' · ') || undefined}>
+                {s.description && <p className="text-sm mt-1 whitespace-pre-wrap line-clamp-2">{s.description}</p>}
+              </Row>
+            ))}
+          </Group>
+
+          <Group title="任务">
+            {(draft.tasks || []).map((t, i) => (
+              <Row key={i} on={picked.has(`task:${i}`)} onToggle={() => toggle(`task:${i}`)}
+                title={t.name}
+                sub={[effectsText(t.effects), t.category].filter(Boolean).join(' · ') || undefined}>
+                {t.description && <p className="text-sm mt-1 whitespace-pre-wrap line-clamp-2">{t.description}</p>}
+                {/* 判定任务办完没有只看 objective 这一句，它编歪了写进去就白搭，得当场让作者看见 */}
+                {t.objective && <p className="text-xs mt-1 text-muted-foreground line-clamp-2"><span className="font-medium">怎样算办完</span>：{t.objective}</p>}
+              </Row>
+            ))}
+          </Group>
+
           <Group title="动作按钮">
             {(draft.actions || []).map((a, i) => (
               <Row key={i} on={picked.has(`action:${i}`)} onToggle={() => toggle(`action:${i}`)}
-                title={a.group ? `[${a.group}] ${a.name}` : a.name}
-                sub={[effectsText(a.effects), effectsText(a.relation_effects)].filter(Boolean).join(' · ') || undefined} />
+                title={`[${a.group || '未分栏'}] ${a.name}`}
+                sub={[
+                  effectsText(a.effects), effectsText(a.relation_effects),
+                  a.cost_slot ? '推掉一格时段' : '', a.at_location ? `只在${a.at_location}` : '',
+                ].filter(Boolean).join(' · ') || undefined} />
             ))}
           </Group>
 
@@ -290,6 +376,13 @@ function effectsText(effects?: Record<string, number>): string {
   return e.map(([k, v]) => `${k}${v >= 0 ? '+' : ''}${v}`).join(' ')
 }
 
+/** 技能门槛写成一句话。抽取只会给出 stats / items 两个子形状，别的不用管 */
+function requiresText(requires?: RpgCondition): string {
+  const parts = Object.entries(requires?.stats || {}).map(([name, c]) => `${name}${c.op}${c.value}`)
+  if (requires?.items?.length) parts.push(`要有${requires.items.join('、')}`)
+  return parts.length ? `需 ${parts.join(' ')}` : ''
+}
+
 function collectKeys(draft: RpgWizardExtract): string[] {
   const keys: string[] = []
   for (const [key] of TEXT_FIELDS) if (draft[key]) keys.push(key as string)
@@ -300,6 +393,8 @@ function collectKeys(draft: RpgWizardExtract): string[] {
   if (draft.default_location) keys.push('default_location')
   ;(draft.npcs || []).forEach((_, i) => keys.push(`npc:${i}`))
   ;(draft.items || []).forEach((_, i) => keys.push(`item:${i}`))
+  ;(draft.skills || []).forEach((_, i) => keys.push(`skill:${i}`))
+  ;(draft.tasks || []).forEach((_, i) => keys.push(`task:${i}`))
   ;(draft.actions || []).forEach((_, i) => keys.push(`action:${i}`))
   return keys
 }

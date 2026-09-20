@@ -1,4 +1,4 @@
-import type { RpgAction, RpgCondition, RpgLocation, RpgNpc, RpgSession } from '@/api/client'
+import type { RpgAction, RpgCondition, RpgLocation, RpgModule, RpgNpc, RpgSession } from '@/api/client'
 
 export const norm = (s: string) => (s || '').trim().toLowerCase()
 
@@ -73,7 +73,8 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
 }
 
 /**
- * 这个人此刻在哪儿：剧情挪过她就听剧情的，否则作息表 → 常驻地点。
+ * 这个人此刻在哪儿：剧情挪过她就听剧情的，然后「跟着你」那一层，再是作息表
+ * → 常驻地点。
  *
  * 后端 `rpg_context.npc_place` 的镜像，两边必须一样——不一样的那一次就是
  * 「面板上他站在你面前，提示词里却没有这个人」。
@@ -81,18 +82,36 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
  * places 传这一局的 `sess.npc_places`：玩家说了句「你过来」，结算把她的新位置
  * 写在里面，下一轮这一格就显示「就在你面前」。读不到会话的场合（模组编辑页）
  * 不传，行为和不传一样。
+ *
+ * followers / here 一起传：`here` 是**玩家此刻在哪**，跟着你的人就解析成它。
+ * 只传 followers 不传 here 是空操作（后端那一层同样要求 here 非空）。
  */
-export const npcPlace = (npc: RpgNpc, slot: string, places?: Record<string, string>) => {
+export const npcPlace = (
+  npc: RpgNpc, slot: string, places?: Record<string, string>,
+  followers?: number[], here?: string,
+) => {
   const over = ((places || {})[String(npc.id)] || '').trim()
   if (over) return over
+  // 跟着你的那一层：解析出来就是**你此刻的位置**，所以关键随你走、零同步。
+  // `here` 必须传玩家当前所在地（sess.location），**不能传要比较的那个地名**
+  // ——那样跟随者在每一个地点都算「在」
+  const at = (here || '').trim()
+  if (at && (followers || []).includes(npc.id)) return at
   const now = (slot || '').trim()
-  const at = now ? ((npc.slot_locations || {})[now] || '').trim() : ''
-  return at || (npc.location || '')
+  return (now ? ((npc.slot_locations || {})[now] || '').trim() : '') || (npc.location || '')
 }
 
 /** 他此刻是不是和玩家在同一个地点 */
 export const onstage = (npc: RpgNpc, sess: RpgSession) =>
-  !!sess.location && norm(npcPlace(npc, sess.slot, sess.npc_places)) === norm(sess.location)
+  !!sess.location
+  && norm(npcPlace(npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location))
+    === norm(sess.location)
+
+/** 他是不是跟着你走（在 `sess.npc_followers` 名单里）。
+ *  **这不是第二个在场判据**——在场仍然只有 `onstage` 那一个定义。这个只用来
+ *  画侧栏那个「跟着你」小块和打发她走的叉 */
+export const following = (npc: RpgNpc, sess: RpgSession) =>
+  (sess.npc_followers || []).includes(npc.id)
 
 /**
  * 玩家已经知道存在的人：见过面的，加上此刻就在同一个地点的。
@@ -100,10 +119,19 @@ export const onstage = (npc: RpgNpc, sess: RpgSession) =>
  * 只认 met 会漏掉开局：met 要等他真的进过一轮上下文才置位，
  * 而开局时站在你起始地点的那个人，画面里明明就在眼前。
  * 主角模板不登场，永远排除。
+ *
+ * **模拟器给全量**：老板手里本来就有一份员工名册，开局就该全员在册。
+ * 藏到见面才登记在这档里反而怪——「招募秘书」要能看见还没见过的人，
+ * 手机也得能打给还没见过的人。
+ *
+ * 这一份和**后端那个 met 不是一回事**：后端管的是外貌要不要注入，
+ * 这里管的是名单给谁看。别为了省事去建局时把 met 预置成 true——
+ * 那样模型从此再也不知道任何人长什么样。
  */
-export const knownNpcs = (npcs: RpgNpc[], sess: RpgSession) =>
+export const knownNpcs = (npcs: RpgNpc[], sess: RpgSession, module?: RpgModule) =>
   npcs.filter(n => n.role !== 'protagonist'
-    && (sess.npc_states?.[String(n.id)]?.met || onstage(n, sess)))
+    && (module?.play_style === 'sim'
+      || sess.npc_states?.[String(n.id)]?.met || onstage(n, sess)))
 
 /** 名字里的间隔号。只在人名比对时去掉，也不进 `norm`——背包那边「铁-钥匙」
  *  和「铁钥匙」是不是一件东西是另一个问题。同后端 `rpg_state._NAME_SEPS` */
@@ -111,6 +139,12 @@ const NAME_SEPS = /[·•・.\-_、,，]/g
 
 /** 半个名字最少要这么长才敢认。一个字的「李」能撞上一整屋人（同 `_MIN_PARTIAL`） */
 const MIN_PARTIAL = 2
+
+/**
+ * 关系条件里「不指定是谁」的写法。后端 `rpg_state.ANY_NPC` 的同名镜像，
+ * 两边必须一样——不一样的那一次就是「按钮亮着，点下去后端说没人达标」。
+ */
+export const ANY_NPC = '*'
 
 const OPS: Record<string, (a: number, b: number) => boolean> = {
   '>=': (a, b) => a >= b,
@@ -163,13 +197,32 @@ export function checkCondition(
   }
 
   const states = sess.npc_states || {}
+  // 这个角色此刻的这项关系数值；没在追踪就是 null。同后端 `_relation_value`：
+  // 「没追踪」和「值等于 0」是两回事，前者该说没有追踪
+  const value = (npc: RpgNpc, stat: string): number | null => {
+    if (npc.relation_enabled === false) return null
+    const state = states[String(npc.id)] || {}
+    return stat in state ? Number(state[stat] || 0) : null
+  }
   for (const rule of cond.relations || []) {
-    const npc = npcs.find(n => norm(n.name) === norm(rule.npc))
-    if (!npc) return [false, `找不到角色「${rule.npc}」`]
     const op = OPS[rule.op || '>=']
     if (!op) continue
-    const have = Number(states[String(npc.id)]?.[rule.stat] || 0)
-    if (!op(have, Number(rule.value || 0))) {
+    const want = Number(rule.value || 0)
+    // ANY_NPC = 不指定是谁，任意一个角色达标就算成立。同后端 check_condition
+    if (rule.npc === ANY_NPC) {
+      if (!npcs.some(n => {
+        const have = value(n, rule.stat)
+        return have !== null && op(have, want)
+      })) {
+        return [false, `没有角色的${rule.stat}满足（需要 ${rule.op} ${rule.value}）`]
+      }
+      continue
+    }
+    const npc = npcs.find(n => norm(n.name) === norm(rule.npc))
+    if (!npc) return [false, `找不到角色「${rule.npc}」`]
+    const have = value(npc, rule.stat)
+    if (have === null) return [false, `${rule.npc}没有追踪关系数值「${rule.stat}」`]
+    if (!op(have, want)) {
       return [false, `${rule.npc}的${rule.stat}不满足（当前 ${have}，需要 ${rule.op} ${rule.value}）`]
     }
   }
@@ -216,12 +269,50 @@ export function checkCondition(
  * 这里只管别让玩家点到一个必然失败的按钮。
  */
 export function actionBlocked(
-  action: RpgAction, sess: RpgSession, npcs: RpgNpc[], target = '',
+  action: RpgAction, sess: RpgSession, npcs: RpgNpc[], target = '', module?: RpgModule,
 ): string {
-  const [ok, why] = checkCondition(action.requires, sess, npcs)
+  if (action.needs_target && action.target_anywhere && !target) {
+    const candidates = knownNpcs(npcs, sess, module)
+    return candidates.some(npc => !actionBlocked(action, sess, npcs, npc.name, module))
+      ? '' : '没有满足条件的对象'
+  }
+  const picked = action.needs_target
+    ? npcs.filter(n => norm(n.name) === norm(target))
+    : npcs
+  const [ok, why] = checkCondition(action.requires, sess, picked)
   if (!ok) return why
   const need = (action.at_location || '').trim()
   if (need && norm(need) !== norm(sess.location || '')) return `得在${need}才行`
-  if (action.needs_target && !target) return '先选一个对象'
+  const cost = effectCostReason(action.effects, sess, module)
+  if (cost) return cost
+  // 远程动作不要求事先选好对象：它的顺序是反过来的——点了按钮才挑人
+  // （RpgPlay 的 runAction 会弹名单）。这里按老规矩判的话，「发消息」在
+  // 没预选对象时是灰的，而玩家根本没有预选它的入口
+  if (action.needs_target && !action.target_anywhere && !target) return '先选一个对象'
   return ''
 }
+
+export function effectCostReason(
+  effects: Record<string, number> | undefined, sess: RpgSession, module?: RpgModule,
+): string {
+  for (const [name, amount] of Object.entries(effects || {})) {
+    const minimum = module?.stat_defs.find(spec => spec.name === name)?.min ?? 0
+    if (amount < 0 && (sess.stats[name] ?? 0) + amount < minimum) {
+      return `${name}不足，需要至少 ${minimum - amount}`
+    }
+  }
+  return ''
+}
+
+/**
+ * 这个动作能挑谁当对象。
+ *
+ * 远程动作（手机、传讯）挑名册上的人：不在跟前正是它存在的理由。名单本身
+ * 仍然按 knownNpcs 那一份走——探索冒险档里见过面这条门槛要留着，对一个还没
+ * 登场的人发消息等于把他从名单里抖出来；模拟器档名册本来就是全员。
+ * 其余动作只能挑此刻站在跟前的人：「夸她」隔着三条街不成立。
+ */
+export const targetChoices = (
+  action: RpgAction, npcs: RpgNpc[], sess: RpgSession, hereNpcs: RpgNpc[],
+  module?: RpgModule,
+) => (action.target_anywhere ? knownNpcs(npcs, sess, module) : hereNpcs)

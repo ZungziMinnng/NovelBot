@@ -14,6 +14,7 @@ from app.agents import rpg_wizard
 from app.api.routes import rpg as rpg_routes
 from app.schemas.rpg import RpgWizardExtractIn
 from app.services import rpg_prompts
+from app.services.auth import current_user_var
 
 
 class StageWiringTests(unittest.TestCase):
@@ -27,6 +28,18 @@ class StageWiringTests(unittest.TestCase):
                 self.assertIn(f"'{stage}'", chat)
                 self.assertIn(f"'{stage}'", extract)
 
+    def test_the_stage_order_feeds_every_whitelist_forward(self):
+        """白名单只往后传，所以顺序错了那一步的引用会被整摊丢掉。
+
+        循环排在数值前面是另一回事：先聊清这一局怎么转，才知道要哪几项数值。
+        """
+        order = {stage: i for i, stage in enumerate(rpg_wizard.STAGES)}
+        self.assertLess(order["loop"], order["stats"])
+        self.assertLess(order["stats"], order["things"])
+        self.assertLess(order["places"], order["cast"])
+        self.assertLess(order["slots"], order["cast"])  # 作息表要同时过时段和地点
+        self.assertEqual(order["quests"], len(rpg_wizard.STAGES) - 1)
+
     def test_both_templates_are_registered(self):
         self.assertIn("rpg_wizard.jinja2", rpg_prompts.PROMPTS)
         self.assertIn("rpg_wizard_extract.jinja2", rpg_prompts.PROMPTS)
@@ -36,6 +49,119 @@ class StageWiringTests(unittest.TestCase):
         prompt = rpg_prompts.default_content("rpg_wizard.jinja2")
         self.assertIn("猎物系统", prompt)
         self.assertIn("不要设计或追问字段外的系统", prompt)
+
+    def test_the_one_shot_template_asks_for_the_same_depth_as_the_wizard(self):
+        """一句话生成那份模板曾明令禁止「任务树、技能树」，而这两摊现在是真表
+        真字段——禁令一旦被顺手改回去，一句话生成就又不产技能和任务，回填链路
+        照走不误，谁也不会报错。"""
+        text = rpg_prompts.default_content("rpg_wizard_full.jinja2")
+
+        # 老禁令不许复活
+        self.assertNotIn("任务树", text)
+        self.assertNotIn("技能树", text)
+
+        # 和分步向导同深度：这几摊必须被明确要求
+        for field in ("skills", "tasks", "slot_locations", "dialogue_examples",
+                      "cost_slot", "at_location", "requires"):
+            with self.subTest(field=field):
+                self.assertIn(field, text)
+
+
+class ActionGroupPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.token = current_user_var.set(SimpleNamespace(rpg_prompts={
+            name: "旧自定义模板" for name in (
+                "rpg_wizard.jinja2", "rpg_wizard_extract.jinja2",
+                "rpg_wizard_full.jinja2", "rpg_generate.jinja2",
+            )
+        }))
+
+    async def asyncTearDown(self):
+        current_user_var.reset(self.token)
+
+    async def test_default_extraction_schema_includes_action_groups(self):
+        self.assertIn('"group":', rpg_prompts.default_content("rpg_wizard_extract.jinja2"))
+
+    async def test_custom_chat_template_gets_grouping_contract(self):
+        with patch.object(rpg_wizard.llm_client, "get_agent_client", return_value=("m", "openai")):
+            messages, _, _ = await rpg_wizard.chat_stream_args([], "7", False, "things", "", "sim")
+        self.assertTrue(messages[0]["content"].startswith("旧自定义模板"))
+        self.assertIn(rpg_wizard._ACTION_GROUP_RULES, messages[0]["content"])
+
+    async def test_all_action_generation_paths_keep_groups_with_custom_templates(self):
+        parsed = {"actions": [
+            {"name": "招募", "group": "人事"}, {"name": "采购", "group": "经营"},
+        ]}
+        for entry in ("extract", "full", "batch"):
+            with self.subTest(entry=entry), \
+                 patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")), \
+                 patch.object(rpg_wizard.llm_json, "call_json", AsyncMock(return_value=(parsed, 0, 0))) as call:
+                if entry == "extract":
+                    result = await rpg_wizard.extract_stage("things", "人事栏：招募；经营栏：采购", {}, "7")
+                elif entry == "full":
+                    result = await rpg_wizard.generate_full("人事与经营", False, "sim", "7")
+                else:
+                    result = await rpg_wizard.generate_batch("action", "人事与经营", 2, {}, False, "7", "sim")
+                prompt = call.call_args.args[0][0]["content"]
+                self.assertTrue(prompt.startswith("旧自定义模板"))
+                self.assertIn(rpg_wizard._ACTION_GROUP_RULES, prompt)
+                self.assertEqual(
+                    [(action["name"], action["group"]) for action in result["actions"]],
+                    [("招募", "人事"), ("采购", "经营")],
+                )
+
+
+class StatOwnershipPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.token = current_user_var.set(SimpleNamespace(rpg_prompts={
+            "rpg_wizard.jinja2": "自定义构思 {{ stage }}",
+            "rpg_wizard_extract.jinja2": "自定义抽取 {{ stage }}",
+            "rpg_wizard_full.jinja2": "自定义整套生成 {{ instruction }}",
+        }))
+
+    async def asyncTearDown(self):
+        current_user_var.reset(self.token)
+
+    async def test_stats_chat_adds_ownership_rules_to_custom_templates_for_all_styles(self):
+        for style in ("rpg", "sim", "slg"):
+            with self.subTest(style=style), patch.object(
+                rpg_wizard.llm_client, "get_agent_client", return_value=("m", "openai"),
+            ):
+                messages, _, _ = await rpg_wizard.chat_stream_args([], "7", False, "stats", "", style)
+                self.assertTrue(messages[0]["content"].startswith("自定义构思 stats"))
+                self.assertIn(rpg_wizard._STAT_OWNERSHIP_RULES, messages[0]["content"])
+
+    async def test_stats_extraction_receives_rules_and_previous_grouping(self):
+        with patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")), \
+             patch.object(rpg_wizard.llm_json, "call_json", AsyncMock(return_value=({}, 0, 0))) as call:
+            await rpg_wizard.extract_stage("stats", "把压力改为每个 NPC 一份", {
+                "stat_names": ["资金", "压力"], "relation_names": ["好感"],
+            }, "7")
+        prompt = call.call_args.args[0][0]["content"]
+        self.assertTrue(prompt.startswith("自定义抽取 stats"))
+        self.assertIn(rpg_wizard._STAT_OWNERSHIP_RULES, prompt)
+        self.assertIn("此前确认的玩家数值：资金、压力", prompt)
+        self.assertIn("此前确认的关系数值：好感", prompt)
+        self.assertIn("以最后一次纠正为准", prompt)
+
+    async def test_full_generation_classifies_before_validating_references(self):
+        parsed = {
+            "stat_defs": [
+                {"name": "资金", "scope": "player"},
+                {"name": "信任", "scope": "relation"},
+            ],
+            "npcs": [{"name": "老陈", "initial_state": {"信任": 30}}],
+            "actions": [{"name": "赠礼", "effects": {"资金": -10}, "relation_effects": {"信任": 5}}],
+        }
+        with patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")), \
+             patch.object(rpg_wizard.llm_json, "call_json", AsyncMock(return_value=(parsed, 0, 0))) as call:
+            result = await rpg_wizard.generate_full("港口", False, "rpg", "7")
+        prompt = call.call_args.args[0][0]["content"]
+        self.assertTrue(prompt.startswith("自定义整套生成 港口"))
+        self.assertIn(rpg_wizard._STAT_OWNERSHIP_RULES, prompt)
+        self.assertEqual(result["npcs"][0]["initial_state"], {"信任": 30})
+        self.assertEqual(result["actions"][0]["effects"], {"资金": -10})
+        self.assertEqual(result["actions"][0]["relation_effects"], {"信任": 5})
 
 
 class PickModelTests(unittest.TestCase):
@@ -101,6 +227,48 @@ class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["资金"]["display"], "数字")
         self.assertEqual(stats["资金"]["on_zero"], "无")
         self.assertEqual(len(out["relation_stat_defs"]), 1)
+
+    async def test_explicit_ownership_splits_stats_even_when_all_in_one_array(self):
+        specs = [
+            {"name": "精力", "scope": "player", "initial": 80, "min": 0, "max": 100, "for_check": True},
+            {"name": "资金", "scope": "player", "initial": 200, "max": None},
+            {"name": "好感", "scope": "relation", "initial": 20, "min": -100, "max": 100},
+        ]
+        for field in ("stat_defs", "relation_stat_defs"):
+            with self.subTest(field=field):
+                out = await self._extract("stats", {field: specs})
+                self.assertEqual([spec["name"] for spec in out["stat_defs"]], ["精力", "资金"])
+                self.assertEqual([spec["name"] for spec in out["relation_stat_defs"]], ["好感"])
+                self.assertEqual(out["stat_defs"][0]["initial"], 80)
+                self.assertTrue(out["stat_defs"][0]["for_check"])
+                self.assertNotIn("for_check", out["relation_stat_defs"][0])
+                self.assertNotIn("scope", out["stat_defs"][0])
+                self.assertTrue(any("明确归属" in note for note in out["dropped"]))
+
+    async def test_same_name_can_belong_to_different_owners(self):
+        out = await self._extract("stats", {"stat_defs": [
+            {"name": "体力", "scope": "player", "initial": 100},
+            {"name": "体力", "scope": "relation", "initial": 60},
+        ]})
+        self.assertEqual(out["stat_defs"][0]["initial"], 100)
+        self.assertEqual(out["relation_stat_defs"][0]["initial"], 60)
+
+    async def test_a_deliberately_empty_group_is_not_filled(self):
+        out = await self._extract("stats", {"relation_stat_defs": [{"name": "体力", "scope": "relation"}]})
+        self.assertEqual(out["stat_defs"], [])
+        self.assertEqual(out["relation_stat_defs"][0]["name"], "体力")
+
+    async def test_legacy_stat_names_do_not_override_the_authors_grouping(self):
+        out = await self._extract("stats", {
+            "stat_defs": [{"name": "压力"}], "relation_stat_defs": [{"name": "体力"}],
+        })
+        self.assertEqual(out["stat_defs"][0]["name"], "压力")
+        self.assertEqual(out["relation_stat_defs"][0]["name"], "体力")
+        self.assertEqual(out["dropped"], [])
+
+    async def test_unknown_explicit_ownership_is_not_silently_assigned(self):
+        with self.assertRaises(rpg_wizard.llm_json.JsonCallError):
+            await self._extract("stats", {"stat_defs": [{"name": "压力", "scope": "unknown"}]})
 
     async def test_location_connections_to_unknown_places_are_dropped(self):
         out = await self._extract("places", {
@@ -241,6 +409,182 @@ class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["items"][0]["effects"], {})
         self.assertTrue(any("体力" in d for d in out["dropped"]))
 
+    async def test_npc_slot_locations_need_both_whitelists(self):
+        """作息表的时段和地点得各过一张白名单。
+
+        猜错的时段名本身不会报错，只会变成一条永远不生效的作息——NPC 到点不动，
+        作者翻遍界面也查不出这个人为什么不动，所以两个白名单缺一不可。
+        """
+        out = await self._extract(
+            "cast",
+            {"npcs": [{
+                "name": "老陈",
+                "slot_locations": {
+                    "清晨": "酒馆",
+                    "深夜": "酒馆",  # 时段不在白名单
+                    "白天": "皇宫",  # 地点不在白名单
+                },
+            }]},
+            known={"location_names": ["酒馆", "后巷"], "slot_names": ["清晨", "白天"]},
+        )
+        self.assertEqual(out["npcs"][0]["slot_locations"], {"清晨": "酒馆"})
+        self.assertTrue(any("深夜" in d for d in out["dropped"]))
+        self.assertTrue(any("皇宫" in d for d in out["dropped"]))
+
+    async def test_slot_locations_are_dropped_without_a_slot_table(self):
+        """没给时段白名单时整摊作息全丢，这是正确的降级。
+
+        单摊生成和「剧情发现」那两条路本来就不传时段，硬留着只会得到一堆
+        对不上任何时段的死数据。
+        """
+        out = await self._extract(
+            "cast",
+            {"npcs": [{"name": "老陈", "slot_locations": {"清晨": "酒馆"}}]},
+            known={"location_names": ["酒馆", "后巷"]},
+        )
+        self.assertEqual(out["npcs"][0]["slot_locations"], {})
+        self.assertTrue(out["dropped"])
+
+    async def test_dialogue_examples_keep_only_complete_pairs(self):
+        """说话样例只留完整的 user/assistant 对。
+
+        空 assistant 那条必须在这儿就丢掉——rpg_context 读到空 assistant 会整条
+        忽略，留着等于骗作者说有样例。但这类是模型少写、不是引用对不上，不记 dropped。
+        """
+        out = await self._extract(
+            "cast",
+            {"npcs": [{
+                "name": "老陈",
+                "dialogue_examples": [
+                    {"user": "最近怎么样", "assistant": "还行。"},
+                    {"user": "在忙什么", "assistant": ""},
+                    "这不是个 dict",
+                    {"user": "只有问没有答"},
+                ],
+            }]},
+        )
+        self.assertEqual(
+            out["npcs"][0]["dialogue_examples"],
+            [{"user": "最近怎么样", "assistant": "还行。"}],
+        )
+        self.assertEqual(out["dropped"], [])
+
+    async def test_skill_requires_keeps_only_whitelisted_stats_and_batch_items(self):
+        out = await self._extract(
+            "things",
+            {
+                "items": [{"name": "信物"}],
+                "actions": [],
+                "skills": [{
+                    "name": "密语",
+                    "requires": {
+                        "stats": {
+                            "声望": {"op": ">=", "value": 50},
+                            "魅力": {"op": ">=", "value": 10},  # 不在数值表里
+                        },
+                        "items": ["信物", "断水剑"],  # 断水剑不是这一批生成的
+                        "flags": {"x": 1},  # 不支持的子键
+                    },
+                }],
+            },
+            known={"stat_names": ["精力", "声望"]},
+        )
+        self.assertEqual(
+            out["skills"][0]["requires"],
+            {"stats": {"声望": {"op": ">=", "value": 50}}, "items": ["信物"]},
+        )
+        self.assertTrue(any("魅力" in d for d in out["dropped"]))
+        self.assertTrue(any("断水剑" in d for d in out["dropped"]))
+        self.assertTrue(any("flags" in d for d in out["dropped"]))
+
+    async def test_a_requires_op_the_engine_cannot_read_is_dropped(self):
+        """读不懂的 op 丢掉之后，requires 得是空 dict，不能留个空 stats 壳子。
+
+        留壳等于一条永不成立的门槛，技能会永远灰着，没人知道为什么。
+        """
+        out = await self._extract(
+            "things",
+            {
+                "items": [],
+                "actions": [],
+                "skills": [{
+                    "name": "密语",
+                    "requires": {"stats": {"声望": {"op": "约等于", "value": 50}}},
+                }],
+            },
+            known={"stat_names": ["声望"]},
+        )
+        self.assertEqual(out["skills"][0]["requires"], {})
+        self.assertTrue(any("写法不认识" in d for d in out["dropped"]))
+
+    async def test_action_at_location_must_be_a_known_place(self):
+        out = await self._extract(
+            "things",
+            {"actions": [
+                {"name": "喝酒", "at_location": "酒馆"},
+                {"name": "上朝", "at_location": "皇宫"},
+            ]},
+            known={"location_names": ["酒馆", "后巷"]},
+        )
+        actions = {a["name"]: a for a in out["actions"]}
+        self.assertEqual(actions["喝酒"]["at_location"], "酒馆")
+        self.assertEqual(actions["上朝"]["at_location"], "")
+        self.assertTrue(any("皇宫" in d for d in out["dropped"]))
+
+    async def test_cost_slot_survives_extraction_and_defaults_to_false(self):
+        """这一栏猜错只是多花或少花一格时段、作者一眼看得见，所以才放开让模型生成。"""
+        out = await self._extract(
+            "things",
+            {"actions": [{"name": "喝酒", "cost_slot": True}, {"name": "发呆"}]},
+        )
+        actions = {a["name"]: a for a in out["actions"]}
+        self.assertTrue(actions["喝酒"]["cost_slot"])
+        self.assertFalse(actions["发呆"]["cost_slot"])
+
+    async def test_the_loop_stage_only_fills_the_gm_rules(self):
+        """loop 复用 _clean_world，world 那几栏取不到就是空串。
+
+        前端 mergeStage / mergeWizardFields 跳过空串，所以这一步不会把 world
+        那一步已经定好的世界观盖回空——这条要是破了，走一遍 loop 世界观就没了。
+        """
+        out = await self._extract("loop", {"system_instruction": "每轮结尾都要留一个钩子"})
+        self.assertEqual(out["system_instruction"], "每轮结尾都要留一个钩子")
+        self.assertEqual(out["worldview"], "")
+        self.assertEqual(out["genre"], "")
+
+    async def test_the_quests_stage_extracts_tasks(self):
+        out = await self._extract(
+            "quests",
+            {"tasks": [
+                {
+                    "name": "查账", "description": "账房对不上", "objective": "找出亏空",
+                    "category": "主线", "auto_start": True,
+                    "effects": {"声望": 10, "武力": 5},  # 武力不在数值表里
+                },
+                {"name": "送信", "objective": "把信送到"},  # 没给分类 → 落「支线」
+                {"name": "", "objective": "空名字整条丢掉"},
+            ]},
+            known={"stat_names": ["声望"]},
+        )
+        self.assertEqual(len(out["tasks"]), 2)
+        self.assertEqual(out["tasks"][0]["effects"], {"声望": 10})
+        self.assertEqual(out["tasks"][1]["category"], "支线")
+        self.assertTrue(any("武力" in d for d in out["dropped"]))
+
+    async def test_the_things_stage_still_extracts_tasks(self):
+        """那段清洗抽成了 _clean_tasks 给 quests 用，_clean_things 改成调它。
+
+        「剧情发现」rpg_discover 走的是 things 这条路，抽成函数不能顺手改行为，
+        所以这条得钉住 things 里带着 tasks 照旧能抽出来。
+        """
+        out = await self._extract(
+            "things",
+            {"tasks": [{"name": "查账", "objective": "找出亏空", "category": "主线"}]},
+            known={"stat_names": ["声望"]},
+        )
+        self.assertEqual(len(out["tasks"]), 1)
+        self.assertEqual(out["tasks"][0]["name"], "查账")
+
 
 class ExtractRouteTests(unittest.IsolatedAsyncioTestCase):
     async def _request(self, parsed):
@@ -323,11 +667,114 @@ class FullGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["time_slots"], ["夜晚"])
         self.assertTrue(out["stat_defs"][0]["effect"])
         self.assertEqual(out["npcs"][0]["initial_state"], {"信任": 10})
-        self.assertEqual(out["npcs"][0]["profile_sections"], {"background": "曾在旧城区长大"})
+        # 模型发的是英文键（它学的还是老模板那套），落库前归一成中文：
+        # 编辑器按中文键取值，提示词也拿 key 当标签
+        self.assertEqual(out["npcs"][0]["profile_sections"], {"背景故事": "曾在旧城区长大"})
         self.assertEqual(out["items"][0]["effects"], {"理智": -1})
         self.assertTrue(any("不存在" in d for d in out["dropped"]))
         self.assertTrue(any("敌意" in d for d in out["dropped"]))
         self.assertTrue(any("体力" in d for d in out["dropped"]))
+
+    async def test_full_generation_feeds_its_own_names_to_every_whitelist(self):
+        """一句话生成是一发出全部，白名单只能取自这一份回答本身。
+
+        generate_full 少传一个白名单参数不是少校验一层，而是那一摊整个被丢掉，
+        作者看到的是「模型明明写了作息，回填时却没有」。
+        """
+        parsed = {
+            "stat_defs": [
+                {"name": "理智", "initial": 10, "min": 0, "max": 100},
+                {"name": "声望", "initial": 0, "min": 0, "max": 100},
+            ],
+            "relation_stat_defs": [
+                {"name": "信任", "initial": 0, "min": -100, "max": 100},
+            ],
+            "locations": [
+                {"name": "码头", "description": "雾气"},
+                {"name": "仓库", "description": "铁皮"},
+            ],
+            "default_location": "码头",
+            "time_slots": ["白天", "夜晚"],
+            "npcs": [
+                {
+                    "name": "老周",
+                    "slot_locations": {"夜晚": "码头", "凌晨": "码头", "白天": "月球"},
+                    "dialogue_examples": [
+                        {"user": "你是谁", "assistant": "管这个干什么"},
+                        {"user": "还有呢"},
+                    ],
+                    "location": "码头",
+                    "initial_state": {"信任": 5},
+                }
+            ],
+            "items": [{"name": "手电", "description": "铝壳"}],
+            "skills": [
+                {
+                    "name": "读心",
+                    "description": "听出没说出口的那半句",
+                    "requires": {
+                        "stats": {
+                            "声望": {"op": ">=", "value": 50},
+                            "魅力": {"op": ">=", "value": 10},
+                        },
+                        "items": ["手电", "断水剑"],
+                        "flags": {"门已开": True},
+                    },
+                }
+            ],
+            "tasks": [
+                {
+                    "name": "送信给老周",
+                    "description": "有人托你带一封信",
+                    "objective": "把信交到老周手上",
+                    "category": "主线",
+                    "effects": {"理智": -1, "体力": 2},
+                }
+            ],
+            "actions": [
+                {"name": "搜仓库", "at_location": "仓库", "cost_slot": True},
+                {"name": "夜探月球", "at_location": "月球"},
+            ],
+        }
+
+        async def fake_call_json(*_args, **_kwargs):
+            return parsed, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json):
+            with patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+                out = await rpg_wizard.generate_full("雨夜港口的侦探", False, "rpg", "7")
+
+        # 作息表要同时过时段和地点：凌晨不是时段、月球不是地点，两条都得丢
+        self.assertEqual(out["npcs"][0]["slot_locations"], {"夜晚": "码头"})
+
+        # 说话样例缺 assistant 是模型自己写残的，不是白名单拒绝，所以不进 dropped
+        self.assertEqual(
+            out["npcs"][0]["dialogue_examples"],
+            [{"user": "你是谁", "assistant": "管这个干什么"}],
+        )
+        self.assertFalse(any("还有呢" in d for d in out["dropped"]))
+
+        # 技能门槛：声望是这一批的数值、手电是这一批的道具，魅力和断水剑都不是
+        self.assertEqual(
+            out["skills"][0]["requires"],
+            {"stats": {"声望": {"op": ">=", "value": 50}}, "items": ["手电"]},
+        )
+
+        # 判定句原样留着，effects 只留白名单里的数值
+        self.assertEqual(out["tasks"][0]["objective"], "把信交到老周手上")
+        self.assertEqual(out["tasks"][0]["effects"], {"理智": -1})
+
+        # 按名字取，顺序不该被测试依赖
+        actions = {a["name"]: a for a in out["actions"]}
+        self.assertEqual(actions["搜仓库"]["at_location"], "仓库")
+        self.assertIs(actions["搜仓库"]["cost_slot"], True)
+        self.assertEqual(actions["夜探月球"]["at_location"], "")
+        self.assertIs(actions["夜探月球"]["cost_slot"], False)
+
+        # 丢掉的每一项都要留下能追的那句话，静默丢弃等于骗作者
+        for word in ("凌晨", "月球", "魅力", "断水剑", "体力"):
+            with self.subTest(word=word):
+                self.assertTrue(any(word in d for d in out["dropped"]))
 
 
 class GenerateBatchTests(unittest.IsolatedAsyncioTestCase):

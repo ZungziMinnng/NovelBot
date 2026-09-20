@@ -7,6 +7,8 @@ import {
   rpgApi, type RpgActionPreset, type RpgActionSeed, type RpgStatDef, type RpgStatPreset,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
+import { useFormAutosave } from '@/lib/useFormAutosave'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import StatDefsSection, { type StatDraft } from './StatDefsSection'
 import ActionFields from './ActionFields'
@@ -99,7 +101,30 @@ function StatPane() {
     setShowForm(false)
   }
 
+  /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
+   *  迟早分叉成「点保存存对了、自动保存存错了」 */
+  const body = () => ({
+    name: name.trim(),
+    note,
+    stat_defs: draft.stat_defs || [],
+    relation_stat_defs: draft.relation_stat_defs || [],
+  })
+
+  /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，而用户只是把它
+   *  清了准备重打。新建的套装还没有 id，整份等「创建」一起提交 */
+  const autosave = useFormAutosave(
+    editingId !== null && name.trim() ? { id: editingId, body: body() } : null,
+    showForm && editingId !== null,
+    async ({ id, body }) => {
+      await rpgApi.statPresets.update(id, body)
+      refresh()
+    },
+  )
+
   const startEdit = (row: RpgStatPreset) => {
+    // 换一套之前先把上一套欠着的那一次存掉。待存的那一份只有最新一格，
+    // 不补发的话它会被下一套的草稿顶掉
+    void autosave.flush()
     setEditingId(row.id)
     setName(row.name)
     setNote(row.note || '')
@@ -115,21 +140,15 @@ function StatPane() {
   const setDraftField = <K extends keyof StatDraft>(key: K, value: StatDraft[K]) =>
     setDraft(prev => ({ ...prev, [key]: value }) as StatDraft)
 
+  /** 收起表单。改过的东西已经存进库了，所以这里没得「取消」——但没存成的时候
+   *  不能收：收了就等于把改动默默扔掉，而用户只看到红字一闪 */
+  const close = async () => { if (await autosave.flush()) reset() }
+
   const submit = async () => {
     if (!name.trim()) return
     setSaving(true)
     try {
-      const body = {
-        name: name.trim(),
-        note,
-        stat_defs: draft.stat_defs || [],
-        relation_stat_defs: draft.relation_stat_defs || [],
-      }
-      if (editingId) {
-        await rpgApi.statPresets.update(editingId, body)
-      } else {
-        await rpgApi.statPresets.create({ ...body, sort_order: mine.length + 1 })
-      }
+      await rpgApi.statPresets.create({ ...body(), sort_order: mine.length + 1 })
       refresh()
       reset()
     } catch {
@@ -178,7 +197,7 @@ function StatPane() {
     <div className="border rounded-lg p-4 bg-muted/30 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{editingId ? '编辑数值套装' : '新建数值套装'}</span>
-        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
       </div>
       <div>
         <label className="text-xs font-medium mb-1 block">名称 *</label>
@@ -199,16 +218,27 @@ function StatPane() {
         />
       </div>
       <StatDefsSection form={draft} set={setDraftField} />
-      <div className="flex gap-2 justify-end">
-        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+      <div className="flex items-center gap-2">
+        {editingId !== null && (
+          <span className="mr-auto">
+            <SaveBadge
+              state={autosave.state}
+              blocked="名字还空着，先不存"
+              onRetry={autosave.flush}
+            />
+          </span>
+        )}
+        <button onClick={editingId ? close : reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          {editingId ? '收起' : '取消'}
+        </button>
         <button
-          onClick={submit}
+          onClick={editingId ? autosave.flush : submit}
           disabled={!name.trim() || saving}
           className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
             bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          {editingId ? '保存修改' : '创建'}
+          {editingId ? '立即保存' : '创建'}
         </button>
       </div>
     </div>
@@ -330,7 +360,32 @@ function ActionPane() {
     setShowForm(false)
   }
 
+  /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
+   *  迟早分叉成「点保存存对了、自动保存存错了」。`refKey` 不在里面：那只是为了
+   *  让下面的下拉有名字可选，从来就不进库 */
+  const body = () => ({
+    name: name.trim(),
+    note,
+    // 名字空的是「点了一下添加动作」留下的空行。存进库以后每次套用都会多出
+    // 一个没有字的按钮，作者还得回过头挨个删
+    actions: actions.filter(a => a.name.trim()),
+  })
+
+  /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，而用户只是把它
+   *  清了准备重打。新建的套装还没有 id，整份等「创建」一起提交 */
+  const autosave = useFormAutosave(
+    editingId !== null && name.trim() ? { id: editingId, body: body() } : null,
+    showForm && editingId !== null,
+    async ({ id, body }) => {
+      await rpgApi.actionPresets.update(id, body)
+      refresh()
+    },
+  )
+
   const startEdit = (row: RpgActionPreset) => {
+    // 换一套之前先把上一套欠着的那一次存掉。待存的那一份只有最新一格，
+    // 不补发的话它会被下一套的草稿顶掉
+    void autosave.flush()
     setEditingId(row.id)
     setName(row.name)
     setNote(row.note || '')
@@ -361,19 +416,15 @@ function ActionPane() {
   const statDefs = defsForKeys(ref?.stat_defs ?? [], usedKeys(actions))
   const relationDefs = defsForKeys(ref?.relation_stat_defs ?? [], usedKeys(actions, true))
 
+  /** 收起表单。改过的东西已经存进库了，所以这里没得「取消」——但没存成的时候
+   *  不能收：收了就等于把改动默默扔掉，而用户只看到红字一闪 */
+  const close = async () => { if (await autosave.flush()) reset() }
+
   const submit = async () => {
     if (!name.trim()) return
     setSaving(true)
     try {
-      // 名字空的是「点了一下添加动作」留下的空行。存进库以后每次套用都会多出
-      // 一个没有字的按钮，作者还得回过头挨个删
-      const cleaned = actions.filter(a => a.name.trim())
-      const body = { name: name.trim(), note, actions: cleaned }
-      if (editingId) {
-        await rpgApi.actionPresets.update(editingId, body)
-      } else {
-        await rpgApi.actionPresets.create({ ...body, sort_order: mine.length + 1 })
-      }
+      await rpgApi.actionPresets.create({ ...body(), sort_order: mine.length + 1 })
       refresh()
       reset()
     } catch {
@@ -419,7 +470,7 @@ function ActionPane() {
     <div className="border rounded-lg p-4 bg-muted/30 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{editingId ? '编辑动作套装' : '新建动作套装'}</span>
-        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
       </div>
       <div>
         <label className="text-xs font-medium mb-1 block">名称 *</label>
@@ -484,16 +535,27 @@ function ActionPane() {
         </p>
       </div>
 
-      <div className="flex gap-2 justify-end">
-        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+      <div className="flex items-center gap-2">
+        {editingId !== null && (
+          <span className="mr-auto">
+            <SaveBadge
+              state={autosave.state}
+              blocked="名字还空着，先不存"
+              onRetry={autosave.flush}
+            />
+          </span>
+        )}
+        <button onClick={editingId ? close : reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          {editingId ? '收起' : '取消'}
+        </button>
         <button
-          onClick={submit}
+          onClick={editingId ? autosave.flush : submit}
           disabled={!name.trim() || saving}
           className="text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5
             bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          {editingId ? '保存修改' : '创建'}
+          {editingId ? '立即保存' : '创建'}
         </button>
       </div>
     </div>

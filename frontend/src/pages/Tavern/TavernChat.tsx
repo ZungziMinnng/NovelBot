@@ -18,6 +18,8 @@ import {
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import ReadingFontButton from '@/components/ReadingFont/ReadingFontButton'
+import { useReadingFont } from '@/components/ReadingFont/useReadingFont'
 import CardAvatar from './CardAvatar'
 import TavernParamFields, { type TavernParams } from './TavernParams'
 
@@ -84,6 +86,8 @@ export default function TavernChat() {
   const [suggesting, setSuggesting] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
+  // 气泡的字号/行距/粗细。和小说侧分键（见 useReadingFont），头部那个按钮改它
+  const { style: readingStyle, ...readingFont } = useReadingFont('tavern')
 
   // 参数存在卡上，所以对话里改完对这张卡的所有故事线都生效。
   // 本地这份 patch 一直盖在 card 上，不在保存后清掉——清了会在 refetch 到达前
@@ -471,6 +475,7 @@ export default function TavernChat() {
               {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
             </optgroup>)}
           </select>
+          <ReadingFontButton {...readingFont} />
           <ThemePicker />
         </div>
       </header>
@@ -557,6 +562,7 @@ export default function TavernChat() {
                         ? 'bg-primary text-primary-foreground rounded-tr-sm'
                         : 'bg-card/80 backdrop-blur-sm border border-pink-500/15 rounded-tl-sm'
                     }`}
+                    style={readingStyle}
                   >
                     {/* 群聊里几个人的气泡长得一样，光靠头像分不清谁在说 */}
                     {isGroup && b.role === 'assistant' && (

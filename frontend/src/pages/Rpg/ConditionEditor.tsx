@@ -1,4 +1,5 @@
 import type { RpgCondition, RpgNpc, RpgStatDef } from '@/api/client'
+import { ANY_NPC } from './condition'
 import { AddRow, CommaInput, DeleteButton, INPUT } from './rpgUi'
 
 /** 后端 check_condition 认得的比较符，顺序即下拉顺序 */
@@ -102,6 +103,7 @@ export default function ConditionEditor({
         {relations.map((row, i) => (
           <div key={i} className="flex items-center gap-2">
             <select value={row.npc} onChange={e => setRelation(i, 'npc', e.target.value)} className={SELECT}>
+              <option value={ANY_NPC}>任意角色</option>
               {npcs.map(n => <option key={n.id} value={n.name}>{n.name}</option>)}
             </select>
             <select value={row.stat} onChange={e => setRelation(i, 'stat', e.target.value)} className={SELECT}>
@@ -127,6 +129,12 @@ export default function ConditionEditor({
           })}>
             加一条关系门槛
           </AddRow>
+        )}
+        {npcs.length > 0 && relationDefs.length > 0 && (
+          <p className="text-[11px] text-muted-foreground">
+            「任意角色」= 不指定是谁，有一个角色达标就算成立。放在动作的可用条件上时，
+            它自动就是「你这一轮选中的那个对象」；放在世界书和地点上时，是「随便哪个角色」。
+          </p>
         )}
       </div>
 

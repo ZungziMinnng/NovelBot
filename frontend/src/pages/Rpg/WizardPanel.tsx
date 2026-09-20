@@ -12,6 +12,7 @@ import type { ChatSurfaceMessage } from '@/components/ChatSurface/types'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import WizardApplyModal, { type WizardPicked } from './WizardApplyModal'
 import { wizardStagesFor } from './wizardStages'
+import { mergeWizardStage, moveWizardStat, type WizardStatGroup } from './wizardApply'
 
 interface Props {
   moduleId: number
@@ -96,6 +97,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     stat_names: (d.stat_defs || []).map(s => s.name),
     relation_names: (d.relation_stat_defs || []).map(s => s.name),
     location_names: (d.locations || []).map(l => l.name),
+    slot_names: d.time_slots || [],
   }), [])
 
   /** 已确认清单转成给对话模型的一段文字，避免它自相矛盾或重复问 */
@@ -232,7 +234,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         model,
         temperature: extractTemp,
       })
-      const merged = mergeStage(base, result)
+      const merged = mergeWizardStage(base, result, target.id)
       setDraft(merged)
       setSettledStages(prev => Array.from(new Set([...prev, target.id])))
       return merged
@@ -323,12 +325,33 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
       await onApply(picked)
       setPreview(null)
     } catch (err) {
-      toast.error(`回填失败：${wizardErrorMessage(err)}。可重试，已写入的同名条目会自动跳过`)
+      toast.error(`回填失败：${wizardErrorMessage(err)}。可重试，重试会先删上一轮向导写的再重写`)
     } finally {
       applyingRef.current = false
       setApplying(false)
     }
   }, [onApply])
+
+  const handleMoveStat = (from: WizardStatGroup, index: number): boolean => {
+    if (!preview || applying) return false
+    try {
+      const updated = moveWizardStat(preview, from, index)
+      const stat = preview[from]![index]
+      const destination = from === 'stat_defs' ? '关系数值（每个 NPC 一份）' : '玩家数值（全局一份）'
+      setPreview(updated)
+      setDraft(currentDraft => ({
+        ...currentDraft, stat_defs: updated.stat_defs, relation_stat_defs: updated.relation_stat_defs,
+      }))
+      setMessages(history => [...history, {
+        role: 'user', content: `已确认数值归属：「${stat.name}」改为${destination}，从原分类移除，保留初值、范围和作用。后续构思与抽取按此分类。`,
+      }])
+      toast.success(`「${stat.name}」已移至${destination}`)
+      return true
+    } catch (error) {
+      toast.error(wizardErrorMessage(error))
+      return false
+    }
+  }
 
   const handleRegenerate = useCallback(() => {
     if (!fullInstruction || generatingFull) return
@@ -379,8 +402,24 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
             />
           </>
         }
-        belowHeader={current && (
+        belowHeader={(current || messages.length > 0) && (
           <div className="px-4 py-2.5 border-b bg-muted/30 shrink-0 space-y-2">
+            <label className="flex items-center gap-2 text-xs">
+              <span className="shrink-0">切换步骤</span>
+              <select
+                value={stage}
+                disabled={busy}
+                onChange={event => { setStage(Number(event.target.value)); setOneShotMode(false) }}
+                className="min-w-0 flex-1 rounded border bg-background px-2 py-1 disabled:opacity-40"
+              >
+                <option value={-1} disabled>选择要修改的步骤</option>
+                {wizardStages.map((step, index) => (
+                  <option key={step.id} value={index}>{index + 1}. {step.label}</option>
+                ))}
+              </select>
+              <span className="text-muted-foreground">保留对话和草案</span>
+            </label>
+            {current && <>
             <div className="flex items-center gap-1">
               {wizardStages.map((s, i) => (
                 <div
@@ -427,6 +466,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
                 </button>
               </div>
             </div>
+            </>}
           </div>
         )}
         emptyState={
@@ -505,6 +545,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
           applying={applying}
           onCancel={() => setPreview(null)}
           onApply={handleApply}
+          onMoveStat={handleMoveStat}
           onRegenerate={oneShotMode ? handleRegenerate : undefined}
         />
       )}
@@ -522,6 +563,10 @@ function fullDraftIntro(draft: RpgWizardExtract): string {
     ['时段', draft.time_slots?.length || 0],
     ['角色', draft.npcs?.length || 0],
     ['道具', draft.items?.length || 0],
+    // 技能和任务少报过一轮：弹窗里明明有这两组，聊天里这句「已生成」却不提，
+    // 作者以为没生成就不勾。后端这两摊一起出，这儿就得一起数
+    ['技能', draft.skills?.length || 0],
+    ['任务', draft.tasks?.length || 0],
     ['动作按钮', draft.actions?.length || 0],
   ]
   const counts = groups.filter(([, count]) => count).map(([label, count]) => `${label}${count}项`)
@@ -542,33 +587,20 @@ function wizardErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 把一步的抽取合并进累积 draft。每步字段不重叠，dropped 追加去重 */
-function mergeStage(base: RpgWizardExtract, step: RpgWizardExtract): RpgWizardExtract {
-  const merged: RpgWizardExtract = { ...base, ...stripEmpty(step) }
-  merged.dropped = Array.from(new Set([...(base.dropped || []), ...(step.dropped || [])]))
-  return merged
-}
-
-/** 空串/空列表是「这步没聊到」，别用它盖掉之前定的 */
-function stripEmpty(step: RpgWizardExtract): Partial<RpgWizardExtract> {
-  const out: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(step)) {
-    if (k === 'dropped') continue
-    if (typeof v === 'string' && v) out[k] = v
-    else if (Array.isArray(v) && v.length) out[k] = v
-  }
-  return out as Partial<RpgWizardExtract>
-}
-
 /** 某一步收下了几项，用于 toast */
 function countStage(d: RpgWizardExtract, stageId: string): number {
+  // 漏一个 case 的症状很隐蔽：那一步其实抽到了东西，但会掉到 default 返回 0，
+  // 于是每次都弹「这步没有抽取到内容」。后端 STAGES 增删阶段，这儿必须跟着改
   switch (stageId) {
-    case 'world': return ['genre', 'worldview', 'opening_scene', 'system_instruction', 'narration_sample'].filter(k => d[k as keyof RpgWizardExtract]).length
+    case 'world': return ['genre', 'worldview', 'opening_scene', 'narration_sample'].filter(k => d[k as keyof RpgWizardExtract]).length
+    // GM 规则那一栏整个归「核心循环」这一步了，不再从 world 那步出
+    case 'loop': return d.system_instruction ? 1 : 0
     case 'stats': return (d.stat_defs?.length || 0) + (d.relation_stat_defs?.length || 0)
     case 'places': return d.locations?.length || 0
     case 'slots': return d.time_slots?.length || 0
     case 'cast': return d.npcs?.length || 0
-    case 'things': return (d.items?.length || 0) + (d.actions?.length || 0)
+    case 'things': return (d.items?.length || 0) + (d.skills?.length || 0) + (d.actions?.length || 0)
+    case 'quests': return d.tasks?.length || 0
     default: return 0
   }
 }

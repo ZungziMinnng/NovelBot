@@ -459,6 +459,32 @@
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
+
+  /* 输入框的拖拽手柄被挪到了上边缘（见 lib/textareaTopResize.ts），浏览器原来画在
+     右下角那个小三角已经关掉了，这儿补一条提示：上边缘那道短横就是能拖的地方。
+     用 background-image 不跟 Tailwind 的 bg-* 打架——那些只写 background-color */
+  textarea[data-top-resize] {
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--border)) 25%,
+      hsl(var(--border)) 75%,
+      transparent
+    );
+    background-repeat: no-repeat;
+    background-position: center 1px;
+    background-size: 3rem 2px;
+  }
+
+  textarea[data-top-resize]:hover {
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--primary) / 0.5) 25%,
+      hsl(var(--primary) / 0.5) 75%,
+      transparent
+    );
+  }
 }
 
 /* 小说内容区域字体 */

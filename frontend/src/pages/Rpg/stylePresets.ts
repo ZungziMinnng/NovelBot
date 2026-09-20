@@ -24,10 +24,10 @@ export const STYLE_DEFAULTS: Record<RpgPlayStyle, Partial<RpgModule>> = {
 export type BlockName =
   | 'stats' | 'slots' | 'actions' | 'items' | 'skills' | 'tasks' | 'locations'
   // 开局背包并进了 protagonist，不再单独占一格
-  | 'protagonist' | 'worldbook' | 'rules' | 'npcs' | 'difficulty'
+  | 'protagonist' | 'worldbook' | 'npcs' | 'difficulty'
   // 这两个不是「一摊数据」而是整页的头和尾，但既然这张表就是面板顺序的唯一来源，
   // 它们也得在里面——漏一个的表达方式是「这一档不显示它」，那不是我们要的
-  | 'world' | 'narration'
+  | 'world' | 'narration' | 'generation'
 
 /** 面板顺序。类型只改变编辑重点和默认顺序，不隐藏或删除其它能力。
  *
@@ -45,9 +45,9 @@ export type BlockName =
  *  sim 保持原位。默认时段表仍按 STYLE_DEFAULTS 各行其是，rpg 依旧是空的——
  *  这里只管「找不找得到」，不管「默认开不开」。 */
 export const STYLE_BLOCKS: Record<RpgPlayStyle, BlockName[]> = {
-  rpg: ['world', 'protagonist', 'npcs', 'locations', 'slots', 'stats', 'actions', 'skills', 'items', 'tasks', 'narration', 'worldbook', 'rules', 'difficulty'],
-  sim: ['world', 'protagonist', 'stats', 'actions', 'npcs', 'locations', 'slots', 'skills', 'items', 'tasks', 'narration', 'worldbook', 'rules', 'difficulty'],
-  slg: ['world', 'protagonist', 'npcs', 'locations', 'slots', 'stats', 'actions', 'skills', 'items', 'tasks', 'narration', 'worldbook', 'rules', 'difficulty'],
+  rpg: ['world', 'protagonist', 'npcs', 'locations', 'slots', 'stats', 'actions', 'skills', 'items', 'tasks', 'narration', 'generation', 'worldbook', 'difficulty'],
+  sim: ['world', 'protagonist', 'stats', 'actions', 'npcs', 'locations', 'slots', 'skills', 'items', 'tasks', 'narration', 'generation', 'worldbook', 'difficulty'],
+  slg: ['world', 'protagonist', 'npcs', 'locations', 'slots', 'stats', 'actions', 'skills', 'items', 'tasks', 'narration', 'generation', 'worldbook', 'difficulty'],
 }
 
 /** 面板标题。sim 那一档「动作按钮」改叫「功能」：在那边它不是聊天框旁边的
@@ -65,9 +65,9 @@ export const BLOCK_TITLES: Record<BlockName, string> = {
   // 「开局时的背包」原先是自己一格，现在是这一块里的一栏：它是主角开局身上
   // 带着的东西，摆在别处的话作者要在两个面板之间来回对
   protagonist: '主角',
-  narration: '叙事风格与生成参数',
+  narration: '叙事风格',
+  generation: '生成参数',
   worldbook: '世界书',
-  rules: '写作规则',
   difficulty: '判定',
 }
 

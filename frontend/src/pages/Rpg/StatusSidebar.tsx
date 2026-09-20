@@ -3,7 +3,7 @@ import { Backpack, ScrollText, Sparkles, Users, Zap } from 'lucide-react'
 import type {
   RpgItem, RpgModule, RpgNpc, RpgSession, RpgSkill, RpgStatDef,
 } from '@/api/client'
-import { npcPlace, onstage } from './condition'
+import { following, npcPlace, onstage } from './condition'
 import useColumnResize from './useColumnResize'
 import CastTab from './sidebar/CastTab'
 import NpcDetail from './sidebar/NpcDetail'
@@ -11,6 +11,7 @@ import BagTab from './sidebar/BagTab'
 import SkillTab from './sidebar/SkillTab'
 import TaskTab from './sidebar/TaskTab'
 import FoundTab from './sidebar/FoundTab'
+import { PLAYER_SLOT } from './sidebar/SummaryBlock'
 
 // 地图从侧栏搬走了：它现在是主界面（地点总览），而且「过去」变成了
 // 纯引擎的瞬移，和这里的其他格子不是一类东西了。
@@ -42,7 +43,7 @@ interface Props {
   onTab: (t: SidebarTab) => void
   locked: boolean
   /** exact = 模组里有定义、效果是引擎算的。没定义的也能点，只是交给 GM 现写 */
-  onUseItem: (name: string, exact: boolean) => void
+  onUseItem: (name: string, exact: boolean, quantity?: number) => void
   /** 施展一招。exact 的含义同 onUseItem */
   onUseSkill: (name: string, exact: boolean) => void
   /** 玩家自己改一条待办。status 给空串 = 划掉 */
@@ -60,10 +61,18 @@ interface Props {
   onDismissItemClaim: (id: string) => void
   /** openNpc 这一局的近况。存在会话上不在角色卡上，所以由 RpgPlay 取好了传进来 */
   notes: Record<string, string>
+  /** openNpc 被这一局改写掉的外貌。同上，也是存档级的 */
+  appearance: Record<string, string>
   /** openNpc 那一句「最近在做什么」。同上 */
   activity: string
   onDeleteNote: (key: string) => void
+  onDeleteAppearance: (key: string) => void
   onDeleteActivity: () => void
+  /** 改写某一格的长期记忆。slot 传 'player' 或角色 id 的字符串，形状同后端
+   *  的格子划分——这一层不认识格子，只负责把 slot 递回去 */
+  onSaveSummary: (slot: string, text: string) => Promise<void>
+  /** 让某人跟着你 / 打发她走。喂给档案页那个既显示状态又当解除入口的小块 */
+  onSetFollow: (npcId: number, following: boolean) => void
   /** 档案在侧栏里被改过了。改的是模组那张卡，不是这一局的状态 */
   onSaveNpc: (updated: RpgNpc) => void
 }
@@ -84,7 +93,8 @@ export default function StatusSidebar({
   onUseItem, onUseSkill, onSetTask, openNpc, onOpenNpc,
   onApplyDiscoveries, onDismissDiscovery, applyingDiscoveries = false,
   onConfirmItemClaim, onDismissItemClaim,
-  notes, activity, onDeleteNote, onDeleteActivity, onSaveNpc,
+  notes, appearance, activity, onDeleteNote, onDeleteAppearance, onDeleteActivity,
+  onSaveSummary, onSetFollow, onSaveNpc,
 }: Props) {
   // 不落盘。编辑器那边也没存，玩家每次进来都是默认宽度
   const [width, setWidth] = useState(320)
@@ -154,9 +164,19 @@ export default function StatusSidebar({
           relationDefs={relDefs}
           state={sess.npc_states?.[String(openNpc.id)] || {}}
           notes={notes}
+          appearance={appearance}
+          onDeleteAppearance={onDeleteAppearance}
           activity={activity}
+          history={sess.npc_history?.[String(openNpc.id)] || []}
+          milestones={sess.npc_milestones || []}
           here={onstage(openNpc, sess)}
-          place={npcPlace(openNpc, sess.slot, sess.npc_places) || ''}
+          place={npcPlace(
+            openNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+          ) || ''}
+          following={following(openNpc, sess)}
+          summary={sess.thread_summaries?.[String(openNpc.id)] || ''}
+          onSaveSummary={text => onSaveSummary(String(openNpc.id), text)}
+          onUnfollow={() => onSetFollow(openNpc.id, false)}
           onBack={() => onOpenNpc(null)}
           onDeleteNote={onDeleteNote}
           onDeleteActivity={onDeleteActivity}
@@ -172,11 +192,13 @@ export default function StatusSidebar({
               statDefs={statDefs}
               relDefs={relDefs}
               onOpenNpc={onOpenNpc}
+              onSaveSummary={text => onSaveSummary(PLAYER_SLOT, text)}
             />
           )}
 
           {tab === 'bag' && (
             <BagTab
+              module={module}
               sess={sess}
               items={items}
               locked={locked}
@@ -187,7 +209,7 @@ export default function StatusSidebar({
           )}
 
           {tab === 'skill' && (
-            <SkillTab sess={sess} skills={skills} locked={locked} onUseSkill={onUseSkill} />
+            <SkillTab sess={sess} skills={skills} module={module} npcs={npcs} locked={locked} onUseSkill={onUseSkill} />
           )}
 
           {tab === 'task' && (

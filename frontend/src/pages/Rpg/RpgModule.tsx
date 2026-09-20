@@ -6,7 +6,7 @@ import toast from 'react-hot-toast'
 import {
   ArrowLeft, Loader2, Plus, Trash2, Dices, BookMarked, X, Users, ScrollText,
   Globe2, Clapperboard, Settings2, ImagePlus, Pin, Backpack, UserRound,
-  Swords, MapPin, Gauge, Sparkles, Clock, Check, AlertCircle, Wand2, MessageSquare,
+  Swords, MapPin, Gauge, Sparkles, Clock, Check, Wand2, MessageSquare,
   ChevronLeft, ChevronRight, BookOpen, BookmarkPlus, Eraser,
 } from 'lucide-react'
 import {
@@ -17,6 +17,8 @@ import {
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
+import { useFormAutosave } from '@/lib/useFormAutosave'
 import CharacterForm from './CharacterForm'
 import { protagonistCard } from './protagonist'
 import WizardPanel from './WizardPanel'
@@ -36,6 +38,7 @@ import BatchGenerate from './BatchGenerate'
 import ConditionEditor from './ConditionEditor'
 import { norm, npcPlace } from './condition'
 import { GENRE_PRESETS, type GenrePreset } from './genrePresets'
+import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS } from './modelSettings'
 import {
   ACCENT, AddRow, Assist, CommaInput, DeleteButton, Field, INPUT, PANEL, Section,
 } from './rpgUi'
@@ -63,141 +66,6 @@ const CHECK_MODES: Array<{ key: Module['check_mode']; label: string; hint: strin
  *  而自动保存是每改一格都发一次，一次 422 就等于这一页什么都存不进去。 */
 function styleOf(m: Module | null): RpgPlayStyle {
   return PLAY_STYLES.find(s => s.key === m?.play_style)?.key ?? 'rpg'
-}
-
-// ── 自动保存 ──────────────────────────────────────────────────────────────
-//
-// 这一页以前是「填完点右上角「保存」」。可它长到要滚好几屏，而保存按钮孤零零
-// 挂在页头：改最上面那一格的人（比如角色的「AI 调度」，勾完了要往下滚七八栏
-// 才看得见保存）根本想不到还得去点它——「我明明点了，退出来又没了」就是这么
-// 来的。现在改哪一格都自己存，右上角那块只负责回话。
-
-type SaveState = 'idle' | 'saving' | 'saved' | 'error' | 'blocked'
-
-/**
- * 改了就直接存进库，不等按钮。
- *
- * 三件事必须守住，少一件都会退化成「改了没存上，界面上还显示存上了」：
- *
- * 1. **数据到位之前一个字都不发。** 表单是 null 起步的，早发一步就是拿空表单
- *    把整行盖掉。第一次看到真实值只记基准，不保存。
- * 2. **同一时刻只放一个请求出去。** 打字会连着排好几次，而两个请求谁先落地并
- *    不由发出的顺序决定；后发的先到，库里留下的是上一秒的旧值，界面上却看不出
- *    任何异常。所以有请求在路上时不另发，等它一趟跑完再按**最新那一份**补一次。
- * 3. **存不上要说。** 状态条会一直红着，点它重试；表单收起之前也拦一道。
- *
- * `draft` 就是现在要存的那一份实体，判据和发给后端的内容是同一个东西，不必再
- * 给每一栏单独列依赖。传 null = 这一份**还存不下去**（必填栏空着）：不动基准、
- * 不发请求，只把状态条挂黄，因为「存一半的空名字」比「没存」更糟。
- *
- * 有多行可编辑时，**这份 draft 必须自带它属于哪一行**（`{id, body}`）：收尾那次
- * 保存是在表单已经换人、甚至已经关掉之后才跑的，`save` 闭包里的 `editingId`
- * 那一刻早就不对了，而 draft 一直跟着数据走。
- */
-function useAutosave<T>(
-  draft: T | null, ready: boolean, save: (data: T) => Promise<void>, delay = 700,
-) {
-  const [state, setState] = useState<SaveState>('idle')
-  const key = draft === null ? null : JSON.stringify(draft)
-  // 最后一份「存得下去」的形态。表单收起时它就是收尾那一次要发的内容，
-  // 所以**只在 draft 非空时更新**，绝不清成 null
-  const latest = useRef<{ key: string; data: T } | null>(null)
-  const sent = useRef<string | null>(null)      // 已经存进去的那一份
-  const writer = useRef(save)
-  const running = useRef(false)
-  const ok = useRef(true)
-  const waiters = useRef<Array<() => void>>([])
-  writer.current = save
-  if (draft !== null && key !== null) latest.current = { key, data: draft }
-
-  /** 立刻把欠的那一次存掉。返回是否存成了——存不成的时候调用方不该关表单，
-   *  关了就等于默默把改动扔了，而用户看到的只是一闪而过的红字。 */
-  const flush = useCallback(async (): Promise<boolean> => {
-    if (running.current) {
-      // 已经有一个在路上。等它跑完就行：它收尾前会自己把最新那份带出去
-      await new Promise<void>(resolve => { waiters.current.push(resolve) })
-      return ok.current
-    }
-    running.current = true
-    try {
-      while (latest.current && latest.current.key !== sent.current) {
-        const shot = latest.current
-        setState('saving')
-        await writer.current(shot.data)
-        sent.current = shot.key
-      }
-      setState('saved')
-      ok.current = true
-      return true
-    } catch {
-      // 基准停在原地：下次再改还会重试，用户也能点状态条自己重试
-      setState('error')
-      ok.current = false
-      return false
-    } finally {
-      running.current = false
-      const waiting = waiters.current
-      waiters.current = []
-      waiting.forEach(resolve => resolve())
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!ready) {
-      // 表单收起了 / 换了一条。先把欠的那一次补掉再清基准——少了这一段，
-      // 「改完立刻点收起」就是丢改动，而 debounce 那几百毫秒里用户根本不会
-      // 觉得自己是在抢时间
-      if (sent.current !== null && sent.current !== latest.current?.key) void flush()
-      sent.current = null
-      setState('idle')
-      return
-    }
-    if (key === null) { setState('blocked'); return }
-    if (sent.current === null) { sent.current = key; return }  // 刚加载出来的，只记基准
-    if (sent.current === key) return
-    const timer = setTimeout(flush, delay)
-    return () => clearTimeout(timer)
-  }, [key, ready, delay, flush])
-
-  // 卸载（点了返回、换页）时把欠的那一次送出去。这里没有 setState 的顾虑，
-  // 请求也不跟着组件走——但少了它，「改完立刻返回」就是丢改动
-  useEffect(() => () => {
-    if (sent.current !== null && sent.current !== latest.current?.key) void flush()
-  }, [flush])
-
-  return { state, flush }
-}
-
-/** 页头 / 表单底部那块状态。以前这里是个「保存」按钮，现在只回话。 */
-function SaveBadge({ state, blocked, onRetry }: {
-  state: SaveState
-  /** 「这一份还存不下去」时说什么。三个表单的必填栏不一样，由调用方给 */
-  blocked: string
-  onRetry: () => void
-}) {
-  if (state === 'saving') {
-    return <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-      <Loader2 className="w-3.5 h-3.5 animate-spin" />保存中
-    </span>
-  }
-  if (state === 'error') {
-    return (
-      <button onClick={onRetry} className="text-xs text-red-500 flex items-center gap-1.5 hover:underline">
-        <AlertCircle className="w-3.5 h-3.5" />没存上，点这里重试
-      </button>
-    )
-  }
-  if (state === 'blocked') {
-    return <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-      <AlertCircle className="w-3.5 h-3.5" />{blocked}
-    </span>
-  }
-  if (state === 'saved') {
-    return <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-      <Check className="w-3.5 h-3.5 text-primary" />已保存
-    </span>
-  }
-  return <span className="text-xs text-muted-foreground/70">改动自动保存</span>
 }
 
 export default function RpgModule() {
@@ -250,17 +118,19 @@ export default function RpgModule() {
 
   const applyWizard = useCallback(async (picked: WizardPicked) => {
     try {
-      await applyWizardEntities(moduleId, picked)
-      setForm(prev => prev ? mergeWizardFields(prev, picked) : prev)
+      // 台账要在开写之前取：applyWizardEntities 靠它认出「上一轮向导建的行」并先删掉
+      const written = formState?.wizard_state || {}
+      const state = await applyWizardEntities(moduleId, picked, written)
+      setForm(prev => (prev ? { ...mergeWizardFields(prev, picked, written), wizard_state: state } : prev))
       setWizardOpen(false)
-      toast.success('已回填，同名条目已自动跳过')
+      toast.success('已回填，上一轮向导填的内容已换成这一轮的')
     } finally {
       qc.invalidateQueries({ queryKey: ['rpg-locations', moduleId] })
       qc.invalidateQueries({ queryKey: ['rpg-npcs', moduleId] })
       qc.invalidateQueries({ queryKey: ['rpg-items', moduleId] })
       qc.invalidateQueries({ queryKey: ['rpg-actions', moduleId] })
     }
-  }, [moduleId, qc])
+  }, [moduleId, formState?.wizard_state, qc])
 
   /** 现在这一份。名字空着就整份不发：`name` 是必填，存一个空的进去，
    *  模组列表那一格就成了一片空白，而用户只是把它清了准备重打 */
@@ -268,7 +138,7 @@ export default function RpgModule() {
     ? { ...formState, name: formState.name.trim(), play_style: styleOf(formState) }
     : null
 
-  const autosave = useAutosave(draft, !!formState, async next => {
+  const autosave = useFormAutosave(draft, !!formState, async next => {
     const saved = await rpgApi.modules.update(moduleId, next)
     // 回写缓存而不是 invalidate。这一发是拿表单当真的，重取一次反而会拿服务端
     // 那一份把用户刚敲的字盖回去。列表页那份只管名字和类别，标脏就够
@@ -486,11 +356,10 @@ export default function RpgModule() {
         slotNames={form.time_slots || []}
       />
     ),
-    rules: (
-      <RulesSection
-        selected={form.enabled_rule_ids || []}
-        onChange={ids => set('enabled_rule_ids', ids)}
-      />
+    generation: (
+      <Section title="生成参数" desc="分别选择 8 类 AI 功能的模型，并调整生成长度、上下文和温度。" icon={Settings2}>
+        <GenerationParams form={form} set={set} />
+      </Section>
     ),
     npcs: (
       <NpcSection
@@ -518,14 +387,21 @@ export default function RpgModule() {
         <div className="border-t border-border/60 pt-5 space-y-5">
           <div className="flex items-center gap-2 text-sm font-medium"><Clapperboard className="w-4 h-4 text-primary" />故事从哪开始</div>
           <Field label="开场旁白" multiline value={form.opening_scene} onChange={v => set('opening_scene', v)} placeholder="玩家睁开眼看到的第一幕……" assist={{ moduleId, field: 'opening_scene', context: assistContext }} />
-          <Field label="起始地点" value={form.default_location} onChange={v => set('default_location', v)} placeholder="例如：地窖入口" />
-          <OpeningCast moduleId={moduleId} npcs={npcs} start={form.default_location || ''} pending={(form.default_location || '') !== (module?.default_location || '')} firstSlot={(form.time_slots || [])[0] || ''} />
+          <OpeningLocationSelect moduleId={moduleId} label="主角起始地点" value={form.default_location || ''} onChange={value => set('default_location', value)} />
+          <OpeningCast
+            moduleId={moduleId} npcs={npcs} start={form.default_location || ''}
+            firstSlot={(form.time_slots || [])[0] || ''}
+            selected={form.opening_npc_ids || []} placements={form.opening_npc_locations || {}}
+            onChange={(ids, placements) => setForm(prev => prev ? {
+              ...prev, opening_npc_ids: ids, opening_npc_locations: placements,
+            } : prev)}
+          />
         </div>
       </div>
     </Section>
   )
   const narrationPanel = (
-    <Section title="叙事风格与生成参数" desc="控制 GM 的语气、示例和生成行为。" icon={Settings2}>
+    <Section title="叙事风格" desc="通过 GM 指令、叙事样例和写作规则控制叙事风格。" icon={ScrollText}>
       <div className="space-y-5">
         <div>
           <Field label="GM 指令" multiline value={form.system_instruction} onChange={v => set('system_instruction', v)} placeholder="语气、血腥程度、是否描写 NPC 的内心……" assist={{ moduleId, field: 'system_instruction', context: assistContext }} />
@@ -545,7 +421,10 @@ export default function RpgModule() {
           />
         </div>
         <Field label="叙事样例" multiline value={form.narration_sample} onChange={v => set('narration_sample', v)} placeholder="贴一两段你想要的旁白，定下腔调。" assist={{ moduleId, field: 'narration_sample', context: assistContext }} />
-        <GenerationParams form={form} set={set} />
+        <RulesSection
+          selected={form.enabled_rule_ids || []}
+          onChange={ids => set('enabled_rule_ids', ids)}
+        />
         <details className="border rounded-lg bg-background/40">
           <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer select-none">自己的备注</summary>
           <div className="px-3 pb-3 pt-1"><Field label="模组介绍" multiline value={form.creator_note} onChange={v => set('creator_note', v)} placeholder="这个模组是做什么的、灵感来源、自己的备注……" hint="AI 不会看到这段内容。" /></div>
@@ -766,101 +645,114 @@ export default function RpgModule() {
   )
 }
 
-/**
- * 开场时谁在场。
- *
- * **这不是一个新字段。** 「在场」在这套引擎里只有一个定义：角色此刻所在的地点和
- * 当前地点一模一样（后端 `rpg_context.here_npcs`、前端 `condition.onstage`）。
- * 而「此刻在哪儿」按 `npc_places（剧情挪动）→ 作息表 → 常驻地点` 取值，所以
- * 「开场人物」= 常驻地点（或第一格作息表）等于起始地点的那些人，勾上等于替作者
- * 把那一栏填好。**这一格只管开场那一刻**：进了游戏剧情可以把人叫走、派走，
- * 侧栏跟着变——不是要求两边永远填成同一个字符串。
- *
- * 为什么要单独摆一格：开场旁白里写了「赫敏抬头看你」，但她的常驻地点在别处，
- * 于是侧栏名单里没有她、开场那条消息的在场名单里也没有她、她的性格也不会进
- * 提示词——作者只会觉得「开场白里明明有她」。那一栏在右边的角色卡里，隔着
- * 半个页面，没人会去对。
- *
- * 读的是**表单里那一份**起始地点，不是库里那一份：这一栏改完几百毫秒就会自己
- * 落库，为这点空档禁止勾人是白等（原先那样还得回头点保存，正是被自动保存替掉的
- * 那一套）。勾了之后两边各发各的请求，谁先到都一样——模组那边是地名，这边也是
- * 地名，最终要对上的是字符串本身。
- */
-function OpeningCast({ moduleId, npcs, start, pending, firstSlot }: {
+function OpeningLocationSelect({ moduleId, label, value, onChange, showLabel = true, emptyLabel = '未设置起始地点' }: {
+  moduleId: number
+  label: string
+  value: string
+  onChange: (value: string) => void
+  showLabel?: boolean
+  emptyLabel?: string
+}) {
+  const { data: locations = [], isLoading, isError } = useQuery({
+    queryKey: ['rpg-locations', moduleId],
+    queryFn: () => rpgApi.locations.list(moduleId),
+  })
+  const names = [...new Set(locations.map(place => place.name).filter(name => name.trim()))]
+
+  return (
+    <div>
+      <label className="block">
+        <span className={showLabel ? 'text-xs font-medium mb-1.5 block' : 'sr-only'}>{label}</span>
+        <select value={value} onChange={event => onChange(event.target.value)} disabled={isLoading || isError} className={INPUT}>
+          <option value="">{isLoading ? '加载地点中…' : emptyLabel}</option>
+          {value && !names.includes(value) && <option value={value}>{value}（当前配置）</option>}
+          {names.map(name => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </label>
+      {isError ? (
+        <p className="text-xs text-muted-foreground mt-1.5">地点加载失败，请刷新页面重试。</p>
+      ) : !isLoading && names.length === 0 ? (
+        <p className="text-xs text-muted-foreground mt-1.5">请先在「地点」面板添加地点，再回来选择。</p>
+      ) : null}
+    </div>
+  )
+}
+
+function OpeningCast({ moduleId, npcs, start, firstSlot, selected, placements, onChange }: {
   moduleId: number
   npcs: RpgNpc[]
-  /** 表单里的起始地点（改了就立刻照它算谁在眼前） */
   start: string
-  /** 这一栏刚改过，还在等着自动保存落库 */
-  pending: boolean
-  /** 时段表的第一格。开局就站在这一格上，所以开场实际按这个时段算 */
   firstSlot: string
+  selected: number[]
+  placements: Record<string, string>
+  onChange: (ids: number[], placements: Record<string, string>) => void
 }) {
-  const qc = useQueryClient()
-  const [busy, setBusy] = useState<number | null>(null)
-
-  // 主角模板不登场，不能出现在开场名单里（同 world_npcs / knownNpcs 的过滤）
   const cast = npcs.filter(n => (n.role || 'npc') !== 'protagonist')
-  // 用 npcPlace 不用 npc.location：有作息表的人开局站在作息表指定的地方，
-  // 按常驻地点显示会让作者以为他在场，进游戏却发现人不在
-  const here = (npc: RpgNpc) => !!start && norm(npcPlace(npc, firstSlot)) === norm(start)
-  /** 作息表把他支到别处去了。这时勾选也改不动，得说清楚为什么 */
-  const pinned = (npc: RpgNpc) =>
-    (firstSlot ? ((npc.slot_locations || {})[firstSlot] || '').trim() : '') || ''
-
-  const toggle = async (npc: RpgNpc) => {
-    setBusy(npc.id)
-    try {
-      // 取消勾选清空而不是还原成别的地名：原来的值就是起始地点，没有「别处」可还
-      await rpgApi.npcs.update(npc.id, { location: here(npc) ? '' : start })
-      await qc.invalidateQueries({ queryKey: ['rpg-npcs', moduleId] })
-    } catch {
-      toast.error('改常驻地点失败')
-    } finally { setBusy(null) }
+  const mode = (id: number) => Object.prototype.hasOwnProperty.call(placements, String(id))
+    ? 'custom' : selected.includes(id) ? 'player' : 'routine'
+  const openingPlace = (npc: RpgNpc) => mode(npc.id) === 'custom'
+    ? placements[String(npc.id)].trim() || npcPlace(npc, firstSlot)
+    : mode(npc.id) === 'player' && start.trim() ? start.trim() : npcPlace(npc, firstSlot)
+  const present = cast.filter(npc => !!start.trim() && norm(openingPlace(npc)) === norm(start))
+  const changeMode = (npc: RpgNpc, nextMode: string) => {
+    const nextPlacements = { ...placements }
+    delete nextPlacements[String(npc.id)]
+    if (nextMode === 'custom') nextPlacements[String(npc.id)] = openingPlace(npc)
+    const nextSelected = selected.filter(identity => identity !== npc.id)
+    if (nextMode === 'player') nextSelected.push(npc.id)
+    onChange(nextSelected, nextPlacements)
   }
 
   return (
     <div>
-      <label className="text-xs font-medium mb-1.5 block">开场人物</label>
+      <div className="text-xs font-medium mb-1.5">NPC 开场位置</div>
       {cast.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          还没有角色卡。在「角色卡」里加了人，这里就能勾谁开场就在眼前。
+          还没有角色卡。在「角色」里加了人，这里就能分别安排开场地点。
         </p>
-      ) : !start ? (
-        <p className="text-xs text-muted-foreground">先填上面的起始地点，才知道把人放在哪。</p>
       ) : (
-        <div className="flex flex-wrap gap-1.5">
+        <div className="space-y-2">
           {cast.map(npc => (
-            <button
-              key={npc.id}
-              onClick={() => toggle(npc)}
-              // 作息表把他支到别处时这一格点不动：这里只能改常驻地点，改了也没用，
-              // 与其让他以为勾上了，不如直接说清楚该去哪儿改
-              disabled={busy !== null || (!!pinned(npc) && !here(npc))}
-              title={
-                pinned(npc) && !here(npc)
-                  ? `作息表里「${firstSlot}」写的是「${pinned(npc)}」，开局他不在${start}。要改去下面的角色卡`
-                  : here(npc)
-                    ? (pinned(npc)
-                        ? `作息表里「${firstSlot}」就是「${start}」，开局就在眼前`
-                        : `常驻地点是「${start}」，开局就在眼前。点一下清空`)
-                    : `常驻地点${npc.location ? `是「${npc.location}」` : '是空的'}，点一下改成「${start}」`
-              }
-              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
-                here(npc)
-                  ? 'bg-primary/15 text-primary border-primary/40'
-                  : 'hover:bg-muted text-muted-foreground'
-              }`}
-            >
-              {npc.name}
-            </button>
+            <div key={npc.id} className="border rounded-lg p-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <label htmlFor={`opening-mode-${npc.id}`} className="text-sm font-medium mr-auto">{npc.name}</label>
+                <select
+                  id={`opening-mode-${npc.id}`} value={mode(npc.id)}
+                  onChange={event => changeMode(npc, event.target.value)}
+                  className="border rounded-lg px-2 py-1.5 text-xs bg-background/60"
+                >
+                  <option value="routine">按作息 / 常驻地点</option>
+                  <option value="player">与主角同地点</option>
+                  <option value="custom">指定地点</option>
+                </select>
+              </div>
+              {mode(npc.id) === 'custom' && (
+                <OpeningLocationSelect
+                  moduleId={moduleId} label={`${npc.name}的开场地点`} showLabel={false}
+                  emptyLabel="未指定，按作息 / 常驻地点"
+                  value={placements[String(npc.id)]}
+                  onChange={value => onChange(selected.filter(identity => identity !== npc.id), {
+                    ...placements, [String(npc.id)]: value,
+                  })}
+                />
+              )}
+              <p className="text-xs text-muted-foreground">
+                开场：{openingPlace(npc) || '未设置'}；常驻：{npc.location || '未设置'}
+                {mode(npc.id) === 'custom' && !placements[String(npc.id)].trim() && '（指定地点未填写，暂按日常安排）'}
+                {mode(npc.id) === 'player' && !start.trim() && '（请填写主角起始地点，暂按日常安排）'}
+              </p>
+            </div>
           ))}
         </div>
       )}
+      {!!start.trim() && (
+        <p className="text-xs text-muted-foreground mt-1.5">
+          开场与主角同处「{start}」：{present.length ? present.map(npc => npc.name).join('、') : '无'}。
+        </p>
+      )}
       <p className="text-xs text-muted-foreground mt-1.5">
-        {pending
-          ? '上面的起始地点刚改过，正在自动保存——不耽误这一格，勾完两边就对上了。'
-          : '勾上就是把他的常驻地点设成起始地点——开局站在你面前、名单里有他、能单独找他说话。这只是开场，之后在对话里把他叫走，他就不在跟前了。这一格和上面每一格一样，改了就存。'}
+        每个人的开场地点可以不同，常驻地点和作息表保持原样。选择「按作息 / 常驻地点」可取消特殊安排。
+        只影响新开局，不会移动已有存档中的人物，也不会自动设为跟随。
       </p>
     </div>
   )
@@ -1209,7 +1101,7 @@ function ProtagonistSection({
     }
   }, [card])
 
-  const autosave = useAutosave(
+  const autosave = useFormAutosave(
     card && name.trim() ? { id: card.id, body: { name: name.trim(), description: desc } } : null,
     !!card,
     async ({ id, body }) => { await rpgApi.npcs.update(id, body); refresh() },
@@ -1581,68 +1473,41 @@ function GenerationParams({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="text-xs font-medium mb-1 block">叙事模型</label>
-          <select
-            value={modelSelectValue(models, form.model_ref)}
-            onChange={e => set('model_ref', e.target.value)}
-            className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
-          >
-            <option value="">跟随默认</option>
-            {options}
-          </select>
-          <p className="text-xs text-muted-foreground mt-1.5">
-            写旁白的那次调用，挑好的。编辑器里的「AI 生成 / AI 优化」也用它。
-          </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {GAMEPLAY_MODEL_FIELDS.map(({ key, label, empty, hint }) => (
+          <div key={key}>
+            <label className="text-xs font-medium mb-1 block">{label}</label>
+            <select
+              value={modelSelectValue(models, form[key])}
+              onChange={event => set(key, event.target.value)}
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
+            >
+              <option value="">{empty}</option>
+              {options}
+            </select>
+            <p className="text-xs text-muted-foreground mt-1.5">{hint}</p>
+          </div>
+        ))}
+      </div>
+      <details className="border rounded-lg bg-background/40">
+        <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer">默认与立绘模型</summary>
+        <div className="px-3 pb-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {EXTRA_MODEL_FIELDS.map(({ key, label, empty, hint }) => (
+            <div key={key}>
+              <label className="text-xs font-medium mb-1 block">{label}</label>
+              <select
+                value={modelSelectValue(models, form[key])}
+                onChange={event => set(key, event.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
+              >
+                <option value="">{empty}</option>
+                {options}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1.5">{hint}</p>
+            </div>
+          ))}
         </div>
-        <div>
-          <label className="text-xs font-medium mb-1 block">判定与结算模型</label>
-          <select
-            value={modelSelectValue(models, form.fast_model_ref)}
-            onChange={e => set('fast_model_ref', e.target.value)}
-            className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
-          >
-            <option value="">跟随默认</option>
-            {options}
-          </select>
-          <p className="text-xs text-muted-foreground mt-1.5">
-            裁决、结算、建议共用。这几次只吐 JSON，用便宜的就行。
-          </p>
-        </div>
-      </div>
-
-      <div>
-        <label className="text-xs font-medium mb-1 block">总结模型</label>
-        <select
-          value={modelSelectValue(models, form.summary_model_ref)}
-          onChange={e => set('summary_model_ref', e.target.value)}
-          className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
-        >
-          <option value="">跟随判定模型</option>
-          {options}
-        </select>
-        <p className="text-xs text-muted-foreground mt-1.5">
-          把超出上下文轮数的旧剧情压成梗概。它单独拎出来是因为要求不一样：
-          这一段压错了会一路带到局终（下一次总结是在它的基础上接着写的），别用太便宜的。
-        </p>
-      </div>
-
-      <div>
-        <label className="text-xs font-medium mb-1 block">立绘 tag 模型</label>
-        <select
-          value={modelSelectValue(models, form.image_model_ref)}
-          onChange={e => set('image_model_ref', e.target.value)}
-          className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
-        >
-          <option value="">跟随判定模型</option>
-          {options}
-        </select>
-        <p className="text-xs text-muted-foreground mt-1.5">
-          把角色的中文外貌描述转成 danbooru tag。转完的 tag 要过白名单、还要给你过目能删，
-          所以挑最便宜的就行。
-        </p>
-      </div>
+      </details>
 
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -1856,11 +1721,9 @@ function RulesSection({
     onChange(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id])
 
   return (
-    <Section
-      title="写作规则"
-      desc="管住叙事的用词用语。默认不启用，勾上的规则会原样拼进 GM 的系统提示词。"
-      icon={ScrollText}
-    >
+    <div className="border-t border-border/60 pt-5 space-y-3">
+      <h3 className="text-sm font-medium">写作规则</h3>
+      <p className="text-xs text-muted-foreground">管住叙事的用词用语。默认不启用，勾上的规则会原样拼进 GM 的系统提示词。</p>
       {rules.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           还没有写作规则。
@@ -1901,7 +1764,7 @@ function RulesSection({
           </p>
         </>
       )}
-    </Section>
+    </div>
   )
 }
 
@@ -1947,7 +1810,7 @@ function WorldBookSection({
   const canSave = valid && !!form.content.trim()
 
   /** 改哪一格就存哪一格。新建的还没有 id，整份等「添加」一起提交 */
-  const autosave = useAutosave(
+  const autosave = useFormAutosave(
     editingId !== null && canSave ? { id: editingId, body: form } : null,
     showForm && editingId !== null,
     async ({ id, body }) => {
@@ -2162,13 +2025,16 @@ function WorldBookSection({
 interface NpcForm {
   name: string
   role: RpgNpc['role']
+  age: string
   description: string
   persona: string
   appearance: string
   location: string
   slot_locations: Record<string, string>
+  random_movement_slots: string[]
   keywords: string
   ai_scheduled: boolean
+  random_movement: boolean
   profile_sections: Record<string, string>
   dialogue_examples: { user: string; assistant: string }[]
   initial_state: Record<string, number | boolean>
@@ -2177,14 +2043,17 @@ interface NpcForm {
 }
 
 const EMPTY_NPC: NpcForm = {
-  name: '', role: 'npc', description: '', persona: '', appearance: '',
+  name: '', role: 'npc', age: '', description: '', persona: '', appearance: '',
   location: '', slot_locations: {}, keywords: '', ai_scheduled: false,
+  random_movement: false,
+  random_movement_slots: [],
   profile_sections: {}, dialogue_examples: [], initial_state: {},
   relation_enabled: false, relation_stat_names: [],
 }
 
 // 后端拿 key 当标签直接拼进提示词，所以这里存的就是中文。
-// 外貌单独一栏（只在首次见面注入），不重复放进档案
+// 外貌单独一栏，不重复放进档案（每轮都注入，见 _one_npc）——向导早期版本照酒馆
+// 那套发了英文键，后端读出来的时候会归一到这三个键上（normalize_profile_sections）
 const PROFILE_KEYS: Array<[string, string]> = [
   ['背景故事', '出身、成长经历、重要事件、当前身份、人生转折……'],
   ['能力特长', '会什么、擅长什么、弱点和限制……'],
@@ -2259,11 +2128,14 @@ function NpcSection({
     void autosave.flush()
     setEditingId(npc.id)
     setForm({
-      name: npc.name, role: npc.role, description: npc.description,
+      name: npc.name, role: npc.role, age: npc.age || '',
+      description: npc.description,
       persona: npc.persona, appearance: npc.appearance,
       location: npc.location, slot_locations: npc.slot_locations || {},
+      random_movement_slots: npc.random_movement_slots || [],
       keywords: npc.keywords,
       ai_scheduled: npc.ai_scheduled,
+      random_movement: npc.random_movement ?? false,
       profile_sections: npc.profile_sections || {},
       dialogue_examples: npc.dialogue_examples || [],
       initial_state: npc.initial_state || {},
@@ -2286,7 +2158,7 @@ function NpcSection({
   /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，存一个空名字进去，
    *  侧栏名单上就是一行没有名字的东西，而用户只是把它清了准备重打。
    *  新建的角色还没有 id，整份等「添加」一起提交 */
-  const autosave = useAutosave(
+  const autosave = useFormAutosave(
     editingId !== null && form.name.trim() ? { id: editingId, body: payload() } : null,
     showForm && editingId !== null,
     async ({ id, body }) => {
@@ -2332,6 +2204,7 @@ function NpcSection({
   const npcContext = () => ({
     ...assistContext(),
     角色名: form.name,
+    年龄: form.age,
     这个人是谁: form.description,
     性格: form.persona,
     外貌: form.appearance,
@@ -2343,20 +2216,14 @@ function NpcSection({
       dialogue_examples: f.dialogue_examples.map((ex, j) => (j === i ? { ...ex, ...patch } : ex)),
     }))
 
-  /**
-   * 勾了调度、可他哪儿也不会去时，把话说出来。
-   *
-   * 调度只替不在场的人写「在做什么」，**不替她挪窝**（挪了的话地点面板和地图
-   * 迷雾都会开始说谎）。而「在哪儿」完全由作息表和常驻地点决定——两样都空着
-   * 的时候，她会一直站在玩家开局那个地方，看起来就是「勾了调度她怎么还在这儿」，
-   * 活像功能坏了。这条边界界面上原本一个字都没写。
-   */
   const activeRelationNames = form.relation_stat_names.length
     ? new Set(form.relation_stat_names)
     : new Set(relationDefs.map(def => def.name))
   const activeRelationDefs = relationDefs.filter(def => activeRelationNames.has(def.name))
 
   const placeHint = !form.ai_scheduled ? ''
+    : form.random_movement
+      ? (placeNames.length === 0 ? '随机移动需要至少一个地点，请先去「地点」里添加。' : '')
     : slotNames.length === 0
       ? '这个模组没设时段（右边「时段」那一格是空的），她不会换地方——调度只替她写「在做什么」。'
       : !Object.values(form.slot_locations).some(v => (v || '').trim())
@@ -2447,15 +2314,13 @@ function NpcSection({
                 ))}
               </div>
               <p className="text-xs text-muted-foreground mt-1.5">
-                填了就在这个时段待在填的地方，玩家要找他得去那儿；留空就一直在常驻地点。
-                没有固定落脚点的人（学生、行商）把每一格都填上就行，常驻地点空着没关系。
-                要让某个人某个时段「谁也找不到」，填一个玩家不去的地方就行。
+                {form.ai_scheduled && form.random_movement
+                  ? '随机移动已启用，常驻地点和作息表都可以留空。填写的地点仅用于初始位置和未调度时的回退。'
+                  : '填了就在这个时段待在填的地方，玩家要找他得去那儿；留空就一直在常驻地点。没有固定落脚点的人（学生、行商）把每一格都填上就行，常驻地点空着没关系。要让某个人某个时段「谁也找不到」，填一个玩家不去的地方就行。'}
               </p>
             </div>
           )}
 
-          {/* AI 调度。和上面作息表并排的是两种「她不在场时怎么办」：
-              作息表决定她在哪儿，这一条决定她在那儿干什么 */}
           {form.role !== 'protagonist' && (
             <div>
               <label className="flex items-start gap-2 cursor-pointer">
@@ -2472,6 +2337,53 @@ function NpcSection({
                 下回见面时她会带着这段日子。每回合多一次模型调用，玩的时候能在这张卡上
                 看到记了什么，觉得不对可以划掉。
               </p>
+              {form.ai_scheduled && (
+                <div className="mt-2 ml-6 space-y-1.5">
+                  <label className="text-xs font-medium block">移动方式</label>
+                  <select
+                    value={form.random_movement ? 'random' : 'schedule'}
+                    onChange={e => setForm(f => ({ ...f, random_movement: e.target.value === 'random' }))}
+                    className={INPUT}
+                  >
+                    <option value="schedule">按作息表 / 常驻地点</option>
+                    <option value="random">随机移动</option>
+                  </select>
+                  {form.random_movement && (
+                    <>
+                    {slotNames.length > 0 && (
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium block">随机移动时段</label>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          {slotNames.map(name => (
+                            <label key={name} className="flex items-center gap-1 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={form.random_movement_slots.includes(name)}
+                                onChange={event => setForm(f => ({
+                                  ...f,
+                                  random_movement_slots: event.target.checked
+                                    ? [...f.random_movement_slots, name]
+                                    : f.random_movement_slots.filter(slot => slot !== name),
+                                }))}
+                                className="accent-primary"
+                              />
+                              {name}
+                            </label>
+                          ))}
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          只在勾选的时段随机移动；不勾选表示所有时段都可随机移动，其他时段按作息表或常驻地点。
+                        </p>
+                      </div>
+                    )}
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      每轮结束时，闲置角色会从模组已有地点中随机选择去处，再由 AI 记录活动。
+                      无需填写常驻地点或作息表，也不需要设置时段；在场、被提到或跟随你的角色不会随机移动。
+                    </p>
+                    </>
+                  )}
+                </div>
+              )}
               {placeHint && (
                 <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1.5 ml-6 leading-relaxed">
                   {placeHint}
@@ -2479,6 +2391,17 @@ function NpcSection({
               )}
             </div>
           )}
+
+          <div>
+            <label className="text-xs font-medium mb-1.5 block">年龄（选填）</label>
+            <input
+              value={form.age}
+              onChange={e => setForm({ ...form, age: e.target.value })}
+              placeholder="例：十七、三百余岁、看不出年纪"
+              className={INPUT}
+            />
+            <p className="text-xs text-muted-foreground mt-1.5">随外貌一起每轮注入。留空就不出现，模型会自己编一个。</p>
+          </div>
 
           <div>
             <label className="text-xs font-medium mb-1.5 block">身份：一句话他是谁</label>
@@ -2529,7 +2452,7 @@ function NpcSection({
               value={form.appearance}
               onApply={v => setForm(f => ({ ...f, appearance: v }))}
             />
-            <p className="text-xs text-muted-foreground mt-1.5">只在玩家第一次见到他时注入，之后就省掉了。</p>
+            <p className="text-xs text-muted-foreground mt-1.5">在场、或者这一轮被提到，就整段注入。写具体点，模型靠它认人。</p>
           </div>
 
           <Fold title="详细档案（选填）">
@@ -2734,7 +2657,7 @@ function NpcSection({
                     title="玩家没提到她时，模型会替她记一句「最近在做什么」。每回合一次模型调用"
                     className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
                   >
-                    AI 调度
+                    {npc.random_movement ? 'AI 调度 · 随机移动' : 'AI 调度'}
                   </span>
                 )}
                 {npc.relation_enabled && (

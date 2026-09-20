@@ -16,9 +16,9 @@ from app.models import novel, chapter, character, memory, model_library, writer_
 from app.models import llm_usage, sensitive_word, text_replace_backup
 from app.models.rpg import RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession
 from app.schemas.rpg import RpgMessageOut, RpgMessageUpdate
-from app.services.rpg_context import build_rpg_messages
+from app.services.rpg_context import build_rpg_messages, npc_place
 from app.services.rpg_memory import event_memory, text_revision
-from app.services.rpg_settlement import DOMAINS, SettlementConflict, _event_groups, capture, inspect_proposal, normalize_proposal, seed_settlement
+from app.services.rpg_settlement import DOMAINS, SettlementConflict, _event_groups, _filter_milestones, _with_cap, capture, inspect_proposal, normalize_proposal, seed_settlement, state_changes
 
 
 def proposal(narration, **delta):
@@ -94,6 +94,37 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({entry["id"] for entry in diagnostic["npcs_here"]}, {npc.id for npc in self.npcs})
         self.assertEqual(row.present, [])
 
+    async def test_other_npc_movement_does_not_block_this_scenes_updates(self):
+        actor, background = self.npcs
+        self.sess.location = "灵药园"
+        self.sess.npc_places = {str(actor.id): "柴房", str(background.id): "柴房"}
+        await self.store.commit()
+        narration = "园丁甲走进灵药园，关上园门。"
+        row = await self.make_reply(narration, present=[actor.id])
+        self.sess.npc_places = {str(actor.id): "柴房", str(background.id): "灵药园"}
+        row.settlement = {**row.settlement, "protected_paths": [["npc_places", str(background.id)]]}
+        await self.store.commit()
+        result = await self.settle(row, proposal(
+            narration, npc_places={actor.name: "灵药园"}, place_notes={"灵药园": "园门关上了"},
+        ))
+        self.assertEqual(result["settlement"]["status"], "done", result["settlement"]["domains"])
+        self.assertEqual(self.sess.npc_places, {str(actor.id): "灵药园", str(background.id): "灵药园"})
+        self.assertEqual(self.sess.place_notes["灵药园"], "园门关上了")
+        self.assertNotIn("人工修改", "；".join(result["warnings"]))
+
+    async def test_same_npc_later_position_is_still_protected(self):
+        actor = self.npcs[0]
+        self.sess.npc_places = {str(actor.id): "柴房"}
+        await self.store.commit()
+        narration = "园丁甲走进灵药园。"
+        row = await self.make_reply(narration, present=[actor.id])
+        self.sess.npc_places = {str(actor.id): "灵药园"}
+        await self.store.commit()
+        result = await self.settle(row, proposal(narration, npc_places={actor.name: "柴房"}))
+        self.assertEqual(self.sess.npc_places[str(actor.id)], "灵药园")
+        self.assertEqual(result["settlement"]["domains"]["scene"]["status"], "needs_review")
+        self.assertNotIn("人工修改", "；".join(result["warnings"]))
+
     async def test_move_event_does_not_mark_empty_character_changes_for_review(self):
         narration = "沿着石阶往下走，药香渐渐淡了。"
         data = {
@@ -112,6 +143,77 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events[0]["domains"], ["scene"])
         self.assertNotIn("已报告变化，但缺少对应更新", issues["characters"])
+
+    async def test_player_arrival_cannot_move_a_colocated_npc_to_a_side_room(self):
+        self.sess.location = "藏经阁"
+        self.npcs[0].location = "藏经阁"
+        self.store.add_all([RpgLocation(module_id=self.module.id, name=name)
+                            for name in ("藏经阁", "藏经阁偏殿")])
+        await self.store.commit()
+        narration = "你沿着廊道拐了个弯，偏殿正厅的门虚掩着。园丁甲坐在偏殿里，笑着与你交谈。"
+        row = await self.make_reply(narration, fixed_location="藏经阁")
+        data = proposal(narration, location="藏经阁", npc_places={"园丁甲": "藏经阁偏殿"},
+                        relations={"园丁甲": {"信任": 1}})
+        data["events"] = [
+            {"kind": "move", "quote": "你沿着廊道拐了个弯，偏殿正厅的门虚掩着。", "domains": ["scene"], "participants": []},
+            {"kind": "relationship", "quote": "园丁甲坐在偏殿里，笑着与你交谈。", "domains": ["characters"], "participants": [self.npcs[0].id]},
+        ]
+        for attempt in (1, 2):
+            result = await self.settle(row, copy.deepcopy(data))
+            self.assertEqual(result["settlement"]["status"], "partial")
+            self.assertEqual(row.settlement["attempts"], attempt)
+            self.assertEqual(self.sess.location, "藏经阁")
+            self.assertEqual(npc_place(self.npcs[0], self.sess.slot, self.sess.npc_places), "藏经阁")
+            self.assertEqual(self.sess.npc_states[str(self.npcs[0].id)]["信任"], 11)
+            self.assertTrue(any("实际离场" in warning for warning in result["warnings"]))
+
+    async def test_colocated_npc_can_leave_with_its_own_move_event(self):
+        self.npcs[0].location = "柴房"
+        await self.store.commit()
+        for narration in ("园丁甲告别你，独自走出柴房，回到灵药园。",
+                          "她向你告别，独自走出柴房，回到灵药园。",
+                          "你回到柴房，园丁甲独自走进灵药园。"):
+            self.sess.npc_places = {}
+            await self.store.commit()
+            row = await self.make_reply(narration, present=[self.npcs[0].id], fixed_location="柴房")
+            data = proposal(narration, npc_places={"园丁甲": "灵药园"})
+            data["events"] = [{"kind": "move", "quote": narration, "domains": ["scene"], "participants": [self.npcs[0].id]}]
+            result = await self.settle(row, data)
+            self.assertEqual(result["settlement"]["status"], "done")
+            self.assertEqual(self.sess.location, "柴房")
+            self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], "灵药园")
+
+    async def test_clearing_a_colocated_npc_override_also_requires_departure(self):
+        self.sess.npc_places = {str(self.npcs[0].id): "柴房"}
+        await self.store.commit()
+        row = await self.make_reply("园丁甲站在你面前与你交谈。", present=[self.npcs[0].id], fixed_location="柴房")
+        result = await self.settle(row, proposal(row.content, npc_places={"园丁甲": ""}))
+        self.assertEqual(result["settlement"]["status"], "partial")
+        self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], "柴房")
+        row = await self.make_reply("园丁甲离开柴房，回到灵药园。", present=[self.npcs[0].id], fixed_location="柴房")
+        data = proposal(row.content, npc_places={"园丁甲": ""})
+        data["events"] = [{"kind": "move", "quote": row.content, "domains": ["scene"], "participants": [self.npcs[0].id]}]
+        await self.settle(row, data)
+        self.assertNotIn(str(self.npcs[0].id), self.sess.npc_places)
+
+    async def test_arriving_npc_can_join_the_fixed_player_location(self):
+        row = await self.make_reply("园丁甲推开柴房的门，走到你面前。", fixed_location="柴房")
+        result = await self.settle(row, proposal(row.content, npc_places={"园丁甲": "柴房"}))
+        self.assertEqual(result["settlement"]["status"], "done")
+        self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], self.sess.location)
+
+    async def test_scene_repair_can_keep_a_colocated_npc_in_place(self):
+        self.npcs[0].location = "柴房"
+        await self.store.commit()
+        row = await self.make_reply("园丁甲在你面前坐下，与你交谈。", present=[self.npcs[0].id], fixed_location="柴房")
+        callback = AsyncMock(side_effect=[
+            (proposal(row.content, npc_places={"园丁甲": "灵药园"}), 1, 1),
+            (proposal(row.content, npc_places={"园丁甲": "柴房"}), 1, 1),
+        ])
+        result = await self.settle(row, callback)
+        self.assertEqual(callback.await_count, 2)
+        self.assertEqual(result["settlement"]["status"], "done")
+        self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], "柴房")
 
     async def test_an_empty_npc_place_survives_as_a_clear(self):
         # 提示词里写死了「她只是回到自己平时待的地方，就写空串」，所以空串是一种
@@ -148,6 +250,27 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issues["scene"], [])
         self.assertIn("状态变化缺少关联的原文依据", soft["scene"])
 
+    async def test_a_chatty_line_is_only_a_reminder(self):
+        """「你接过了话头」命中易手词表，可那只是一句闲聊。
+
+        判据是**本地正则猜的**，而从前它挂的是硬问题。挂在 memory 上还是最贵
+        的那一档：apply_proposal 末尾会把这一轮已经逐字取证过的 facts 整份清掉，
+        大事记也跟着不写。那个代价和「疑似」两个字的把握完全不相称
+        """
+        narration = "你接过了话头，把明天的行程说了一遍。"
+        issues, soft, _events = self._inspect({}, narration)
+        self.assertEqual(issues["inventory"], [])
+        self.assertEqual(issues["memory"], [])
+        self.assertTrue(any("疑似漏记关键事件" in line for line in soft["inventory"]))
+        self.assertTrue(any("关键事件缺少原文记录" in line for line in soft["memory"]))
+
+    async def test_a_real_handover_is_still_refused(self):
+        # 放宽只给「疑似」那两条。东西真的递给了有名有姓的人、却没交上一条
+        # transfer 事件，那是模型没守契约，照旧一票否决
+        issues, _soft, _events = self._inspect({}, "你把铁钥匙交给园丁甲。")
+        self.assertIn("物品交接需要同时核对背包与接收人的持有状态", issues["inventory"])
+        self.assertIn("物品交接需要同时核对背包与接收人的持有状态", issues["characters"])
+
     async def test_a_number_out_of_nowhere_is_still_refused(self):
         # 放宽只给地点：地点另有一层硬校验（必须在登记地点表里、还要过进入条件），
         # 数值和背包没有，缺原文依据就是唯一的防幻觉门禁，照样一票否决
@@ -157,6 +280,40 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
                 "events": []}
         issues, _soft, _events = self._inspect(data, narration)
         self.assertIn("状态变化缺少关联的原文依据", issues["stats"])
+
+    async def test_a_line_of_history_does_not_have_to_drag_an_event_along(self):
+        # 经历自己带原话校验，不该再被「状态变化必须配一条 event」拦一道。
+        # 拦了的话模型想记一句「他今天家里出了事」就得顺手编个事件出来交差——
+        # 那正是这道闸门要防的事
+        narration = "园丁甲蹲在药畦边，半晌才说他家里出了事。"
+        data = {
+            "npc_history": {self.npcs[0].name: {
+                "content": "他家里出了事，一个人蹲在药畦边",
+                "quote": "园丁甲蹲在药畦边",
+            }},
+            "checks": {domain: "changed" if domain == "characters" else "unchanged" for domain in DOMAINS},
+            "events": [],
+        }
+        issues, _soft, _events = self._inspect(data, narration)
+        self.assertEqual(issues["characters"], [])
+
+    async def test_a_turning_point_nobody_can_find_in_the_narration_is_dropped(self):
+        # 里程碑会一直挂在后面每一轮的上下文里，编出来一条比漏掉一条贵得多
+        narration = "园丁甲把最后半块干粮塞给你，说往后别再回这儿了。"
+        allowed = {npc.id for npc in self.npcs}
+        kept, dropped = _filter_milestones([
+            {"type": "决裂", "a": "园丁甲", "b": "你",
+             "content": "他给了你干粮，叫你别再回来", "quote": "说往后别再回这儿了"},
+            {"type": "表白", "a": "园丁乙", "b": "你",
+             "content": "她说她一直等着你", "quote": "她说她一直等着你"},
+            # 自造的 type 静默丢，同 task_updates 丢掉 done/failed 之外的 action
+            {"type": "结拜", "a": "园丁甲", "b": "你", "content": "你们结拜了"},
+        ], narration, self.npcs, allowed)
+        self.assertEqual([entry["type"] for entry in kept], ["决裂"])
+        # 只有「写了但站不住」那条要往外报：静默丢掉的话它和「模型压根没写」
+        # 在报告里长得一模一样
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("表白", dropped[0])
 
     async def test_only_item_handover_forces_two_domains_to_agree(self):
         # 从前这里算的是所有事件 domains 的传递闭包：事件 A(scene,stats) 和
@@ -169,15 +326,31 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_event_groups(handover), [{"inventory", "characters"}])
 
     async def test_missing_move_is_repaired_once_using_full_narration(self):
+        self.module.settlement_model_ref = "settlement-only"
+        self.module.fast_model_ref = "legacy-fast"
+        await self.store.commit()
         narration = "你抵达灵药园，园丁甲向你招手。" + "你沿着小径查看药草。" * 400
         row = await self.make_reply(narration)
         corrected = proposal(narration, location="灵药园")
         callback = AsyncMock(side_effect=[(proposal(narration), 1, 1), (corrected, 2, 2)])
-        result = await self.settle(row, callback)
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("settlement-client", "openai")) as resolve:
+            result = await self.settle(row, callback)
+        resolve.assert_called_once_with("memory", "settlement-only")
         self.assertEqual(self.sess.location, "灵药园")
         self.assertEqual(callback.await_count, 2)
+        for invocation in callback.call_args_list:
+            self.assertEqual(invocation.args[1:3], ("settlement-client", "openai"))
         self.assertIn(narration, callback.call_args_list[0].args[0][0]["content"])
         self.assertEqual(result["aux_input_tokens"], 3)
+
+    async def test_empty_settlement_model_uses_legacy_fast_model(self):
+        self.module.settlement_model_ref = ""
+        self.module.fast_model_ref = "legacy-fast"
+        await self.store.commit()
+        row = await self.make_reply("你停下来看看周围。")
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("legacy-client", "openai")) as resolve:
+            await self.settle(row, proposal(row.content))
+        resolve.assert_called_once_with("memory", "legacy-fast")
 
     async def test_a_discovery_reported_only_in_the_repair_round_still_lands(self):
         # 修复那一轮是完整重出一份 JSON，模型常在这时候才把人补上。它不属于任何
@@ -416,6 +589,23 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         row.content = "新约定"
         self.assertEqual(event_memory([row], set(), "回忆"), "")
 
+    async def test_recall_reports_participants_for_second_hop(self):
+        """第二跳：入选往事牵涉的 NPC id 从出参吐出来，供上层补卡。
+
+        提到「药园失火」→ 命中这条往事 → participants 里的人被收集，
+        build_rpg_messages 靠这份 id 给放火的人也出完整卡，而不是只剩一句 summary。
+        """
+        content = "药园失火那晚，园丁甲把火扑灭了。"
+        row = RpgMessage(id=1, role="assistant", content=content, settlement={
+            "status": "done", "revision": text_revision(content),
+            "facts": [{"kind": "rescue", "quote": content, "summary": "园丁甲扑灭药园大火",
+                       "participants": [7, 12], "witnesses": [], "visibility": "public"}],
+        })
+        hop: set[int] = set()
+        recalled = event_memory([row], set(), "回忆药园失火", out_participants=hop)
+        self.assertIn("药园失火", recalled)
+        self.assertEqual(hop, {7, 12})
+
     async def test_unsettled_message_is_recallable_by_its_own_text(self):
         """结算失败的回合靠正文也能召回。
 
@@ -495,17 +685,18 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(SettlementConflict, "没有独立结算基线"):
             await self.settle(row, proposal(row.content))
 
-    async def test_editing_earlier_reply_invalidates_later_memories(self):
+    async def test_editing_earlier_reply_requires_rewind_without_invalidating_memories(self):
         first = await self.make_reply("你在原地休息。")
         await self.settle(first, proposal(first.content))
         second = await self.make_reply("园丁甲答应带路。")
         await self.settle(second, proposal(second.content))
-        await update_message(first.id, RpgMessageUpdate(content="你继续睡觉。"), self.user, self.store)
+        previous_status = second.settlement["status"]
+        with self.assertRaises(HTTPException) as caught:
+            await update_message(first.id, RpgMessageUpdate(content="你继续睡觉。"), self.user, self.store)
+        self.assertEqual(caught.exception.status_code, 409)
         await self.store.refresh(second)
-        self.assertEqual(second.settlement["status"], "stale")
-        self.assertEqual(second.settlement["invalidated_by"], first.id)
-        with self.assertRaisesRegex(SettlementConflict, "前面的剧情已修改"):
-            await self.settle(second, proposal(second.content))
+        self.assertEqual(second.settlement["status"], previous_status)
+        self.assertNotIn("invalidated_by", second.settlement)
 
     async def test_failed_recalculation_does_not_resurrect_previous_revision(self):
         row = await self.make_reply("你走了许久，有些疲惫。")
@@ -544,6 +735,30 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sess.npc_notes, {})
         await self.settle(row, proposal(row.content, npc_notes={f"npc:{self.npcs[0].id}": {"衣服": "蓝衣"}}))
         self.assertEqual(self.sess.npc_notes, {str(self.npcs[0].id): {"衣服": "蓝衣"}})
+
+    async def test_a_rewritten_appearance_is_applied_and_reported(self):
+        # 药剂改造这类「永远回不去」的变化。写进 npc_notes 会被那条 10 条的
+        # 上限淘汰掉（身体改造写一次就再不刷新，永远排在淘汰队列最前面），
+        # 所以它有自己的一列，注入时压过作者写的 appearance
+        identity = self.npcs[0].id
+        narration = "园丁甲喝下那碗药，胸口肉眼可见地鼓了起来。"
+        row = await self.make_reply(narration, present=[identity])
+        await self.settle(row, proposal(
+            narration, npc_appearance={f"npc:{identity}": {"胸部": "服药后长出，已定形"}}))
+        self.assertEqual(self.sess.npc_appearance, {str(identity): {"胸部": "服药后长出，已定形"}})
+
+    async def test_an_override_for_someone_not_in_front_of_you_is_refused(self):
+        # 和近况同一道门，而且更该守：门外的人连近况都不让记，
+        # 而外貌改写是**把这个人在你眼前的样子永久改掉**。
+        #
+        # 旁白刻意不提那个人的名字：allowed 是「在场 ∪ 正文里被点名的」，
+        # 点了名就等于他这一轮真的出场了，那种情况下写他是合理的
+        away = self.npcs[1].id
+        narration = "你在柴房里坐了一会儿，药味还没散。"
+        row = await self.make_reply(narration, present=[self.npcs[0].id])
+        await self.settle(row, proposal(
+            narration, npc_appearance={f"npc:{away}": {"胸部": "服药后长出"}}))
+        self.assertEqual(self.sess.npc_appearance, {})
 
     async def test_transfer_quantity_cannot_exceed_inventory(self):
         identity = self.npcs[0].id
@@ -724,6 +939,111 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         result = await self.settle(row, empty, label="失败")
         self.assertEqual(result["settlement"]["status"], "done")
         self.assertNotIn("这一次失手了", self.sess.flags or {})
+
+    # ── 每轮顺带产出的那 3 条建议 ──────────────────────────────────────────
+    #
+    # 这条路和主动的「帮我想想」共用 rpg_suggestions 的收口，但**只改输出格式、
+    # 不补新资料**：模板里只教了 free / item。下面钉的是收口本身。
+
+    async def _suggesting(self, suggestions):
+        narration = "你把钥匙插进锁孔，锁芯咔哒一声。"
+        row = await self.make_reply(narration)
+        data = proposal(narration)
+        data["suggestions"] = suggestions
+        await self.settle(row, data)
+        return row.suggestions
+
+    async def test_an_item_suggestion_is_structured_against_the_module_table(self):
+        self.store.add(rpg.RpgItem(module_id=self.module.id, name="钥匙", usable=True))
+        await self.store.commit()
+        got = await self._suggesting([
+            {"kind": "item", "name": "钥匙", "text": "拿钥匙撬开那把锁"},
+            {"kind": "free", "text": "先退回柴房"},
+        ])
+        self.assertEqual(got[0], {
+            "text": "拿钥匙撬开那把锁", "kind": "item", "name": "钥匙", "action_id": None,
+        })
+        self.assertEqual(got[1]["kind"], "free")
+
+    async def test_an_item_the_player_does_not_own_degrades_to_free(self):
+        """模组里有绳梯，背包里没有 —— 点了必然弹黄条，所以降级；正文留着。"""
+        self.store.add(rpg.RpgItem(module_id=self.module.id, name="绳梯", usable=True))
+        await self.store.commit()
+        got = await self._suggesting([{"kind": "item", "name": "绳梯", "text": "架起绳梯"}])
+        self.assertEqual(got[0], {
+            "text": "架起绳梯", "kind": "free", "name": "", "action_id": None,
+        })
+
+    async def test_an_invented_item_name_degrades_to_free(self):
+        got = await self._suggesting([{"kind": "item", "name": "万能钥匙", "text": "试试看"}])
+        self.assertEqual(got[0]["kind"], "free")
+        self.assertEqual(got[0]["text"], "试试看")
+
+    async def test_plain_strings_from_an_old_override_still_work(self):
+        """老覆写吐的是 list[str]，降级成 free 恰好等价于加这个功能之前。"""
+        got = await self._suggesting(["推门进去", "喊一声看有没有人应", "数到三", "第四条"])
+        self.assertEqual([g["text"] for g in got][:3], ["推门进去", "喊一声看有没有人应", "数到三"])
+        self.assertTrue(all(g["kind"] == "free" for g in got))
+        self.assertEqual(len(got), 3)
+
+
+class ChangeSummaryTests(unittest.TestCase):
+    """给玩家看的「这一轮变了什么」。NPC 的关系数值要落到具体的人身上。"""
+
+    def test_a_named_relation_change_is_listed_person_by_person(self):
+        before = {"npc_states": {"3": {"信任": 10, "met": True}}}
+        after = {"npc_states": {"3": {"信任": 13, "met": True}}}
+        _applied, lines = state_changes(before, after, npc_names={"3": "赫敏"})
+        self.assertIn("赫敏的信任 +3", lines)
+        # 逐项列过了就不再打一遍笼统标签，否则同一笔关系报两遍
+        self.assertNotIn("人物关系或相识记录已更新", lines)
+
+    def test_a_change_that_is_only_met_still_gets_the_generic_label(self):
+        # met 是 bool，而 isinstance(True, int) 为真。不显式排除的话这一笔会报成
+        # 「赫敏的met +1」——逐项列了个出来，笼统标签又恰好被它挡掉
+        before = {"npc_states": {"3": {"信任": 10, "met": False}}}
+        after = {"npc_states": {"3": {"信任": 10, "met": True}}}
+        _applied, lines = state_changes(before, after, npc_names={"3": "赫敏"})
+        self.assertEqual(lines, ["人物关系或相识记录已更新"])
+
+    def test_an_unnamed_npc_falls_back_to_the_generic_label(self):
+        # 查不到名字就说不了人话，那一笔整条跳过、落回笼统标签
+        before = {"npc_states": {"3": {"信任": 10}}}
+        after = {"npc_states": {"3": {"信任": 13}}}
+        _applied, lines = state_changes(before, after, npc_names={"9": "赫敏"})
+        self.assertEqual(lines, ["人物关系或相识记录已更新"])
+
+    def test_the_old_call_keeps_the_generic_label(self):
+        # 可选参数向后兼容：不传 npc_names 的调用点和加这一手之前逐字一致
+        before = {"npc_states": {"3": {"信任": 10}}}
+        after = {"npc_states": {"3": {"信任": 13}}}
+        _applied, lines = state_changes(before, after)
+        self.assertEqual(lines, ["人物关系或相识记录已更新"])
+
+
+class StatCapTests(unittest.TestCase):
+    """提示词里的数值要带分母：只给 62，模型不知道这是高还是低。"""
+
+    def test_a_definition_with_a_ceiling_is_written_as_a_fraction(self):
+        self.assertEqual(_with_cap({"好感": {"max": 100}}, "好感", 62), "62/100")
+
+    def test_a_definition_without_a_ceiling_keeps_the_bare_number(self):
+        # 钱、声望没有 max。拼成 "300/None" 会让模型以为有一道看不见的天花板
+        self.assertEqual(_with_cap({"资金": {"max": None}}, "资金", 300), 300)
+
+    def test_an_undefined_name_is_left_alone_too(self):
+        self.assertEqual(_with_cap({}, "精力", 80), 80)
+
+    def test_the_template_shows_the_fraction_and_says_what_the_slash_means(self):
+        from app.prompts.loader import render
+        prompt = render(
+            "rpg_settle.jinja2", narration="", outcome_label="", outcome_failed=False,
+            stats={"精力": "20/100"}, location="", place_note="", inventory=[], flags={},
+            npcs=[], note_keys=[], relation_names=[], step_caps={}, engine_note="",
+            chronicle=[], tasks=[], has_clock=False,
+        )
+        self.assertIn("精力 20/100", prompt)
+        self.assertIn("斜杠后面是上限", prompt)
 
 
 if __name__ == "__main__":

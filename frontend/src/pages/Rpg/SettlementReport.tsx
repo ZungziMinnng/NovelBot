@@ -7,7 +7,7 @@ const LABELS: Record<string, string> = {
 }
 const STATUS: Record<string, string> = {
   pending: '等待结算', running: '正在结算', done: '结算完成',
-  partial: '部分变化尚未确认', failed: '结算失败，剧情已保留', stale: '正文已修改，需要重新结算',
+  partial: '结算已结束，部分变化未采纳', failed: '结算失败，剧情已保留', stale: '正文已修改，需要重新结算',
   updated: '已更新', unchanged: '无变化', needs_review: '待核对',
 }
 
@@ -31,8 +31,16 @@ export default function SettlementReport({ report, latest, busy, disabled, npcs,
           </button>
         )}
       </div>
-      {!!report.changes?.length && <p>{report.changes.join('；')}</p>}
-      {incomplete && !latest && <p>后面已有新回合，需要从对应玩家消息回滚重玩。</p>}
+      {!!report.engine_facts?.length && (
+        <div className="space-y-1">
+          {report.engine_facts.map((fact, index) => <p key={index}>{fact}</p>)}
+        </div>
+      )}
+      {!!report.changes?.length && <p>最终变化：{report.changes.join('；')}</p>}
+      {report.status === 'partial' && <p>已确认的变化已保存，未通过核对的变化没有写入。可以继续游玩。{latest && '如需重新结算，请在进入下一轮或推进时间之前操作。'}</p>}
+      {incomplete && !latest && <p>{report.status === 'stale'
+        ? '这段剧情修改后尚未重算，请从对应玩家消息回滚重玩。'
+        : '这是以前回合的核对记录，不影响继续游玩。如需重算，请从对应玩家消息回滚重玩。'}</p>}
       {!!report.warnings?.length && <p className="text-amber-600 dark:text-amber-400">{report.warnings.join('；')}</p>}
       <details>
         <summary className="cursor-pointer">核对结果与原文依据</summary>

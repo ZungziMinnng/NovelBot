@@ -47,9 +47,12 @@ export const BUILTIN_ACTION_PACKS: ActionPack[] = GENRE_PRESETS.map(p => ({
   key: p.key,
   name: `${p.label}的动作`,
   note: `配「${p.label}」那套数值用`,
-  // 题材模板里的动作不带分栏和时间开销：这三套是按探索冒险写的，那边动作本来就
-  // 平铺一排、不吃时间。补上默认值而不是回头给模板逐条加字段——补了也全是空的
-  actions: p.actions.map(a => ({ ...a, group: '', cost_slot: false })),
+  // 题材模板里的动作不带分栏、时间开销和远程指定：这三套是按探索冒险写的，那边
+  // 动作本来就平铺一排、不吃时间、对象都在跟前。补上默认值而不是回头给模板逐条
+  // 加字段——补了也全是空的
+  actions: p.actions.map(a => ({
+    ...a, group: '', cost_slot: false, target_anywhere: false, summons_target: false,
+  })),
 }))
 
 /**
@@ -107,5 +110,5 @@ export function usedKeys(actions: RpgActionSeed[], relation = false): string[] {
 /** 一个干净的空动作。库里的动作没有 requires 和 at_location */
 export const emptySeed = (): RpgActionSeed => ({
   name: '', prompt_hint: '', effects: {}, relation_effects: {}, needs_target: false,
-  group: '', cost_slot: false,
+  target_anywhere: false, summons_target: false, group: '', cost_slot: false,
 })

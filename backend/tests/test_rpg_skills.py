@@ -134,11 +134,12 @@ class SkillTurnTests(unittest.IsolatedAsyncioTestCase):
         await self._turn("御火", skill_name="御火")
         self.assertEqual(self.sess.stats["精力"], 45)
 
-    async def test_effects_are_clamped_by_the_stat_definition(self):
+    async def test_insufficient_skill_cost_changes_nothing(self):
         self.sess.stats = {**self.sess.stats, "精力": 4}
         await self.db.commit()
         await self._turn("施展听风辨位", skill_name="听风辨位")
-        self.assertEqual(self.sess.stats["精力"], 0)
+        self.assertEqual(self.sess.stats["精力"], 4)
+        self.assertEqual(self._cooldown("听风辨位"), 0)
 
     async def test_unknown_skill_warns_and_leaves_state_alone(self):
         events = await self._turn("乱按", skill_name="没这招")

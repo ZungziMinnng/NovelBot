@@ -34,10 +34,14 @@ import RpgTurnIndicator from '@/components/GenerationIndicator/RpgTurnIndicator'
 import TavernTurnIndicator from '@/components/GenerationIndicator/TavernTurnIndicator'
 import { useSettingsStore } from '@/store/settingsStore'
 import { getThemeById } from '@/lib/themes'
+import installTextareaTopResize from '@/lib/textareaTopResize'
 
 export default function App() {
   const theme = useSettingsStore((s) => s.theme)
   const nsfwMode = useSettingsStore((s) => s.nsfwMode)
+
+  // 所有输入框的拖拽手柄从右下角挪到上边缘，全局装一份，见 lib/textareaTopResize.ts
+  useEffect(() => installTextareaTopResize(), [])
 
   useEffect(() => {
     const root = document.documentElement

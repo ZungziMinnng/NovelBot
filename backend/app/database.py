@@ -268,15 +268,26 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_sessions ADD COLUMN visited JSON DEFAULT '[]'",
         # GM 边玩边记的 NPC 近况。老库拿到 '{}'，角色卡上那一块不显示
         "ALTER TABLE rpg_sessions ADD COLUMN npc_notes JSON DEFAULT '{}'",
+        # 这一局被改写掉的外貌（药剂、断手、毁容）。老库拿到 '{}' = 没有覆盖，
+        # 注入时只有作者写的那段 appearance，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_appearance JSON DEFAULT '{}'",
         # 道具定义上的「开局就有」。老库拿到 0 = 一件都不带，开局背包照旧只看
         # rpg_modules.default_inventory，和加这一列之前一模一样
         "ALTER TABLE rpg_items ADD COLUMN start_with BOOLEAN DEFAULT 0",
         # 玩法类别（模拟器 / 探索冒险 / 角色养成）。老库拿到 'rpg'，而 'rpg' 的
         # 玩法规则就是照着现在这套 GM 提示词写的，所以老模组行为完全不变
         "ALTER TABLE rpg_modules ADD COLUMN play_style VARCHAR(20) DEFAULT 'rpg'",
+        "ALTER TABLE rpg_modules ADD COLUMN opening_npc_ids JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_modules ADD COLUMN opening_npc_locations JSON DEFAULT '{}'",
         # 摘要专用模型。老库拿到 ''，而消费端一律写 summary_model_ref or
         # fast_model_ref，空串就是跟着裁决模型走，和没有这一列时一样
         "ALTER TABLE rpg_modules ADD COLUMN summary_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN settlement_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN adjudication_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN suggestion_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN activity_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN offscreen_model_ref VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN discovery_model_ref VARCHAR(100) DEFAULT ''",
         # 立绘 tag 转换专用模型。老库拿到 ''，消费端写 image_model_ref or
         # fast_model_ref or model_ref，所以老模组从此跟着裁决模型走——这一列
         # 就是为了不再让它花叙事模型的钱，回落到 fast 是有意的行为变化
@@ -295,6 +306,8 @@ async def _run_migrations() -> None:
         # 角色是否交给 AI 调度。默认关：老模组不勾就一个模型调用都不多，
         # 行为和加这一列之前逐字一致
         "ALTER TABLE rpg_npcs ADD COLUMN ai_scheduled BOOLEAN DEFAULT 0",
+        "ALTER TABLE rpg_npcs ADD COLUMN random_movement BOOLEAN DEFAULT 0",
+        "ALTER TABLE rpg_npcs ADD COLUMN random_movement_slots JSON DEFAULT '[]'",
         # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。老库拿到 '{}' =
         # 谁都没被调度过，角色卡上不出现这一行
         "ALTER TABLE rpg_sessions ADD COLUMN npc_activities JSON DEFAULT '{}'",
@@ -307,6 +320,10 @@ async def _run_migrations() -> None:
         # 剧情挪动的人物位置：{"3": "校长办公室"}。老库拿到 '{}' = 谁的位置
         # 都没被剧情改过，一律按作息表 / 常驻地点算，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_places JSON DEFAULT '{}'",
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_random_places JSON DEFAULT '{}'",
+        # 跟着玩家走的人：[3, 7]。老库拿到 '[]' = 谁都没跟着，位置一律按作息表 /
+        # 常驻地点算，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_followers JSON DEFAULT '[]'",
         # 地点近况：{"地窖": "门被你踹坏了，合不上"}。老库拿到 '{}' = 哪个地方
         # 都没被记过一笔，场面块少一行，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN place_notes JSON DEFAULT '{}'",
@@ -329,6 +346,10 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_messages ADD COLUMN location VARCHAR(100) DEFAULT ''",
         "ALTER TABLE rpg_messages ADD COLUMN present JSON DEFAULT NULL",
         "ALTER TABLE rpg_messages ADD COLUMN settlement JSON DEFAULT NULL",
+        "ALTER TABLE rpg_messages ADD COLUMN turn_request JSON DEFAULT NULL",
+        "ALTER TABLE rpg_messages ADD COLUMN before_save_id INTEGER DEFAULT NULL",
+        "ALTER TABLE rpg_sessions ADD COLUMN operation_token VARCHAR(40) DEFAULT ''",
+        "ALTER TABLE rpg_sessions ADD COLUMN operation_until DATETIME DEFAULT NULL",
         # 老消息按线回填在场名单：从角色线来的就是那一个人。用字符串拼而不是
         # json_array()，免得依赖 SQLite 编译时带没带 JSON1
         #
@@ -367,6 +388,8 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_actions ADD COLUMN \"group\" TEXT DEFAULT ''",
         "ALTER TABLE rpg_actions ADD COLUMN cost_slot INTEGER DEFAULT 0",
         "ALTER TABLE rpg_actions ADD COLUMN at_location TEXT DEFAULT ''",
+        "ALTER TABLE rpg_actions ADD COLUMN target_anywhere INTEGER DEFAULT 0",
+        "ALTER TABLE rpg_actions ADD COLUMN summons_target INTEGER DEFAULT 0",
         # 时段推进的两个阈值，和这一局在当前时段里的两个计数器。
         # 四个 DEFAULT 0 恰好就是「加这四列之前」的行为：不自动推时段、
         # 不点亮按钮、计数从零起，所以老模组和老局一个字都不用改
@@ -383,6 +406,24 @@ async def _run_migrations() -> None:
         # 老局拿到空字典 = 那些已经立着的 flag 没有日期，after_days 条件判不过；
         # 这正是想要的——引擎不知道它是哪天发生的，就别假装知道
         "ALTER TABLE rpg_sessions ADD COLUMN flag_days JSON DEFAULT '{}'",
+        # 推时段之后留给下一轮 prompt 的起跳点。老局拿到 '' = 没有待补的时间，
+        # 上下文里那句话说都不说，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN time_jump_from VARCHAR(40) DEFAULT ''",
+        # 构思向导上次回填写了哪些东西，给「重新生成再回填」时先摘掉用。
+        # 老库拿到 {} = 没有可摘的，回填行为退回加这一列之前（只追加）
+        "ALTER TABLE rpg_modules ADD COLUMN wizard_state JSON DEFAULT '{}'",
+        # 每个人的经历流水。老局拿到 {} = 谁都没记过一条，角色卡上「经历」那一段
+        # 整段不出现，上下文一个 token 都不多花，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_history JSON DEFAULT '{}'",
+        # 关系里程碑。老局拿到 [] = 没有任何转折，【关系的转折】整块不出现，
+        # 同样逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_milestones JSON DEFAULT '[]'",
+        # 角色年龄，自由文本。老卡拿到 '' = 卡上那一行整行不出现，
+        # 上下文和加这一列之前逐字一致
+        "ALTER TABLE rpg_npcs ADD COLUMN age VARCHAR(20) DEFAULT ''",
+        # 纯引擎瞬移之后留给下一轮 prompt 的断场点。老局拿到 '' = 没有待说的断场，
+        # 上下文里那句话说都不说，和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN scene_break_from VARCHAR(40) DEFAULT ''",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

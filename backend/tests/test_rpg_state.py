@@ -8,15 +8,19 @@ import unittest
 
 from app.models.rpg import RpgItem, RpgModule, RpgNpc, RpgSession
 from app.services.rpg_state import (
+    ANY_NPC,
     ON_FULL_FLAG,
     ON_ZERO_DEAD, ON_ZERO_FLAG,
-    apply_flags, apply_inventory, apply_npc_notes, apply_place_note, apply_relations,
+    apply_flags, apply_inventory, apply_npc_appearance, apply_npc_notes,
+    apply_place_note, apply_relations,
     apply_state_delta,
-    apply_stats, check_condition, check_full, check_zero, clamp, def_map, for_check_stats,
-    init_relation, init_stats, mark_met, match_npc, note_visited, place_note,
+    apply_stats, apply_tweak,
+    check_condition, check_full, check_zero, clamp, def_map, for_check_stats,
+    ensure_relation_states, init_relation, init_stats, mark_met, match_npc, note_visited, place_note,
     starting_inventory,
     tier_list, tier_of, visible_defs,
-    FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT, PLACE_CHARS, PLACE_LIMIT,
+    APPEARANCE_CHARS, APPEARANCE_LIMIT, FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT,
+    PLACE_CHARS, PLACE_LIMIT,
     TIER_LABEL_CHARS, TIER_NOTE_CHARS, VISITED_LIMIT,
 )
 
@@ -45,6 +49,7 @@ def _sess(**kwargs):
         "flag_days": {},
         "npc_states": {},
         "npc_notes": {},
+        "npc_appearance": {},
         "location": "",
         "status": "alive",
     }
@@ -152,6 +157,32 @@ class RelationInitTests(unittest.TestCase):
         self.assertEqual(init_relation(RELATION_DEFS, {"好感": 999})["好感"], 100)
 
 
+class EnsureRelationStateTests(unittest.TestCase):
+    def test_missing_state_is_filled_from_npc_initial_values(self):
+        sess = _sess(npc_states={})
+        npc = RpgNpc(
+            id=3, module_id=1, name="npc", relation_enabled=True,
+            initial_state={RELATION_DEFS[0]["name"]: 42},
+            relation_stat_names=[d["name"] for d in RELATION_DEFS],
+        )
+
+        self.assertTrue(ensure_relation_states(_module(), sess, [npc]))
+        self.assertEqual(sess.npc_states["3"], {
+            RELATION_DEFS[0]["name"]: 42,
+            RELATION_DEFS[1]["name"]: 10,
+        })
+
+    def test_existing_values_are_preserved_and_disabled_npcs_are_skipped(self):
+        sess = _sess(npc_states={"3": {RELATION_DEFS[0]["name"]: 77}})
+        enabled = RpgNpc(id=3, module_id=1, name="enabled", relation_enabled=True)
+        disabled = RpgNpc(id=4, module_id=1, name="disabled", relation_enabled=False)
+
+        self.assertTrue(ensure_relation_states(_module(), sess, [enabled, disabled]))
+        self.assertEqual(sess.npc_states["3"][RELATION_DEFS[0]["name"]], 77)
+        self.assertEqual(sess.npc_states["3"][RELATION_DEFS[1]["name"]], 10)
+        self.assertNotIn("4", sess.npc_states)
+
+
 class ConditionTests(unittest.TestCase):
     """一处写完三处共用：世界书 / 动作按钮 / 地点入口。"""
 
@@ -196,6 +227,36 @@ class ConditionTests(unittest.TestCase):
         ok, why = check_condition(cond, self.sess, self.npcs)
         self.assertFalse(ok)
         self.assertIn("找不到角色", why)
+
+    def test_any_npc_threshold_passes_when_one_character_is_over(self):
+        # 「不指定是谁」：任意一个角色达标就算成立，不必先挑一个人
+        cond = {"relations": [{"npc": ANY_NPC, "stat": "好感", "op": ">=", "value": 50}]}
+        self.assertTrue(check_condition(cond, self.sess, self.npcs)[0])
+        cond["relations"][0]["value"] = 80
+        ok, why = check_condition(cond, self.sess, self.npcs)
+        self.assertFalse(ok)
+        self.assertIn("好感", why)
+
+    def test_any_npc_reads_whoever_it_is_given(self):
+        """动作那一路只喂选中的对象，于是 ANY_NPC 就是「你选的那个人」。
+
+        _action_gate 传的是 `[target]`，所以同一个写法在动作上不该再是「场上有
+        别人达标就行」——那会让按钮对着 A 亮着，点下去判的是 B。
+        """
+        cond = {"relations": [{"npc": ANY_NPC, "stat": "好感", "op": ">=", "value": 50}]}
+        lukewarm = [RpgNpc(id=9, module_id=1, name="路人")]
+        states = dict(self.sess.npc_states)
+        states["9"] = {"好感": 10}
+        self.sess.npc_states = states
+        self.assertFalse(check_condition(cond, self.sess, lukewarm)[0])
+        # 换成那个达标的人，同一个条件就成立
+        self.assertTrue(check_condition(cond, self.sess, self.npcs)[0])
+
+    def test_any_npc_needs_someone_actually_tracking_that_stat(self):
+        # 「没追踪」和「值等于 0」是两回事：一个没开关系数值的角色不该被当 0 算
+        cond = {"relations": [{"npc": ANY_NPC, "stat": "好感", "op": ">=", "value": 0}]}
+        untracked = [RpgNpc(id=7, module_id=1, name="过路人", relation_enabled=False)]
+        self.assertFalse(check_condition(cond, self.sess, untracked)[0])
 
     def test_flag_negation(self):
         self.assertTrue(check_condition({"flags": ["已经拿到钥匙"]}, self.sess)[0])
@@ -360,6 +421,70 @@ class NpcNoteTests(unittest.TestCase):
         self.assertTrue(apply_npc_notes(sess, 3, "这不是字典"))
 
 
+class NpcAppearanceTests(unittest.TestCase):
+    """这一局被永久改写掉的外貌。合并语义同近况，淘汰规则**正好相反**。
+
+    锁这条差异的是 test_a_full_table_keeps_the_old_ones_and_refuses_the_new：
+    照抄近况那套「淘汰最久没更新的」，被扔掉的恰好是最早、也最要紧的那条
+    （温眠第 3 天服下的那副药）。
+    """
+
+    def test_a_new_key_appends_and_the_same_key_overwrites(self):
+        sess = _sess(npc_appearance={"3": {"胸部": "刚有起伏"}})
+        apply_npc_appearance(sess, 3, {"胸部": "已定形", "左手": "齐腕断了"})
+        self.assertEqual(sess.npc_appearance["3"], {"胸部": "已定形", "左手": "齐腕断了"})
+
+    def test_null_removes_one_override_and_leaves_the_others_alone(self):
+        sess = _sess(npc_appearance={"3": {"胸部": "已定形", "左手": "齐腕断了"}})
+        apply_npc_appearance(sess, 3, {"左手": None})
+        self.assertEqual(sess.npc_appearance["3"], {"胸部": "已定形"})
+
+    def test_a_full_table_keeps_the_old_ones_and_refuses_the_new(self):
+        # 和 NpcNoteTests 那条**故意相反**：近况满了扔最旧的，外貌满了扔最新的。
+        # 外貌的每一条都是「这个人身上已经发生的永久改变」，没有一条会过期
+        sess = _sess(npc_appearance={"3": {f"旧{i}": "x" for i in range(APPEARANCE_LIMIT)}})
+        warnings = apply_npc_appearance(sess, 3, {"新的一处": "y"})
+        self.assertEqual(len(sess.npc_appearance["3"]), APPEARANCE_LIMIT)
+        self.assertNotIn("新的一处", sess.npc_appearance["3"])
+        self.assertIn("旧0", sess.npc_appearance["3"])
+        self.assertTrue(warnings)
+
+    def test_a_full_table_still_lets_an_existing_key_be_fixed_or_removed(self):
+        # 满员只拦新键。已有的一处措辞写错了得能改，否则除了读档没有别的办法
+        sess = _sess(npc_appearance={"3": {f"旧{i}": "x" for i in range(APPEARANCE_LIMIT)}})
+        apply_npc_appearance(sess, 3, {"旧0": "改过的说法"})
+        self.assertEqual(sess.npc_appearance["3"]["旧0"], "改过的说法")
+        apply_npc_appearance(sess, 3, {"旧0": None})
+        self.assertNotIn("旧0", sess.npc_appearance["3"])
+
+    def test_a_value_that_is_not_a_string_is_flattened_rather_than_stored_raw(self):
+        sess = _sess()
+        apply_npc_appearance(sess, 3, {"胸部": ["左", "右"], "脸": {"疤": "左颊"}})
+        for value in sess.npc_appearance["3"].values():
+            self.assertIsInstance(value, str)
+
+    def test_an_over_long_value_is_trimmed_instead_of_dropped(self):
+        sess = _sess()
+        apply_npc_appearance(sess, 3, {"脸": "一道很长的疤" * 50})
+        self.assertLessEqual(len(sess.npc_appearance["3"]["脸"]), APPEARANCE_CHARS + 1)
+
+    def test_two_npcs_keep_their_own_overrides(self):
+        sess = _sess(npc_appearance={"3": {"胸部": "已定形"}})
+        apply_npc_appearance(sess, 4, {"左手": "齐腕断了"})
+        self.assertEqual(sess.npc_appearance["3"]["胸部"], "已定形")
+        self.assertEqual(sess.npc_appearance["4"]["左手"], "齐腕断了")
+
+    def test_a_null_table_clears_that_person_entirely(self):
+        sess = _sess(npc_appearance={"3": {"胸部": "已定形"}, "4": {"左手": "齐腕断了"}})
+        apply_npc_appearance(sess, 3, None)
+        self.assertNotIn("3", sess.npc_appearance)
+        self.assertIn("4", sess.npc_appearance)
+
+    def test_a_malformed_table_warns_instead_of_swallowing_it(self):
+        sess = _sess()
+        self.assertTrue(apply_npc_appearance(sess, 3, "这不是字典"))
+
+
 class PlaceNoteTests(unittest.TestCase):
     """地点近况：这地方被玩家弄成什么样了，一个地方一句。
 
@@ -405,6 +530,20 @@ class PlaceNoteTests(unittest.TestCase):
     def test_a_place_that_was_never_written_reads_as_empty(self):
         self.assertEqual(place_note(_sess(), "地窖"), "")
         self.assertEqual(place_note(_sess(place_notes={"地窖": "x"}), ""), "")
+
+    def test_a_malformed_value_is_refused_instead_of_stored_as_text(self):
+        # 模型会把值写成嵌套字典。str() 一落库就是 "{'门': '坏了'}"，还会每轮
+        # 注入【场面】块——那是格式错误，不是这地方的新样子
+        sess = _sess(place_notes={"地窖": "门开着"})
+        warnings = apply_place_note(sess, "地窖", {"门": "坏了"})
+        self.assertTrue(warnings)
+        self.assertEqual(sess.place_notes, {"地窖": "门开着"})
+
+    def test_none_still_clears_the_note(self):
+        # 玩家手动划掉走的就是这一条，不能被上面那道格式检查挡下来
+        sess = _sess(place_notes={"地窖": "门被踹坏了"})
+        self.assertEqual(apply_place_note(sess, "地窖", None), [])
+        self.assertEqual(sess.place_notes, {})
 
 
 class StartingInventoryTests(unittest.TestCase):
@@ -912,6 +1051,90 @@ class MatchNpcTests(unittest.TestCase):
     def test_a_blank_name_does_not_match(self):
         self.assertIsNone(match_npc("  ", [self.hermione]))
         self.assertIsNone(match_npc("·", [self.hermione]))
+
+
+class TweakTests(unittest.TestCase):
+    """玩家手动改数值的入口（修改器面板），和模型提议那条路是两回事。
+
+    模型提议走 apply_state_delta，头顶压着 cap_delta 那道每轮幅度上限；玩家
+    自己动手走 apply_tweak，绕过那道闸——它防的是模型一轮给自己加 80 点好感，
+    不是防玩家的手。但 clamp（作者定的 min/max）和归零 / 填满后果照旧生效，
+    走的是和平常完全同一条路。
+    """
+
+    def test_tweak_sets_the_exact_value_instead_of_adding(self):
+        # 面板上收的是目标值。当成增减的话 100 改成 72 会变成 172
+        module, sess = _module(), _sess(stats={"精力": 100})
+        apply_tweak(module, sess, stats={"精力": 72})
+        self.assertEqual(sess.stats["精力"], 72)
+        apply_tweak(module, sess, stats={"精力": 30})
+        self.assertEqual(sess.stats["精力"], 30)
+
+    def test_tweak_still_obeys_the_author_s_min_and_max(self):
+        # clamp 是作者定义的数值范围，不是防作弊的闸，改完了也得落在线里
+        module, sess = _module(), _sess(stats={"精力": 50})
+        notes = apply_tweak(module, sess, stats={"精力": 999})
+        self.assertEqual(sess.stats["精力"], 100)
+        self.assertTrue(any("精力" in n and "100" in n for n in notes))
+
+    def test_tweak_is_not_capped_by_the_per_turn_ceiling(self):
+        # 关键回归锁：step_max 那道闸是给模型提议用的（apply_state_delta），
+        # 玩家自己的手不受它管——打开修改器就是明说要这个数字
+        defs = [{"name": "精力", "initial": 10, "min": 0, "max": 100, "step_max": 5}]
+        module, sess = _module(stat_defs=defs), _sess(stats={"精力": 10})
+        apply_tweak(module, sess, stats={"精力": 90})
+        self.assertEqual(sess.stats["精力"], 90)
+        # 先确认这道闸对模型那一路真在管，否则上面那条锁的是空气
+        module, sess = _module(stat_defs=defs), _sess(stats={"精力": 10})
+        apply_state_delta(module, sess, {"stats": {"精力": 80}})
+        self.assertEqual(sess.stats["精力"], 15)
+
+    def test_tweak_triggers_the_same_zero_consequences(self):
+        # 归零后果不能推到下一轮：值已经是 0 了，下一轮照样触发，
+        # 中间这一段反而是面板显示 0 而 status 还写着活着的怪状态
+        module = _module(stat_defs=[{"name": "生命", "max": 100, "on_zero": ON_ZERO_DEAD}])
+        sess = _sess(stats={"生命": 40})
+        notes = apply_tweak(module, sess, stats={"生命": 0})
+        self.assertEqual(sess.status, "dead")
+        self.assertTrue(notes)
+
+        module = _module(stat_defs=[{"name": "精力", "max": 100, "on_zero": ON_ZERO_FLAG}])
+        sess = _sess(stats={"精力": 40})
+        apply_tweak(module, sess, stats={"精力": 0})
+        self.assertTrue(sess.flags.get("精力耗尽"))
+
+    def test_tweak_only_touches_the_named_npc(self):
+        module = _module()
+        sess = _sess(npc_states={
+            "1": init_relation(RELATION_DEFS),
+            "2": init_relation(RELATION_DEFS),
+        })
+        apply_tweak(module, sess, relations={"1": {"好感": 80}})
+        self.assertEqual(sess.npc_states["1"]["好感"], 80)
+        self.assertEqual(sess.npc_states["2"]["好感"], 0)
+        # npc_states 里根本没有的角色：apply_relations 会拒绝，这里不该抛
+        notes = apply_tweak(module, sess, relations={"9": {"好感": 50}})
+        self.assertTrue(any("这个角色没有启用关系数值" in n for n in notes))
+
+    def test_tweak_treats_inventory_qty_as_the_target_count(self):
+        # 面板上写的是「要几件」。当成增减的话 2 件改成 5 会变成 7 件
+        module, sess = _module(), _sess(inventory=[{"name": "绳子", "qty": 2}])
+        apply_tweak(module, sess, inventory=[{"name": "绳子", "qty": 5}])
+        self.assertEqual(len(sess.inventory), 1)
+        self.assertEqual(sess.inventory[0]["qty"], 5)
+        # qty 0 是「一件都不留」，走 apply_inventory 的扣到 0 就删掉那条路
+        apply_tweak(module, sess, inventory=[{"name": "绳子", "qty": 0}])
+        self.assertEqual(sess.inventory, [])
+        # 背包里没有的名字就是新增一条
+        apply_tweak(module, sess, inventory=[{"name": "火把", "qty": 3}])
+        self.assertEqual([(r["name"], r["qty"]) for r in sess.inventory], [("火把", 3)])
+
+    def test_tweak_writes_nothing_the_gm_would_see(self):
+        # 修改器对 GM 完全静默：GM 每轮本来就拿当前数值，只会看到新数字。
+        # 这条防以后有人顺手往大事记里加一句「玩家改了数值」
+        module, sess = _module(), _sess(chronicle=["旧事"])
+        apply_tweak(module, sess, stats={"精力": 30}, flags={"开过修改器": True})
+        self.assertEqual(sess.chronicle, ["旧事"])
 
 
 if __name__ == "__main__":

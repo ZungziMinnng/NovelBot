@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+from app.models.rpg import normalize_profile_sections
 
 
 # 玩法类别。写进来的必须是这三个之一（拼错直接 422，不要等到玩的时候才发现
@@ -26,6 +28,8 @@ class RpgModuleCreate(BaseModel):
     relation_stat_defs: list = []
     default_inventory: list = []
     default_location: str = ""
+    opening_npc_ids: list[int] = []
+    opening_npc_locations: dict[str, str] = {}
     time_slots: list = []
     lock_protagonist: bool = False
     rate_table: dict = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
@@ -39,6 +43,12 @@ class RpgModuleCreate(BaseModel):
     reply_length: int = 300
     model_ref: str = ""
     fast_model_ref: str = ""
+    settlement_model_ref: str = ""
+    adjudication_model_ref: str = ""
+    suggestion_model_ref: str = ""
+    activity_model_ref: str = ""
+    offscreen_model_ref: str = ""
+    discovery_model_ref: str = ""
     summary_model_ref: str = ""
     image_model_ref: str = ""
     offscreen_brief: bool = False
@@ -67,6 +77,10 @@ class RpgModuleUpdate(BaseModel):
     relation_stat_defs: Optional[list] = None
     default_inventory: Optional[list] = None
     default_location: Optional[str] = None
+    opening_npc_ids: Optional[list[int]] = None
+    opening_npc_locations: Optional[dict[str, str]] = None
+    # 构思向导的回填台账。前端回填后整份写回，供下次回填先摘掉自己上次写的
+    wizard_state: Optional[dict] = None
     time_slots: Optional[list] = None
     lock_protagonist: Optional[bool] = None
     rate_table: Optional[dict] = None
@@ -80,6 +94,12 @@ class RpgModuleUpdate(BaseModel):
     reply_length: Optional[int] = None
     model_ref: Optional[str] = None
     fast_model_ref: Optional[str] = None
+    settlement_model_ref: Optional[str] = None
+    adjudication_model_ref: Optional[str] = None
+    suggestion_model_ref: Optional[str] = None
+    activity_model_ref: Optional[str] = None
+    offscreen_model_ref: Optional[str] = None
+    discovery_model_ref: Optional[str] = None
     summary_model_ref: Optional[str] = None
     image_model_ref: Optional[str] = None
     offscreen_brief: Optional[bool] = None
@@ -106,7 +126,11 @@ class RpgModuleOut(BaseModel):
     relation_stat_defs: list
     default_inventory: list
     default_location: str
+    opening_npc_ids: list[int] = []
+    opening_npc_locations: dict[str, str] = {}
     time_slots: list
+    # 构思向导上次回填写了哪些东西，形状见 models/rpg.py 的 wizard_state
+    wizard_state: dict = {}
     # 给默认值：老模组的行读出来没有这一项，理由同下面 slot_budget
     lock_protagonist: bool = False
     rate_table: dict
@@ -120,6 +144,12 @@ class RpgModuleOut(BaseModel):
     reply_length: int
     model_ref: str
     fast_model_ref: str
+    settlement_model_ref: str = ""
+    adjudication_model_ref: str = ""
+    suggestion_model_ref: str = ""
+    activity_model_ref: str = ""
+    offscreen_model_ref: str = ""
+    discovery_model_ref: str = ""
     summary_model_ref: str
     image_model_ref: str
     offscreen_brief: bool
@@ -287,7 +317,7 @@ class RpgWizardExtractIn(BaseModel):
     """抽当前这一步聊定的结论。known 带前面已定的名字白名单。"""
     stage: str
     messages: list[WizardMessage] = []
-    # {stat_names: [], relation_names: [], location_names: []}
+    # {stat_names: [], relation_names: [], location_names: [], slot_names: []}
     known: dict = {}
     model: str = ""
     # 抽取的**起始**温度。None = 按 call_json 的默认 0.3 走（老前端不传就是这条路）；
@@ -378,6 +408,8 @@ class RpgWorldEntryOut(BaseModel):
 class RpgNpcCreate(BaseModel):
     name: str
     role: str = "npc"
+    # 自由文本：「十七八岁」「三百岁」都能写
+    age: str = ""
     avatar_url: str = ""
     # 只给这个人的出图设置。稀疏，形状同 RpgModule.image_config，
     # {} = 整份跟着模组走。见 services/rpg_image.py
@@ -387,8 +419,10 @@ class RpgNpcCreate(BaseModel):
     appearance: str = ""
     location: str = ""
     slot_locations: dict = {}
+    random_movement_slots: list[str] = []
     keywords: str = ""
     ai_scheduled: bool = False
+    random_movement: bool = False
     profile_sections: dict = {}
     dialogue_examples: list = []
     initial_state: dict = {}
@@ -400,6 +434,7 @@ class RpgNpcCreate(BaseModel):
 class RpgNpcUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[str] = None
+    age: Optional[str] = None
     avatar_url: Optional[str] = None
     # 整份替换，不做深合并：「取消覆写某一项」在前端就是把那个 key 删掉再发
     # 整份上来，后端要是合并就永远删不掉了
@@ -409,8 +444,10 @@ class RpgNpcUpdate(BaseModel):
     appearance: Optional[str] = None
     location: Optional[str] = None
     slot_locations: Optional[dict] = None
+    random_movement_slots: Optional[list[str]] = None
     keywords: Optional[str] = None
     ai_scheduled: Optional[bool] = None
+    random_movement: Optional[bool] = None
     profile_sections: Optional[dict] = None
     dialogue_examples: Optional[list] = None
     initial_state: Optional[dict] = None
@@ -450,6 +487,7 @@ class RpgNpcOut(BaseModel):
     module_id: int
     name: str
     role: str
+    age: str = ""
     avatar_url: str
     # 这张立绘的随机种子，0 = 没记录。只读，写它的只有生成接口
     avatar_seed: int = 0
@@ -460,8 +498,10 @@ class RpgNpcOut(BaseModel):
     appearance: str
     location: str
     slot_locations: dict
+    random_movement_slots: list[str] = []
     keywords: str
     ai_scheduled: bool
+    random_movement: bool = False
     profile_sections: dict
     dialogue_examples: list
     initial_state: dict
@@ -472,6 +512,15 @@ class RpgNpcOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _normalize_profile(self):
+        # 老库里的英文键读出来先归成中文，否则编辑器那三栏永远是空的（见
+        # normalize_profile_sections）。前端拿到的就是归一后的值，存一次即归位
+        self.profile_sections, self.appearance = normalize_profile_sections(
+            self.profile_sections, self.appearance,
+        )
+        return self
 
 
 # ── 道具 ──────────────────────────────────────────────────────────────────
@@ -671,6 +720,8 @@ class RpgActionCreate(BaseModel):
     relation_effects: dict = {}
     requires: dict = {}
     needs_target: bool = False
+    target_anywhere: bool = False
+    summons_target: bool = False
     group: str = ""
     cost_slot: bool = False
     at_location: str = ""
@@ -684,6 +735,8 @@ class RpgActionUpdate(BaseModel):
     relation_effects: Optional[dict] = None
     requires: Optional[dict] = None
     needs_target: Optional[bool] = None
+    target_anywhere: Optional[bool] = None
+    summons_target: Optional[bool] = None
     group: Optional[str] = None
     cost_slot: Optional[bool] = None
     at_location: Optional[str] = None
@@ -699,6 +752,8 @@ class RpgActionOut(BaseModel):
     relation_effects: dict
     requires: dict
     needs_target: bool
+    target_anywhere: bool
+    summons_target: bool
     group: str
     cost_slot: bool
     at_location: str
@@ -727,9 +782,34 @@ class RpgSessionUpdate(BaseModel):
     title: Optional[str] = None
 
 
+class RpgSessionTweakIn(BaseModel):
+    """修改器提交的内容。各项都可以只给一部分。
+
+    传的是**目标值**不是增减：面板上显示的就是当前值，玩家改完直接提交，
+    不用自己心算差多少——心算正是「改成 5」被当成「加 5」的温床。
+    """
+    stats: dict[str, float] = {}                      # {数值名: 目标值}
+    relations: dict[str, dict[str, float]] = {}       # {npc_id 字符串: {关系名: 目标值}}
+    inventory: list[dict] = []                        # [{"name": 名字, "qty": 想要几件}]，0 就是丢掉
+    flags: dict = {}                                  # 值给 true/false 是置位，给 null 是删掉这一条
+    npc_places: dict[str, str | None] = {}
+
+
 class RpgNoteDeleteIn(BaseModel):
     """要删掉的那条近况的键名。GM 记错了，玩家自己划掉。"""
     key: str
+
+
+class RpgSummaryEditIn(BaseModel):
+    """改写某一格的长期记忆。slot 用 rpg_context 那套：`player` 是你亲身经历的
+    那条场面线，别的是角色 id 的字符串。
+
+    理由同 delete_npc_note，但后果更重：这段话每轮都注入那个人的上下文，压错
+    一句（「你已经答应嫁给他」）会一路带到局终——摘要还会喂给下一次摘要，
+    错误自己会长。
+    """
+    slot: str
+    text: str
 
 
 class RpgDiscoveryApplyIn(BaseModel):
@@ -784,8 +864,18 @@ class RpgSessionOut(BaseModel):
     flag_days: dict = {}
     npc_states: dict
     npc_notes: dict
+    # 这一局被改写掉的外貌（{"3": {"胸部": "…"}}）。给默认值：老局的行里没有
+    # 这一列，不给默认值整份校验会失败。形状见 models/rpg.py 的 npc_appearance
+    npc_appearance: dict = {}
+    # 每个人的经历流水（只追加，外层键是 npc_id 的字符串）和这一局所有关系转折。
+    # 都给默认值：老局的行里没有这两列，不给默认值整份校验会失败。
+    # 形状见 models/rpg.py 的 npc_history / npc_milestones
+    npc_history: dict = {}
+    npc_milestones: list = []
     npc_activities: dict
     npc_places: dict
+    # 跟着玩家走的人，npc id 列表。见 RpgSession.npc_followers
+    npc_followers: list = []
     # {"地窖": "门被你踹坏了"}，键是地名。见 RpgSession.place_notes
     place_notes: dict = {}
     chronicle: list
@@ -799,6 +889,10 @@ class RpgSessionOut(BaseModel):
     item_claims: list = []
     summary: str
     summarized_upto_id: int
+    # 每个角色各一份的长期记忆，键是 npc_id 的字符串。给默认值：老局的行里
+    # 是空 dict 没问题，但存档快照读回来的旧局可能整个键都没有。
+    # 上面那个 summary 是玩家自己那格（场面线），两者是并列的格子不是总分关系
+    thread_summaries: dict = {}
     turn_count: int
     created_at: datetime
     updated_at: datetime
@@ -832,6 +926,7 @@ class RpgMessageOut(BaseModel):
     session_id: int
     role: str
     content: str
+    turn_request: Optional[dict] = None
     # 已废弃：后端不再读写，保留只为老前端不至于拿到 null 就崩。
     # 新的筛选键是下面的 present
     thread_id: Optional[int] = None
@@ -865,6 +960,7 @@ class RpgTurnRequest(BaseModel):
     # 就走引擎，数字由模组定义算死，AI 只负责写成画面
     action_id: Optional[int] = None
     item_name: str = ""
+    item_qty: int = 1
     skill_name: str = ""
     move_to: str = ""
     target_npc: str = ""
@@ -895,8 +991,48 @@ class RpgMoveOut(BaseModel):
     message: str = ""
 
 
+class RpgTweakOut(BaseModel):
+    """修改器改完之后的新状态，外加要当面告诉玩家的那几句话。
+
+    notes 是「被上下限截住了」「背包里没这件东西」这类话，只回给面板——
+    它不进剧情、不进 GM 上下文：修改器对 GM 完全静默，GM 每轮本来就拿
+    当前数值，它只会看到新数字。
+    """
+    session: RpgSessionOut
+    notes: list[str] = []
+
+
+class RpgFollowIn(BaseModel):
+    """让某人跟着你 / 别跟着了。following=False 就是打发她走。
+
+    走这个接口而不是打字，是为了让侧栏那个叉有落点：打字认不出来的说法
+    （「你走吧」放给 AI 结算了）总得有一个能点的地方，否则玩家猜不中那句话
+    就卡住了。
+    """
+    npc_id: int
+    following: bool = True
+
+
+class RpgSuggestion(BaseModel):
+    """一条建议。`kind` 决定点下去走哪个入口，`free` 就是当一句话发出去。
+
+    刻意**不用 Literal**：这里收的是模型输出，编出一个没听过的类型时该降级成
+    free（后端已经降过一次），而不是让整条建议 400 掉。字段名对应
+    `RpgTurnRequest` 的：skill→skill_name、item→item_name、move→move_to、
+    action→action_id、free→（无，正文原样发）。
+    """
+    text: str = ""
+    kind: str = "free"
+    name: str = ""
+    action_id: Optional[int] = None
+
+
 class RpgSuggestOut(BaseModel):
-    suggestions: list[str]
+    suggestions: list[RpgSuggestion]
+    # 各块 token 的账。**前端不渲染**，只给调预算的人看：这次一口气引入了
+    # 六个新预算常量，没有这个数下次调只能靠猜。输出侧 token 拿不到
+    # （dispatch_chat_complete 不回传用量），见 suggest_actions 的注释
+    diag: dict = {}
 
 
 # ── 存档 ──────────────────────────────────────────────────────────────────

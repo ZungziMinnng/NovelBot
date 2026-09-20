@@ -43,6 +43,13 @@ VISITED_LIMIT = 100
 NOTE_LIMIT = 10
 NOTE_CHARS = 60
 
+# 每个 NPC 最多被改写几处外貌、每处长多少字。比 NOTE_LIMIT 松：这不是「今天怎么了」，
+# 而是一个人的身体被永久改动过的地方，一局下来也就那么几处（药师改造、断手、
+# 毁容、纹身）。40 字足够写清一处变化，比 NOTE_CHARS 短是因为注入时它紧贴
+# appearance，而那张卡还要跟在场所有人分 NPC_TOKEN_BUDGET
+APPEARANCE_LIMIT = 12
+APPEARANCE_CHARS = 40
+
 # AI 调度的角色「最近在做什么」，每个角色只有一句，所以比 NOTE_CHARS 更短：
 # 它和近况并排画在同一张卡上，长了两行挤在一起
 ACTIVITY_CHARS = 40
@@ -101,6 +108,7 @@ _OPS = {
 TASK_OPEN = "open"
 TASK_DONE = "done"
 TASK_FAILED = "failed"
+DAILY_TASK_CATEGORY = "日常"
 
 
 def _num(value, fallback=0) -> int:
@@ -326,6 +334,39 @@ def init_relation(defs, overrides=None, names=None) -> dict[str, int]:
     return out
 
 
+def ensure_relation_states(module, sess, npcs=()) -> bool:
+    """为后来才开启关系数值的 NPC 补齐本局初始值。
+
+    开局时关闭关系数值的 NPC 不会进入 ``npc_states``。作者之后再打开开关时，
+    既要保留已经存在的数值，也要把新增的关系项按角色卡初始值补进来。
+    """
+    states = dict(sess.npc_states or {})
+    changed = False
+    for npc in npcs or ():
+        if getattr(npc, "relation_enabled", None) is False:
+            continue
+        defaults = init_relation(
+            module.relation_stat_defs,
+            getattr(npc, "initial_state", None),
+            getattr(npc, "relation_stat_names", None),
+        )
+        if not defaults:
+            continue
+        key = str(npc.id)
+        state = dict(states.get(key) or {})
+        for name, value in defaults.items():
+            if name not in state:
+                state[name] = value
+                changed = True
+        if state and key not in states:
+            changed = True
+        if state:
+            states[key] = state
+    if changed:
+        sess.npc_states = states
+    return changed
+
+
 def for_check_stats(defs) -> list[str]:
     """能拿来判定的数值名。资金不行，敏捷可以。"""
     return [n for n, spec in def_map(defs).items() if spec.get("for_check")]
@@ -340,6 +381,20 @@ def visible_defs(defs) -> list[dict]:
 
 
 # ── 条件求值：世界书 / 动作按钮 / 地点入口共用 ────────────────────────────
+
+# 关系条件里「不指定是谁」的写法。名字写这个，就没有哪个角色会跟它重名。
+# 判据是**任意一个**角色达标（见 check_condition），不是全部
+ANY_NPC = "*"
+
+
+def _relation_value(sess, npc, stat):
+    """这个角色此刻的这项关系数值。没在追踪就是 None——和「值等于 0」是两回事，
+    前者该报「没有追踪」，后者才是真的不满足。"""
+    if getattr(npc, "relation_enabled", None) is False:
+        return None
+    state = (sess.npc_states or {}).get(str(npc.id)) or {}
+    return _num(state[stat]) if stat in state else None
+
 
 def check_condition(cond, sess, npcs=None) -> tuple[bool, str]:
     """条件是否成立，返回 (成立, 不成立的原因)。
@@ -387,24 +442,34 @@ def check_condition(cond, sess, npcs=None) -> tuple[bool, str]:
     # 关系条件按角色名写，这里转成 id 去 npc_states 里查。
     # 名字对不上就算不成立——静默放行会让「好感≥50」的词条在打错名字时
     # 每轮都注入，比直接不生效难查得多
+    #
+    # 名字写 ANY_NPC 是「不指定是谁」，**任意一个**角色达标就算成立。它在动作上
+    # 自动变成「你这一轮选中的那个人」——_action_gate 喂进来的 npcs 只有那个目标；
+    # 技能、地点、世界书喂的是全体，那时它才是「随便哪个角色」
     by_name = {norm_name(n.name): n for n in (npcs or [])}
-    states = sess.npc_states or {}
     for rule in cond.get("relations") or []:
         if not isinstance(rule, dict):
             continue
         who = str(rule.get("npc") or "").strip()
-        npc = by_name.get(norm_name(who))
-        if npc is None:
-            return False, f"找不到角色「{who}」"
         op = _OPS.get(str(rule.get("op") or ">=").strip())
         if op is None:
             continue
         stat = str(rule.get("stat") or "").strip()
         want = _num(rule.get("value"))
-        state = states.get(str(npc.id)) or {}
-        if getattr(npc, "relation_enabled", None) is False or stat not in state:
+        if who == ANY_NPC:
+            for npc in npcs or []:
+                have = _relation_value(sess, npc, stat)
+                if have is not None and op(have, want):
+                    break
+            else:
+                return False, f"没有角色的{stat}满足（需要 {rule.get('op')} {want}）"
+            continue
+        npc = by_name.get(norm_name(who))
+        if npc is None:
+            return False, f"找不到角色「{who}」"
+        have = _relation_value(sess, npc, stat)
+        if have is None:
             return False, f"{who}没有追踪关系数值「{stat}」"
-        have = _num(state.get(stat))
         if not op(have, want):
             return False, f"{who}的{stat}不满足（当前 {have}，需要 {rule.get('op')} {want}）"
 
@@ -451,6 +516,16 @@ def check_condition(cond, sess, npcs=None) -> tuple[bool, str]:
 
 
 # ── 状态应用 ──────────────────────────────────────────────────────────────
+
+def effect_cost_reason(sess, effects, defs=()) -> str:
+    specs = def_map(defs)
+    for name, amount in (effects or {}).items():
+        cost = _num(amount)
+        minimum = _num((specs.get(name) or {}).get("min"), 0)
+        if cost < 0 and _num((sess.stats or {}).get(name)) + cost < minimum:
+            return f"{name}不足，需要至少 {minimum - cost}"
+    return ""
+
 
 def apply_stats(module, sess, delta) -> list[str]:
     """玩家数值增减。delta 是 {名字: 增量}，返回 warning 列表。
@@ -555,6 +630,62 @@ def apply_npc_notes(sess, npc_id: int, delta) -> list[str]:
     return warnings
 
 
+def apply_npc_appearance(sess, npc_id: int, delta) -> list[str]:
+    """这个人的外貌被这一局改写到什么地步了。自由键值，作者没定义过任何一个键。
+
+    和 apply_npc_notes 是同一套合并语义（同键覆盖、新键追加、null 表示不再成立、
+    整份 delta 是 null 表示全清），区别只在**满了怎么办**：
+
+    近况满了淘汰**最久没被更新的那条**——那张表里新的比旧的要紧，「伤好了」就该
+    盖过「左肩中刀」。这张表正相反：**拒绝新的、保留旧的**。这里的每一条都是
+    「这个人身上已经发生的永久改变」，没有任何一条会因为别处更新而变得不重要；
+    按新旧淘汰，被扔掉的恰好是「服下丰元玉乳散」那条最早的、也是最要紧的一条。
+
+    满员时把 refusals 原样返回给玩家看：结算还在往里写就说明模型认为有变化，
+    这时候该做的是让玩家去侧栏划掉一条不再作数的，而不是悄悄丢掉新的。
+
+    值一律转成字符串，理由同 apply_npc_notes：模型会写数组或嵌套字典，而裸字典
+    交给 React 当子节点会白屏。
+    """
+    table = {k: dict(v) for k, v in (sess.npc_appearance or {}).items() if isinstance(v, dict)}
+    key = str(npc_id)
+    if delta is None:
+        table.pop(key, None)
+        sess.npc_appearance = table
+        return []
+    if not isinstance(delta, dict):
+        return ["外貌变化格式不对，没能记下"]
+
+    fields = table.get(key) or {}
+    warnings: list[str] = []
+    for name, value in delta.items():
+        field = str(name or "").strip()
+        if not field:
+            continue
+        # 先删再写，让它落到末尾：和 apply_npc_notes 一样，新条目排在后面，
+        # 注入时顺序稳定；满员判定也因此总是从最早的开始数
+        fields.pop(field, None)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) > APPEARANCE_CHARS:
+            text = text[:APPEARANCE_CHARS] + "…"
+        # 满员只拦**新键**。已有的键照样能改能删——不然一处写错的措辞
+        # 会被永久焊死在那里，玩家除了读档没有别的办法
+        if field not in fields and len(fields) >= APPEARANCE_LIMIT:
+            warnings.append(
+                f"这个人改写过的地方已经记满 {APPEARANCE_LIMIT} 处，"
+                f"「{field}」没记下（先划掉一条不再作数的再试）")
+            continue
+        fields[field] = text
+
+    table[key] = fields
+    sess.npc_appearance = table
+    return warnings
+
+
 def place_note(sess, place) -> str:
     """这个地方现在什么样（GM 记的那一句）。没记过就是空串。"""
     key = str(place or "").strip()
@@ -581,6 +712,11 @@ def apply_place_note(sess, place, text) -> list[str]:
     key = str(place or "").strip()
     if not key:
         return []
+    # 模型会把值写成 {"门": "坏了"} 这样的嵌套字典，str() 一落库就是
+    # "{'门': '坏了'}"，还会每轮注入【场面】块。那是格式错误，不是这地方的新样子。
+    # None / 空串照旧走下面「清掉」那条老路，不能被这道检查挡下来
+    if text is not None and not isinstance(text, str):
+        return [f"「{key}」的近况格式不对，没能记下"]
     table = {str(k): str(v) for k, v in (sess.place_notes or {}).items()}
     # 先删：既是覆盖同名（大小写不同也算同一个地方），也是把它挪到末尾
     want = norm_name(key)
@@ -699,14 +835,14 @@ def drop_npc_inbox(sess, entry_id) -> None:
                       if not (isinstance(r, dict) and str(r.get("id") or "") == str(entry_id))]
 
 
-def apply_npc_place(sess, npc_id: int, place) -> None:
+def apply_npc_place(sess, npc_id: int, place, *, source: str = "story") -> None:
     """剧情把这个人挪到哪儿了（写进 sess.npc_places）。
 
     空串 / None = 清掉，她回到作息表 / 常驻地点安排的地方。**这不是「撤回」的
     特例**，而是唯一的表达方式：作者排的作息表是「她该在哪儿」，清掉就等于
     剧情放她回去了。
 
-    位置只活到下一个时段（advance_slot 会清空整张表），所以这里不留历史。
+    换时段时仍在玩家身边的人保留位置，离场者恢复日常安排。
 
     整个字典赋回去才标脏，原地改 JSON 列不会落库（同 apply_npc_activity）。
     """
@@ -720,10 +856,48 @@ def apply_npc_place(sess, npc_id: int, place) -> None:
     else:
         table.pop(key, None)
     sess.npc_places = table
+    random_places = dict(getattr(sess, "npc_random_places", None) or {})
+    if source == "random" and value:
+        random_places[key] = value
+    else:
+        random_places.pop(key, None)
+    if hasattr(sess, "npc_random_places"):
+        sess.npc_random_places = random_places
+
+
+def apply_npc_followers(sess, npc_id: int, following: bool) -> bool:
+    """把这个人加进 / 移出「跟着玩家走」的名单（sess.npc_followers）。返回是否真的变了。
+
+    **这里不记位置**，只记「她跟着你」这件事：位置由 rpg_context.npc_place 的
+    取值链当场算出来（剧情 → 跟随 → 作息表 → 常驻地），解析出来就是你此刻站
+    的地方。所以这个名单**不需要任何「移动之后同步一遍」的收口**，玩家走到哪
+    她就在哪，不可能和 sess.location 对不上。
+
+    这份名单推时段不清，直到玩家明确解除跟随。
+
+    返回布尔是为了让调用方能说「赫敏跟上了你」——没变的事不必报一遍。
+
+    整份列表赋回去才标脏，原地改 JSON 列不会落库（同 apply_npc_place）。
+    """
+    try:
+        key = int(npc_id)
+    except (TypeError, ValueError):
+        return False
+    current = [int(x) for x in (sess.npc_followers or []) if isinstance(x, (int, float))]
+    if following == (key in current):
+        return False
+    table = [x for x in current if x != key]
+    if following:
+        table.append(key)
+    sess.npc_followers = table
+    return True
+
 
 
 def mark_met(sess, npc_ids) -> None:
-    """标记见过面。外貌只在首次见面时注入，见过之后每轮再发一遍纯属浪费。"""
+    """标记见过面。**和注入无关**（外貌改成每轮都发了），它管的是「玩家认识谁」：
+    【外场】只给见过面的、又不在跟前的人写近况（见 rpg_turn 的 offscreen_brief），
+    前端 condition.ts 的 knownNpcs 也拿它筛列表。"""
     states = dict(sess.npc_states or {})
     changed = False
     for npc_id in npc_ids or []:
@@ -880,6 +1054,7 @@ def starting_tasks(tasks, turn: int = 0) -> list[dict]:
             # 「怎样才算办完」。存进这一局而不是每次回查模组行：判定用的标准
             # 应该跟接下这桩事的时候一致，作者后来改了定义不该影响进行中的局
             "goal": str(getattr(task, "objective", "") or ""),
+            "category": str(getattr(task, "category", "") or ""),
             "status": TASK_OPEN,
             "task_id": getattr(task, "id", None),
             "source": "module",
@@ -889,8 +1064,48 @@ def starting_tasks(tasks, turn: int = 0) -> list[dict]:
     return out
 
 
+def sync_task_categories(sess, tasks=()) -> bool:
+    """为旧存档补回任务定义里的分类，避免升级后丢失日常标记。"""
+    by_id = {str(getattr(task, "id", "")): task for task in tasks or []}
+    by_name = {norm_name(str(getattr(task, "name", "") or "")): task for task in tasks or []}
+    rows = [dict(task) for task in (sess.tasks or []) if isinstance(task, dict)]
+    changed = False
+    for row in rows:
+        if str(row.get("category") or "").strip():
+            continue
+        definition = by_id.get(str(row.get("task_id") or ""))
+        if definition is None:
+            definition = by_name.get(norm_name(str(row.get("name") or "")))
+        category = str(getattr(definition, "category", "") or "").strip() if definition else ""
+        if category:
+            row["category"] = category
+            changed = True
+    if changed:
+        sess.tasks = rows
+    return changed
+
+
+def reset_daily_tasks(sess, tasks=()) -> bool:
+    """跨天重新开放本局已经结束的日常任务。"""
+    sync_task_categories(sess, tasks)
+    rows = [dict(task) for task in (sess.tasks or []) if isinstance(task, dict)]
+    changed = False
+    for row in rows:
+        if str(row.get("category") or "").strip() != DAILY_TASK_CATEGORY:
+            continue
+        if str(row.get("status") or TASK_OPEN) == TASK_OPEN:
+            continue
+        row["status"] = TASK_OPEN
+        row["opened_turn"] = int(getattr(sess, "turn_count", 0) or 0)
+        row["closed_turn"] = 0
+        changed = True
+    if changed:
+        sess.tasks = rows
+    return changed
+
+
 def open_task(sess, name: str, desc: str = "", goal: str = "", task_id=None,
-              source: str = "story") -> bool:
+              source: str = "story", category: str = "") -> bool:
     """这一局接下一桩事。同名的已经在清单上就不动，返回是否真的加上了。"""
     name = str(name or "").strip()
     if not name:
@@ -900,6 +1115,7 @@ def open_task(sess, name: str, desc: str = "", goal: str = "", task_id=None,
         return False
     rows.append({
         "name": name, "desc": str(desc or ""), "goal": str(goal or ""),
+        "category": str(category or ""),
         "status": TASK_OPEN, "task_id": task_id, "source": source,
         "opened_turn": int(getattr(sess, "turn_count", 0) or 0), "closed_turn": 0,
     })
@@ -1026,6 +1242,128 @@ def apply_flags(sess, delta) -> list[str]:
     sess.flags = flags
     _sync_flag_days(sess, flags)
     return warnings
+
+
+def apply_tweak(
+    module, sess, stats=None, relations=None, inventory=None, flags=None,
+    *, npc_places=None, npcs=None, locations=None,
+) -> list[str]:
+    """修改器：玩家自己动手把某一项改成想要的值。返回只给面板看的那几句话。
+
+    **不走 apply_state_delta**，走的是引擎那条路——rpg_turn 的 _use_item /
+    _run_action 也是直接调 apply_stats 绕开它的。理由是 apply_state_delta 上面
+    套着 cap_delta：那道每轮幅度上限是防模型一轮给自己加 80 点好感的，不是防
+    玩家的手。玩家打开修改器就是明说要这个数字，中间再拦一道等于这功能没做。
+
+    但 clamp（作者定的 min/max）照样生效：那是作者定义的数值范围，不是防作弊的
+    闸。改完了也得落回作者画的那条线里，否则 on_zero / on_full / 分档全都会收到
+    一个作者从没设想过的值。
+
+    参数传的是**目标值**不是增减：面板上显示的就是当前值，玩家改完直接提交。
+    差值由这里自己算，再交给现成的 apply_stats / apply_relations / apply_inventory，
+    这样上下限、归零后果、满值标记全都还是走平时那一条路，不会出现只有修改器
+    才有的怪状态。
+
+    差为 0 的项直接跳过、不塞进 delta：一个 0 的增减落在一个已经越界的旧值上，
+    apply_stats 会白冒一条「被限制在 X」——玩家只是没动它，却被念了一句。
+    """
+    notes: list[str] = []
+
+    available_npcs = {
+        str(npc.id): npc for npc in (npcs or [])
+        if npc.module_id == module.id and npc.role != "protagonist"
+    }
+    available_places = {
+        norm_name(place.name): place.name for place in (locations or [])
+        if place.module_id == module.id and place.name.strip()
+    }
+    for npc_id, destination in (npc_places or {}).items():
+        npc = available_npcs.get(str(npc_id))
+        if npc is None:
+            notes.append(f"忽略了不认识的角色「{npc_id}」")
+            continue
+        target = (destination or "").strip()
+        if target:
+            target = available_places.get(norm_name(target))
+            if target is None:
+                notes.append(f"{npc.name}的位置未修改：地点「{destination}」不在当前模组中")
+                continue
+        apply_npc_place(sess, npc.id, target)
+        if not target or norm_name(target) != norm_name(sess.location):
+            apply_npc_followers(sess, npc.id, False)
+
+    # 数值：算差值。当前值取 sess.stats，缺项按 0 算（同 _num 的兜底）
+    stats_delta: dict = {}
+    current = dict(sess.stats or {})
+    for name, want in (stats or {}).items():
+        key = str(name or "").strip()
+        if not key:
+            continue
+        diff = _num(want) - _num(current.get(key))
+        if diff:
+            stats_delta[key] = diff
+    if stats_delta:
+        notes.extend(apply_stats(module, sess, stats_delta))
+
+    # 关系：按角色挨个处理。键是 npc_id 字符串（面板就是拿它当键的），
+    # 对不上就跳过一个人，不能让整份提交作废
+    for raw_id, changes in (relations or {}).items():
+        try:
+            npc_id = int(raw_id)
+        except (TypeError, ValueError):
+            notes.append(f"忽略了不认识的角色「{raw_id}」")
+            continue
+        # 当前值每次现取：上一个人的 apply_relations 会整份换掉 npc_states
+        state = (sess.npc_states or {}).get(str(npc_id)) or {}
+        diff = {}
+        for name, want in (changes or {}).items():
+            key = str(name or "").strip()
+            if not key:
+                continue
+            gap = _num(want) - _num(state.get(key))
+            if gap:
+                diff[key] = gap
+        if diff:
+            notes.extend(apply_relations(module, sess, npc_id, diff))
+
+    # 背包：qty 是**目标件数**不是增减。当前件数按 norm_name 模糊比对找，
+    # 和 apply_inventory 一个口径——两处口径不一样的话，面板上写「绳子 5 件」
+    # 会在这边算成 0、在那边又并排添一条新的
+    changes = []
+    for row in inventory or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        want = max(0, _num(row.get("qty")))
+        key = norm_name(name)
+        have = 0
+        for item in sess.inventory or []:
+            if isinstance(item, dict) and norm_name(item.get("name")) == key:
+                have = _num(item.get("qty"), 1)
+                break
+        gap = want - have
+        if gap:
+            changes.append({"name": name, "qty": gap})
+    if changes:
+        # 模糊合并和「扣到 0 就删掉」都是 apply_inventory 自己会做的，这里只算差
+        notes.extend(apply_inventory(sess, changes))
+
+    # 处境开关本来就是覆盖 / 删除的语义，原样交出去。非空才调——
+    # 空 dict 进去会白跑一趟 _sync_flag_days
+    if flags:
+        notes.extend(apply_flags(sess, flags))
+
+    # 归零 / 填满的后果在这儿当场结掉，不能推到下一轮：跳过只是把后果推迟
+    # （值已经是 0 了，下一轮照样触发），中间这一段反而是个前后不一致的状态——
+    # 面板显示 0 而 status 还写着活着
+    notes.extend(check_zero(module, sess))
+    notes.extend(check_full(module, sess))
+
+    # 上面这几句只回给面板，不进剧情、不进 GM 上下文：修改器对 GM 是完全静默的，
+    # GM 每轮本来就拿当前数值，它只会看到新数字
+    return notes
 
 
 def check_zero(module, sess) -> list[str]:
@@ -1179,8 +1517,9 @@ def reset_daily(module, sess) -> list[str]:
             continue
         target = clamp(spec, int(_num(spec.get("max")) * DAILY_RECOVER_RATIO))
         if _num(stats.get(name)) < target:
+            previous = _num(stats.get(name))
             stats[name] = target
-            notes.append(f"{name}回到 {target}")
+            notes.append(f"跨天恢复：{name}+{target - previous}（{previous} → {target}）")
     # 整个赋回去才会被标脏，原地改 JSON 列不会触发更新
     sess.stats = stats
     return notes
@@ -1197,7 +1536,33 @@ def slot_table(module, sess) -> list[str]:
     return [str(s).strip() for s in raw if str(s).strip()]
 
 
-def advance_slot(module, sess) -> list[str]:
+def _clear_expired_random_places(sess, npcs=()) -> None:
+    random_places = dict(getattr(sess, "npc_random_places", None) or {})
+    if not random_places:
+        return
+    by_id = {str(getattr(npc, "id", "")): npc for npc in (npcs or [])}
+    places = dict(sess.npc_places or {})
+    for key, marked in list(random_places.items()):
+        npc = by_id.get(str(key))
+        slots = {
+            str(value).strip()
+            for value in (getattr(npc, "random_movement_slots", None) or [])
+            if str(value).strip()
+        }
+        expired = (
+            npc is None
+            or not getattr(npc, "random_movement", False)
+            or (slots and (sess.slot or "").strip() not in slots)
+        )
+        if expired:
+            if norm_name(places.get(str(key))) == norm_name(marked):
+                places.pop(str(key), None)
+            random_places.pop(str(key), None)
+    sess.npc_places = places
+    sess.npc_random_places = random_places
+
+
+def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
     """结束当前时段。走到最后一格就翻篇：回到第一格、天数 +1、跨天恢复。
 
     返回给玩家看的话。模组没设时段时什么都不做——时钟不存在，
@@ -1207,10 +1572,29 @@ def advance_slot(module, sess) -> list[str]:
     if not names:
         return []
 
-    # 剧情挪过的位置只活一格：时段一变，作息表重新说了算。不清的话模型随手
-    # 写的一笔会永久盖掉作者排的作息表，而作息表是他唯一的排期手段——
-    # 到那时「她把所有人调到我门口」只要说一句话就够了
-    sess.npc_places = {}
+    # 推时段不调模型，中间这一段天然没有叙事。记下起跳点留给下一轮的 prompt，
+    # 否则模型只看到新的时段名，会接着上一轮的场景往下写。
+    # 已经有起跳点就不覆盖：连着按两下、或者按完又攒满预算，中间那几格算同一段空白
+    if not str(getattr(sess, "time_jump_from", "") or "").strip():
+        day = max(1, int(getattr(sess, "day", 1) or 1))
+        was = str(sess.slot or "").strip()
+        # 名字拿不到（刚建局、或时段表改过）就只留天数——总比编一个时段名强
+        sess.time_jump_from = f"第 {day} 天 · {was}" if was else f"第 {day} 天"
+
+    from app.services.rpg_context import here_npcs
+
+    here = str(sess.location or "").strip()
+    followers = {str(identity) for identity in (sess.npc_followers or [])}
+    retained = {
+        str(identity): place for identity, place in (sess.npc_places or {}).items()
+        if here and norm_name(place) == norm_name(here) and str(identity) not in followers
+    }
+    retained.update({
+        str(npc.id): here
+        for npc in here_npcs(list(npcs), here, sess.slot, sess.npc_places, sess.npc_followers)
+        if str(npc.id) not in followers
+    })
+    sess.npc_places = retained
 
     # 新的一格，两个计数器从零起。归零只写在这里：手动按按钮、动作勾了
     # cost_slot、行动预算攒满自动推，三条路都经过这个函数。
@@ -1223,17 +1607,20 @@ def advance_slot(module, sess) -> list[str]:
     index = names.index(now) + 1 if now in names else 0
     if index < len(names):
         sess.slot = names[index]
+        _clear_expired_random_places(sess, npcs)
         return [f"现在是{names[index]}"]
 
     sess.slot = names[0]
+    _clear_expired_random_places(sess, npcs)
     sess.day = _num(sess.day, 1) + 1
+    reset_daily_tasks(sess, tasks)
     # 只在翻篇这一格写大事记。每推一格都写的话，时钟噪音会把真正传开的
     # 事挤出去；一行都不写则换个地点就不知道过了几天
     push_chronicle(sess, f"{DAY_TAG}第 {sess.day} 天开始了")
     return [f"第 {sess.day} 天，{names[0]}"] + reset_daily(module, sess)
 
 
-def spend_slot_action(module, sess) -> list[str]:
+def spend_slot_action(module, sess, npcs=()) -> list[str]:
     """记一格行动，攒满 module.slot_budget 就自动推一格时段。返回给玩家看的话。
 
     只在**世界真的动了**那几轮调用（引擎产出了事实句），所以「条件没过、
@@ -1252,7 +1639,7 @@ def spend_slot_action(module, sess) -> list[str]:
         return []
     # advance_slot 会把 slot_actions 归零，所以这里不用自己收尾。
     # 没设时段时它空转、返回空表，于是下面那句也不会拼——界面上什么都不会说
-    facts = advance_slot(module, sess)
+    facts = advance_slot(module, sess, npcs)
     if not facts:
         return []
     # 说清楚是「预算用完了」而不是玩家自己按的，否则时段看着像自己乱跳
@@ -1351,6 +1738,22 @@ def apply_state_delta(
             warnings.extend(apply_npc_notes(sess, npc_id, changes))
         except Exception:
             warnings.append(f"{name}的近况没能记下")
+
+    # 外貌改写同样只认这一轮在模型眼前的人，门比近况再紧一层：近况写错是卡上
+    # 多一行字，外貌写错是**这个人在你眼前的样子被永久改掉**，而且它压在作者
+    # 原文后面，模型会一直照着它写。门外的人连近况都不让记，这条更不该放行
+    for name, changes in (delta.get("npc_appearance") or {}).items():
+        who = match_npc(name, npcs)
+        if who is None:
+            warnings.append(f"找不到角色「{name}」，外貌变化没能记下")
+            continue
+        if who.id not in note_ids:
+            warnings.append(f"「{name}」不在你跟前，关于他外貌的变化没有记下")
+            continue
+        try:
+            warnings.extend(apply_npc_appearance(sess, who.id, changes))
+        except Exception:
+            warnings.append(f"{name}的外貌变化没能记下")
 
     # 人物位置：剧情把谁挪到哪儿了。空串 = 放她回作息表安排的地方。
     # 不看 allow_move——那个开关只管玩家自己的位置（见函数说明）

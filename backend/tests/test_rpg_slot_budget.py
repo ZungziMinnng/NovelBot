@@ -203,15 +203,12 @@ class BudgetSpendTests(unittest.TestCase):
         self.assertEqual(len(facts), 1)
         self.assertEqual(sess.location, "办公室")
 
-    def test_a_cost_slot_action_still_takes_a_budget_slot(self):
-        # 勾了 cost_slot 的动作已经自己推过一格，这里再记一格是对的：
-        # 它确实占掉了这个时段的一个行动位。两者叠加就是推两格
+    def test_a_cost_slot_action_starts_the_next_slot_with_a_full_budget(self):
         sess = _sess()
         module = _module(slot_budget=1)
         _run_action(module, sess, _action(cost_slot=True), None)
         self.assertEqual(sess.slot, "中")
-        spend_slot_action(module, sess)
-        self.assertEqual(sess.slot, "晚")
+        self.assertEqual(sess.slot_actions, 0)
 
 
 class MapMoveTests(unittest.IsolatedAsyncioTestCase):
@@ -525,7 +522,7 @@ class FreeCostsSlotTests(unittest.IsolatedAsyncioTestCase):
     async def _fake_settle(self, *args, **kwargs):
         return {
             "warnings": [], "state": {"stats": {}, "day": 1, "slot": "早"},
-            "settlement": {}, "suggestions": [], "discoveries": [],
+            "settlement": {"status": "done"}, "suggestions": [], "discoveries": [],
             "scene_wrapped": self.wrapped,
             "aux_input_tokens": 0, "aux_output_tokens": 0,
         }
@@ -601,7 +598,7 @@ class FreeCostsSlotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sess.slot_actions, 1)
         self.assertEqual(sess.slot, "早")
         # 推完必须再发一条 state，否则侧栏那排格子要等整页重拉才更新
-        self.assertEqual(len(events["state"]), 2)
+        self.assertEqual(events["state"][-1]["slot_actions"], 1)
 
     async def test_the_second_wrapped_scene_turns_the_page(self):
         await self._turn()
@@ -647,6 +644,33 @@ class FreeCostsSlotTests(unittest.IsolatedAsyncioTestCase):
             )).scalars().all()
         self.assertTrue(saves)
         self.assertEqual(saves[-1].state["slot_actions"], 0)
+
+    async def test_the_time_jump_marker_is_consumed_by_the_turn_that_reads_it(self):
+        """标记只活一轮：推时钟的那一轮写它，下一轮 prompt 读到就清。
+
+        不覆盖的话此后每一轮都会说一遍「时间刚跳过一段」，模型会把每一幕都
+        当成刚睡醒。清和 mark_met 同一个位置、同一个理由：放在开流之前，
+        叙事失败也算发过，模型确实已经拿到那句话了。
+        """
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, self.session_id)
+            sess.time_jump_from = "第 1 天 · 早"
+            await db.commit()
+        await self._turn()
+        self.assertFalse((await self._reload()).time_jump_from)
+
+    async def test_the_scene_break_marker_is_consumed_by_the_turn_that_reads_it(self):
+        """同上：瞬移的那一轮写它，下一轮 prompt 读到就清。
+
+        不清的话此后每一轮都会说一遍「你离开过那儿」，模型会把每一幕都当成
+        刚进门。位置和理由逐字同 time_jump_from。
+        """
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, self.session_id)
+            sess.scene_break_from = "织云阁"
+            await db.commit()
+        await self._turn()
+        self.assertFalse((await self._reload()).scene_break_from)
 
 
 if __name__ == "__main__":

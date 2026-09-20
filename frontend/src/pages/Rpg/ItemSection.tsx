@@ -4,6 +4,8 @@ import toast from 'react-hot-toast'
 import { Package, X } from 'lucide-react'
 import { rpgApi, type RpgItem, type RpgStatDef } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
+import { useFormAutosave } from '@/lib/useFormAutosave'
 import { ACCENT, AddRow, Assist, DeleteButton, INPUT, Section } from './rpgUi'
 import EffectEditor from './EffectEditor'
 import BatchGenerate from './BatchGenerate'
@@ -53,7 +55,26 @@ export default function ItemSection({
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-items', moduleId] })
   const reset = () => { setForm(EMPTY); setEditingId(null); setShowForm(false) }
 
+  /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
+   *  迟早分叉成「点保存存对了、自动保存存错了」 */
+  const body = () => ({ ...form, name: form.name.trim() })
+
+  /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，存个空名字进去，
+   *  列表上就是一行没有名字的东西，而用户只是把它清了准备重打。
+   *  新建的道具还没有 id，整份等「添加」一起提交 */
+  const autosave = useFormAutosave(
+    editingId !== null && form.name.trim() ? { id: editingId, body: body() } : null,
+    showForm && editingId !== null,
+    async ({ id, body }) => {
+      await rpgApi.items.update(id, body)
+      refresh()
+    },
+  )
+
   const startEdit = (item: RpgItem) => {
+    // 换一条之前先把上一条欠着的那一次存掉。待存的那一份只有最新一格，
+    // 不补发的话它会被下一条的草稿顶掉
+    void autosave.flush()
     setEditingId(item.id)
     setForm({
       name: item.name, description: item.description, category: item.category,
@@ -63,14 +84,14 @@ export default function ItemSection({
     setShowForm(true)
   }
 
+  /** 收起表单。改过的东西已经存进库了，所以这里没得「取消」——但没存成的时候
+   *  不能收：收了就等于把改动默默扔掉，而用户只看到红字一闪 */
+  const close = async () => { if (await autosave.flush()) reset() }
+
   const submit = async () => {
     if (!form.name.trim()) return
     try {
-      if (editingId) {
-        await rpgApi.items.update(editingId, { ...form, name: form.name.trim() })
-      } else {
-        await rpgApi.items.create(moduleId, { ...form, name: form.name.trim(), sort_order: items.length + 1 })
-      }
+      await rpgApi.items.create(moduleId, { ...body(), sort_order: items.length + 1 })
       refresh()
       reset()
     } catch {
@@ -97,7 +118,7 @@ export default function ItemSection({
     <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{editingId ? '编辑道具' : '新增道具'}</span>
-        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <input
@@ -172,14 +193,25 @@ export default function ItemSection({
           <span className="text-muted-foreground">（不勾的话，新开的局里不会有这件）</span>
         </span>
       </label>
-      <div className="flex gap-2 justify-end">
-        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+      <div className="flex items-center gap-2">
+        {editingId !== null && (
+          <span className="mr-auto">
+            <SaveBadge
+              state={autosave.state}
+              blocked="名字还空着，先不存"
+              onRetry={autosave.flush}
+            />
+          </span>
+        )}
+        <button onClick={editingId ? close : reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          {editingId ? '收起' : '取消'}
+        </button>
         <button
-          onClick={submit}
+          onClick={editingId ? autosave.flush : submit}
           disabled={!form.name.trim()}
           className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
-          {editingId ? '保存' : '添加'}
+          {editingId ? '立即保存' : '添加'}
         </button>
       </div>
     </div>

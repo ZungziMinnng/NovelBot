@@ -6,6 +6,8 @@ import {
   rpgApi, type RpgCondition, type RpgLocation, type RpgNpc, type RpgStatDef,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
+import { useFormAutosave } from '@/lib/useFormAutosave'
 import { norm } from './condition'
 import { clampPct, edgePairs, layout } from './mapLayout'
 import { ACCENT, AddRow, Assist, DeleteButton, INPUT, Section } from './rpgUi'
@@ -68,7 +70,30 @@ export default function LocationSection({
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-locations', moduleId] })
   const reset = () => { setForm(EMPTY); setEditingId(null); setShowForm(false) }
 
+  /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
+   *  迟早分叉成「点保存存对了、自动保存存错了」。x/y 仍然不在里面（见 LocForm） */
+  const body = () => ({ ...form, name: form.name.trim() })
+
+  /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，而地点名还是
+   *  角色常驻地、连接、动作 at_location 的引用键，存个空名字进去就是一片悬空。
+   *  新建的地点还没有 id，整份等「添加」一起提交。
+   *
+   *  防抖比别处长（1000ms）：地点名是**引用键**，改到一半的中间态会被别的地方
+   *  读到，慢一点发少一点抖动 */
+  const autosave = useFormAutosave(
+    editingId !== null && form.name.trim() ? { id: editingId, body: body() } : null,
+    showForm && editingId !== null,
+    async ({ id, body }) => {
+      await rpgApi.locations.update(id, body)
+      refresh()
+    },
+    1000,
+  )
+
   const startEdit = (loc: RpgLocation) => {
+    // 换一条之前先把上一条欠着的那一次存掉。待存的那一份只有最新一格，
+    // 不补发的话它会被下一条的草稿顶掉
+    void autosave.flush()
     setEditingId(loc.id)
     setForm({
       name: loc.name, description: loc.description, parent_id: loc.parent_id || null,
@@ -77,16 +102,14 @@ export default function LocationSection({
     setShowForm(true)
   }
 
+  /** 收起表单。改过的东西已经存进库了，所以这里没得「取消」——但没存成的时候
+   *  不能收：收了就等于把改动默默扔掉，而用户只看到红字一闪 */
+  const close = async () => { if (await autosave.flush()) reset() }
+
   const submit = async () => {
     if (!form.name.trim()) return
     try {
-      if (editingId) {
-        await rpgApi.locations.update(editingId, { ...form, name: form.name.trim() })
-      } else {
-        await rpgApi.locations.create(moduleId, {
-          ...form, name: form.name.trim(), sort_order: locations.length + 1,
-        })
-      }
+      await rpgApi.locations.create(moduleId, { ...body(), sort_order: locations.length + 1 })
       refresh()
       reset()
     } catch {
@@ -194,7 +217,7 @@ export default function LocationSection({
     <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{editingId ? '编辑地点' : '新增地点'}</span>
-        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
       </div>
       <input
         value={form.name}
@@ -267,14 +290,25 @@ export default function LocationSection({
           slotNames={slotNames}
         />
       </div>
-      <div className="flex gap-2 justify-end">
-        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+      <div className="flex items-center gap-2">
+        {editingId !== null && (
+          <span className="mr-auto">
+            <SaveBadge
+              state={autosave.state}
+              blocked="名字还空着，先不存"
+              onRetry={autosave.flush}
+            />
+          </span>
+        )}
+        <button onClick={editingId ? close : reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          {editingId ? '收起' : '取消'}
+        </button>
         <button
-          onClick={submit}
+          onClick={editingId ? autosave.flush : submit}
           disabled={!form.name.trim()}
           className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
-          {editingId ? '保存' : '添加'}
+          {editingId ? '立即保存' : '添加'}
         </button>
       </div>
     </div>

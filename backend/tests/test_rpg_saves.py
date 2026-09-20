@@ -12,13 +12,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.routes.rpg import (
     AUTO_SAVE_KEEP, _prune_auto_saves, _take_save,
-    create_save, delete_npc_note, delete_save, list_saves, restore_save,
+    create_save, delete_npc_note, delete_save, edit_summary, list_saves,
+    restore_save,
 )
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
 from app.models.rpg import RpgMessage, RpgModule, RpgNpc, RpgSave, RpgSession
 from app.models.user import User
-from app.schemas.rpg import RpgNoteDeleteIn, RpgSaveCreate
+from app.schemas.rpg import RpgNoteDeleteIn, RpgSaveCreate, RpgSummaryEditIn
+from app.services.rpg_context import PLAYER_SLOT
 
 
 class RpgSaveTests(unittest.TestCase):
@@ -313,6 +315,71 @@ class RpgSaveTests(unittest.TestCase):
                 sess.id, npc.id, RpgNoteDeleteIn(key="身份"), user, db
             )
             self.assertEqual(out.npc_notes[str(npc.id)], {"伤势": "左肩中刀"})
+
+        self._run(scenario)
+
+    def test_rewriting_a_summary_leaves_the_pointer_where_it_was(self):
+        """改记忆和读档一样是补救，但它**不许碰指针**。
+
+        碰了的话下一轮会把同一段原文重压一遍，把玩家刚写的字盖掉——
+        补救反倒成了「改完过一轮又变回去」，比不给这个口子还难查。
+        """
+        async def scenario():
+            db, user, _other, sess, npc = await self._setup()
+
+            sess.summary = "你一路向北"
+            sess.summarized_upto_id = 12
+            sess.thread_summaries = {str(npc.id): "她说你已经答应娶她"}
+            sess.thread_upto = {str(npc.id): 9}
+            await db.commit()
+
+            out = await edit_summary(
+                sess.id, RpgSummaryEditIn(slot=str(npc.id), text="她替你保管过行李"), user, db
+            )
+            self.assertEqual(out.thread_summaries[str(npc.id)], "她替你保管过行李")
+            self.assertEqual(sess.thread_upto[str(npc.id)], 9)
+            # 别人那格和玩家那格一个字没动
+            self.assertEqual(out.summary, "你一路向北")
+            self.assertEqual(out.summarized_upto_id, 12)
+
+            out = await edit_summary(
+                sess.id, RpgSummaryEditIn(slot=PLAYER_SLOT, text="你一路向南"), user, db
+            )
+            self.assertEqual(out.summary, "你一路向南")
+            self.assertEqual(out.summarized_upto_id, 12)
+            self.assertEqual(out.thread_summaries[str(npc.id)], "她替你保管过行李")
+
+        self._run(scenario)
+
+    def test_clearing_a_summary_drops_the_slot_instead_of_leaving_a_blank(self):
+        """空串 = 这段记忆不要了。留一个空字符串在字典里的话，
+        `summary_block` 那边靠 `if text` 筛，筛得掉；但存档快照里会多一个
+        永远对不上任何角色的空格子，以后按键数格子就会数错。
+        """
+        async def scenario():
+            db, user, _other, sess, npc = await self._setup()
+
+            sess.thread_summaries = {str(npc.id): "她说你已经答应娶她"}
+            await db.commit()
+
+            out = await edit_summary(
+                sess.id, RpgSummaryEditIn(slot=str(npc.id), text="  "), user, db
+            )
+            self.assertEqual(out.thread_summaries, {})
+
+        self._run(scenario)
+
+    def test_someone_else_cannot_rewrite_your_memories(self):
+        async def scenario():
+            db, user, other, sess, npc = await self._setup()
+            sess.thread_summaries = {str(npc.id): "她替你保管过行李"}
+            await db.commit()
+
+            with self.assertRaises(HTTPException) as ctx:
+                await edit_summary(
+                    sess.id, RpgSummaryEditIn(slot=str(npc.id), text="她恨你"), other, db
+                )
+            self.assertEqual(ctx.exception.status_code, 404)
 
         self._run(scenario)
 

@@ -235,6 +235,10 @@ export function ActionPresetBar({ moduleId, actions, statDefs, relationDefs, onA
                   name: a.name, prompt_hint: a.prompt_hint,
                   effects: a.effects || {}, relation_effects: a.relation_effects || {},
                   needs_target: a.needs_target,
+                  // 这两个和 cost_slot 同类：纯布尔，不引用模组里的任何名字，
+                  // 搬到别的模组照样成立（远程/召见靠的是「见过面」和玩家当前
+                  // 位置，两者每个模组都有）
+                  target_anywhere: !!a.target_anywhere, summons_target: !!a.summons_target,
                   group: a.group || '', cost_slot: !!a.cost_slot,
                 })),
               })

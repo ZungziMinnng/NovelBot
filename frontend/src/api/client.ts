@@ -1153,6 +1153,8 @@ export interface RpgStatDef {
 /** 统一条件格式。世界书触发、动作按钮可用性、地点进入条件共用 */
 export interface RpgCondition {
   stats?: Record<string, { op: string; value: number }>
+  /** npc 写 "*" 表示不指定是谁：任意一个角色达标就算成立。放在动作的可用条件上
+   *  时，后端只把这一轮选中的对象喂给条件求值，于是它自动是「你选的那个人」 */
   relations?: { npc: string; stat: string; op: string; value: number }[]
   /** 「!xxx」表示这条 flag 不能立着 */
   flags?: string[]
@@ -1204,6 +1206,8 @@ export interface RpgModule {
   relation_stat_defs: RpgStatDef[]
   default_inventory: RpgInvItem[]
   default_location: string
+  opening_npc_ids: number[]
+  opening_npc_locations: Record<string, string>
   /** 默认时段表，如 ["早","中","晚"]。空 = 这个模组不用时段 */
   time_slots: string[]
   /** 主角的名字和出身由模组定死，玩家在建局界面改不动。**只在有主角模板卡时
@@ -1223,8 +1227,13 @@ export interface RpgModule {
   max_tokens: number
   reply_length: number
   model_ref: string
-  /** 裁决 / 结算 / 建议共用的便宜模型 */
   fast_model_ref: string
+  settlement_model_ref: string
+  adjudication_model_ref: string
+  suggestion_model_ref: string
+  activity_model_ref: string
+  offscreen_model_ref: string
+  discovery_model_ref: string
   /** 压缩旧剧情用。空 = 跟着 fast_model_ref 走 */
   summary_model_ref: string
   /** 立绘 tag 转换用。空 = 跟着 fast_model_ref 走 */
@@ -1242,11 +1251,34 @@ export interface RpgModule {
   free_costs_slot: boolean
   /** NPC 立绘的出图设置。老模组是 {}，三项都要判空 */
   image_config: RpgImageConfig
+  /** 构思向导上次回填写进来的东西。老模组是 {}，回填时按「没有台账」处理 */
+  wizard_state: RpgWizardState
   session_count: number
   npc_count: number
   entry_count: number
   created_at: string
   updated_at: string
+}
+
+/**
+ * 构思向导的回填台账：上一次回填往模组里写了什么。
+ *
+ * 只用来「下次回填先把这些摘掉」。没有它就只能一律追加，于是
+ * 「重新生成 → 再回填」会在模组里叠出两套数值/时段/角色。
+ *
+ * 全可选：老模组这一列是 {}，那时按「没有台账」处理，退回只追加。
+ * 名字一律按 trim 后比对，和 wizardApply.ts 的 newNamed 同一套口径。
+ */
+export interface RpgWizardState {
+  slots?: string[]
+  stats?: string[]
+  relation_stats?: string[]
+  location_ids?: number[]
+  npc_ids?: number[]
+  item_ids?: number[]
+  skill_ids?: number[]
+  task_ids?: number[]
+  action_ids?: number[]
 }
 
 /**
@@ -1382,7 +1414,7 @@ export interface RpgActionPreset {
 export type RpgActionSeed = Pick<
   RpgAction,
   'name' | 'prompt_hint' | 'effects' | 'relation_effects' | 'needs_target'
-  | 'group' | 'cost_slot'
+  | 'target_anywhere' | 'summons_target' | 'group' | 'cost_slot'
 >
 
 /** 背包里的一行。和模组的道具定义 RpgItem 是两回事 */
@@ -1447,6 +1479,8 @@ export interface RpgSessionTask {
   desc: string
   /** 「怎样才算办完」。接下这桩事的时候从定义拷过来，之后不跟着定义变 */
   goal: string
+  /** 主线 / 支线 / 日常；旧存档可能没有此字段 */
+  category?: string
   status: 'open' | 'done' | 'failed'
   /** 对应模组里那一行；剧情里冒出来的差事没有，也就没有奖励 */
   task_id: number | null
@@ -1514,6 +1548,10 @@ export interface RpgAction {
   requires: RpgCondition
   /** 要不要先选一个在场角色 */
   needs_target: boolean
+  /** 目标可以是不在跟前的人（手机、传讯这类远程渠道） */
+  target_anywhere: boolean
+  /** 点了把目标叫到你身边 */
+  summons_target: boolean
   /** 分栏用的自由文本，空 = 归到「其他」那一栏 */
   group: string
   /** 点一下推进一格时段 */
@@ -1548,6 +1586,8 @@ export interface RpgNpc {
   name: string
   /** protagonist = 主角模板，开局时预填玩家角色 */
   role: 'npc' | 'protagonist'
+  /** 自由文本，不是数字：「十七八岁」「三百岁」都能写。每轮随长相一起注入 */
+  age: string
   avatar_url: string
   /** 当前这张立绘用的随机种子，0 = 没记录（自己上传的、或还没生成过）。只读 */
   avatar_seed: number
@@ -1566,11 +1606,14 @@ export interface RpgNpc {
   /** 作息表：{"早": "大礼堂", "晚": "寝室"}。当前时段在这张表里有值就用它，
    *  没有就落回 location。后端的 rpg_context.npc_place 是同一套算法 */
   slot_locations: Record<string, string>
+  /** 仅这些时段执行随机移动；空数组表示所有时段 */
+  random_movement_slots: string[]
   /** 额外触发词：人不在场但被提到也注入 */
   keywords: string
   /** 勾上之后，这一轮没提到她时她自己过日子：模型写一句「最近在做什么」，
    *  记在这一局的 npc_activities 里，下回见面时注入。默认关 */
   ai_scheduled: boolean
+  random_movement: boolean
   /** 分栏档案，照抄酒馆卡：外貌身材 / 背景故事 / … */
   profile_sections: Record<string, string>
   dialogue_examples: { user: string; assistant: string }[]
@@ -1610,6 +1653,24 @@ export interface RpgItemClaim {
   known_item_id: number | null
 }
 
+/** 一个人这一局经历过的一件事。结算时模型写一句，引擎盖上日期时段 */
+export interface RpgNpcHistoryEntry {
+  day: number
+  slot: string
+  content: string
+}
+
+/** 一段关系拐弯的那一下。a / b 是两头，名册上的人写名册上的名字，玩家自己是「你」 */
+export interface RpgMilestone {
+  day: number
+  slot: string
+  /** 初见 / 动心 / 表白 / 决裂 / 和解 / 身份揭露 / 其他。后端白名单挡过，不会有别的 */
+  type: string
+  a: string
+  b: string
+  content: string
+}
+
 export interface RpgSession {
   id: number
   module_id: number
@@ -1645,13 +1706,27 @@ export interface RpgSession {
   /** GM 这一局边玩边记下的 NPC 近况。{"3": {"伤势": "左肩中刀"}}，值一律是字符串。
    *  和 npc_states 分开存：那边的值是关系数字，合在一起会被字符串盖掉 */
   npc_notes: Record<string, Record<string, string>>
+  /** 这一局被**永久改写掉**的外貌。{"3": {"胸部": "服丰元玉乳散后长出"}}。
+   *  和 npc_notes 分开存：那张表满了淘汰最久没更新的，而身体改造写一次就不刷新，
+   *  永远排在淘汰队列最前面。注入时它紧贴作者写的 appearance 之后、并压过它 */
+  npc_appearance: Record<string, Record<string, string>>
   /** AI 调度给不在场的人记的那一句「最近在做什么」。{"3": "在图书馆翻旧报纸"}。
    *  和 npc_notes 分开存，后端的 rpg_state.apply_npc_activity 是同一个意思 */
   npc_activities: Record<string, string>
+  /** 每个人这一局的经历，{"3": [...]}，按发生顺序往后追加。和 npc_notes 分开存：
+   *  那边同名键会被盖掉（她现在怎么样），这边只增不改（她经历过什么） */
+  npc_history: Record<string, RpgNpcHistoryEntry[]>
+  /** 关系的转折点，整局一条线不按人分——一条连着两个人 */
+  npc_milestones: RpgMilestone[]
   /** 剧情把谁挪到哪儿了：{"3": "校长办公室"}。你在对话框里说「你过来」，
    *  结算从刚写出的正文里读出她的新位置写在这——它优先于作息表，推时段清空。
    *  取值口径见 condition.npcPlace（后端 rpg_context.npc_place 的镜像） */
   npc_places: Record<string, string>
+  /** 跟着你走的人，装的是 npc id。**只装 id 不记位置**——她的位置就是你的位置，
+   *  由 npcPlace 的取值链当场算出来。和 npc_places 分开存、而且推时段**不清空**：
+   *  那一列防的是模型随手写一笔盖掉作者的作息表，这一列是**玩家**自己说的
+   *  （打了句话，或点了侧栏那个叉），跨时段存活直到你打发她走 */
+  npc_followers: number[]
   /** 这个地方现在什么样：{"地窖": "门被你踹坏了，合不上"}，键是**地名**。
    *  不是第四个记忆格，就是结算顺手记的一句，你走进去它才进上下文 */
   place_notes: Record<string, string>
@@ -1663,8 +1738,14 @@ export interface RpgSession {
   discoveries: RpgDiscovery[]
   /** 结算说「你拿到了」、还没认领的道具。道具那一格最上面那块读它 */
   item_claims: RpgItemClaim[]
+  /** 你亲身经历那条线的长期记忆。旧剧情溢出窗口时压成的一段话，每轮注入。
+   *  空 = 还没溢出过，这一局的全部原文都还在窗口里 */
   summary: string
   summarized_upto_id: number
+  /** 和每个角色各自的长期记忆，{"3": "她告诉你二十年前那桩事"}，键是 npc_id
+   *  的字符串。和上面那条是**并列的格子**：那条是你自己记得的，这些是她记得的，
+   *  只在她在跟前时注入。同样是溢出才有 */
+  thread_summaries: Record<string, string>
   turn_count: number
   created_at: string
   updated_at: string
@@ -1705,6 +1786,7 @@ export interface RpgSettlement {
   attempts?: number
   domains?: Record<string, { status: string; warnings: string[] }>
   changes?: string[]
+  engine_facts?: string[]
   warnings?: string[]
   facts?: { kind: string; summary: string; quote: string; witnesses: number[]; visibility: string }[]
   applied?: Record<string, { before: unknown; after: unknown }>
@@ -1712,11 +1794,38 @@ export interface RpgSettlement {
   retryable?: boolean
 }
 
+/**
+ * 一条建议。两条路（主动的「帮我想想」和每轮结算顺带产出的）都收成这个形状。
+ *
+ * `kind` 决定点下去走哪个入口：
+ * - `free`  当成一句话发出去，`text` 就是那句话
+ * - `skill` / `item` / `move` 分别带 `name` 走 useSkill / useItem / moveByTurn
+ * - `action` 带 `action_id` 走引擎动作；要不要先挑人由那个动作自己的
+ *   `needs_target` 说了算，数据里**不带** target
+ */
+export interface RpgSuggestion {
+  text: string
+  kind: string
+  name: string
+  action_id: number | null
+}
+
 export interface RpgMessage {
   id: number
   session_id: number
   role: 'user' | 'assistant'
   content: string
+  turn_request?: {
+    attr?: string
+    action_id?: number | null
+    item_name?: string
+    item_qty?: number
+    skill_name?: string
+    move_to?: string
+    target_npc?: string
+    mode?: 'group' | 'private' | 'solo'
+    private_with?: number | null
+  } | null
   /** 这条消息发生在哪个地点。统一时间线之后一屏里会混着几个地方的戏，
    *  前端靠它在换地方的地方插一条分隔 */
   location: string
@@ -1726,7 +1835,10 @@ export interface RpgMessage {
   roll: RpgRoll | null
   state_delta: Record<string, unknown> | null
   settlement: RpgSettlement | null
-  suggestions: string[] | null
+  /** 建议条。**老行是 `string[]`**——这一列是 JSON，加结构化之前写进去的就是
+   *  纯字符串，没有迁移。所以类型老实写成联合，逼所有消费点过
+   *  `pages/Rpg/suggestion.ts` 的 normalizeSuggestions（唯一收口） */
+  suggestions: (RpgSuggestion | string)[] | null
   /** 叙事那次调用的消耗 */
   input_tokens: number
   output_tokens: number
@@ -1766,6 +1878,8 @@ export interface RpgWizardKnown {
   stat_names?: string[]
   relation_names?: string[]
   location_names?: string[]
+  /** 时段名。角色那一步的作息表要同时对上它和 location_names，缺了就整摊丢掉 */
+  slot_names?: string[]
 }
 export type RpgWorldScope = 'world' | 'region'
 
@@ -1786,6 +1900,9 @@ export interface RpgWizardExtract {
     name: string; persona: string; appearance: string; description: string
     profile_sections?: Record<string, string>
     location: string; initial_state: Record<string, number>
+    /** 作息表。键过时段白名单、值过地点白名单，两张表缺一个就是空对象 */
+    slot_locations?: Record<string, string>
+    dialogue_examples?: Array<{ user: string; assistant: string }>
   }>
   items?: Array<{
     name: string; description: string; category: string
@@ -1794,6 +1911,8 @@ export interface RpgWizardExtract {
   skills?: Array<{
     name: string; description: string; category: string
     cooldown: number; start_with: boolean; effects: Record<string, number>
+    /** 解锁门槛。只有 stats / items 两个子形状进抽取，见 rpg_wizard._clean_requires */
+    requires?: RpgCondition
   }>
   tasks?: Array<{
     name: string; description: string; objective: string; category: string
@@ -1802,9 +1921,11 @@ export interface RpgWizardExtract {
   actions?: Array<{
     name: string; prompt_hint: string; needs_target: boolean
     effects: Record<string, number>; relation_effects: Record<string, number>
-    /** 分栏名。只有它进抽取，cost_slot / at_location 不让模型生成
-     *  （见 rpg_wizard._clean_things 里那条注释） */
+    /** 分栏名是纯文本，编错了只是分栏难看。cost_slot 是布尔，at_location 过地点
+     *  白名单、对不上就留空并记 dropped（见 rpg_wizard._clean_things 里那条注释） */
     group?: string
+    cost_slot?: boolean
+    at_location?: string
   }>
   dropped: string[]
 }
@@ -1989,11 +2110,21 @@ export const rpgApi = {
       api.post<{ session: RpgSession; message: string }>(
         `/rpg/sessions/${id}/move`, { target },
       ).then(r => r.data),
+    /** 让某人跟着你 / 别跟着了。和 move 同类：纯引擎、零 LLM、不产生消息。
+     *  **不占行动位**——跟着走或散开不花这个时段的时间 */
+    follow: (id: number, npcId: number, following = true) =>
+      api.post<{ session: RpgSession; message: string }>(
+        `/rpg/sessions/${id}/follow`, { npc_id: npcId, following },
+      ).then(r => r.data),
     update: (id: number, data: { title?: string }) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}`, data).then(r => r.data),
     /** 划掉 GM 记错的一条 NPC 近况。没有这个口子，记错了只能读档 */
     deleteNpcNote: (id: number, npcId: number, key: string) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}/npc-notes/${npcId}`, { key }).then(r => r.data),
+    /** 划掉模型给这个人改写的一处外貌。比 deleteNpcNote 更要紧：近况记错是卡上多
+     *  一行字，外貌改写记错是这个人的长相被永久改掉，而且它压过作者原文 */
+    deleteNpcAppearance: (id: number, npcId: number, key: string) =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}/npc-appearance/${npcId}`, { key }).then(r => r.data),
     /** 划掉 AI 调度给这个人记的那句「最近在做什么」。只清这一句，
      *  「AI 调度」开关是模组作者的决定，改它要回模组页 */
     deleteNpcActivity: (id: number, npcId: number) =>
@@ -2002,6 +2133,11 @@ export const rpgApi = {
      *  走进这个地方都会进上下文，记错了没有这个口子就只能读档 */
     deletePlaceNote: (id: number, place: string) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}/place-note`, { key: place }).then(r => r.data),
+    /** 改写某一格的长期记忆。slot 传 'player'（你亲身经历的那条）或角色 id 的
+     *  字符串。空串 = 这段记忆不要了。**指针不动**，所以被压掉的原文不会回来，
+     *  改完之后模型看到的就只有你写的这一版 */
+    editSummary: (id: number, slot: string, text: string) =>
+      api.patch<RpgSession>(`/rpg/sessions/${id}/summary`, { slot, text }).then(r => r.data),
     /** 把勾中的新发现补全成完整档案并建进模组。这是**第二次**模型调用——
      *  提取是结算那一次顺带的，不花钱；补属性、连地图才在这里花。
      *  超时同向导的 3 分钟：它是一次完整的设定生成 */
@@ -2026,6 +2162,19 @@ export const rpgApi = {
     /** 玩家自己改一条待办：标完成/失败、改回进行中，status 给空串是划掉 */
     setTaskState: (id: number, name: string, status: '' | 'open' | 'done' | 'failed') =>
       api.patch<RpgSession>(`/rpg/sessions/${id}/tasks`, { name, status }).then(r => r.data),
+    /** 修改器：玩家自己把这几摊掰成想要的样子。**传的是目标值**，差多少由后端算——
+     *  「先夹到上下限、再算差值」那套规则只该有一份，前端再做一遍减法迟早对不上。
+     *  各项都可选，只发真的动过的那几项；notes 是后端对某一项的批注
+     *  （「被限制在 100」这类），前端逐条念给玩家听，不进剧情 */
+    tweak: (id: number, body: {
+      stats?: Record<string, number>
+      relations?: Record<string, Record<string, number>>
+      inventory?: { name: string; qty: number }[]
+      flags?: Record<string, boolean | null>
+      npc_places?: Record<string, string | null>
+    }) => api.patch<{ session: RpgSession; notes: string[] }>(
+      `/rpg/sessions/${id}/tweak`, body,
+    ).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/sessions/${id}`).then(r => r.data),
   },
   messages: {
@@ -2055,7 +2204,7 @@ export const rpgApi = {
   /** 「帮我想想」看的是整条时间线：全场只有一条历史，隔壁刚聊的那几句
    *  就是你的前情 */
   suggest: (sessionId: number) =>
-    api.post<{ suggestions: string[] }>(
+    api.post<{ suggestions: RpgSuggestion[]; diag: Record<string, number> }>(
       `/rpg/sessions/${sessionId}/suggest`, {}, { timeout: 120000 },
     ).then(r => r.data),
 }
@@ -2660,8 +2809,14 @@ export interface RpgTurnMeta {
   /** 【道具与技能】那一块占了多少 token：模组定义过的东西的说明书，每轮都在 */
   catalog_tokens?: number
   npc_tokens?: number
+  /** 【角色总表】那一块占了多少 token：全模组角色一人一行（名字 + 常驻地 +
+   *  一句简介），完整设定仍归 npc_tokens；私聊时不注入，所以那一轮会是 0 */
+  roster_tokens?: number
   /** 【外场】那一块占了多少 token */
   chronicle_tokens?: number
+  /** 【关系的转折】那一块占了多少 token：整局攒下的关系里程碑，
+   *  不按在场筛、每轮都在，所以它只增不减 */
+  milestone_tokens?: number
   /** 【场面】那一块占了多少 token：地点描述加在场名单，每轮都在 */
   scene_tokens?: number
   history_count?: number
@@ -2690,7 +2845,11 @@ export interface RpgStatePatch {
   location: string
   npc_states: Record<string, Record<string, number | boolean>>
   npc_notes: Record<string, Record<string, string>>
+  /** 被永久改写掉的外貌。同上，不带回来的话要整页重拉才看得见 */
+  npc_appearance: Record<string, Record<string, string>>
   npc_activities: Record<string, string>
+  npc_history: Record<string, RpgNpcHistoryEntry[]>
+  npc_milestones: RpgMilestone[]
   npc_places: Record<string, string>
   place_notes: Record<string, string>
   status: 'alive' | 'dead' | 'ended'
@@ -2731,8 +2890,9 @@ export type RpgSSEMessage =
   | { event: 'stage'; data: string }
   | { event: 'warning'; data: string }
   | { event: 'state'; data: RpgStatePatch }
+  | { event: 'engine_result'; data: { facts: string[] } }
   | { event: 'settlement'; data: { message_id: number; report: RpgSettlement | null } }
-  | { event: 'suggestions'; data: string[] }
+  | { event: 'suggestions'; data: RpgSuggestion[] }
   /** 这一轮认出来的、模组里还没有的人/地方/东西。只挂角标，不打断 */
   | { event: 'discoveries'; data: RpgDiscovery[] }
   | { event: 'item_claims'; data: RpgItemClaim[] }
@@ -2752,6 +2912,7 @@ export function streamRpgTurn(
     /** 「点出来的」行动。给了任意一个就走引擎，数字由模组定义算死 */
     action_id?: number | null
     item_name?: string
+    item_qty?: number
     skill_name?: string
     move_to?: string
     /** 这一轮怎么说话：group 群聊 / private 私聊 / solo 独自行动。

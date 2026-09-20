@@ -8,7 +8,7 @@ import unittest
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.api.routes.rpg import create_session
+from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS, create_session
 from app.database import Base, _backfill_rpg_clock, _repair_concatenated_clock
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
 from app.models.rpg import RpgModule, RpgSession
@@ -84,6 +84,32 @@ class AdvanceTests(unittest.TestCase):
         self.assertEqual(sess.day, 1)
         advance_slot(_module(), sess)
         self.assertEqual(sess.day, 2)
+
+    def test_it_records_where_the_unnarrated_stretch_starts(self):
+        # 推时段不调模型，这一段没有叙事。下一轮 prompt 靠这个起点说一句
+        # 「时间从早跳到了现在」，否则模型会接着上一轮的场景往下写
+        sess = _sess(slot="晚")
+        advance_slot(_module(), sess)
+        self.assertEqual(sess.time_jump_from, "第 1 天 · 晚")
+
+    def test_a_second_advance_keeps_the_first_starting_point(self):
+        # 连着推两格之间同样一句都没写过，不该把中间那一格从空白段里吞掉
+        sess = _sess()
+        advance_slot(_module(), sess)
+        advance_slot(_module(), sess)
+        self.assertEqual(sess.time_jump_from, "第 1 天 · 早")
+
+    def test_a_module_without_a_clock_records_no_jump(self):
+        # 没有时钟就没有「跳过的时段」，一个字都不该留
+        sess = _sess(time_slots=[], slot="")
+        advance_slot(_module(), sess)
+        self.assertFalse(sess.time_jump_from)
+
+    def test_the_jump_marker_is_snapshotted(self):
+        # 它随回合自己变（推时段写、下一轮清），所以必须进快照表：漏了不报错，
+        # 只会在读档回到推时段之前时，下一轮 prompt 里还挂着一句「刚才跳过了一段」
+        self.assertIn("time_jump_from", SNAPSHOT_FIELDS)
+        self.assertEqual(SNAPSHOT_DEFAULTS["time_jump_from"], "")
 
 
 class ResetDailyTests(unittest.TestCase):

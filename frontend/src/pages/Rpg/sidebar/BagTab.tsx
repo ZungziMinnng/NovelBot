@@ -1,21 +1,24 @@
+import { useState } from 'react'
 import { X } from 'lucide-react'
-import type { RpgItem, RpgSession } from '@/api/client'
-import { norm } from '../condition'
+import type { RpgItem, RpgModule, RpgSession } from '@/api/client'
+import { effectCostReason, norm } from '../condition'
 import { PANEL } from '../rpgUi'
 import Empty from './Empty'
 
 export default function BagTab({
-  sess, items, locked, onUseItem, onConfirmClaim, onDismissClaim,
+  sess, items, locked, onUseItem, onConfirmClaim, onDismissClaim, module,
 }: {
   sess: RpgSession
   items: RpgItem[]
+  module?: RpgModule
   locked: boolean
-  onUseItem: (name: string, exact: boolean) => void
+  onUseItem: (name: string, exact: boolean, quantity?: number) => void
   /** 认下一件新道具。consumable 只在模组里还没有同名定义时才用得上 */
   onConfirmClaim: (id: string, consumable: boolean) => void
   onDismissClaim: (id: string) => void
 }) {
   const bag = sess.inventory || []
+  const [quantities, setQuantities] = useState<Record<string, number>>({})
   // 结算说你拿到了、还没认的那几件。**不混进下面那堆**：下面每一件都是确定在你
   // 身上的东西，这些还只是「模型说你有」
   const claims = sess.item_claims || []
@@ -100,6 +103,11 @@ export default function BagTab({
         // 都不是玩家的错，不该让他只能自己打字。
         // 有定义但没勾「能用」的不给按钮——那是作者明说了「这不是用来用的」
         const canUse = exact || !def
+        const quantity = def?.consumable ? Math.max(1, quantities[it.name] || 1) : 1
+        const effects = Object.fromEntries(Object.entries(def?.effects || {}).map(
+          ([name, amount]) => [name, amount * quantity],
+        ))
+        const blocked = it.qty < quantity ? '数量不足' : effectCostReason(effects, sess, module)
         return (
           <div key={`${it.name}-${i}`} className={`${PANEL} p-3`}>
             <div className="flex items-baseline gap-2">
@@ -128,12 +136,27 @@ export default function BagTab({
               </div>
             )}
             {canUse && (
+              <>
+              {exact && def?.consumable && it.qty > 1 && (
+                <input
+                  type="number"
+                  min={1}
+                  max={it.qty}
+                  value={quantities[it.name] || 1}
+                  onChange={event => setQuantities(prev => ({
+                    ...prev, [it.name]: Math.max(1, Math.min(it.qty, Number(event.target.value) || 1)),
+                  }))}
+                  disabled={locked}
+                  className="mt-2.5 mr-2 w-16 rounded-lg border bg-transparent px-2 py-1.5 text-xs"
+                  aria-label={`使用${it.name}数量`}
+                />
+              )}
               <button
-                onClick={() => onUseItem(it.name, exact)}
-                disabled={locked}
-                title={exact
+                onClick={() => onUseItem(it.name, exact, quantity)}
+                disabled={locked || !!blocked}
+                title={blocked || (exact
                   ? '效果是模组里写死的，AI 改不了'
-                  : '模组里没有这件道具的定义：用出来什么效果由 GM 现写，数值不精确'}
+                  : '模组里没有这件道具的定义：用出来什么效果由 GM 现写，数值不精确')}
                 // 描边 = 效果不精确。和上面那种「数字是死的」明显区分开，
                 // 不然玩家会以为两种按钮是一回事
                 className={`mt-2.5 w-full text-xs py-1.5 rounded-lg disabled:opacity-40 ${
@@ -144,6 +167,7 @@ export default function BagTab({
               >
                 使用
               </button>
+              </>
             )}
           </div>
         )

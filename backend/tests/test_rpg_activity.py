@@ -6,21 +6,25 @@
    一次调用写完（一人一次 = 玩家为 N 次往返付钱等时间）。
 2. 这一轮在场或被提到的人**不调度**——他们归叙事模型管，两边各写一份，
    玩家下回见到的会和自己刚经历的对不上。
-3. 调度出来的句子只落在这个人身上，**不进大事记、不动数值、不挪地方**。
+3. 调度出来的句子只落在这个人身上，不进大事记、不动数值；随机移动由引擎执行。
 4. 生成失败不能拖垮这一轮（它排在 done 之前，抛出去整轮就报错了）。
 """
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app import database
 from app.agents import rpg_turn
 from app.api.routes.rpg import update_npc
 from app.database import Base
+from app.models import sensitive_word, text_replace_backup, llm_usage
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
-from app.models.rpg import RpgModule, RpgNpc, RpgMessage, RpgSession
-from app.schemas.rpg import RpgNpcUpdate
+from app.models.rpg import RpgLocation, RpgModule, RpgNpc, RpgMessage, RpgSession
+from app.schemas.rpg import RpgNpcCreate, RpgNpcOut, RpgNpcUpdate
+from app.services.rpg_context import here_npcs, npc_place
 from app.services.rpg_state import ACTIVITY_CHARS, apply_npc_activity, npc_activity
 
 STAT_DEFS = [{"name": "精力", "initial": 100, "min": 0, "max": 100}]
@@ -74,7 +78,7 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
         self.patcher.stop()
         await self.engine.dispose()
 
-    async def _setup(self, *npcs, location="校长办公室", slot="晚"):
+    async def _setup(self, *npcs, location="校长办公室", slot="晚", random_movement=False, places=()):
         """npcs 是 (名字, 常驻地点, ai_scheduled) 或 (名字, 常驻地, 调度, role)。"""
         async with self.sessions() as db:
             module = RpgModule(
@@ -87,12 +91,13 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
             for row in npcs:
                 npc = RpgNpc(
                     module_id=module.id, name=row[0], location=row[1],
-                    persona="好胜", ai_scheduled=row[2],
+                    persona="好胜", ai_scheduled=row[2], random_movement=random_movement,
                     **({"role": row[3]} if len(row) > 3 else {}),
                 )
                 db.add(npc)
                 await db.commit()
                 ids.append(npc.id)
+            db.add_all([RpgLocation(module_id=module.id, name=name) for name in places])
             sess = RpgSession(
                 module_id=module.id, char_name="阿隼", stats={"精力": 100},
                 location=location, slot=slot, day=3, status="alive",
@@ -210,6 +215,185 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
         async with self.sessions() as db:
             self.assertEqual(list((await db.get(RpgSession, session_id)).chronicle or []), [])
 
+    async def test_random_movement_needs_no_home_schedule_or_clock(self):
+        module_id, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "", True), slot="", random_movement=True, places=("图书馆", "寝室", "  "),
+        )
+        async with self.sessions() as db:
+            module = await db.get(RpgModule, module_id)
+            module.time_slots = []
+            other = RpgModule(name="另一个模组")
+            db.add(other)
+            await db.flush()
+            db.add(RpgLocation(module_id=other.id, name="其他世界"))
+            await db.commit()
+        with patch.object(rpg_turn.random, "choice", return_value="图书馆") as choose:
+            _, prompts = await self._run(session_id)
+        self.assertEqual(choose.call_args.args[0], ["图书馆", "寝室"])
+        self.assertIn("赫敏：在图书馆", prompts[0])
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            npc = await db.get(RpgNpc, npc_id)
+            self.assertEqual(sess.npc_places, {str(npc_id): "图书馆"})
+            self.assertEqual(npc_place(npc, sess.slot, sess.npc_places), "图书馆")
+            self.assertEqual(here_npcs([npc], "图书馆", sess.slot, sess.npc_places), [npc])
+            self.assertEqual(rpg_turn._state_payload(sess)["npc_places"], sess.npc_places)
+            self.assertEqual(npc.location, "")
+        await self._run(session_id)
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "寝室"})
+
+    async def test_random_movement_leaves_engaged_present_and_following_npcs_alone(self):
+        _, session_id, identities = await self._setup(
+            ("被提到的人", "寝室", True), ("在场的人", "校长办公室", True),
+            ("跟随的人", "寝室", True), ("正文人物", "寝室", True),
+            ("主角模板", "寝室", True, "protagonist"), ("未启用调度", "寝室", False),
+            random_movement=True, places=("图书馆",),
+        )
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            sess.npc_followers = [identities[2]]
+            sess.npc_places = {str(identities[2]): "寝室"}
+            db.add(RpgMessage(session_id=session_id, role="assistant", content="正文人物走出了房间。"))
+            await db.commit()
+        with patch.object(rpg_turn.random, "choice") as choose:
+            await self._run(session_id, engaged=[identities[0]])
+        choose.assert_not_called()
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places,
+                {str(identities[2]): "寝室"},
+            )
+
+    async def test_random_movement_is_opt_in(self):
+        _, session_id, _ = await self._setup(("赫敏", "寝室", True), places=("图书馆",))
+        await self._run(session_id)
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+
+    async def test_random_movement_handles_zero_or_one_location(self):
+        for places in ((), ("寝室",)):
+            with self.subTest(places=places):
+                _, session_id, (npc_id,) = await self._setup(
+                    ("赫敏", "寝室", True), random_movement=True, places=places,
+                )
+                await self._run(session_id, text="赫敏：无")
+                async with self.sessions() as db:
+                    sess = await db.get(RpgSession, session_id)
+                    self.assertEqual(sess.npc_places, {str(npc_id): "寝室"} if places else {})
+
+    async def test_random_movement_survives_activity_generation_failure(self):
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆",),
+        )
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
+             patch.object(rpg_turn.llm_client, "dispatch_chat_complete", side_effect=RuntimeError("模型失败")):
+            self.assertEqual(await rpg_turn.idle_npc_activities(session_id, set()), {})
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "图书馆"})
+
+
+class TurnSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    """第五条底线：调度只在**这一轮时段真的翻篇了**的时候跑。
+
+    从前每轮都调一次。可它问的是「不在跟前的那个人最近在做什么」——时段没动，
+    答案和上一轮不会有区别，那一次调用是白花的。钉三件事：没翻篇的回合一次
+    调用都不发；翻篇的回合照旧要发；跳过的回合末尾那条 state 也照旧要发，
+    冷却倒计时和这一格的聊天数只走它。
+    """
+
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        # 结算判定这一幕收尾了没有。配上 free_costs_slot + slot_budget=1，
+        # 收尾就是这条用例里推动时钟的那只手
+        self.wrapped = True
+        self.scheduled = []
+        self.patchers = [
+            patch.object(rpg_turn, "AsyncSessionLocal", self.sessions),
+            patch.object(rpg_turn, "build_rpg_messages", self._fake_context),
+            patch.object(rpg_turn, "_settle", self._fake_settle),
+            patch.object(rpg_turn, "_maybe_summarize", self._noop),
+            patch.object(rpg_turn, "idle_npc_activities", self._fake_schedule),
+            patch.object(rpg_turn.llm_client, "get_agent_client",
+                         lambda *a, **k: ("fake-model", "openai")),
+            patch.object(rpg_turn.llm_client, "dispatch_chat_stream_with_usage", self._fake_stream),
+        ]
+        for p in self.patchers:
+            p.start()
+        async with self.sessions() as db:
+            module = RpgModule(
+                user_id=1, name="魔法学院", stat_defs=STAT_DEFS, relation_stat_defs=[],
+                time_slots=["早", "中", "晚"], slot_budget=1, free_costs_slot=True,
+            )
+            db.add(module)
+            await db.commit()
+            sess = RpgSession(
+                module_id=module.id, char_name="阿隼", stats={"精力": 100},
+                location="校长办公室", slot="早", day=1, status="alive",
+                npc_states={}, npc_activities={},
+            )
+            db.add(sess)
+            await db.commit()
+            self.session_id = sess.id
+
+    async def asyncTearDown(self):
+        for p in self.patchers:
+            p.stop()
+        await self.engine.dispose()
+
+    async def _fake_context(self, *args, **kwargs):
+        return [{"role": "user", "content": "x"}], {"npcs_here": [], "npcs_onstage": []}
+
+    async def _fake_settle(self, *args, **kwargs):
+        return {
+            "warnings": [], "state": {"stats": {}, "day": 1, "slot": "早"},
+            "settlement": {"status": "done"}, "suggestions": [], "discoveries": [],
+            "scene_wrapped": self.wrapped,
+            "aux_input_tokens": 0, "aux_output_tokens": 0,
+        }
+
+    async def _noop(self, *args, **kwargs):
+        return None
+
+    async def _fake_schedule(self, session_id, engaged):
+        self.scheduled.append(engaged)
+        return {}
+
+    async def _fake_stream(self, *args, **kwargs):
+        yield "他推门走了出去。"
+        yield ("他推门走了出去。", 10, 20)
+
+    async def _turn(self):
+        async with self.sessions() as db:
+            row = RpgMessage(session_id=self.session_id, role="user", content="她多大了")
+            db.add(row)
+            await db.commit()
+            message_id = row.id
+        events: dict[str, list] = {}
+        async for name, data in rpg_turn.run_turn(self.session_id, message_id, "她多大了"):
+            events.setdefault(name, []).append(data)
+        return events
+
+    async def test_a_turn_that_does_not_move_the_clock_never_calls_it(self):
+        self.wrapped = False
+        events = await self._turn()
+        self.assertEqual(self.scheduled, [])
+        # 跳过调度也要把末尾那条 state 发出去：冷却和这一格的聊天数不在
+        # STATE_FIELDS 里，结算那条 state 带不上，吞掉它玩家会看到一颗
+        # 明明已经能点的技能还灰着
+        self.assertIn("state", events)
+        self.assertIn("done", events)
+
+    async def test_a_turn_that_moves_the_clock_still_calls_it(self):
+        events = await self._turn()
+        self.assertEqual(self.scheduled, [set()])
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, self.session_id)).slot, "中")
+        self.assertIn("done", events)
+
 
 class NpcWritePathTests(unittest.IsolatedAsyncioTestCase):
     """角色卡上这两栏的写入链路：路由 → 模型 → 再读回来。
@@ -247,6 +431,23 @@ class NpcWritePathTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_switch_survives_the_round_trip(self):
         self.assertTrue((await self._patch(ai_scheduled=True)).ai_scheduled)
+
+    async def test_random_movement_survives_the_round_trip_and_can_be_disabled(self):
+        self.assertFalse(RpgNpcCreate(name="赫敏").random_movement)
+        npc = await self._patch(ai_scheduled=True, random_movement=True, location="")
+        self.assertTrue(RpgNpcOut.model_validate(npc).random_movement)
+        self.assertEqual(npc.location, "")
+        self.assertFalse((await self._patch(random_movement=False)).random_movement)
+
+    async def test_random_movement_migration_keeps_existing_npcs_opted_out(self):
+        async with self.engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE rpg_npcs DROP COLUMN random_movement"))
+        with patch.object(database, "engine", self.engine):
+            await database._run_migrations()
+            await database._run_migrations()
+        async with self.sessions() as db:
+            npc = await db.get(RpgNpc, self.npc.id)
+            self.assertFalse(npc.random_movement)
 
     async def test_turning_it_off_is_not_swallowed_by_exclude_none(self):
         # 路由是 `model_dump(exclude_none=True)`。False 不是 None，所以关得掉——

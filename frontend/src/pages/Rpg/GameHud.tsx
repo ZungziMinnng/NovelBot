@@ -108,7 +108,7 @@ export default function GameHud({
         <Flag className="w-3.5 h-3.5" />{outcome.title}
       </div>
       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        {[...outcome.facts, ...outcome.changes].map((fact, index) => (
+        {[...outcome.facts, ...outcome.changes.map(change => `状态变化：${change}`)].map((fact, index) => (
           <span key={`${fact}-${index}`}>{fact}</span>
         ))}
       </div>
@@ -117,12 +117,12 @@ export default function GameHud({
 
   if (column) {
     return (
-      <div className="rpg-side relative flex flex-col h-full min-h-0 border-l border-border/60">
-        <div className="flex-1 overflow-y-auto p-3 space-y-3">
-          <div className="flex flex-col items-start gap-2 text-xs">{chips}</div>
-          <div className="space-y-2.5">{stats}</div>
-          {report}
-        </div>
+      // 这一列现在是三块叠着（数值 / 立绘 / 用量），滚动和左边框都归外面那个
+      // aside 管，自己只管排内容，不然三块各滚各的
+      <div className="rpg-side p-3 space-y-3">
+        <div className="flex flex-col items-start gap-2 text-xs">{chips}</div>
+        <div className="space-y-2.5">{stats}</div>
+        {report}
       </div>
     )
   }

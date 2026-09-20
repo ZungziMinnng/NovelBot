@@ -38,7 +38,11 @@ def _best_snippet(content: str, query: str) -> str:
 
 
 def event_memory(history, audience: set[int], query: str, budget: int = 1100,
-                 window_ids: set[int] | None = None) -> str:
+                 window_ids: set[int] | None = None,
+                 out_participants: set[int] | None = None) -> str:
+    # out_participants：传一个 set 进来，函数把**入选**往事牵涉到的 NPC id 塞进去。
+    # 这是第二跳的数据出口——「提到往事 → 往事里的人也加载」靠调用方拿这份 id 补卡。
+    # 用出参而非改返回：十几处调用把返回值直接当字符串用，改签名会连坐全破
     recall = bool(re.search(r"记得|还记|当时|那次|以前|曾经|承诺|答应|为什么|如何认识", query))
     terms = set(re.findall(r"[\w\u4e00-\u9fff]{2,}", query.lower()))
     terms.update(query[index:index + 2] for index in range(len(query) - 1)
@@ -121,6 +125,10 @@ def event_memory(history, audience: set[int], query: str, budget: int = 1100,
                 f"- 回合消息 #{cand['message_id']}（原文摘录）：「{_best_snippet(cand['text'], query)}」"
             )
             continue
+        if out_participants is not None:
+            out_participants.update(
+                p for p in (fact.get("participants") or []) if isinstance(p, int)
+            )
         scope = "已公开" if fact.get("visibility") == "public" else "仅当时知情者知晓"
         line = f"- 回合消息 #{cand['message_id']}（{scope}）：{fact.get('summary') or cand['key']}"
         if recall or cand["surface"] > 0 or cand["key"] in bm25_keys:

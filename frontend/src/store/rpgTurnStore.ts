@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type {
-  RpgMessage, RpgRoll, RpgSettlement, RpgTaskProposal, RpgTurnMeta,
+  RpgMessage, RpgRoll, RpgSettlement, RpgSuggestion, RpgTaskProposal, RpgTurnMeta,
 } from '@/api/client'
 
 /** 界面上的一条消息。id 为 null 表示流式过程中还没落库的占位气泡 */
@@ -18,12 +18,14 @@ export interface RpgBubble {
    *  会混着几个地方的戏，不标就分不清哪句是在哪儿说的 */
   location: string
   settlement?: RpgSettlement | null
+  turn_request?: RpgMessage['turn_request']
 }
 
 export const toBubble = (m: RpgMessage): RpgBubble => ({
   id: m.id, role: m.role, content: m.content, roll: m.roll, fresh: false,
   present: m.present ?? null, location: m.location || '',
   settlement: m.settlement,
+  turn_request: m.turn_request,
 })
 
 /**
@@ -46,7 +48,10 @@ export interface RpgTurn {
    *  「正在做什么」，见 agents/rpg_turn.py 里的 stage 事件 */
   stage: string
   meta: RpgTurnMeta | null
-  tips: string[]
+  tips: RpgSuggestion[]
+  /** 「帮我想想」正在等模型。**住在这里而不是组件里**：SimHome 也有那个按钮，
+   *  放组件里的话在两套界面之间切一下转圈就丢了，按钮看着像没按过 */
+  suggesting: boolean
   /** 上一轮为什么没成。原先只有一个 toast + 气泡里一行 [错误]：toast 三秒就没了，
    *  那行字又常缩在屏幕上方，失败之后界面看着和「还没发出去」一模一样 */
   lastError: string | null
@@ -73,7 +78,7 @@ export interface RunningTurn {
 // 空值都共用同一份，别每次 new：useSyncExternalStore 靠引用相等判断要不要重渲染，
 // 每次给新数组就是每渲染一次都重渲一次
 const EMPTY_BUBBLES: RpgBubble[] = []
-const EMPTY_TIPS: string[] = []
+const EMPTY_TIPS: RpgSuggestion[] = []
 const EMPTY_TASKS: RpgTaskProposal[] = []
 
 const BLANK: RpgTurn = {
@@ -83,6 +88,7 @@ const BLANK: RpgTurn = {
   stage: '',
   meta: null,
   tips: EMPTY_TIPS,
+  suggesting: false,
   lastError: null,
   taskAsk: EMPTY_TASKS,
   controller: null,
@@ -162,7 +168,11 @@ export const useRpgTurnStore = create<RpgTurnState>()((set, get) => ({
   start: (sessionId, title, path) => {
     flushTokens()
     set(state => ({
-      turns: { ...state.turns, [sessionId]: { ...BLANK, streaming: true, waiting: true } },
+      turns: { ...state.turns, [sessionId]: {
+        ...BLANK, bubbles: state.turns[sessionId]?.bubbles ?? EMPTY_BUBBLES,
+        taskAsk: state.turns[sessionId]?.taskAsk ?? EMPTY_TASKS,
+        streaming: true, waiting: true,
+      } },
       // 同一局重复开就换掉那一条，不要叠两个药丸
       running: [
         ...state.running.filter(r => r.sessionId !== sessionId),
@@ -245,6 +255,7 @@ export function rpgTurnActions(sessionId: number) {
     setStage: put('stage'),
     setMeta: put('meta'),
     setTips: put('tips'),
+    setSuggesting: put('suggesting'),
     setLastError: put('lastError'),
     setTaskAsk: put('taskAsk'),
     appendToken: (text: string) => useRpgTurnStore.getState().appendToken(sessionId, text),

@@ -19,13 +19,22 @@ from app.services.rpg_dice import OUTCOME_LABELS
 from app.services.rpg_memory import invalidate_summaries, text_revision
 from app.services.rpg_prompts import render
 from app.services.rpg_state import apply_flags, apply_state_delta, check_condition, check_full, check_zero, def_map, mark_met, match_npc, norm_name, open_task_names, push_chronicle
+from app.services.rpg_suggestions import SuggestSources, clean_suggestions
 
 logger = logging.getLogger(__name__)
 
 
 STATE_FIELDS = (
     "stats", "inventory", "flags", "location", "npc_states", "npc_notes",
+    # 这一局被改写掉的外貌。和 npc_notes 同进同出：两者都是模型从正文里读出来、
+    # 写进会话语境、下一轮原样注入那个人的卡的东西，回滚时漏一个就留下一处
+    # 改不回来的身体
+    "npc_appearance",
     "npc_places", "place_notes", "status", "visited", "chronicle",
+    # 只追加的两条长期记忆（见 models.RpgSession.npc_history / npc_milestones）。
+    # **必须进这张表**：capture() 出来的这一份是异常回滚和存档快照唯一的来源，
+    # 漏在外面的话写进去的经历回滚不掉，而且不报错
+    "npc_history", "npc_milestones",
     # flag 的立起日期。必须跟 flags 同进同出：这一列是引擎在 apply_flags 里记的，
     # 而 AI 结算走的是 working 副本，不在这张表里就写不回会话——模型立起来的
     # flag 于是永远没有日期，「某事之后 N 天」判不过。
@@ -36,7 +45,8 @@ DOMAINS = {
     "scene": ("location", "npc_places", "place_notes"),
     "stats": ("stats",),
     "inventory": ("inventory",),
-    "characters": ("relations", "npc_notes"),
+    # 经历和里程碑挂在人物这一域：写它们的是同一段正文、同一次判定
+    "characters": ("relations", "npc_notes", "npc_appearance", "npc_history", "npc_milestones"),
     "flags": ("flags",),
     "memory": ("events", "chronicle"),
 }
@@ -46,11 +56,28 @@ DOMAIN_FIELDS = {
     "stats": ("stats", "status"), "inventory": ("inventory",),
     # flag_days 跟着 flags 一起回滚：处境这一域被判为需要人工核对时，
     # 只退 flags 会留下一个指向不存在 flag 的日期
-    "characters": ("npc_states", "npc_notes"), "flags": ("flags", "flag_days"),
+    # 经历和里程碑跟着人物域一起回滚：这一域被判为需要人工核对时它们一起退，
+    # 否则「人物这一块要人工核对」而流水里已经多了一条谁也删不掉的经历
+    "characters": ("npc_states", "npc_notes", "npc_appearance", "npc_history", "npc_milestones"),
+    "flags": ("flags", "flag_days"),
     "memory": ("chronicle",),
 }
-PUBLIC_KEYS = ("status", "revision", "attempts", "domains", "changes", "warnings", "facts", "applied", "proposed", "retryable")
+PUBLIC_KEYS = ("status", "revision", "attempts", "domains", "changes", "warnings", "facts", "engine_facts", "applied", "proposed", "retryable")
 EVENT_KINDS = {"state", "move", "gain", "loss", "transfer", "injury", "recovery", "relationship", "promise", "rescue", "death", "public"}
+# 只追加、从不覆盖的两个键。单列出来是因为它们**不算「状态变化」**：
+# 记一句「她今天经历了什么」不该被要求同时配一条 events（见 inspect_proposal
+# 里那道取证门禁为什么跳过它们）。代价是它们自带一道更严的闸门——文本必须能
+# 在正文里找到原话（见 _grounded）
+APPEND_ONLY_KEYS = ("npc_history", "npc_milestones")
+
+# 关系里程碑的七种类型，逐字沿用小说侧 Memory(memory_type=
+# "relationship_milestone") 那一套：两个模式里的关系转折是同一批事，
+# 类型名各写一套只会让「动心」和「心动」分家
+_MILESTONE_TYPES = ("初见", "动心", "表白", "决裂", "和解", "身份揭露", "其他")
+# 每回合最多几条。小说侧是每章 3 条（_MAX_MILESTONES_PER_CHAPTER），而游戏侧
+# 一回合比一章细得多——一章的量里有七八个回合，还按 3 条算的话一局下来会糊成
+# 一片，那正是里程碑要避免的
+_MAX_MILESTONES_PER_TURN = 2
 CONTRACT = """
 === 结算核对协议（必须遵守） ===
 读取本回合完整正文，区分真实发生、计划、否定、转述和假设。已有状态不是本轮新变化。
@@ -69,6 +96,8 @@ domains 标出事件应改变的项目；交给 NPC 的物品必须同时核对�
 participants 和 witnesses 填下面角色表中的数字 id。提到一个人的名字不代表他在场或知情。
 visibility 默认 witnessed；只有正文明确写出已经传播/公告的事件可填 public。私聊事件不能公开。
 relations/npc_notes/npc_places 的角色键优先写 npc:数字id，地名使用完整登记名称。
+同场 NPC 改到别处（包括清空位置恢复作息）必须有该 NPC 实际离场的 move 事件，participants 包含该 NPC 的 id，quote 引用其离场过程。玩家的移动事件不能作为 NPC 离场的依据。
+人物坐在房间、站在门边等场景描写不是移动。主角地点由引擎锁定时，不得仅因正文换用了偏殿、后院等地名，就把仍与主角交谈的 NPC 单独移走。
 已有的伤势痊愈、物品给出、目标结束时，相关近况或处境写 null 删除，不能留下过期事实。
 引擎已结算的移动、数值、物品和关系效果不可再次应用。
 建议行动、摘要和传闻不能代替状态更新。不要把历史回忆当作本回合新变化。
@@ -393,6 +422,99 @@ def _gain_hint(name, narration) -> str:
     return ""
 
 
+def _grounded(entry: dict, narration: str) -> bool:
+    """这一条经历 / 里程碑在正文里有没有依据。
+
+    先认模型另给的 quote（正文原话，同 discoveries 的 hint、task_updates 的
+    reason）：经历那一句是**概括**——「她把伞留在了门口」在正文里逐字找不到，
+    拿它去查会把每一条都误杀。没给 quote 才退回查 content 本身，那时只认正文
+    里真出现过的字。
+
+    两条路都走不通就判假：宁可少记一条，也不能记一条没发生过的事——
+    里程碑会常驻注入，一条编出来的「表白」会一直杵在上下文里骗后面每一轮。
+    """
+    quote = str(entry.get("quote") or "").strip()[:200]
+    if quote and _quote_in_narration(quote, narration):
+        return True
+    content = str(entry.get("content") or "").strip()
+    return bool(content) and _mentioned_text(content, narration)
+
+
+def _long_term_text(value, narration) -> str:
+    """把一条经历归一成一句能落库的话。空串 = 这一条不要。
+
+    收两种写法：一句人话，或 {"content": ..., "quote": ...}——模板里教的是后者，
+    但模型给前者时不该整条丢掉，只要站得住就行。给了多条时只取头一条：每回合
+    每人最多一条（游戏侧一回合比小说一章细得多，见 models.npc_history）。
+
+    quote 只用来验真、**不落库**：落库的是那句概括，而「这概括是从这句原文来的」
+    只在这一刻有意义，存下来下一轮也没人会再去比对。
+    """
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    entry = value if isinstance(value, dict) else {"content": value}
+    content = " ".join(str(entry.get("content") or "").split())[:200]
+    if not content or not _grounded(entry, narration):
+        return ""
+    return content
+
+
+def _filter_milestones(raw, narration, npcs, allowed) -> tuple[list[dict], list[str]]:
+    """从结算 JSON 的 npc_milestones 里挑出这一轮真发生了的关系转折。
+    返回 (留下的, 要往外报的原因)。
+
+    三道关，全照 filter_discoveries / filter_task_updates 的路子——模型报什么
+    一律本地复核：
+      1. type 必须在那七个里。自造的静默丢掉，同 task_updates 丢掉 done/failed
+         之外的 action
+      2. a / b 两侧都得站得住。对不上名册的那一侧只认「你 / 玩家 / 我」（模板里
+         教的就是这么写），对得上的必须**这一轮真的参与了**（allowed）——
+         把两个不相干的人焊在一起不是转折，是幻觉
+      3. content 必须能在正文里找到依据。**这一条要往外报**：它会常驻注入，
+         静默丢掉的话「模型压根没写」和「写了但站不住」在外面看起来一模一样
+    """
+    if not isinstance(raw, list):
+        return [], []
+    kept: list[dict] = []
+    dropped: list[str] = []
+    for entry in raw:
+        if len(kept) >= _MAX_MILESTONES_PER_TURN:
+            break
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("type") or "").strip()
+        if kind not in _MILESTONE_TYPES:
+            continue
+        a = str(entry.get("a") or "").strip()[:50]
+        b = str(entry.get("b") or "").strip()[:50]
+        if not a or not b:
+            continue
+        sides = [_npc_ref(name, npcs) for name in (a, b)]
+        # 认出来的那几个必须参与了本轮；没认出来的那一侧只能是玩家自己
+        if any(npc is not None and npc.id not in allowed for npc in sides):
+            continue
+        if not any(sides):
+            continue
+        if any(npc is None for npc in sides) and not ({a, b} & {"你", "玩家", "我"}):
+            continue
+        content = " ".join(str(entry.get("content") or "").split())[:200]
+        if not content:
+            continue
+        if not _grounded(entry, narration):
+            dropped.append(f"关系里程碑「{kind} {a}↔{b}」在正文里找不到依据，已丢弃")
+            continue
+        # 认出来的那一侧存**名册上的名字**，不存模型当时的写法。模型这一轮叫
+        # 「赫敏姑娘」下一轮叫「赫敏」，原样存下来注入时是两个人，档案页也
+        # 按名字挑不出「跟她有关的那几条」
+        kept.append({
+            "type": kind,
+            "a": sides[0].name if sides[0] else a,
+            "b": sides[1].name if sides[1] else b,
+            "content": content,
+        })
+    return kept, dropped
+
+
 def seed_settlement(sess, user_id, engine_before, engine_note, fixed_location, mode, private_with, present) -> dict:
     return {
         "status": "pending", "baseline": capture(sess), "engine_before": engine_before,
@@ -402,7 +524,37 @@ def seed_settlement(sess, user_id, engine_before, engine_note, fixed_location, m
     }
 
 
-def state_changes(before: dict, after: dict) -> tuple[dict, list[str]]:
+def _npc_state_deltas(before: dict, after: dict, npc_names: dict | None) -> list[str]:
+    """逐项列出这一轮变了几点关系数值。
+
+    npc_names 是 {npc id 的字符串形式: 名字}。查不到名字的那个人整条跳过——
+    这一行是拿给玩家看的，`npc:7 好感 +3` 不如不写；跳过之后那一笔会落回
+    下面那句笼统标签。
+    """
+    if not npc_names:
+        return []
+    old = before.get("npc_states") or {}
+    new = after.get("npc_states") or {}
+    lines = []
+    for identity in sorted(set(old) | set(new)):
+        who = npc_names.get(str(identity))
+        if not who:
+            continue
+        previous, current = old.get(identity), new.get(identity)
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            continue
+        for stat in sorted(set(previous) | set(current)):
+            a, b = previous.get(stat), current.get(stat)
+            # met 是 bool，而 isinstance(True, int) 为真——不显式挡一道，
+            # 这条相识标记会报成「+1」
+            if isinstance(a, bool) or isinstance(b, bool):
+                continue
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)) and a != b:
+                lines.append(f"{who}的{stat} {b - a:+g}")
+    return lines
+
+
+def state_changes(before: dict, after: dict, npc_names: dict | None = None) -> tuple[dict, list[str]]:
     applied = {field: {"before": before.get(field), "after": after.get(field)}
                for field in STATE_FIELDS if before.get(field) != after.get(field)}
     lines = []
@@ -419,10 +571,18 @@ def state_changes(before: dict, after: dict) -> tuple[dict, list[str]]:
         amount = new_bag.get(name, 0) - old_bag.get(name, 0)
         if amount:
             lines.append(f"{name} {amount:+g}")
-    for field, label in (("npc_notes", "人物近况已更新"), ("npc_states", "人物关系或相识记录已更新"),
+    listed = _npc_state_deltas(before, after, npc_names)
+    for field, label in (("npc_notes", "人物近况已更新"), ("npc_appearance", "人物外貌已改写"),
+                         ("npc_states", "人物关系或相识记录已更新"),
                          ("npc_places", "人物位置已更新"), ("place_notes", "地点近况已更新"), ("flags", "处境已更新")):
-        if field in applied:
-            lines.append(label)
+        if field not in applied:
+            continue
+        if field == "npc_states":
+            # 逐项列过了就不再打一遍笼统标签，否则同一笔关系报两遍。
+            # 一行都没列出来（比如只有 met 变了）才落回它
+            lines.extend(listed or [label])
+            continue
+        lines.append(label)
     # 归零的后果（check_zero 会把 status 置成 dead）从前只在黄色警告里挂一句，
     # 而 changes 这一行才是玩家真正会看的——一局结束了不该藏在警告里
     if "status" in applied and after.get("status") != "alive":
@@ -532,13 +692,15 @@ def _suspected_events(narration, places, player_name, npcs):
         if not sentence or re.search(r"[“”「」『』\"]|如果|打算|准备|想要|听说|曾经|当年|没有|并未|还没|别去|不要", sentence):
             continue
         subject = rf"(?:你|{re.escape(player_name or '玩家')})"
-        if re.search(subject + r"(?:终于|已经|径直|便|就|缓缓|悄悄|顺利|也|们|都|一行人)*.{0,12}(?:来到|抵达|到达|走进|进入|前往|奔向|赶往|返回|回到)", sentence):
-            targets = [place.name for place in places if place.name and _mentioned_text(place.name, sentence)]
-            if targets:
-                suspects.append(("scene", sentence, max(targets, key=len)))
-        # 只加确实指向「东西易手」的词。这一条命中之后是**硬**问题（见下面
-        # 「疑似漏记关键事件」和「关键事件缺少原文记录」），所以宁可漏抓也别错抓：
-        # 「她递给你一个眼神」这种要是算进来，一整轮闲聊都会被打回
+        for clause in re.split(r"[，,；;]", sentence):
+            if re.match(subject + r"(?:终于|已经|径直|便|就|缓缓|悄悄|顺利|也|们|都|一行人)*.{0,12}(?:来到|抵达|到达|走进|进入|前往|奔向|赶往|返回|回到)", clause.strip()):
+                targets = [place.name for place in places if place.name and _mentioned_text(place.name, clause)]
+                if targets:
+                    suspects.append(("scene", sentence, max(targets, key=len)))
+        # 只加确实指向「东西易手」的词。命中之后是**软**提示（见 inspect_proposal
+        # 里「疑似漏记关键事件」那两条），但提示会原样挂在报告上给玩家看，
+        # 所以还是宁可漏抓也别错抓：「她递给你一个眼神」这种要是算进来，
+        # 每一轮闲聊的提醒里都会挂一条假警报
         if re.search(subject + r".{0,24}(?:获得|拿到|收下|接过|收起|揣进|捡起|取出|装入|买到|借到|归还|失去|用掉|吃掉|服下|丢弃|遗失|被夺|交给|递给|送给|交还)", sentence):
             suspects.append(("inventory", sentence, None))
         if re.search(r"受伤|中刀|伤口愈合|伤势痊愈|伤好了", sentence):
@@ -605,7 +767,9 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
         for key in keys:
             if key not in data:
                 continue
-            expected = list if key in {"inventory", "events", "chronicle"} else str if key == "location" else dict
+            # npc_milestones 是跨两个人的一张表、不挂在谁名下，形状同 inventory；
+            # 别的键（含 npc_history）都是「按角色名写的一张字典」
+            expected = list if key in {"inventory", "events", "chronicle", "npc_milestones"} else str if key == "location" else dict
             if not isinstance(data[key], expected):
                 issues[domain].append(f"{key} 格式错误")
     events, errors = _evidence_events(data, narration, npcs, report)
@@ -622,7 +786,10 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
     if data.get("chronicle") and not any(event["visibility"] == "public" for event in events):
         issues["memory"].append("公共大事记缺少正文中的传播或公告依据")
     for domain, keys in DOMAINS.items():
-        if domain == "memory" or not any(data.get(key) for key in keys):
+        # 经历和里程碑不参与这道门禁：它们自己带原话校验（_grounded），
+        # 不需要再配一条 event。否则模型想记一句「她今天终于肯抬头看你」，
+        # 就得顺手编一个事件出来交差——那正是这道闸门要防的事
+        if domain == "memory" or not any(data.get(key) for key in keys if key not in APPEND_ONLY_KEYS):
             continue
         if domain == "scene" and report.get("fixed_location") is not None and not any(data.get(key) for key in ("npc_places", "place_notes")):
             continue
@@ -636,13 +803,14 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
             (soft if only_location else issues)[domain].append("状态变化缺少关联的原文依据")
     for event in events:
         for domain in event["domains"]:
-            if domain != "memory" and not any(data.get(key) for key in DOMAINS[domain]):
+            if domain != "memory" and not any(data.get(key) for key in DOMAINS[domain]
+                                              if key not in APPEND_ONLY_KEYS):
                 if domain == "scene" and report.get("fixed_location") is not None:
                     continue
                 issues[domain].append(f"事件尚未回填：{event['quote'][:60]}")
         if event["kind"] == "transfer":
             for domain in ("inventory", "characters"):
-                if not any(data.get(key) for key in DOMAINS[domain]):
+                if not any(data.get(key) for key in DOMAINS[domain] if key not in APPEND_ONLY_KEYS):
                     issues[domain].append(f"物品交接尚未同时核对背包和人物持有情况：{event['quote'][:60]}")
             item, quantity = event.get("item"), event.get("qty")
             source, target = event.get("from"), event.get("to")
@@ -688,13 +856,19 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
         if domain == "scene" and destination == last_destination and data.get("location") != destination:
             issues["scene"].append(f"正文已抵达「{destination}」，结算地点尚未对应")
         if not any(data.get(key) for key in DOMAINS[domain]):
-            issues[domain].append(f"疑似漏记关键事件：{quote[:80]}")
+            # 只挂提醒、不压 status：判据是**本地正则猜的**，不是模型自己报的。
+            # 一句「你接过了话头」就够命中上面那张易手词表，而把一个域打回去
+            # 的代价和「疑似」两个字的把握完全不相称
+            soft[domain].append(f"疑似漏记关键事件：{quote[:80]}")
         if domain == "inventory" and re.search(r"交给|递给|送给", quote) and any(npc.name and npc.name in quote for npc in npcs):
             if not any(event["kind"] == "transfer" and (event["quote"] in quote or quote in event["quote"]) for event in events):
                 issues["inventory"].append("物品交接需要同时核对背包与接收人的持有状态")
                 issues["characters"].append("物品交接需要同时核对背包与接收人的持有状态")
         if not any(event["quote"] in quote or quote in event["quote"] for event in events):
-            issues["memory"].append(f"关键事件缺少原文记录：{quote[:80]}")
+            # 同上。挂在 memory 上还是全套里**最贵的那一档**：apply_proposal 末尾
+            # 那句 `if reports["memory"]["status"] == "needs_review": facts = []`
+            # 会把这一轮已经逐字取证过的事实整份清掉，大事记也跟着不写
+            soft["memory"].append(f"关键事件缺少原文记录：{quote[:80]}")
     if _costless_failure(data, report):
         # 判成硬问题（而不是 soft）就是为了走 repair 那一轮——那是这一整条
         # 门禁的正身，兜底的 flag 只是 repair 也不肯给时的下限。
@@ -714,11 +888,13 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
 def _block_engine_duplicates(delta, report):
     before = report.get("engine_before") or {}
     after = report["baseline"]
+    claimed = set((report.get("engine_effects") or {}).get("stats") or [])
     for field in ("stats",):
         changes = delta.get(field)
         if isinstance(changes, dict):
             delta[field] = {key: value for key, value in changes.items()
-                            if (before.get(field) or {}).get(key) == (after.get(field) or {}).get(key)}
+                            if str(key).strip() not in claimed
+                            and (before.get(field) or {}).get(key) == (after.get(field) or {}).get(key)}
     old_bag = {item.get("name"): item.get("qty") for item in before.get("inventory") or [] if isinstance(item, dict)}
     new_bag = {item.get("name"): item.get("qty") for item in after.get("inventory") or [] if isinstance(item, dict)}
     if isinstance(delta.get("inventory"), list):
@@ -738,6 +914,24 @@ def _event_groups(events):
     一起回滚回去。爆炸半径和「一致性」没关系，纯粹是事件恰好挨着。
     """
     return [{"inventory", "characters"}] if any(event["kind"] == "transfer" for event in events) else []
+
+
+def _scene_protection_overlaps(report, delta, mapped):
+    proposals = {
+        "location": delta.get("location"),
+        "visited": delta.get("location"),
+        "npc_places": mapped.get("npc_places"),
+        "place_notes": delta.get("place_notes"),
+    }
+    for path in report.get("protected_paths", []):
+        if not path:
+            continue
+        proposed = proposals.get(path[0])
+        if not proposed:
+            continue
+        if len(path) == 1 or not isinstance(proposed, dict) or path[1] in proposed:
+            return True
+    return False
 
 
 def apply_proposal(module, working, data, npcs, places, report, issues, soft, events,
@@ -772,6 +966,11 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
     allowed = original | named
     if report.get("mode") == "private":
         allowed = original
+    # 判定失败又没人付账的那一轮，经历和里程碑都不记。理由同 _costless_failure
+    # 上面那段注释：「她皱了下眉」是文字，不是状态变化。把它记成一条经历等于
+    # 每失手一次就在长期记忆里划一道痕，而那一轮其实什么都没发生；里程碑更重——
+    # 它常驻注入，等于把一次没成的事永久钉进两个人的关系史
+    quiet = _costless_failure(data, report)
     mapped = {}
     amounts = delta.get("stats")
     if isinstance(amounts, dict):
@@ -792,7 +991,9 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
     flags = delta.get("flags")
     if isinstance(flags, dict) and any(isinstance(value, (dict, list)) for value in flags.values()):
         issues["flags"].append("处境必须使用扁平字段，不能包含对象或数组")
-    for key, domain in (("relations", "characters"), ("npc_notes", "characters"), ("npc_places", "scene")):
+    for key, domain in (("relations", "characters"), ("npc_notes", "characters"),
+                        ("npc_appearance", "characters"),
+                        ("npc_history", "characters"), ("npc_places", "scene")):
         changes = delta.get(key)
         mapped[key] = {}
         if not isinstance(changes, dict):
@@ -811,11 +1012,29 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                     issues[domain].append(f"人物「{npc.name}」的目的地未登记")
                     continue
                 value = canonical
-            if key in {"relations", "npc_notes"} and value is not None and not isinstance(value, dict):
+                fixed = report.get("fixed_location")
+                if fixed:
+                    current_place = npc_place(npc, working.slot, working.npc_places,
+                                              working.npc_followers, working.location)
+                    proposed_places = dict(working.npc_places or {})
+                    if value:
+                        proposed_places[str(npc.id)] = value
+                    else:
+                        proposed_places.pop(str(npc.id), None)
+                    next_place = npc_place(npc, working.slot, proposed_places,
+                                           working.npc_followers, working.location)
+                    departure = any(event["kind"] == "move" and npc.id in event["participants"]
+                                    for event in events)
+                    if (norm_name(current_place) == norm_name(fixed)
+                            and norm_name(next_place) != norm_name(fixed) and not departure):
+                        issues[domain].append(f"「{npc.name}」仍与玩家同场，缺少该角色实际离场的原文依据，未将其移到别处")
+                        continue
+            if key in {"relations", "npc_notes", "npc_appearance"} and value is not None and not isinstance(value, dict):
                 issues[domain].append(f"人物「{npc.name}」的变化格式错误")
                 continue
-            if key == "npc_notes" and isinstance(value, dict) and any(entry is not None and not isinstance(entry, str) for entry in value.values()):
-                issues[domain].append(f"人物「{npc.name}」的近况必须是文字或 null")
+            if key in {"npc_notes", "npc_appearance"} and isinstance(value, dict) and any(entry is not None and not isinstance(entry, str) for entry in value.values()):
+                label = "近况" if key == "npc_notes" else "外貌变化"
+                issues[domain].append(f"人物「{npc.name}」的{label}必须是文字或 null")
                 continue
             if key == "npc_notes":
                 existing = (working.npc_notes or {}).get(str(npc.id)) or {}
@@ -824,15 +1043,39 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                 if conflict:
                     issues[domain].append(f"{npc.name}：{conflict['reason']}")
                     continue
+            if key == "npc_history":
+                # 一句话，只追加不覆盖（见 models.RpgSession.npc_history）。
+                # 写了东西却找不到正文依据的**整条丢并记一笔**：静默丢弃的话，
+                # 「模型压根没写」和「写了但站不住」在外面长得一模一样，
+                # 没法判断该调模板还是调这里
+                line = "" if quiet else _long_term_text(value, report["narration"])
+                if not line:
+                    if not quiet and value:
+                        issues[domain].append(
+                            f"「{npc.name}」这一轮的经历在正文里找不到依据，已丢弃"
+                            "（quote 必须逐字摘自正文）")
+                    continue
+                value = line
             if key == "relations":
                 if not isinstance(value, dict) or any(isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) for amount in value.values()):
                     issues[domain].append(f"人物「{npc.name}」的关系增减量不是有效数字")
                     continue
                 engine_before = (report.get("engine_before") or {}).get("npc_states") or {}
                 engine_after = report["baseline"].get("npc_states") or {}
+                claimed = set(((report.get("engine_effects") or {}).get("relations") or {}).get(str(npc.id)) or [])
                 value = {stat: amount for stat, amount in value.items()
-                         if (engine_before.get(str(npc.id)) or {}).get(stat) == (engine_after.get(str(npc.id)) or {}).get(stat)}
+                         if str(stat).strip() not in claimed
+                         and (engine_before.get(str(npc.id)) or {}).get(stat) == (engine_after.get(str(npc.id)) or {}).get(stat)}
             mapped[key][str(npc.id)] = value
+    # 里程碑跨两个人、不挂在谁名下，所以不塞进上面那圈按 npc_ref 归一的循环。
+    # mapped 里仍要占个空位：下面 portion 靠 `key not in mapped` 把它挡在
+    # apply_state_delta 之外——那一层认的是会被覆盖的状态，不认只追加的流水
+    mapped["npc_milestones"] = {}
+    milestones, milestone_drops = ([], []) if quiet else _filter_milestones(
+        delta.get("npc_milestones"), report["narration"], available, allowed,
+    )
+    for reason in milestone_drops:
+        issues["characters"].append(reason)
     # 地名没登记时只扣下 location 这一个字段，不整域打回。挂在这里而不是
     # issues["scene"]：issues 会让整个 scene 域判为 needs_review，连同一轮里
     # 「谁走到哪了」「门被踹坏了」一起赔掉——那两件事和这个地名没有任何关系。
@@ -873,11 +1116,13 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
             continue
         if not protected_fields.intersection(DOMAIN_FIELDS[domain]):
             continue
+        if domain == "scene" and not _scene_protection_overlaps(report, delta, mapped):
+            continue
         for field in DOMAIN_FIELDS[domain]:
             value = copy.deepcopy(report["live_state"][field])
             setattr(working, field, value)
             report["working_before"][field] = copy.deepcopy(value)
-        issues[domain].append("这一项包含人工修改，已保留当前值，需要人工核对")
+        issues[domain].append("这一项在本回合后发生变化，已保留当前值，需要核对")
     for related in groups:
         if any(issues[domain] for domain in related):
             for domain in related:
@@ -904,8 +1149,28 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                 for key in keys:
                     for identity, value in mapped.get(key, {}).items():
                         npc = next(npc for npc in available if npc.id == int(identity))
+                        if key == "npc_history":
+                            # 不走 apply_state_delta：那一层认的是数值 / 近况 /
+                            # 位置这些**会被覆盖**的东西，而经历是只追加的流水。
+                            # 时间戳由引擎盖，不信模型自己填的 day/slot——
+                            # 它连「现在几点」都不一定看得对
+                            stored = list((working.npc_history or {}).get(str(npc.id)) or [])
+                            stored.append({"day": max(1, int(getattr(working, "day", 1) or 1)),
+                                           "slot": str(getattr(working, "slot", "") or ""),
+                                           "content": value})
+                            working.npc_history = {**(working.npc_history or {}), str(npc.id): stored}
+                            continue
                         warnings.extend(apply_state_delta(module, working, {key: {npc.name: value}}, [npc],
                                                           note_npcs=[npc], move_npcs=[npc], places=list(known_places), finalize=False))
+                # 里程碑同样只追加，但它不挂在某个人名下，所以走不了上面那套
+                # mapped。只在人物这一域做一次：别的域轮到这里时它是空的
+                if domain == "characters" and milestones:
+                    working.npc_milestones = [
+                        *(working.npc_milestones or []),
+                        *({"day": max(1, int(getattr(working, "day", 1) or 1)),
+                           "slot": str(getattr(working, "slot", "") or ""),
+                           **entry} for entry in milestones),
+                    ]
         except Exception as error:
             for field, value in before.items():
                 setattr(working, field, value)
@@ -938,10 +1203,13 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
 
 def _working(sess, state):
     # tasks 跟 day/slot 一样是"带过来给模板看的"，不在 STATE_FIELDS 里，
-    # 也就不会被结算结果覆写回去——任务状态只认玩家点头
+    # 也就不会被结算结果覆写回去——任务状态只认玩家点头。
+    # npc_followers 同理：它只在 npc_place 里定「跟着你的人此刻在哪儿」，
+    # 结算一个字都不该写它（改它是引擎那侧的事），漏了它提示词就直接炸
     return SimpleNamespace(**copy.deepcopy(state), day=sess.day, slot=sess.slot,
                            time_slots=sess.time_slots, turn_count=sess.turn_count,
-                           tasks=copy.deepcopy(sess.tasks or []))
+                           tasks=copy.deepcopy(sess.tasks or []),
+                           npc_followers=sess.npc_followers or [])
 
 
 def _open_tasks(sess) -> list[dict]:
@@ -956,6 +1224,17 @@ def _open_tasks(sess) -> list[dict]:
             continue
         rows.append({"name": name, "goal": str(task.get("goal") or task.get("desc") or "")[:120]})
     return rows[:10]
+
+
+def _with_cap(specs: dict, name: str, value):
+    """数值带上分母：有上限的写成 "20/100"，没上限的保持原数字。
+
+    只给当前值的话，模型无从判断「她已经 90 了」还是「刚认识」，只能闭着眼给
+    增量，于是好感一路顶到上限。分母只认定义里真写了的 max——钱、声望没有，
+    拼成 "/None" 只会让模型以为有一道看不见的天花板。
+    """
+    top = (specs.get(name) or {}).get("max")
+    return f"{value}/{top}" if top is not None else value
 
 
 def _prompt(module, sess, npcs, places, narration, label, report, place_block):
@@ -975,7 +1254,8 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
         # 「失败要留代价」说在前面，比等它交了空 delta 再打回去便宜一整轮调用
         "rpg_settle.jinja2", narration=narration, outcome_label=label,
         outcome_failed=label in FAIL_LABELS,
-        stats=sess.stats or {}, location=sess.location or "",
+        stats={name: _with_cap(stat_specs, name, value)
+               for name, value in (sess.stats or {}).items()}, location=sess.location or "",
         place_note=(sess.place_notes or {}).get(sess.location, ""),
         inventory=sess.inventory or [], flags=sess.flags or {},
         # 关系值要带**当前数字**，不能只给名字：不给的话模型无从判断「她已经
@@ -984,7 +1264,13 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
         npcs=[{
             "id": npc.id, "name": npc.name,
             "notes": (sess.npc_notes or {}).get(str(npc.id), {}),
-            "relations": {name: value for name, value in (states.get(str(npc.id)) or {}).items()
+            # 已经改写过的外貌。不给的话模型看不到自己上一轮写了什么，会把
+            # 「她长出了乳房」这一件事每轮重写一遍——同一条变化在表里只有一份
+            # （同键覆盖），重复写除了浪费 token 没别的后果，但它的 quote 可能是
+            # 上一轮的正文，那一轮不在这次 narration 里，取证会直接挂掉
+            "appearance": (sess.npc_appearance or {}).get(str(npc.id), {}),
+            "relations": {name: _with_cap(relation_specs, name, value)
+                          for name, value in (states.get(str(npc.id)) or {}).items()
                           if name in relation_specs},
         } for npc in participants],
         note_keys=sorted({key for notes in (sess.npc_notes or {}).values() if isinstance(notes, dict) for key in notes}),
@@ -999,7 +1285,13 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
     prompt += place_block(participants, [place.name for place in places], sess)
     prompt += CONTRACT
     prompt += "\n角色表：" + json.dumps([
-        {"id": npc.id, "name": npc.name, "location": npc_place(npc, sess.slot, sess.npc_places)} for npc in participants
+        {
+            "id": npc.id, "name": npc.name,
+            # 跟着你的人，位置就是他此刻站的地方——结算据此判断她有没有「换地方」
+            "location": npc_place(
+                npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+            ),
+        } for npc in participants
     ], ensure_ascii=False)
     prompt += "\n地点表：" + json.dumps([place.name for place in places], ensure_ascii=False)
     candidates = _entity_candidates(narration, world_npcs(npcs), places, sess.inventory or [])
@@ -1105,7 +1397,7 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
     input_tokens = output_tokens = 0
     try:
         prompt = _prompt(module, working, npcs, places, narration, label, report, place_block)
-        model, api_format = llm_client.get_agent_client("memory", module.fast_model_ref)
+        model, api_format = llm_client.get_agent_client("memory", module.settlement_model_ref or module.fast_model_ref)
         data, used_in, used_out = await json_call([{"role": "user", "content": prompt}], model, api_format, max_tokens=4096)
         input_tokens += used_in
         output_tokens += used_out
@@ -1208,7 +1500,7 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
         preserve_edits(after, current, protected)
         warnings = [warning for info in domains.values() for warning in info["warnings"]]
         if protected:
-            warnings.append("已保留此回合后人工修改的状态字段")
+            warnings.append("已保留本回合之后更新的状态字段")
         if repair_warning:
             warnings.append(repair_warning)
         if data.get("outcome_consistent") is False:
@@ -1216,7 +1508,8 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
             # 门禁），所以这句话要说的是「别信这段字，信数值」，而不是从前那句
             # 含糊的「好像没照判定结果写」——玩家读完只会一头雾水
             warnings.append(f"这段剧情没写出「{label}」该有的样子，数值按判定结果记")
-        applied, changes = state_changes(report.get("engine_before") or base, after)
+        applied, changes = state_changes(report.get("engine_before") or base, after,
+                                         npc_names={str(npc.id): npc.name for npc in npcs})
         report.update({
             "status": "partial" if any(info["status"] in {"partial", "needs_review"} for info in domains.values()) else "done",
             "domains": domains, "proposed": data, "applied": applied, "changes": changes,
@@ -1265,8 +1558,24 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
                 invalidate_summaries(fresh)
             fresh_row.settlement = report
             fresh_row.state_delta = {field: value["after"] for field, value in applied.items()}
-            suggestions = data.get("suggestions")
-            fresh_row.suggestions = [value.strip()[:100] for value in suggestions if isinstance(value, str) and value.strip()][:3] if isinstance(suggestions, list) else []
+            # 建议条收口成和主动路同一份形状，白名单/降级都走 rpg_suggestions。
+            # **时序是对的**：上面那圈 setattr 已经把 after 写回 fresh 了，
+            # 所以「用止血草」依的是结算之后的背包，不是结算之前的
+            #
+            # 白名单比提示词宽：模板只教了 free / item（技能栏、地点表、动作表
+            # 根本不在渲染参数里），但这里照样把技能和地点一起递进去。这个不对称
+            # 是故意的——白名单是**为了点击一定能走通**而存在的，模型没被教过就
+            # 不会写；哪天真写了，能被白名单认下来说明那条本来就成立。
+            # 动作的 usable 留空：判据 `_action_gate` 在 rpg_turn 里，
+            # import 它会成环，于是动作建议在这条路上必然降级成自由文本
+            # （见 SuggestSources 的注释：这是安全的那一侧）
+            fresh_row.suggestions = clean_suggestions(
+                data.get("suggestions"),
+                fresh,
+                SuggestSources(
+                    module=module, npcs=npcs, items=items, skills=skills, locations=places,
+                ),
+            )
             fresh_row.aux_input_tokens = (fresh_row.aux_input_tokens or 0) + input_tokens
             fresh_row.aux_output_tokens = (fresh_row.aux_output_tokens or 0) + output_tokens
             await store.commit()

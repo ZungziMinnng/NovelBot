@@ -19,7 +19,8 @@ export default function TaskTab({
   const [showClosed, setShowClosed] = useState(false)
   const all = sess.tasks || []
   const open = all.filter(t => t.status === 'open')
-  const closed = all.filter(t => t.status !== 'open')
+  // 日常任务完成后当天不再占据任务栏；跨天由引擎重新打开。
+  const closed = all.filter(t => t.status !== 'open' && !(t.category === '日常' && t.status === 'done'))
 
   const card = (task: RpgSessionTask, done: boolean) => (
     <div key={task.name} className={`${PANEL} p-3`}>

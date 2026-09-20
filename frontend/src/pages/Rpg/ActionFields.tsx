@@ -11,6 +11,8 @@ export interface ActionDraft {
   effects: Record<string, number>
   relation_effects: Record<string, number>
   needs_target: boolean
+  target_anywhere: boolean
+  summons_target: boolean
   group: string
   cost_slot: boolean
 }
@@ -95,8 +97,54 @@ export default function ActionFields({
           disabled={Object.keys(value.relation_effects).length > 0}
           className="accent-[hsl(var(--primary))] disabled:opacity-50"
         />
-        <span className="text-xs">点之前先选一个在场角色</span>
+        <span className="text-xs">
+          点之前先选一个角色
+          {Object.keys(value.relation_effects).length > 0 && (
+            <span className="text-muted-foreground">（填了关系数值，必须选，改不了）</span>
+          )}
+        </span>
       </label>
+      {/* 下面两条只在「要选对象」时才有意义。不显示而不是置灰：勾不到的框
+          比看不到的框更让人琢磨为什么 */}
+      {value.needs_target && (
+        <>
+          <label className="flex items-start gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={value.target_anywhere}
+              onChange={e => onChange({
+                ...value,
+                target_anywhere: e.target.checked,
+                // 关掉远程就没有召见这回事：召见的前提正是人不在跟前
+                summons_target: e.target.checked ? value.summons_target : false,
+              })}
+              className="accent-[hsl(var(--primary))] mt-0.5"
+            />
+            <span className="text-xs">
+              可以指定不在跟前的人
+              <span className="text-muted-foreground">
+                （手机、传讯这类。点了按钮再挑人，不用先走到她那儿去）
+              </span>
+            </span>
+          </label>
+          {value.target_anywhere && (
+            <label className="flex items-start gap-1.5 cursor-pointer pl-5">
+              <input
+                type="checkbox"
+                checked={value.summons_target}
+                onChange={e => onChange({ ...value, summons_target: e.target.checked })}
+                className="accent-[hsl(var(--primary))] mt-0.5"
+              />
+              <span className="text-xs">
+                顺便把她叫到你这儿来
+                <span className="text-muted-foreground">
+                  （「召见」就是这个。她待到这一格时段结束，之后回自己的作息）
+                </span>
+              </span>
+            </label>
+          )}
+        </>
+      )}
       {hasClock && (
         <label className="flex items-center gap-1.5 cursor-pointer">
           <input

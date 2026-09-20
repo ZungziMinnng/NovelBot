@@ -9,7 +9,7 @@ from app.models import novel, chapter, character, memory, model_library, writer_
 from app.models.rpg import RpgModule, RpgSession, RpgTask
 from app.schemas.rpg import RpgTaskResolveIn, RpgTaskStateIn
 from app.services.rpg_settlement import filter_task_updates
-from app.services.rpg_state import starting_tasks
+from app.services.rpg_state import DAILY_TASK_CATEGORY, reset_daily_tasks, starting_tasks
 
 
 NARRATION = "你把那封信递过去，老周就着灯看了两眼，点点头收进怀里。"
@@ -30,6 +30,35 @@ class StartingTasksTests(unittest.TestCase):
         self.assertEqual(rows[0]["goal"], "把信交到老周手上")
         self.assertEqual(rows[0]["status"], "open")
         self.assertEqual(rows[0]["task_id"], 1)
+
+
+class DailyTaskTests(unittest.TestCase):
+    def test_starting_tasks_keep_the_daily_category(self):
+        rows = starting_tasks([SimpleNamespace(
+            id=1, name="daily", description="", objective="",
+            category=DAILY_TASK_CATEGORY, auto_start=True,
+        )])
+        self.assertEqual(rows[0]["category"], DAILY_TASK_CATEGORY)
+
+    def test_finished_daily_tasks_reopen_when_a_new_day_starts(self):
+        sess = SimpleNamespace(
+            turn_count=8,
+            tasks=[
+                {"name": "daily done", "category": DAILY_TASK_CATEGORY,
+                 "status": "done", "opened_turn": 1, "closed_turn": 7},
+                {"name": "daily failed", "category": DAILY_TASK_CATEGORY,
+                 "status": "failed", "opened_turn": 1, "closed_turn": 7},
+                {"name": "side quest", "category": "side",
+                 "status": "done", "opened_turn": 1, "closed_turn": 7},
+            ],
+        )
+
+        self.assertTrue(reset_daily_tasks(sess))
+        self.assertEqual(sess.tasks[0]["status"], "open")
+        self.assertEqual(sess.tasks[1]["status"], "open")
+        self.assertEqual(sess.tasks[0]["opened_turn"], 8)
+        self.assertEqual(sess.tasks[0]["closed_turn"], 0)
+        self.assertEqual(sess.tasks[2]["status"], "done")
 
 
 class FilterTaskUpdatesTests(unittest.TestCase):

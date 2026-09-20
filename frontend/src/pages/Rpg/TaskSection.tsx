@@ -4,6 +4,8 @@ import toast from 'react-hot-toast'
 import { ScrollText, X } from 'lucide-react'
 import { rpgApi, type RpgStatDef, type RpgTask } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
+import { useFormAutosave } from '@/lib/useFormAutosave'
 import { ACCENT, AddRow, Assist, DeleteButton, INPUT, Section } from './rpgUi'
 import EffectEditor from './EffectEditor'
 import BatchGenerate from './BatchGenerate'
@@ -49,7 +51,26 @@ export default function TaskSection({
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-tasks', moduleId] })
   const reset = () => { setForm(EMPTY); setEditingId(null); setShowForm(false) }
 
+  /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
+   *  迟早分叉成「点保存存对了、自动保存存错了」 */
+  const body = () => ({ ...form, name: form.name.trim(), objective: form.objective.trim() })
+
+  /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，存个空名字进去，
+   *  任务栏上就是一行没有名字的东西，而用户只是把它清了准备重打。
+   *  新建的任务还没有 id，整份等「添加」一起提交 */
+  const autosave = useFormAutosave(
+    editingId !== null && form.name.trim() ? { id: editingId, body: body() } : null,
+    showForm && editingId !== null,
+    async ({ id, body }) => {
+      await rpgApi.tasks.update(id, body)
+      refresh()
+    },
+  )
+
   const startEdit = (task: RpgTask) => {
+    // 换一条之前先把上一条欠着的那一次存掉。待存的那一份只有最新一格，
+    // 不补发的话它会被下一条的草稿顶掉
+    void autosave.flush()
     setEditingId(task.id)
     setForm({
       name: task.name, description: task.description, objective: task.objective,
@@ -58,15 +79,14 @@ export default function TaskSection({
     setShowForm(true)
   }
 
+  /** 收起表单。改过的东西已经存进库了，所以这里没得「取消」——但没存成的时候
+   *  不能收：收了就等于把改动默默扔掉，而用户只看到红字一闪 */
+  const close = async () => { if (await autosave.flush()) reset() }
+
   const submit = async () => {
     if (!form.name.trim()) return
-    const payload = { ...form, name: form.name.trim(), objective: form.objective.trim() }
     try {
-      if (editingId) {
-        await rpgApi.tasks.update(editingId, payload)
-      } else {
-        await rpgApi.tasks.create(moduleId, { ...payload, sort_order: tasks.length + 1 })
-      }
+      await rpgApi.tasks.create(moduleId, { ...body(), sort_order: tasks.length + 1 })
       refresh()
       reset()
     } catch {
@@ -93,7 +113,7 @@ export default function TaskSection({
     <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{editingId ? '编辑任务' : '新增任务'}</span>
-        <button onClick={reset} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+        <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <input
@@ -110,6 +130,11 @@ export default function TaskSection({
           {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
       </div>
+      {form.category === '日常' && (
+        <p className="text-xs text-muted-foreground">
+          日常任务当天完成后会隐藏，进入下一天时自动重新出现。
+        </p>
+      )}
       {/* 这一栏单独占一行、单独给说明：AI 判定「算不算办完」只看它 */}
       <div>
         <label className="text-xs font-medium mb-1.5 block">怎样才算办完</label>
@@ -159,14 +184,25 @@ export default function TaskSection({
           <span className="text-muted-foreground">（不勾的话，要在剧情里被托付）</span>
         </span>
       </label>
-      <div className="flex gap-2 justify-end">
-        <button onClick={reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">取消</button>
+      <div className="flex items-center gap-2">
+        {editingId !== null && (
+          <span className="mr-auto">
+            <SaveBadge
+              state={autosave.state}
+              blocked="名字还空着，先不存"
+              onRetry={autosave.flush}
+            />
+          </span>
+        )}
+        <button onClick={editingId ? close : reset} className="text-sm px-3 py-1.5 border rounded-lg hover:bg-muted">
+          {editingId ? '收起' : '取消'}
+        </button>
         <button
-          onClick={submit}
+          onClick={editingId ? autosave.flush : submit}
           disabled={!form.name.trim()}
           className="text-sm px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
-          {editingId ? '保存' : '添加'}
+          {editingId ? '立即保存' : '添加'}
         </button>
       </div>
     </div>

@@ -64,7 +64,9 @@ export default function LocationOverview({
   // 站在这个点上的人。onstage 是「在玩家当前地点」，这里要的是「在这个地点」，
   // 所以拿 sess 换成这个点本身比较——走的仍是 npcPlace 那一套（含作息表）
   const faces = (loc: RpgLocation) =>
-    known.filter(n => norm(npcPlace(n, sess.slot, sess.npc_places)) === norm(loc.name))
+    known.filter(n => norm(npcPlace(
+      n, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+    )) === norm(loc.name))
 
   /** 进不去的话，那句理由。空串 = 能进 */
   const blockedWhy = (loc: RpgLocation) => {

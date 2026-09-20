@@ -81,6 +81,8 @@ class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.db.add(module)
         await self.db.commit()
+        # 建一个地点：下面要断言路由把地点表查齐了递进 suggest_actions
+        self.db.add(RpgLocation(module_id=module.id, name="后山"))
         sess = RpgSession(module_id=module.id, char_name="阿隼", stats={}, location="地窖")
         self.db.add(sess)
         await self.db.commit()
@@ -98,10 +100,13 @@ class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
         sess, user = await self._seed()
         seen = {}
 
-        async def fake(_module, _sess, history, here_ids):
+        # sources 是**必填位置参数**，刻意不给默认值：漏传的话动作/道具/地点
+        # 白名单全空，建议静默退化成三条自由文本，测试不会红——必填会当场炸
+        async def fake(_module, _sess, history, here_ids, sources):
             seen["contents"] = [m.content for m in history]
             seen["here_ids"] = here_ids
-            return []
+            seen["sources"] = sources
+            return [], {}
 
         with patch.object(rpg_turn, "suggest_actions", fake):
             await suggest_actions(sess.id, user, self.db)
@@ -112,6 +117,8 @@ class SuggestScopeTests(unittest.IsolatedAsyncioTestCase):
         # 路由必须自己把在场名单算出来递进去：suggest_actions 拿不到 db，
         # 递 None 的话「帮我想想」会提到隔壁屋里才说过的事
         self.assertIsNotNone(seen["here_ids"])
+        # 地点表必须一次查齐：空的话「能去的地方」整块消失，模型只能瞎编地名
+        self.assertTrue(seen["sources"].locations)
 
 
 class ChronicleTests(unittest.IsolatedAsyncioTestCase):
@@ -438,16 +445,14 @@ class SilentMoveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saves[0].state["location"], "地窖")
 
     async def test_a_refused_or_repeated_move_leaves_no_junk_snapshots(self):
-        # 一局里所有瞬移的 before_message_id 都是同一个（它不产生消息），
-        # 一次点击一张档会把 30 张的自动档窗口灌满，真正的回合档被挤掉
         await self._move("后山")          # 精力不够，什么都没改
         self.assertEqual(await self._saves(), [])
         await self._move("铁匠铺")
         await self._move("地窖")
         await self._move("铁匠铺")
+        await self._move("铁匠铺")
         saves = await self._saves()
-        self.assertEqual(len(saves), 1)
-        # 留下的必须是最早那张：要回到的是「这一串点击之前」
+        self.assertEqual(len(saves), 3)
         self.assertEqual(saves[0].state["location"], "地窖")
 
 

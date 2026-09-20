@@ -3,14 +3,15 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
-  AlertTriangle, ArrowLeft, BookMarked, Clock, Cpu, Dices, Footprints, History, Lightbulb, Loader2,
-  MapPin, MessageSquare, PanelLeftOpen, Pencil, RotateCcw, Send, SkipForward, Square, User, Users, X,
+  AlertTriangle, ArrowLeft, BookMarked, Clock, Cpu, Dices, Footprints, Gauge, History, Lightbulb, Loader2,
+  MapPin, MessageSquare, PanelLeftOpen, Pencil, RotateCcw, Send, SkipForward, Square, User, Users,
+  Wrench, X,
 } from 'lucide-react'
 import {
   rpgApi, modelLibraryApi, modelSelectValue, groupModelsByProvider, streamRpgTurn,
   type RpgAction, type RpgModule, type RpgNpc,
-  type RpgRoll, type RpgSave, type RpgSession, type RpgSSEMessage, type RpgTaskProposal,
-  type RpgTurnMeta,
+  type RpgRoll, type RpgSave, type RpgSession, type RpgSSEMessage, type RpgSuggestion,
+  type RpgTaskProposal, type RpgTurnMeta,
 } from '@/api/client'
 import {
   isTurnLive, rpgTurnActions, toBubble, useRpgTurn, useRpgTurnStore,
@@ -21,23 +22,34 @@ import {
   EntityAutocompleteList, useEntityAutocomplete, type EntityItem,
 } from '@/components/EntityAutocomplete/EntityAutocomplete'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import ReadingFontButton from '@/components/ReadingFont/ReadingFontButton'
+import { useReadingFont } from '@/components/ReadingFont/useReadingFont'
 import {
-  actionBlocked, checkCondition, knownNpcs, norm, npcPlace, onstage, visibleLocations,
+  actionBlocked, checkCondition, following, knownNpcs, norm, npcPlace, onstage, targetChoices,
+  visibleLocations,
 } from './condition'
+import {
+  kindMeta, normalizeSuggestions, splitSuggestions, suggestionLabel,
+} from './suggestion'
 import DiceRoll from './DiceRoll'
+import RpgAvatar from './RpgAvatar'
 import LocationOverview from './LocationOverview'
 import PlacePage from './PlacePage'
 import SimHome from './SimHome'
+import { actionTimeHint } from './actionFeedback'
 import StatePanel from './StatePanel'
 import FocusPortrait from './FocusPortrait'
 import StatusSidebar, { type SidebarTab } from './StatusSidebar'
+import TweakPanel from './TweakPanel'
 import SaveTab from './sidebar/SaveTab'
 import TaskResolutionsModal from './TaskResolutionsModal'
 import RpgTurnStatus from './RpgTurnStatus'
 import SettlementReport from './SettlementReport'
 import { styleLabel } from './stylePresets'
+import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, type RpgModelField } from './modelSettings'
 import { playSfx } from './useSfx'
 import GameHud, { type GameOutcome } from './GameHud'
+import TurnCostPanel, { type TurnCost } from './TurnCostPanel'
 
 // 气泡的形状和「消息 → 气泡」的转换都搬到 @/store/rpgTurnStore 了：
 // 「正在生成的那一轮」整套状态既然归 store 管，气泡的类型也该跟着它走，
@@ -65,6 +77,7 @@ const MODES: { key: TurnMode; label: string; hint: string }[] = [
 interface TurnExtra {
   action_id?: number | null
   item_name?: string
+  item_qty?: number
   skill_name?: string
   move_to?: string
   target_npc?: string
@@ -94,6 +107,15 @@ const readView = (id: number): View | null => {
     return raw === 'home' || raw === 'overview' || raw === 'place' || raw === 'line'
       ? raw : null
   } catch { return null }
+}
+
+/** 用量那一列开着没有。默认开——只有**明确关过**才收起来。
+ *
+ *  **不按局存**：想不想看 token 是一个习惯，不是每局重新做一次的选择
+ *  （view 那个是「上次停在哪」，所以才按局存） */
+const COST_KEY = 'rpg-cost'
+const readCostOpen = () => {
+  try { return window.localStorage.getItem(COST_KEY) !== '0' } catch { return true }
 }
 
 /** 改消息时那排小按钮。次要动作，别抢正文的注意力 */
@@ -153,19 +175,17 @@ export default function RpgPlay() {
   // 切走时这个页面是真的卸载（App.tsx 的 <Route> 没带 key），而 `send` 里那条
   // SSE 的会调还在跑——状态留在组件里就跟着一起销毁，回到页面只剩空白。
   // setter 的名字和原来逐个对齐，于是下面那十几处 setBubbles(...) 一行没改
-  const { bubbles, streaming, waiting, stage, meta, tips, lastError, taskAsk } =
+  const { bubbles, streaming, waiting, stage, meta, tips, suggesting, lastError, taskAsk } =
     useRpgTurn(sessionId)
   const turnActions = useMemo(() => rpgTurnActions(sessionId), [sessionId])
   const {
-    setBubbles, setStreaming, setWaiting, setStage, setMeta, setTips, setLastError,
-    setTaskAsk, appendToken, flushTokens, setController, start: startTurn,
+    setBubbles, setStreaming, setWaiting, setStage, setMeta, setTips, setSuggesting,
+    setLastError, setTaskAsk, appendToken, flushTokens, setController, start: startTurn,
     abort: abortTurn, end: endTurn,
   } = turnActions
 
   // 正在改哪条消息。id 是库里的行，没落库的（流式占位）不给改
   const [editing, setEditing] = useState<{ id: number; role: string; text: string } | null>(null)
-  // 「帮我想想」在跑。和 streaming 分开：那一个是整轮生成，这个只是要几条建议
-  const [suggesting, setSuggesting] = useState(false)
   // 瞬移 / 推时段在跑。都是毫秒级的纯引擎请求，但手滑连点两下就会发两个
   const [engineBusy, setEngineBusy] = useState(false)
   const [settlingId, setSettlingId] = useState<number | null>(null)
@@ -179,6 +199,11 @@ export default function RpgPlay() {
     return () => window.clearInterval(timer)
   }, [bubbles, streaming, qc, sessionId])
   const [target, setTarget] = useState('')
+  // 点了「可远程指定」的动作、人还没挑。非空 = 挑人的浮层开着。
+  // 远程动作的顺序和别的动作是反的：先点按钮，再挑对象（手机上就该是这样），
+  // 所以得有个地方暂存「刚点的是哪个」
+  const [pickFor, setPickFor] = useState<RpgAction | null>(null)
+  const pendingSuggestionTextRef = useRef('')
   const [tab, setTab] = useState<SidebarTab>('cast')
   // 「新发现」那一格在补全档案。要等一次模型调用，所以得有个转圈
   const [applyingFound, setApplyingFound] = useState(false)
@@ -192,6 +217,8 @@ export default function RpgPlay() {
   const [menuOpen, setMenuOpen] = useState(false)
   // 存档从侧栏搬到了页头，点开是个浮层
   const [saveOpen, setSaveOpen] = useState(false)
+  // 修改器同理挂在页头：手改数值是「这一局之外」的事，和侧栏那五格不是一类
+  const [tweakOpen, setTweakOpen] = useState(false)
   const [view, setView] = useState<View>(() => readView(sessionId) ?? 'overview')
   // 地图当前展开的父地点；null 表示大陆/区域级大地图
   const [mapParentId, setMapParentId] = useState<number | null>(null)
@@ -207,6 +234,14 @@ export default function RpgPlay() {
   const [moveOpen, setMoveOpen] = useState(false)
   const moveBox = useRef<HTMLDivElement>(null)
   const pendingActionRef = useRef('自由行动')
+  // 右边那一列（本次行动花了多少 token）开着没有
+  const [costOpen, setCostOpen] = useState(readCostOpen)
+  // 哪条 assistant 消息是点哪个按钮打出来的。**只认本次打开页面之后发出的
+  // 那几轮**：刷新之后旧回合认不出是动作还是自由输入，统一叫「回合」。
+  // 为此给消息加一列并不值得——这一列是个看一眼的仪表，不是账本
+  const [costLabels, setCostLabels] = useState<Record<number, string>>({})
+  // 剧情气泡的字号/行距/粗细。和小说侧分键（见 useReadingFont），页头那个按钮改它
+  const { style: readingStyle, ...readingFont } = useReadingFont('rpg')
 
   const bottomRef = useRef<HTMLDivElement>(null)
   // adjudicate 和 roll 是两个事件，拼起来才是完整的一次判定
@@ -275,6 +310,49 @@ export default function RpgPlay() {
     refetchOnMount: 'always',
     staleTime: 0,
     gcTime: 0,
+  })
+
+  /** 每次操作一条，从新到旧，只留最近几条。
+   *
+   *  叙事那次调用的消耗记在 assistant 那行；判定挂在 user 行、结算挂在
+   *  assistant 行，两边的 aux 都要算进来才是这一次操作的真实花费。
+   *
+   *  四个数全是 0 的 assistant 行不算一次操作——开场旁白、瞬移留下的那种
+   *  纯引擎文字压根没调过模型，列出来一排 0 只会让人以为读数坏了 */
+  const costEntries = useMemo<TurnCost[]>(() => {
+    const rows = loaded || []
+    const out: TurnCost[] = []
+    rows.forEach((row, index) => {
+      if (row.role !== 'assistant') return
+      const before = rows[index - 1]
+      const paired = before && before.role === 'user' ? before : null
+      const cost: TurnCost = {
+        id: row.id,
+        label: costLabels[row.id] || '回合',
+        narrIn: row.input_tokens || 0,
+        narrOut: row.output_tokens || 0,
+        auxIn: (row.aux_input_tokens || 0) + (paired?.aux_input_tokens || 0),
+        auxOut: (row.aux_output_tokens || 0) + (paired?.aux_output_tokens || 0),
+      }
+      if (cost.narrIn || cost.narrOut || cost.auxIn || cost.auxOut) out.push(cost)
+    })
+    return out.reverse().slice(0, 6)
+  }, [loaded, costLabels])
+
+  /** 本局累计。按消息自己带的数字加，所以刷新、换设备都对得上 */
+  const costTotal = useMemo(() => (loaded || []).reduce(
+    (acc, row) => ({
+      input: acc.input + (row.input_tokens || 0) + (row.aux_input_tokens || 0),
+      output: acc.output + (row.output_tokens || 0) + (row.aux_output_tokens || 0),
+    }),
+    { input: 0, output: 0 },
+  ), [loaded])
+
+  const toggleCost = () => setCostOpen(open => {
+    // 写的是「关掉」的标记，不是「开着」。读那边认的是「没关过就当开」，
+    // 所以这里存 '1' 反而会让收起失效——收起要能记住，靠的就是这个 '0'
+    try { window.localStorage.setItem(COST_KEY, open ? '0' : '1') } catch { }
+    return !open
   })
 
   // 进这一局之前存着的是哪一级。下面「新局落在时间线」那一跳要拿它当判据，
@@ -356,11 +434,12 @@ export default function RpgPlay() {
   // 而这一页切走就是卸载（App.tsx 的 <Route> 没带 key）。真想停有两条路——
   // 输入框上的停止按钮，和右下角药丸上的 ×
 
-  // 只有见过面或此刻在场的人能当动作对象：对一个还没登场的人「夸奖」
-  // 等于把他抖出来
+  // 名册上的人。默认只有见过面或此刻在场的能当动作对象：对一个还没登场的人
+  // 「夸奖」等于把他抖出来。模拟器档是全员（见 knownNpcs）——那边老板本来就
+  // 该知道手下有谁，手机也要打得出去
   const metNpcs = useMemo(
-    () => (sess ? knownNpcs(npcs, sess) : []),
-    [npcs, sess],
+    () => (sess ? knownNpcs(npcs, sess, module) : []),
+    [npcs, sess, module],
   )
 
   const focusNpc = useMemo(
@@ -397,7 +476,7 @@ export default function RpgPlay() {
   const moveTargets = useMemo(() => {
     if (!sess) return []
     const seen = new Set(visibleLocations(locations, sess))
-    const known = knownNpcs(npcs, sess)
+    const known = knownNpcs(npcs, sess, module)
     return locations
       .filter(loc => seen.has(loc.id) && norm(loc.name) !== norm(sess.location || ''))
       .map(loc => {
@@ -406,11 +485,13 @@ export default function RpgPlay() {
           loc,
           why: ok ? '' : why,
           people: known.filter(
-            n => norm(npcPlace(n, sess.slot, sess.npc_places)) === norm(loc.name),
+            n => norm(npcPlace(
+              n, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+            )) === norm(loc.name),
           ).length,
         }
       })
-  }, [locations, npcs, sess])
+  }, [locations, npcs, sess, module])
 
   /**
    * 真正发出去的那个模式。turnMode 存的是玩家的**意愿**，这里按屋里此刻的人
@@ -442,22 +523,30 @@ export default function RpgPlay() {
   /**
    * 打字补全的候选：敲下名字的头一个字就能选。同小说编辑器那条生成指令栏。
    *
-   * 模组里有的**全给**，不按迷雾筛。这是给玩家（同时也是作者）的输入辅助，
-   * 不是叙事内容：能不能真的走到那儿、见到那个人，仍旧由进入条件和后端结算
-   * 说了算，打得出名字不等于去得了。
+   * **世界里的东西和身上的东西两套来源**：
    *
-   * 背包也一起进来：剧情里 GM 给的东西模组的道具表上没有。
+   * - 角色 / 地点取模组表，**全给**、不按迷雾筛。这是输入辅助不是叙事内容：
+   *   能不能真的走到那儿、见到那个人，仍旧由进入条件和后端结算说了算，
+   *   打得出名字不等于去得了。
+   * - 道具 / 技能只取这一局的背包和已学表。**不能拿模组的定义表**：那张表是
+   *   作者写下的全集，上品灵石用光了它照样在，玩家敲个「上」还是弹出来，
+   *   点进去发的是一句自己根本办不到的话。背包/已学也更全——剧情里 GM 给的
+   *   东西、现学的一招，模组表上压根没有。
    */
   const entities = useMemo<EntityItem[]>(() => {
+    // 技能的说明只有模组表里有，已学表只记名字和冷却
+    const skillDesc = (name: string) =>
+      skills.find(s => norm(s.name) === norm(name))?.description || ''
     const all: EntityItem[] = [
       ...npcs.map(n => ({ name: n.name, typeLabel: '角色', description: n.description })),
       ...locations.map(l => ({ name: l.name, typeLabel: '地点', description: l.description })),
-      ...items.map(it => ({ name: it.name, typeLabel: '道具', description: it.description })),
       ...(sess?.inventory || []).map(it => ({
         name: it.name, typeLabel: '道具', description: it.qty > 1 ? `×${it.qty}` : '',
       })),
+      ...(sess?.skills || []).map(sk => ({
+        name: sk.name, typeLabel: '技能', description: skillDesc(sk.name),
+      })),
     ]
-    // 背包里那件和模组里那件是同一个名字，别弹两条
     const seen = new Set<string>()
     return all.filter(e => {
       const key = `${e.typeLabel}-${e.name}`
@@ -465,7 +554,7 @@ export default function RpgPlay() {
       seen.add(key)
       return true
     })
-  }, [npcs, locations, items, sess])
+  }, [npcs, locations, skills, sess])
 
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const ac = useEntityAutocomplete(entities, input, setInput, inputRef)
@@ -504,11 +593,14 @@ export default function RpgPlay() {
   const send = useCallback((
     text: string, useAttr: string, extra: TurnExtra = {},
   ) => {
+    if (useRpgTurnStore.getState().turns[sessionId]?.streaming) return
     pendingActionRef.current = extra.action_id
       ? (actions.find(action => action.id === extra.action_id)?.name || '快捷行动')
       : extra.item_name ? `使用 ${extra.item_name}`
-        : extra.move_to ? `前往 ${extra.move_to}` : '自由行动'
+        : extra.skill_name ? `施展 ${extra.skill_name}`
+          : extra.move_to ? `前往 ${extra.move_to}` : '自由行动'
     lastTurnRef.current = { text, attr: useAttr, extra }
+    setLastOutcome(null)
     // 先把这一局重置成新的一轮再往里写。必须在第一颗气泡之前调——start 会
     // 清空气泡、并把右下角那粒药丸挂上
     startTurn(module?.name || sess?.title || '', `/game/play/${sessionId}`)
@@ -516,6 +608,7 @@ export default function RpgPlay() {
     setBubbles(prev => [...prev, {
       id: null, role: 'user', content: text, roll: null, fresh: true,
       present: null, location: '',
+      turn_request: { attr: useAttr, ...extra },
     }])
     setStreaming(true)
     setWaiting(true)
@@ -555,10 +648,11 @@ export default function RpgPlay() {
         return next
       })
 
-    setController(streamRpgTurn(
+    const controller = streamRpgTurn(
       sessionId,
       { content: text, attr: useAttr, ...extra },
       (msg: RpgSSEMessage) => {
+        if (useRpgTurnStore.getState().turns[sessionId]?.controller !== controller) return
         if (msg.event === 'meta') {
           // 后端发两次：先只带 user_message_id，上下文拼完再补诊断。必须合并
           setMeta(prev => ({ ...prev, ...msg.data }))
@@ -610,14 +704,30 @@ export default function RpgPlay() {
             const changes = stateChanges(before, after)
             setLastOutcome(previous => (
               changes.length || !previous
-                ? { title: pendingActionRef.current, facts: changes.length ? [] : ['行动已结算'], changes }
+                ? {
+                    title: pendingActionRef.current,
+                    facts: previous?.facts || [],
+                    changes: [...(previous?.changes || []), ...changes],
+                  }
                 : previous
             ))
           }
           qc.setQueryData(['rpg-session', sessionId], after)
+        } else if (msg.event === 'engine_result') {
+          setLastOutcome(previous => ({
+            title: pendingActionRef.current, facts: msg.data.facts, changes: previous?.changes || [],
+          }))
         } else if (msg.event === 'suggestions') {
-          setTips(msg.data)
+          setTips(normalizeSuggestions(msg.data))
         } else if (msg.event === 'settlement') {
+          const report = msg.data.report
+          if (report) {
+            setLastOutcome({
+              title: pendingActionRef.current,
+              facts: report.engine_facts || [],
+              changes: report.changes || [],
+            })
+          }
           setBubbles(prev => prev.map((bubble, index) => (
             bubble.id === msg.data.message_id || (index === prev.length - 1 && bubble.role === 'assistant')
               ? { ...bubble, id: msg.data.message_id, settlement: msg.data.report } : bubble
@@ -653,6 +763,9 @@ export default function RpgPlay() {
           // 已经拿到正式 id 的气泡上
           flushTokens()
           setStage('')
+          // 这一轮是点什么打出来的，趁 pendingActionRef 还没被下一轮改掉记下来，
+          // 用量那一列拿它当标签
+          setCostLabels(prev => ({ ...prev, [id]: pendingActionRef.current }))
           setBubbles(prev => prev.map((b, i) => (i === prev.length - 1 ? { ...b, id } : b)))
           qc.invalidateQueries({ queryKey: ['rpg-session', sessionId] })
           qc.invalidateQueries({ queryKey: ['rpg-messages', sessionId] })
@@ -669,13 +782,16 @@ export default function RpgPlay() {
         }
       },
       () => {
+        if (useRpgTurnStore.getState().turns[sessionId]?.controller !== controller) return
         // 这一轮收尾。界面此刻可能已经不在了（切走了），收尾照样做——
         // 药丸要摘掉、streaming 要落回 false，不然切回来会一直显示成「正在生成」
         flushTokens()
         endTurn()
         qc.invalidateQueries({ queryKey: ['rpg-messages', sessionId] })
+        qc.invalidateQueries({ queryKey: ['rpg-session', sessionId] })
       },
-    ))
+    )
+    setController(controller)
   }, [actions, sessionId, qc, sess?.location, sess?.title, module?.name, npcs, turnActions])
 
   const handleSend = () => {
@@ -708,8 +824,8 @@ export default function RpgPlay() {
       setBubbles(prev => prev.map(b => (b.id === editing.id ? toBubble(updated) : b)))
       qc.invalidateQueries({ queryKey: ['rpg-messages', sessionId] })
       setEditing(null)
-    } catch {
-      toast.error('改不动，刷新看看')
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || '改不动，刷新看看')
     }
   }
 
@@ -720,8 +836,11 @@ export default function RpgPlay() {
     try {
       const message = await rpgApi.messages.settle(messageId)
       setBubbles(prev => prev.map(bubble => bubble.id === messageId ? toBubble(message) : bubble))
-      if (message.suggestions) setTips(message.suggestions)
-      toast(message.settlement?.status === 'done' ? '状态已重新结算' : '核对结果已更新，请查看待确认项目')
+      const fresh = normalizeSuggestions(message.suggestions)
+      if (fresh.length) setTips(fresh)
+      toast(message.settlement?.status === 'done' ? '状态已重新结算'
+        : message.settlement?.status === 'partial' ? '结算已结束，可以继续游玩；部分变化未采纳，请查看核对结果'
+          : '核对结果已更新，请查看结算状态')
     } catch (error: any) {
       toast.error(error?.response?.data?.detail || '补结算失败，剧情已保留')
     } finally {
@@ -742,10 +861,14 @@ export default function RpgPlay() {
    * 身上，会落下「这句话没说过，代价还在」。回滚靠的是每轮自动存档，所以
    * 只有最近那几十轮退得回去，更早的后端会直接拒绝并说明原因。
    */
-  const resendFrom = async (messageId: number, text: string, extra: TurnExtra, ask = true) => {
+  const resendFrom = async (messageId: number, text: string, extra: TurnExtra = {}, ask = true) => {
     if (locked) return
     const body = text.trim()
     if (!body) return
+    const request = bubbles.find(bubble => bubble.id === messageId)?.turn_request
+      ?? loaded?.find(message => message.id === messageId)?.turn_request
+      ?? { attr, ...extra }
+    const { attr: replayAttr = '', ...replayExtra } = request
     if (ask && !await confirmDialog({
       title: '重发这一句？',
       detail: '这一句之后的剧情会被删掉，数值、背包、时段一起回到它发生之前。',
@@ -762,7 +885,7 @@ export default function RpgPlay() {
       setEditing(null)
       setLastError(null)
       refreshSaves()
-      send(body, attr, extra)
+      send(body, replayAttr, replayExtra)
     } catch (err: any) {
       // 400 带着「太早了，退不回去」那句话，原样说出来比「失败了」有用
       toast.error(err?.response?.data?.detail || '退不回去')
@@ -788,7 +911,7 @@ export default function RpgPlay() {
   const regenerate = () => {
     const lastUser = [...bubbles].reverse().find(b => b.role === 'user')
     if (!lastUser?.id) return
-    resendFrom(lastUser.id, lastUser.content, lastTurnRef.current?.extra ?? {})
+    resendFrom(lastUser.id, lastUser.content)
   }
 
   // 帮我想想：另开一次调用要三条候选行动，和每轮结算顺带给的建议共用同一块显示区
@@ -799,10 +922,13 @@ export default function RpgPlay() {
     setTips([])
     try {
       const { suggestions } = await rpgApi.suggest(sessionId)
-      if (suggestions.length === 0) toast('没想出来，再聊两句试试')
-      else setTips(suggestions)
-    } catch {
-      toast.error('没能生成建议')
+      const fresh = normalizeSuggestions(suggestions)
+      if (!fresh.length) toast('没想出来，再聊两句试试')
+      else setTips(fresh)
+    } catch (error: any) {
+      // detail 里是后端那句人话（模型没配好、这一局已经结束）。只 toast 一句
+      // 「没能生成建议」的话，模型配错时玩家找不到真正的毛病
+      toast.error(error?.response?.data?.detail || '没能生成建议')
     } finally { setSuggesting(false) }
   }
 
@@ -823,7 +949,10 @@ export default function RpgPlay() {
   }
 
   const dead = sess.status !== 'alive'
-  const locked = streaming || dead || settlingId !== null
+  const locked = streaming || dead || engineBusy || settlingId !== null
+  // 建议条分两行渲染：结构化的一行、自由文本的一行。原先后端只给字符串，
+  // 现在两条路都收口成 RpgSuggestion（老存档由 normalizeSuggestions 兜住）
+  const { structured, plain } = splitSuggestions(tips)
   // 这一局有没有时钟：玩家建局时定制过就看他那份，否则跟模组走（和后端的
   // slot_table 同一条规则）
   const hasClock = (sess.time_slots?.length || module?.time_slots?.length || 0) > 0
@@ -837,19 +966,36 @@ export default function RpgPlay() {
     || !!slotHint
   )
 
+  /** 真的把这一轮发出去。对象已经定了（`who` 可以是空串 = 这动作不需要对象）。
+   *
+   *  和 runAction 分开只为了一件事：远程动作要在「挑完人」之后才走到这儿，
+   *  而挑人是个异步的界面动作。发送逻辑仍然只有这一份。 */
+  const fireAction = (action: RpgAction, who: string, content?: string) => {
+    // 选中的人只决定数值加给谁（target_npc），不决定这段戏归谁看——
+    // 后者是写入时的在场快照，两件事不要互相决定
+    const hint = content?.trim() || (action.prompt_hint || '').trim() || `你${action.name}`
+    // 翻页这一句和用道具那边同理：远程动作在模拟器主页点得到，不翻过去
+    // 玩家看不见刚生成的叙事
+    if (action.target_anywhere) setView('line')
+    send(who ? `${hint}（对象：${who}）` : hint, '', {
+      action_id: action.id, target_npc: who, ...turnExtra(),
+    })
+  }
+
   const runAction = (action: RpgAction) => {
     if (locked) return
+    // 远程动作：点了先不发，弹名单让玩家挑人。这就是「点手机里的发消息，
+    // 再指定角色」那个顺序——不用先走到她所在的地方去
+    if (action.needs_target && action.target_anywhere) {
+      setPickFor(action)
+      return
+    }
     const who = action.needs_target ? target : ''
     if (action.needs_target && !who) {
       toast.error(`「${action.name}」得先选一个对象`)
       return
     }
-    // 选中的人只决定数值加给谁（target_npc），不决定这段戏归谁看——
-    // 后者是写入时的在场快照，两件事不要互相决定
-    const hint = (action.prompt_hint || '').trim() || `你${action.name}`
-    send(who ? `${hint}（对象：${who}）` : hint, '', {
-      action_id: action.id, target_npc: who, ...turnExtra(),
-    })
+    fireAction(action, who)
   }
 
   /** 背包里点「使用」。用道具是引擎动作，不是对话，落在唯一那条时间线上。
@@ -857,14 +1003,14 @@ export default function RpgPlay() {
    *  `exact` = 模组里有这件道具的定义（见侧栏）。没定义的**不能带 item_name**：
    *  后端会回一句「模组里没有这件道具」的黄条，而玩家拿到的东西是剧情里 GM
    *  给的，这不是他的错。不带就等于替他打出这句话，交给 GM 写 + AI 结算。 */
-  const useItem = (name: string, exact: boolean) => {
+  const useItem = (name: string, exact: boolean, quantity = 1) => {
     if (locked) return
     setMenuOpen(false)
     // 翻页这一句要留：背包在总览页、地点页也点得到，不翻过去玩家就看不见
     // 刚生成的叙事，等于消息掉进黑洞
     setView('line')
-    send(`你用了「${name}」。`, '', {
-      ...(exact ? { item_name: name } : {}), ...turnExtra(),
+    send(`你用了「${name}」${quantity > 1 ? ` ×${quantity}` : ''}。`, '', {
+      ...(exact ? { item_name: name, item_qty: quantity } : {}), ...turnExtra(),
     })
   }
 
@@ -891,6 +1037,47 @@ export default function RpgPlay() {
     setPrivateWith(null)
     setView('line')
     send(`你前往${name}。`, '', { move_to: name, mode: 'solo' })
+  }
+
+  /** 点一条「作者定义的动作」建议。
+   *
+   *  **刻意不套 `actionBlocked`**：后端拼建议时已经用 `_action_gate` 筛过一遍，
+   *  前端再判就是第三份规则。它与 `runAction` 唯一的差别是缺对象时**弹窗挑人**
+   *  而不是报错：建议是玩家点出来的，他不知道哪个下拉框要先动。
+   *  要不要挑人仍然由动作自己的 `needs_target` 说了算，**数据里不带 target**。 */
+  const runSuggestedAction = (action: RpgAction, content?: string) => {
+    if (locked) return
+    if (action.needs_target) {
+      pendingSuggestionTextRef.current = content || ''
+      setPickFor(action)
+      return
+    }
+    fireAction(action, '', content)
+  }
+
+  /** 点一条建议。逐字对齐上面那几个入口（`useItem` / `useSkill` / `moveByTurn`
+   *  / `fireAction` / `send`），**那几个一行不改**。
+   *
+   *  清空顺序要紧：`setTips([])` 必须在 `send(...)` 之前。`send` 第一步就会
+   *  清一次建议，顺序反了会把这一轮新拿到的建议一并抹掉。 */
+  const runSuggestion = (tip: RpgSuggestion) => {
+    setTips([])
+    if (tip.kind === 'skill') return useSkill(tip.name, true)
+    if (tip.kind === 'item') return useItem(tip.name, true)
+    if (tip.kind === 'move') return moveByTurn(tip.name)
+    if (tip.kind === 'action') {
+      // 建议是模组改动之前生成的，那个动作可能已经被作者删了。
+      // **必须静默 return**，绝不能把 action_id: undefined 发出去——那会变成
+      // 「说了句话但什么都没发生」
+      const action = actions.find(row => row.id === tip.action_id)
+      if (action) runSuggestedAction(action, tip.text)
+      return
+    }
+    // 自由文本：原样当成玩家自己打的一句话发出去。attr 照传，和加这个功能之前
+    // 那条 `send(tip, attr, turnExtra())` 逐字一致
+    if (locked || streaming) return
+    setView('line')
+    send(tip.text, attr, turnExtra())
   }
 
   const refreshSaves = () => qc.invalidateQueries({ queryKey: ['rpg-saves', sessionId] })
@@ -953,6 +1140,16 @@ export default function RpgPlay() {
     }
   }
 
+  /** 划掉模型误改的一处外貌。同理不拍存档：划掉之后她又变回模组里写的
+   *  那个样子，而模型下一轮看到的也就跟着变回去了 */
+  const dropAppearance = async (npcId: number, key: string) => {
+    try {
+      qc.setQueryData(['rpg-session', sessionId], await rpgApi.sessions.deleteNpcAppearance(sessionId, npcId, key))
+    } catch {
+      toast.error('没能划掉')
+    }
+  }
+
   /** 划掉 AI 调度替她编的那一句。同理不拍存档，而且清掉之后
    *  她下一轮还会照常过日子、再写一句新的 */
   const dropActivity = async (npcId: number) => {
@@ -960,6 +1157,30 @@ export default function RpgPlay() {
       qc.setQueryData(['rpg-session', sessionId], await rpgApi.sessions.deleteNpcActivity(sessionId, npcId))
     } catch {
       toast.error('没能划掉')
+    }
+  }
+
+  /** 让某人跟着你 / 打发她走。和瞬移同类：纯引擎、零 LLM、不产生消息，
+   *  所以也不拍存档。返回的 message 是给她的一句回执（「赫敏跟上了你」） */
+  const setFollow = async (npcId: number, following: boolean) => {
+    try {
+      const res = await rpgApi.sessions.follow(sessionId, npcId, following)
+      qc.setQueryData(['rpg-session', sessionId], res.session)
+      if (res.message) toast.success(res.message)
+    } catch {
+      toast.error('没能改过来')
+    }
+  }
+
+  /** 改写某一格的长期记忆。同上不拍存档：改的是模型压错的一段话，不是剧情事件。
+   *  失败要让调用方知道——它得把编辑态留着，不然玩家刚写的几百字就没了 */
+  const saveSummary = async (slot: string, text: string) => {
+    try {
+      qc.setQueryData(['rpg-session', sessionId], await rpgApi.sessions.editSummary(sessionId, slot, text))
+      toast.success('记忆改好了')
+    } catch (e) {
+      toast.error('没能改过来')
+      throw e
     }
   }
 
@@ -1148,9 +1369,13 @@ export default function RpgPlay() {
       onDismissItemClaim={dismissItemClaim}
       // 这几项是 openNpc 那个人的，会话上才有、角色卡上没有，所以在这儿取好再递进去
       notes={openNpc ? sess.npc_notes?.[String(openNpc.id)] || {} : {}}
+      appearance={openNpc ? sess.npc_appearance?.[String(openNpc.id)] || {} : {}}
       activity={openNpc ? sess.npc_activities?.[String(openNpc.id)] || '' : ''}
       onDeleteNote={key => { if (openNpc) dropNote(openNpc.id, key) }}
+      onDeleteAppearance={key => { if (openNpc) dropAppearance(openNpc.id, key) }}
       onDeleteActivity={() => { if (openNpc) dropActivity(openNpc.id) }}
+      onSaveSummary={saveSummary}
+      onSetFollow={setFollow}
       onSaveNpc={updated => {
         // openNpc 是一份快照，不刷它侧栏还显示旧文案
         setOpenNpc(updated)
@@ -1235,7 +1460,49 @@ export default function RpgPlay() {
               </>
             )}
           </div>
+          {/* 修改器。浮层的做法和存档完全一样，**同样不能 createPortal**，
+              理由见上面那条注释 */}
+          <div className="relative">
+            <button
+              onClick={() => setTweakOpen(open => !open)}
+              title="手动改数值、关系、背包和处境。GM 不会知道你动过手"
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
+                ${tweakOpen ? 'bg-muted' : ''}`}
+            >
+              <Wrench className="w-3.5 h-3.5" />修改器
+            </button>
+            {tweakOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setTweakOpen(false)} />
+                <div
+                  className="absolute right-0 top-full z-40 mt-1.5 w-80 max-h-[70vh] overflow-y-auto
+                    rounded-xl border bg-background p-3 shadow-2xl"
+                >
+                  <TweakPanel
+                    sessionId={sessionId}
+                    sess={sess}
+                    module={module}
+                    npcs={npcs}
+                    locations={locations}
+                    // 这一轮还没结算完就改，改出来的数字会被这一次的结算盖回去
+                    locked={streaming}
+                    onApplied={next => qc.setQueryData(['rpg-session', sessionId], next)}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+          {/* 用量那一列的开关。只在宽屏出现：那一列自己是 xl 才渲染的 */}
+          <button
+            onClick={toggleCost}
+            title="本次行动花了多少 token"
+            className={`hidden xl:flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
+              ${costOpen ? 'bg-muted' : ''}`}
+          >
+            <Gauge className="w-3.5 h-3.5" />用量
+          </button>
           {module && <PlayParams module={module} disabled={streaming} />}
+          <ReadingFontButton {...readingFont} />
           <ThemePicker />
           <button
             onClick={() => setMenuOpen(true)}
@@ -1369,7 +1636,14 @@ export default function RpgPlay() {
                   {/* 模组里定义过的道具和技能那一份说明书。它是静态的，每轮
                       一样大，所以这个数字基本不动——动了就是作者刚加了东西 */}
                   {' · '}物技 {meta.catalog_tokens ?? 0}
-                  {' · '}角色 {meta.npc_tokens ?? 0} · 外场 {meta.chronicle_tokens ?? 0}
+                  {' · '}角色 {meta.npc_tokens ?? 0}
+                  {/* 全模组角色的花名册，一人一行。角色块是其中几个人的详细卡，
+                      所以这一块基本不动、那一块每轮变。私聊时不注入，那一轮是 0 */}
+                  {' · '}名册 {meta.roster_tokens ?? 0}
+                  {' · '}外场 {meta.chronicle_tokens ?? 0}
+                  {/* 关系里程碑。不按在场筛、只增不减，所以这个数字会一路涨——
+                      涨得不对劲就是结算在乱记转折 */}
+                  {' · '}转折 {meta.milestone_tokens ?? 0}
                   {/* 地点描述和在场名单那一块。每轮都在，大小只跟作者写的
                       地点描述有多长有关 */}
                   {' · '}场面 {meta.scene_tokens ?? 0}
@@ -1388,11 +1662,14 @@ export default function RpgPlay() {
           )}
 
           <div className="flex-1 overflow-y-auto px-6 py-6">
-            {/* 地图要比正文宽一点，不然节点挤在一起。面包屑和输入条各自带着
-                自己的 max-w-3xl，所以只动这一处不会错位 */}
-            <div className={`${view === 'overview' || view === 'home' ? 'max-w-5xl' : 'max-w-3xl'} mx-auto space-y-4`}>
+            {/* 地图要比正文宽一点，不然节点挤在一起。
+                正文从 3xl 放到 4xl：右边三列并成一列后腾出四百来像素，中文全角
+                字在 768px 下一行才四十来个字，太短了。输入条那处要跟着一起动，
+                不然气泡和输入框对不齐 */}
+            <div className={`${view === 'overview' || view === 'home' ? 'max-w-5xl' : 'max-w-4xl'} mx-auto space-y-4`}>
               {view === 'home' && (
-                <SimHome
+              <SimHome
+                module={module}
                   sess={sess}
                   actions={actions}
                   locations={locations}
@@ -1415,6 +1692,12 @@ export default function RpgPlay() {
                   onOpenLine={() => setView('line')}
                   target={target}
                   onTarget={setTarget}
+                  tips={tips}
+                  suggesting={suggesting}
+                  onSuggest={suggest}
+                  // 和上面 onRunAction 逐字同理：不翻到时间线，刚生成的那段叙事
+                  // 玩家一个字都看不见
+                  onSuggestion={tip => { setView('line'); runSuggestion(tip) }}
                 />
               )}
 
@@ -1513,7 +1796,7 @@ export default function RpgPlay() {
                                   <Pencil className="w-3.5 h-3.5" />
                                 </button>
                                 <button
-                                  onClick={() => resendFrom(b.id!, b.content, {})}
+                                  onClick={() => resendFrom(b.id!, b.content)}
                                   title="从这句重来：它之后的剧情和数值一起回滚"
                                   className="p-1.5 rounded-lg text-muted-foreground hover:bg-muted"
                                 >
@@ -1538,7 +1821,7 @@ export default function RpgPlay() {
                                     只改字
                                   </button>
                                   <button
-                                    onClick={() => resendFrom(b.id!, editing!.text, {})}
+                                    onClick={() => resendFrom(b.id!, editing!.text)}
                                     className="text-xs px-2.5 py-1 rounded-lg bg-primary text-primary-foreground hover:opacity-90"
                                     title="改完从这里重跑：它之后的剧情和数值一起回滚"
                                   >
@@ -1547,8 +1830,12 @@ export default function RpgPlay() {
                                 </div>
                               </div>
                             ) : (
-                              <div className="max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed
-                                whitespace-pre-wrap bg-primary text-primary-foreground">
+                              // 玩家这侧也跟着调，不然一页里两种字号
+                              <div
+                                className="max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed
+                                  whitespace-pre-wrap bg-primary text-primary-foreground"
+                                style={readingStyle}
+                              >
                                 {b.content}
                               </div>
                             )}
@@ -1587,8 +1874,11 @@ export default function RpgPlay() {
                         // 排版直接借小说阅读区那一套（.novel-content：宋体/Georgia 衬线 +
                         // 行高 2 + 字距），字号也从 text-sm 提到 text-base（全局基准 1rem）。
                         // 剧情是这个页面真正要看的东西，用比正文更小的字没道理
-                        <div className="novel-content relative rounded-2xl border border-primary/15 bg-card/80 backdrop-blur-sm
-                          px-5 py-4 text-base whitespace-pre-wrap">
+                        <div
+                          className="novel-content relative rounded-2xl border border-primary/15 bg-card/80 backdrop-blur-sm
+                            px-5 py-4 text-base whitespace-pre-wrap"
+                          style={readingStyle}
+                        >
                           {waiting && streamingHere && last
                             ? <ThinkingDots /> : b.content}
                           {streamingHere && !waiting && last && (
@@ -1640,7 +1930,7 @@ export default function RpgPlay() {
 
           {view === 'line' && (
             <div className="border-t border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 shrink-0">
-              <div className="max-w-3xl mx-auto space-y-2">
+              <div className="max-w-4xl mx-auto space-y-2">
                 {/* 「结束这个时段」跟输入框待在一起：它和「发一句话」一样是玩家
                     主动推进这一局的动作，摆在页头反而像个设置项。只此一处，
                     页头和 GameHud 上那两个重复的已经撤了 */}
@@ -1718,18 +2008,51 @@ export default function RpgPlay() {
                 )}
 
                 {tips.length > 0 && !streaming && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {tips.map((tip, i) => (
-                      <button
-                        key={i}
-                        onClick={() => { setTips([]); send(tip, attr, turnExtra()) }}
-                        disabled={dead}
-                        className="text-xs px-2.5 py-1 rounded-full bg-primary/10 text-primary ring-1 ring-primary/30
-                          hover:bg-primary/20 disabled:opacity-40"
-                      >
-                        {tip}
-                      </button>
-                    ))}
+                  <div className="space-y-1.5">
+                    {/* 结构化那一行：点下去直接走引擎。样式比自由文本重一档，
+                        让它一眼看出「这个和随手说一句不是一回事」 */}
+                    {structured.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {structured.map((tip, i) => {
+                          const Icon = kindMeta(tip.kind).icon
+                          // 动作的 name 是空的（后端只给 action_id），名字从模组
+                          // 动作表里查。已经被删掉时查不到，只显示「动作」两个字
+                          const actionName = actions.find(a => a.id === tip.action_id)?.name || ''
+                          return (
+                            <button
+                              key={i}
+                              onClick={() => runSuggestion(tip)}
+                              disabled={locked}
+                              title={tip.text}
+                              className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full
+                                bg-primary/15 text-primary ring-1 ring-primary/40
+                                hover:bg-primary/25 disabled:opacity-40"
+                            >
+                              <Icon className="w-3 h-3 shrink-0" />
+                              <span className="opacity-60">{suggestionLabel(tip, actionName)}</span>
+                              <span>{tip.text}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {/* 自由文本那一行：保持原来的淡样式，点一下等于替他打出这句话 */}
+                    {plain.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[11px] text-muted-foreground shrink-0">或者说一句</span>
+                        {plain.map((tip, i) => (
+                          <button
+                            key={i}
+                            onClick={() => runSuggestion(tip)}
+                            disabled={dead}
+                            className="text-xs px-2.5 py-1 rounded-full bg-primary/10 text-primary ring-1 ring-primary/30
+                              hover:bg-primary/20 disabled:opacity-40"
+                          >
+                            {tip.text}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1741,7 +2064,7 @@ export default function RpgPlay() {
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
                     {actions.map(action => {
-                      const blocked = actionBlocked(action, sess, npcs, target)
+                      const blocked = actionBlocked(action, sess, npcs, action.target_anywhere ? '' : target, module)
                       return (
                         <button
                           key={action.id}
@@ -1752,12 +2075,16 @@ export default function RpgPlay() {
                             hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {action.name}
+                          <span className="ml-1 text-[10px] opacity-75">{actionTimeHint(action, sess, module)}</span>
                         </button>
                       )
                     })}
                     {/* 只列此刻在场的人。用「见过面的」那份名单的话，从 A 地
                         走到 B 地之后 npcA 还挂在这里，好感就加到一个不在跟前的人身上 */}
-                    {actions.some(a => a.needs_target) && hereNpcs.length > 0 && (
+                    {/* 只为「必须人在跟前」那些动作而存在。远程动作自己弹名单，
+                        不看这个下拉——两者都算进来的话，一个只有手机功能的模组
+                        会白挂一个永远没用的选择器 */}
+                    {actions.some(a => a.needs_target && !a.target_anywhere) && hereNpcs.length > 0 && (
                       <select
                         value={target}
                         onChange={e => setTarget(e.target.value)}
@@ -1896,7 +2223,7 @@ export default function RpgPlay() {
                   <button
                     onClick={suggest}
                     disabled={locked || suggesting || lineBubbles.length === 0}
-                    title="帮我想想：给几条接下来能做的事"
+                    title="帮我想想：照你身上的状态和眼前的人和地方，给几条接下来能做的事。能对上的那条点一下直接执行"
                     className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0
                       bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20
                       disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1931,11 +2258,14 @@ export default function RpgPlay() {
 
         </div>
 
-        {/* 回合、日期、玩家数值。原先它是页头下面一整条横幅，从上占到底，
-            正文和输入条都被它往下挤了一截；现在竖着挪进右边这一列，
-            和左边那列（角色/道具）一左一右夹着正文。
-            窄屏放不下三列，退回上面那条横幅 */}
-        <aside className="hidden xl:block shrink-0 w-[240px]">
+        {/* 右边这一列：回合日期数值、你正盯着的那个人、本次用量，三块竖着叠。
+            原先这三样各开一个 aside（240 + 208 + 200），宽屏上光这三条边就吃掉
+            648px，正文在 1600 的容器里只剩六百出头——「左右空着中间反而挤」就是
+            这么来的。并成一列，正文把那四百多像素拿回去。
+            立绘和用量仍然只在对话里挂：地点总览和地点页是满幅布局。
+            窄屏放不下三列，退回页头下面那条横幅 */}
+        <aside className="hidden xl:flex shrink-0 w-[260px] flex-col overflow-y-auto
+          border-l border-border/60">
           <GameHud
             session={sess}
             module={module}
@@ -1944,19 +2274,32 @@ export default function RpgPlay() {
             hasClock={hasClock}
             layout="column"
           />
-        </aside>
 
-        {/* 你正盯着的那个人。只在对话里挂——地点总览和地点页各有自己的满幅
-            布局，塞一列进去会把地图挤歪。组件自己判断没立绘就不渲染 */}
-        {view === 'line' && portraitNpc && (
-          <FocusPortrait
-            npc={portraitNpc}
-            relationDefs={module?.relation_stat_defs || []}
-            npcStates={sess.npc_states || {}}
-            place={npcPlace(portraitNpc, sess.slot, sess.npc_places)}
-            here={onstage(portraitNpc, sess)}
-          />
-        )}
+          {/* 你正盯着的那个人。只在对话里挂：地点总览和地点页那两个视角里
+              没有「正在对谁说话」这回事。组件自己判断没立绘就不渲染 */}
+          {view === 'line' && portraitNpc && (
+            <FocusPortrait
+              npc={portraitNpc}
+              relationDefs={module?.relation_stat_defs || []}
+              npcStates={sess.npc_states || {}}
+              place={npcPlace(
+                portraitNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+              )}
+              here={onstage(portraitNpc, sess)}
+            />
+          )}
+
+          {/* 本次行动的 token 用量。同立绘，只在对话里挂：走地图不发模型，
+              那两个视角下这块永远是空的 */}
+          {view === 'line' && costOpen && (
+            <TurnCostPanel
+              entries={costEntries}
+              totalIn={costTotal.input}
+              totalOut={costTotal.output}
+              onClose={toggleCost}
+            />
+          )}
+        </aside>
       </div>
 
       {menuOpen && (
@@ -1986,6 +2329,78 @@ export default function RpgPlay() {
           // 「先放着」：这一轮不问了，但提议还挂在会话上，任务格里还看得见
           onClose={() => setTaskAsk([])}
         />
+      )}
+
+      {/* 远程动作点完之后挑人。留在组件树里、不 createPortal：--rpg-* 那套
+          颜色变量定在外面的 .mode-game 上，portal 出去颜色全丢 */}
+      {pickFor && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setPickFor(null)}
+        >
+          <div
+            className="w-full max-w-md max-h-[80vh] overflow-y-auto rounded-2xl border border-primary/25 bg-card shadow-2xl p-4 space-y-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{pickFor.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  找谁？
+                  {pickFor.summons_target
+                    ? '选中的人会赶到你这儿来。'
+                    : '不用走过去，人在哪儿都能找。'}
+                </p>
+              </div>
+              <button
+                onClick={() => setPickFor(null)}
+                className="p-1 rounded hover:bg-muted shrink-0"
+                title="算了"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {targetChoices(pickFor, npcs, sess, hereNpcs, module).length === 0 ? (
+              <p className="text-xs text-muted-foreground py-6 text-center">
+                你还没认识任何人。先去见几个人再用这个。
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {targetChoices(pickFor, npcs, sess, hereNpcs, module).map(npc => {
+                  const place = npcPlace(
+                    npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+                  )
+                  const here = onstage(npc, sess)
+                  const blocked = actionBlocked(pickFor, sess, npcs, npc.name, module)
+                  return (
+                    <button
+                      key={npc.id}
+                      disabled={locked || !!blocked}
+                      title={blocked}
+                      onClick={() => {
+                        const action = pickFor
+                        setPickFor(null)
+                        // 同步 target：侧栏和底部那个下拉显示的是同一份状态，
+                        // 不跟上的话玩家刚挑的人在界面上没有任何痕迹
+                        setTarget(npc.name)
+                        fireAction(action, npc.name, pendingSuggestionTextRef.current)
+                        pendingSuggestionTextRef.current = ''
+                      }}
+                      className="w-full flex items-center gap-2.5 rounded-xl border px-2.5 py-2
+                        hover:bg-muted text-left transition-colors"
+                    >
+                      <RpgAvatar name={npc.name} url={npc.avatar_url} size="sm" />
+                      <span className="text-sm min-w-0 flex-1 truncate">{npc.name}</span>
+                      <span className="text-[11px] text-muted-foreground shrink-0">
+                        {following(npc, sess) ? '跟着你' : here ? '就在跟前' : place || '行踪不明'}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -2020,7 +2435,7 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
   }, [open])
 
   const change = async (
-    key: 'model_ref' | 'fast_model_ref' | 'summary_model_ref' | 'image_model_ref' | 'temperature',
+    key: RpgModelField | 'temperature',
     value: string | number,
   ) => {
     try {
@@ -2047,11 +2462,11 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
 
   const row = (
     label: string,
-    key: 'model_ref' | 'fast_model_ref' | 'summary_model_ref' | 'image_model_ref',
+    key: RpgModelField,
     empty: string,
     hint: string,
   ) => (
-    <div>
+    <div key={key}>
       <label className="text-xs font-medium mb-1 block">{label}</label>
       <select
         value={modelSelectValue(models, module[key])}
@@ -2089,13 +2504,16 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
         // 底色不用 PANEL 的 bg-card/70 而是实心 bg-card：半透明的话下面的聊天
         // 文字会透上来，几个下拉根本看不清。其余（rpg-panel 的那圈起伏、圆角、
         // 边框）和别处一致
-        <div className="rpg-panel absolute right-0 top-full mt-2 z-50 w-64 p-3 space-y-3
+        <div className="rpg-panel absolute right-0 top-full mt-2 z-50 w-72 max-h-[70vh] overflow-y-auto p-3 space-y-3
           rounded-xl border bg-card shadow-xl"
         >
-          {row('叙事', 'model_ref', '跟随默认', '写旁白的那次调用。')}
-          {row('判定与结算', 'fast_model_ref', '跟随默认', '只吐 JSON，便宜的就行。')}
-          {row('总结', 'summary_model_ref', '跟随判定模型', '把旧剧情压成梗概，压错会一路带下去。')}
-          {row('立绘 tag', 'image_model_ref', '跟随判定模型', '中文外貌转 danbooru tag，便宜的就行。')}
+          {GAMEPLAY_MODEL_FIELDS.map(({ label, key, empty, hint }) => row(label, key, empty, hint))}
+          <details className="border-t pt-2">
+            <summary className="text-xs text-muted-foreground cursor-pointer">默认与立绘模型</summary>
+            <div className="space-y-3 pt-2">
+              {EXTRA_MODEL_FIELDS.map(({ label, key, empty, hint }) => row(label, key, empty, hint))}
+            </div>
+          </details>
           <div>
             <label className="text-xs font-medium mb-1 block">温度</label>
             <input

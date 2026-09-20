@@ -1,13 +1,15 @@
-import type { RpgSession, RpgSkill } from '@/api/client'
-import { norm } from '../condition'
+import type { RpgModule, RpgNpc, RpgSession, RpgSkill } from '@/api/client'
+import { checkCondition, effectCostReason, norm } from '../condition'
 import { PANEL } from '../rpgUi'
 import Empty from './Empty'
 
 export default function SkillTab({
-  sess, skills, locked, onUseSkill,
+  sess, skills, locked, onUseSkill, module, npcs,
 }: {
   sess: RpgSession
   skills: RpgSkill[]
+  module?: RpgModule
+  npcs: RpgNpc[]
   locked: boolean
   onUseSkill: (name: string, exact: boolean) => void
 }) {
@@ -25,7 +27,9 @@ export default function SkillTab({
         // 没定义的照样能点（剧情里现学的一招），只是效果交给 GM 现写。同背包
         const passive = def?.category === '被动'
         const canUse = !passive && (exact || !def)
-        const cooling = Math.max(0, row.cooldown_left || 0)
+        const cooling = Math.max(0, (row.cooldown_left || 0) - 1)
+        const [allowed, reason] = checkCondition(def?.requires, sess, npcs)
+        const blocked = !allowed ? reason : effectCostReason(def?.effects, sess, module)
         return (
           <div key={`${row.name}-${i}`} className={`${PANEL} p-3`}>
             <div className="flex items-baseline gap-2">
@@ -56,12 +60,12 @@ export default function SkillTab({
             {canUse && (
               <button
                 onClick={() => onUseSkill(row.name, exact)}
-                disabled={locked || cooling > 0}
-                title={cooling > 0
+                disabled={locked || cooling > 0 || !!blocked}
+                title={blocked || (cooling > 0
                   ? `还要歇 ${cooling} 回合`
                   : exact
                     ? '效果是模组里写死的，AI 改不了'
-                    : '模组里没有这个技能的定义：使出来什么效果由 GM 现写，数值不精确'}
+                    : '模组里没有这个技能的定义：使出来什么效果由 GM 现写，数值不精确')}
                 // 描边 = 效果不精确，同背包那两种按钮的区分
                 className={`mt-2.5 w-full text-xs py-1.5 rounded-lg disabled:opacity-40 ${
                   exact

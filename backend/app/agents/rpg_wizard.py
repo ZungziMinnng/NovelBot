@@ -11,6 +11,7 @@ location 引用地点名。小说侧每步重抽全量、靠 knownNames 去重�
 以为生成了，实际没有。
 """
 from app.agents.rpg_assist import FIELD_SPECS
+from app.models.rpg import normalize_profile_sections
 from app.services import llm_client, llm_json
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
@@ -19,15 +20,41 @@ from app.services.rpg_state import (
 )
 
 # 向导的步骤顺序。id 与 rpg_wizard.jinja2 / rpg_wizard_extract.jinja2 的 stage
-# 分支、前端 wizardStages.ts 保持一致。顺序有依赖：数值是地基、地点要在角色之前
-STAGES = ["world", "stats", "places", "slots", "cast", "things"]
+# 分支、前端 wizardStages.ts 保持一致。顺序有依赖：循环要排在数值前面——先聊清
+# 这一局到底怎么跑，才知道该给玩家哪几项数值，反过来先编数值，多半是编完发现
+# 一半栏位没人引用；数值是地基、地点要在角色之前；任务排最后，因为任务的 effects
+# 要引用前面定过的数值、objective 要引用地点/角色/道具，前面没定完它就无从写起
+STAGES = ["world", "loop", "stats", "places", "slots", "cast", "things", "quests"]
 
 # 每一步给模型多少输出额度。cast 单独给高：一个写全了的角色（性格+外貌+详细
 # 设定+四栏档案）就要五六千 token，原先六步统一 3000，**一个人都放不下**。
 # 给少了不会报错——llm_json.repair_json 会把被掐断的 JSON 补齐成合法的，于是
-# 症状是「说好八个角色只出来三个」「最后一段写到一半没了」，全程静默
-_STAGE_MAX_TOKENS = {"cast": 10000}
+# 症状是「说好八个角色只出来三个」「最后一段写到一半没了」，全程静默。
+# quests 也单列一档：一条任务（名字+简介+判定句+分类+effects）比一个角色便宜
+# 得多，但比世界观那种单栏文本贵；loop 只产一栏，走默认就够
+_STAGE_MAX_TOKENS = {"cast": 10000, "quests": 4000}
 _STAGE_MAX_TOKENS_DEFAULT = 6000
+
+_STAT_OWNERSHIP_RULES = """
+=== 数值归属与输出字段约定 ===
+先确定“这项数值属于谁、保存几份”，再分类，不能因为是模拟器或养成玩法就把全部数值塞进同一组。
+- 玩家数值 stat_defs：玩家自身的属性、状态、资源，或整局共用的指标，只保存一份。例如玩家体力、资金、全局声望。
+- 关系数值 relation_stat_defs：每个 NPC 各自保存一份的维度，如对玩家的好感、信任、戒心；作者明确要逐个 NPC 记录的状态也属于这一组。
+- 同一个“体力”“压力”“声望”可能属于不同对象，必须按作者说明的持有者分类，不能只看名字或是否能用于判定。NPC 的数值不能冒充玩家自身数值。
+- 尊重作者最后一次明确确认或纠正的归属。没有说清归属时，构思对话应先询问；抽取只能收已确认内容，不能擅自补一组、换组或强求两组都有值。
+- 构思数值方案时明确分成“玩家数值（全局一份）”和“关系数值（每个 NPC 一份）”两组，每项写明持有者、初值、范围和作用；未设置的组明确写“无”。
+- 输出数值 JSON 时同时给出 stat_defs 和 relation_stat_defs 两个数组，未设置的组输出 []。每项额外标注 scope：玩家数值填 "player"，关系数值填 "relation"；scope 必须与所在数组一致，effect 必须说明持有者和用途。
+- 关系数值名称用通用维度名，人物名放进 NPC 卡片，不能把“甲的好感”“乙的好感”做成两种关系维度。
+- 道具、技能、任务的 effects 和动作的 effects 引用玩家数值；NPC initial_state 和动作 relation_effects 引用关系数值，不能互换。
+"""
+
+_ACTION_GROUP_RULES = """
+=== 功能按钮分栏与输出字段约定 ===
+- 功能按钮的分栏使用 actions 每一项的 group 字段，分栏名是作者定义的文本，不是独立的新系统。不能只在说明文字中提到分栏却漏掉字段。
+- 构思时按分栏列出各栏里的按钮；模拟器（sim）的功能按钮尤其需要分栏。作者已确定分栏名和按钮归属时，保留原名、归属和按钮清单，不把多栏压成少数通用动作。
+- 输出每个动作时都带上 "group": "分栏名"，例如 {"name": "招募", "group": "人事"}。同一栏使用完全一致的名称，不用 category 等其他字段替代 group。
+- 抽取时只采用对话里已经确定的分栏与按钮，不能重新策划或改名；作者未设分栏时 group 留空字符串。作者明确调整过的，以最后一次确认结果为准。
+"""
 
 _DISPLAYS = {DISPLAY_BAR, DISPLAY_NUMBER, DISPLAY_HIDDEN, DISPLAY_CELLS}
 _ON_ZEROS = {ON_ZERO_NONE, ON_ZERO_DEAD, ON_ZERO_FLAG}
@@ -84,6 +111,8 @@ async def generate_full(
         instruction=instruction.strip(), nsfw=nsfw, play_style=play_style or "rpg",
         world_scope=world_scope if world_scope in {"world", "region"} else "region",
     )
+    prompt += _STAT_OWNERSHIP_RULES
+    prompt += _ACTION_GROUP_RULES
     model, api_format = llm_client.get_fast_client(model_ref)
     parsed, _, _ = await llm_json.call_json(
         [
@@ -93,8 +122,11 @@ async def generate_full(
         model,
         api_format,
         # 这一发要出整个模组（设定+数值+地点+时段+角色+道具+动作），原先的
-        # 6500/9000 连几个写全了的角色都装不下，多出来的部分被静默吞掉
-        max_tokens=16000 if world_scope == "world" else 12000,
+        # 6500/9000 连几个写全了的角色都装不下，多出来的部分被静默吞掉。
+        # 现在还要多装技能、任务、每个角色的作息和说话样例，额度再往上抬一档：
+        # 给少了不报错——repair_json 会把掐断的 JSON 补成合法的，于是症状是
+        # 「说好六个角色只出来四个」，全程静默
+        max_tokens=40000,
         temperatures=_ladder(temperature),
     )
     dropped: list[str] = []
@@ -105,8 +137,12 @@ async def generate_full(
     relation_names = [s["name"] for s in stats["relation_stat_defs"]]
     stat_names = [s["name"] for s in stats["stat_defs"]]
     location_names = [p["name"] for p in places["locations"]]
-    cast = _clean_cast(parsed, dropped, relation_names, location_names)
-    things = _clean_things(parsed, dropped, stat_names, relation_names)
+    # 一句话生成是一发出全部，白名单没别处可取，只能从这一份回答自己里按依赖
+    # 顺序洗：数值 → 地点 → 时段 → 角色 → 道具技能任务。少传一个参数不是少校验
+    # 一层，是那一摊整个丢掉——症状是模型明明写了角色作息、动作的 at_location，
+    # 回填时却不见了
+    cast = _clean_cast(parsed, dropped, relation_names, location_names, slots["time_slots"])
+    things = _clean_things(parsed, dropped, stat_names, relation_names, location_names)
     result = {**world, **stats, **places, **slots, **cast, **things}
     result["dropped"] = dropped
     return result
@@ -185,6 +221,10 @@ async def chat_stream_args(
         play_style=play_style or "rpg",
         world_scope=world_scope if world_scope in {"world", "region"} else "region",
     )
+    if stage == "stats":
+        system_prompt += _STAT_OWNERSHIP_RULES
+    if stage == "things":
+        system_prompt += _ACTION_GROUP_RULES
     full = [{"role": "system", "content": system_prompt}]
     full += [{"role": m["role"], "content": m["content"]} for m in messages]
     model, api_format = llm_client.get_agent_client("writer", model_ref)
@@ -206,6 +246,7 @@ async def extract_stage(
     stat_names = [str(n) for n in (known.get("stat_names") or [])]
     relation_names = [str(n) for n in (known.get("relation_names") or [])]
     location_names = [str(n) for n in (known.get("location_names") or [])]
+    slot_names = [str(n) for n in (known.get("slot_names") or [])]
 
     system_prompt = render(
         "rpg_wizard_extract.jinja2",
@@ -213,7 +254,18 @@ async def extract_stage(
         stat_names="、".join(stat_names),
         relation_names="、".join(relation_names),
         location_names="、".join(location_names),
+        slot_names="、".join(slot_names),
     )
+    if stage == "things":
+        system_prompt += _ACTION_GROUP_RULES
+    if stage == "stats":
+        system_prompt += _STAT_OWNERSHIP_RULES
+        if stat_names or relation_names:
+            system_prompt += (
+                "\n此前确认的玩家数值：" + ("、".join(stat_names) or "无")
+                + "\n此前确认的关系数值：" + ("、".join(relation_names) or "无")
+                + "\n保留未被作者修改的归属；对话中有明确纠正时，以最后一次纠正为准。"
+            )
     model, api_format = llm_client.get_fast_client(model_ref)
     parsed, _, _ = await llm_json.call_json(
         [
@@ -228,11 +280,17 @@ async def extract_stage(
 
     cleaners = {
         "world": _clean_world,
+        # loop 直接复用 _clean_world：它只是按 key 从 _WORLD_CHARS 里取值限长，而
+        # loop 这一步只产 system_instruction，其余几栏在 parsed 里取不到就是空串，
+        # 前端 mergeStage / mergeWizardFields 本来就跳过空串，所以不会把 world
+        # 那一步已经定好的世界观、开场旁白盖回空
+        "loop": _clean_world,
         "stats": _clean_stats,
         "places": _clean_places,
         "slots": _clean_slots,
-        "cast": lambda p, d: _clean_cast(p, d, relation_names, location_names),
-        "things": lambda p, d: _clean_things(p, d, stat_names, relation_names),
+        "cast": lambda p, d: _clean_cast(p, d, relation_names, location_names, slot_names),
+        "things": lambda p, d: _clean_things(p, d, stat_names, relation_names, location_names),
+        "quests": lambda p, d: _clean_tasks(p, d, stat_names),
     }
     dropped: list[str] = []
     result = cleaners[stage](parsed, dropped)
@@ -284,6 +342,8 @@ async def generate_batch(
         location_names="、".join(location_names),
         existing_names="、".join(existing_names),
     )
+    if kind == "action":
+        system_prompt += _ACTION_GROUP_RULES
     model, api_format = llm_client.get_fast_client(model_ref)
     parsed, _, _ = await llm_json.call_json(
         [
@@ -389,15 +449,27 @@ def _clean_stat_def(spec: dict, *, full: bool) -> dict | None:
 
 
 def _clean_stats(parsed: dict, dropped: list) -> dict:
+    groups: dict[str, list[dict]] = {"player": [], "relation": []}
+    for field, fallback in (("stat_defs", "player"), ("relation_stat_defs", "relation")):
+        for spec in _list_field(parsed, field):
+            if not isinstance(spec, dict):
+                continue
+            scope = _text(spec.get("scope")) or fallback
+            if scope not in groups:
+                raise llm_json.JsonCallError(f"数值「{_text(spec.get('name'))}」的归属不明确，请确认属于玩家还是每个 NPC 后重新抽取")
+            groups[scope].append(spec)
+            if scope != fallback:
+                label = "玩家数值" if scope == "player" else "关系数值"
+                dropped.append(f"数值「{_text(spec.get('name'))}」已按明确归属移至{label}")
     stat_defs = []
-    for spec in _list_field(parsed, "stat_defs"):
+    for spec in groups["player"]:
         if isinstance(spec, dict):
             cleaned = _clean_stat_def(spec, full=True)
             if cleaned:
                 stat_defs.append(cleaned)
     relation_defs = []
     relation_names = set()
-    for spec in _list_field(parsed, "relation_stat_defs"):
+    for spec in groups["relation"]:
         if isinstance(spec, dict):
             cleaned = _clean_stat_def(spec, full=False)
             if cleaned:
@@ -452,9 +524,16 @@ def _clean_places(parsed: dict, dropped: list, known_names=()) -> dict:
     return {"locations": locations, "default_location": default_location}
 
 
-def _clean_cast(parsed: dict, dropped: list, relation_names, location_names) -> dict:
+def _clean_cast(parsed: dict, dropped: list, relation_names, location_names, slot_names=()) -> dict:
+    """抽角色这一摊，引用一律过前面几步定下的白名单。
+
+    slot_names 是时段白名单，为空时作息表整摊丢掉——单摊生成和「剧情发现」那两条路
+    本来就不传时段，这是正确的降级。作息表对不上也得丢：猜错的时段名不报错，只会变成
+    一条永远不生效的作息，作者翻遍界面也查不出这个人为什么不动。
+    """
     relations = set(relation_names)
     places = set(location_names)
+    slots = set(slot_names)
     npcs = []
     for spec in _list_field(parsed, "npcs"):
         if not isinstance(spec, dict):
@@ -473,23 +552,52 @@ def _clean_cast(parsed: dict, dropped: list, relation_names, location_names) -> 
                 initial_state[k] = _num(value, 0)
             elif raw_key:
                 dropped.append(f"角色「{name}」的关系「{raw_key}」不在数值表里，已去掉")
+        # 作息表：键是时段名、值是地点名，两边都得在白名单里
+        slot_locations = {}
+        for raw_slot, raw_place in _object_field(
+            spec.get("slot_locations"), f"角色「{name}」的作息表", dropped,
+        ).items():
+            slot, place = _text(raw_slot), _text(raw_place)
+            if slot in slots and place in places:
+                slot_locations[slot] = place
+            elif slot or place:
+                dropped.append(f"角色「{name}」的作息「{slot}→{place}」对不上时段或地点，已去掉")
         location = _text(spec.get("location"))
         if location and location not in places:
             dropped.append(f"角色「{name}」在的地点「{location}」不存在，已留空")
             location = ""
+        # 说话样例只认 user/assistant 两个键，assistant 空的那条会被 rpg_context
+        # 整条忽略，所以这里直接不留。那是模型少写、不是引用对不上，不记 dropped
+        dialogue_examples = []
+        for ex in _list_field(spec, "dialogue_examples"):
+            if not isinstance(ex, dict):
+                continue
+            assistant = _text(ex.get("assistant"), _THING_DESC_CHARS)
+            if assistant:
+                dialogue_examples.append({
+                    "user": _text(ex.get("user"), _THING_DESC_CHARS),
+                    "assistant": assistant,
+                })
         profile_sections = _object_field(spec.get("profile_sections"), f"角色「{name}」的详细档案", dropped)
+        # 小白名单只认中文三栏：编辑器和提示词都按中文键认这张卡（键就是拼进提示词的
+        # 标签，见 normalize_profile_sections）。模型偶尔还照老习惯发英文键，
+        # 先归一一道，别让那些内容填了却哪儿都看不见
+        sections, section_appearance = normalize_profile_sections(profile_sections)
         npcs.append({
             "name": name,
             "persona": _text(spec.get("persona"), _cap("npc_persona")),
-            "appearance": _text(spec.get("appearance"), _DESC_CHARS),
+            # 外貌只住顶层这一栏。模型把它塞进分栏的也有，那就拿出来用
+            "appearance": _text(spec.get("appearance") or section_appearance, _DESC_CHARS),
             "description": _text(spec.get("description"), _cap("npc_description")),
             "profile_sections": {
-                key: _text(profile_sections.get(key), _PROFILE_CHARS)
-                for key in ("appearance", "background", "abilities", "relationships")
-                if _text(profile_sections.get(key), _PROFILE_CHARS)
+                key: _text(sections.get(key), _PROFILE_CHARS)
+                for key in ("背景故事", "能力特长", "关系网络")
+                if _text(sections.get(key), _PROFILE_CHARS)
             },
             "location": location,
             "initial_state": initial_state,
+            "slot_locations": slot_locations,
+            "dialogue_examples": dialogue_examples,
         })
     return {"npcs": npcs}
 
@@ -507,9 +615,57 @@ def _clean_effects(raw, allowed: set, name: str, kind: str, dropped: list, norma
     return out
 
 
-def _clean_things(parsed: dict, dropped: list, stat_names, relation_names) -> dict:
+def _clean_requires(raw, name: str, stats: set, item_names: set, dropped: list) -> dict:
+    """技能的解锁门槛。只收 stats 和 items 两个子形状，别的子键一律丢掉。
+
+    完整的条件格式是一套嵌套结构，模型编出来的既看不懂也没法在界面上改对；但
+    「声望≥50 才亮」这种门槛本来就该在策划阶段定下来，全砍掉等于让作者回头一项项补。
+    折中就是只放开这两块最扁的。
+
+    items 只认**这一批**里的道具名。单摊生成技能时这一批里根本没有道具，于是整个
+    items 条件都会被丢掉——和作息表一样是正确的降级。
+    """
+    ops = {">=", "<=", ">", "<", "=="}
+    out: dict = {}
+    for field, value in _object_field(raw, f"技能「{name}」的解锁条件", dropped).items():
+        key = _text(field)
+        if key == "stats":
+            thresholds = {}
+            for raw_stat, cond in _object_field(value, f"技能「{name}」的数值门槛", dropped).items():
+                stat = _text(raw_stat)
+                if stat and stat not in stats:
+                    dropped.append(f"技能「{name}」的门槛「{stat}」不在数值表里，已去掉")
+                    continue
+                if not stat:
+                    continue
+                op = _text(cond.get("op")) if isinstance(cond, dict) else ""
+                if op not in ops:
+                    dropped.append(f"技能「{name}」的门槛「{stat}」写法不认识，已去掉")
+                    continue
+                thresholds[stat] = {"op": op, "value": _num(cond.get("value"), 0)}
+            if thresholds:
+                out["stats"] = thresholds
+        elif key == "items":
+            needed = []
+            for raw_item in value if isinstance(value, list) else []:
+                item = _text(raw_item)
+                if item and item in item_names:
+                    needed.append(item)
+                elif item:
+                    dropped.append(f"技能「{name}」要的「{item}」不是这一批生成的道具，已去掉")
+            if needed:
+                out["items"] = needed
+        elif key:
+            dropped.append(f"技能「{name}」的解锁条件里「{key}」这一项不支持，已去掉")
+    return out
+
+
+def _clean_things(
+    parsed: dict, dropped: list, stat_names, relation_names, location_names=(),
+) -> dict:
     stats = set(stat_names)
     relations = set(relation_names)
+    places = set(location_names)
     items = []
     for spec in _list_field(parsed, "items"):
         if not isinstance(spec, dict):
@@ -525,6 +681,8 @@ def _clean_things(parsed: dict, dropped: list, stat_names, relation_names) -> di
             "start_with": bool(spec.get("start_with")),
             "effects": _clean_effects(spec.get("effects"), stats, name, "道具", dropped),
         })
+    # 技能的道具门槛只认同一批生成的道具，名字得先收出来
+    item_names = {it["name"] for it in items}
     skills = []
     for spec in _list_field(parsed, "skills"):
         if not isinstance(spec, dict):
@@ -532,8 +690,6 @@ def _clean_things(parsed: dict, dropped: list, stat_names, relation_names) -> di
         name = _text(spec.get("name"))
         if not name:
             continue
-        # requires 不让模型生成：条件是一套嵌套结构，模型胡编出来的条件既看不懂
-        # 也没法在界面上改对。作者要门槛就自己在技能那一摊点两下
         skills.append({
             "name": name,
             "description": _text(spec.get("description"), _THING_DESC_CHARS),
@@ -541,7 +697,51 @@ def _clean_things(parsed: dict, dropped: list, stat_names, relation_names) -> di
             "cooldown": max(0, int(_num(spec.get("cooldown"), 0))),
             "start_with": bool(spec.get("start_with")),
             "effects": _clean_effects(spec.get("effects"), stats, name, "技能", dropped),
+            # requires 只放开两个最扁的子形状，理由见 _clean_requires
+            "requires": _clean_requires(spec.get("requires"), name, stats, item_names, dropped),
         })
+    # things 这一摊的抽取模板里仍然可能带 tasks（「剧情发现」也走这条路），所以
+    # 这里照旧出任务，行为跟抽成函数之前一样
+    tasks = _clean_tasks(parsed, dropped, stat_names)["tasks"]
+    actions = []
+    for spec in _list_field(parsed, "actions"):
+        if not isinstance(spec, dict):
+            continue
+        name = _text(spec.get("name"))
+        if not name:
+            continue
+        # 「这个按钮花掉一格时段」是策划阶段就要定的事，所以 cost_slot 放开——
+        # 它是纯布尔，猜错了也只是多花或少花一格，作者一眼看得见。at_location
+        # 要模型写对地点名，猜错就是个永远灰着的按钮，所以只在对得上白名单时才留
+        at_location = _text(spec.get("at_location"))
+        if at_location and at_location not in places:
+            dropped.append(f"动作「{name}」限定的地点「{at_location}」不存在，已留空")
+            at_location = ""
+        actions.append({
+            "name": name,
+            "prompt_hint": _text(spec.get("prompt_hint"), 200),
+            "needs_target": bool(spec.get("needs_target")),
+            # 分组是纯文本，编错了也只是分栏难看，所以放给模型生成
+            "group": _text(spec.get("group"), 50),
+            "cost_slot": bool(spec.get("cost_slot")),
+            "at_location": at_location,
+            "effects": _clean_effects(spec.get("effects"), stats, name, "动作", dropped),
+            "relation_effects": _clean_effects(
+                spec.get("relation_effects"), relations, name, "动作", dropped,
+                normalize=_clean_relation_name,
+            ),
+        })
+    return {"items": items, "skills": skills, "tasks": tasks, "actions": actions}
+
+
+def _clean_tasks(parsed: dict, dropped: list, stat_names) -> dict:
+    """洗 tasks 这一摊，返回 {"tasks": [...]}。
+
+    既给向导的 quests 那一步用，也被 _clean_things 调——「剧情发现」和单摊生成
+    那两条路仍然从 things 那一摊里出任务。抽成函数只是为了共用，两边的行为必须
+    和抽出来之前一模一样。
+    """
+    stats = set(stat_names)
     tasks = []
     for spec in _list_field(parsed, "tasks"):
         if not isinstance(spec, dict):
@@ -559,25 +759,4 @@ def _clean_things(parsed: dict, dropped: list, stat_names, relation_names) -> di
             "auto_start": bool(spec.get("auto_start")),
             "effects": _clean_effects(spec.get("effects"), stats, name, "任务", dropped),
         })
-    actions = []
-    for spec in _list_field(parsed, "actions"):
-        if not isinstance(spec, dict):
-            continue
-        name = _text(spec.get("name"))
-        if not name:
-            continue
-        actions.append({
-            "name": name,
-            "prompt_hint": _text(spec.get("prompt_hint"), 200),
-            "needs_target": bool(spec.get("needs_target")),
-            # 分组是纯文本，编错了也只是分栏难看，所以放给模型生成。
-            # cost_slot 和 at_location 不给：一个要模型懂这个模组的时段节奏，
-            # 一个要它写对地点名，猜错就是个永远灰着的按钮，作者还不知道为什么
-            "group": _text(spec.get("group"), 50),
-            "effects": _clean_effects(spec.get("effects"), stats, name, "动作", dropped),
-            "relation_effects": _clean_effects(
-                spec.get("relation_effects"), relations, name, "动作", dropped,
-                normalize=_clean_relation_name,
-            ),
-        })
-    return {"items": items, "skills": skills, "tasks": tasks, "actions": actions}
+    return {"tasks": tasks}

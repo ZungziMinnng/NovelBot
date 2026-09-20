@@ -27,9 +27,9 @@ import { INPUT } from './rpgUi'
 function buildPrompt(
   npc: RpgNpc, genre: string, cfg: RpgImageConfig, place?: RpgLocation,
 ): string {
-  const parts = [npc.appearance, npc.profile_sections?.['外貌身材']]
-    .map(s => (s || '').trim())
-    .filter(Boolean)
+  // 外貌只有顶层这一栏：分栏里的外貌键会被后端读时归一进它（见
+  // normalize_profile_sections），所以这里不必再看 profile_sections
+  const parts = [(npc.appearance || '').trim()].filter(Boolean)
   if (!parts.length && npc.description.trim()) parts.push(npc.description.trim())
   // 地点表里没这一条时落回 npc.location 这个名字本身。常驻地点那一栏是从
   // 地点表里挑的，正常对得上，但模组是可以先填人后删地点的

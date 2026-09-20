@@ -221,19 +221,19 @@ class SlotResetTests(unittest.TestCase):
     def _module(self):
         return RpgModule(name="魔法学院", time_slots=["早", "中", "晚"])
 
-    def test_advancing_the_slot_clears_the_places(self):
+    def test_advancing_the_slot_preserves_the_present_cast(self):
         module = self._module()
         sess = _sess(slot="中", npc_places={"3": "校长办公室"})
         advance_slot(module, sess)
         self.assertEqual(sess.slot, "晚")
-        self.assertEqual(sess.npc_places, {})
+        self.assertEqual(sess.npc_places, {"3": "校长办公室"})
 
-    def test_rolling_over_to_a_new_day_clears_them_too(self):
+    def test_rolling_over_to_a_new_day_preserves_the_present_cast(self):
         module = self._module()
         sess = _sess(slot="晚", day=3, npc_places={"3": "校长办公室"})
         advance_slot(module, sess)
         self.assertEqual(sess.day, 4)
-        self.assertEqual(sess.npc_places, {})
+        self.assertEqual(sess.npc_places, {"3": "校长办公室"})
 
     def test_no_clock_means_no_reset(self):
         # 模组没设时段时按一下不该有任何后果——时钟不存在，也就没有「下一格」

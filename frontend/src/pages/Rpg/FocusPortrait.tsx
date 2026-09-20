@@ -36,8 +36,8 @@ export default function FocusPortrait({
     .filter(d => !npc.relation_stat_names?.length || npc.relation_stat_names.includes(d.name))
 
   return (
-    <aside className="hidden lg:flex shrink-0 w-52 flex-col gap-2 border-l border-border/50
-      bg-background/30 px-3 py-4 overflow-y-auto">
+    <div className="flex flex-col gap-2 border-t border-border/50
+      bg-background/30 px-3 py-4">
       {/* 立绘是 2:3 竖图，用 object-cover 裁成同一个比例，免得每个人一个高度
           把下面的数值顶得参差不齐 */}
       <button
@@ -65,7 +65,11 @@ export default function FocusPortrait({
       {rels.length > 0 && (
         <div className="space-y-1 border-t border-border/40 pt-2">
           {rels.map(def => {
-            const value = Number(npcStates[String(npc.id)]?.[def.name] ?? 0)
+            const value = Number(
+              npcStates[String(npc.id)]?.[def.name]
+                ?? npc.initial_state?.[def.name]
+                ?? def.initial,
+            )
             const label = bandOf(def, value)?.label
             return (
               <div key={def.name} className="flex items-baseline gap-1.5 text-[11px]">
@@ -81,6 +85,6 @@ export default function FocusPortrait({
       {viewing && (
         <ImageLightbox url={npc.avatar_url} alt={npc.name} onClose={() => setViewing(false)} />
       )}
-    </aside>
+    </div>
   )
 }
