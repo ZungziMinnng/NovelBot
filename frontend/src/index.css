@@ -506,6 +506,37 @@
   color: hsl(var(--primary));
 }
 
+/* 不定长进度条：等的是一次模型调用，没人知道还剩几秒，所以**不装百分比**——
+   假的百分比走到 90% 卡住比没有条更让人以为是死了。它只回答「还在跑」 */
+/* 百分比是相对**自己**33% 的宽度算的，所以走完全程要 300% 出头，
+   不是 100%——按 100% 写的话条子只挪三分之一就跳回去了 */
+@keyframes rpg-wait {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
+.rpg-wait-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* 不写 right：那一头由 width 和 transform 管，两个都给的话 width 会被忽略 */
+  width: 33%;
+  border-radius: inherit;
+  background: hsl(var(--primary) / 0.75);
+  animation: rpg-wait 1.3s ease-in-out infinite;
+}
+
+/* 关了动画偏好的人看到的是一条静态的半亮条：仍然表示「在忙」，不再滑动 */
+@media (prefers-reduced-motion: reduce) {
+  .rpg-wait-bar::after {
+    width: 100%;
+    animation: none;
+    background: hsl(var(--primary) / 0.35);
+  }
+}
+
 /* 自定义滚动条 */
 ::-webkit-scrollbar {
   width: 6px;

@@ -145,10 +145,25 @@ class RpgModule(Base):
     # 开了判定之后还掷不掷随机数。关掉则纯看成功率，同一存档重玩结果一样
     random_check: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # ── 对抗：判定时对上某个角色的能力数值，而不是对一个固定基准 ──
+    # 空 = 数值制：跟人对碰时比裁判挑中的那一项的同名数值，每点 RATE_PER_POINT。
+    # 非空 = 等级制：一律比这一项（stat_defs 里的某个 name），每级 rank_per_level。
+    # 「等级制还是数值制」就是这一个字段空不空——刻意不另立一个三值枚举，
+    # 否则要处理「等级制但没指定是哪一项」这种自相矛盾的状态。
+    # 等级的**名字**（金丹期/元婴期）不在这儿，用那一项自己的 tiers
+    rank_stat: Mapped[str] = mapped_column(String(100), default="")
+    # 等级每差一级多少个百分点。默认 15：差一级就明显吃力，差三级基本只能靠
+    # 险胜档蹭过去。注意它在 medium 档的可用量程只有 −3…+2（±4 就撞上
+    # RATE_MIN/MAX 了），九阶天梯会在两头压平，编辑器里有阶梯预览提醒作者
+    rank_per_level: Mapped[int] = mapped_column(Integer, default=15)
+
     # ── 上下文与模型参数 ──
     # 世界书关键词往回扫几条消息，含义同酒馆
     scan_depth: Mapped[int] = mapped_column(Integer, default=3)
     context_turns: Mapped[int] = mapped_column(Integer, default=20)
+    # 整段 system 的总闸，按 rpg_budget.SECTION_BASE 等比摊给各块。默认值
+    # 就是原来写死的那个 21500，所以不填 = 今天的行为一个字不变
+    context_budget: Mapped[int] = mapped_column(Integer, default=21500)
     temperature: Mapped[float] = mapped_column(Float, default=0.9)
     max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
     # 期望叙事字数（软约束）。RPG 单轮该比酒馆长，所以给默认值而不是 0
@@ -170,6 +185,10 @@ class RpgModule(Base):
     # 而且转完要给用户过目能删，所以最便宜的模型就够——单独拎出来是因为它
     # 从前跟着 model_ref 走，白花叙事模型的钱。空 = 跟着 fast_model_ref 走
     image_model_ref: Mapped[str] = mapped_column(String(100), default="")
+    # 长期记忆的向量召回用。**空 = 整条向量路关闭**，不另设开关：没配就是
+    # 一次嵌入接口都不调，召回退回 BM25 + 词面两路，和今天完全一样。
+    # 单独一个开关会多出「配了却关着」这种谁也说不清的状态
+    embedding_model_ref: Mapped[str] = mapped_column(String(100), default="")
 
     # 推时段时写一句「别处的传闻」进大事记。**默认关**：开了之后「结束这个
     # 时段」就不再是零模型调用了，这个承诺写在文档、按钮提示和测试里
@@ -368,6 +387,10 @@ class RpgWorldEntry(Base):
         Integer, ForeignKey("rpg_modules.id"), nullable=False, index=True
     )
 
+    # 这条叫什么。纯粹给人看：列表上认条目、游戏里那行诊断报「本轮生效了谁」。
+    # 加它的直接理由是条件事件全是「常驻 + 无关键词」，原先诊断条上只能显示成
+    # 一串「常驻」，分不清是哪条（见 RpgPlay 那行诊断）。空 = 回退到按关键词显示
+    title: Mapped[str] = mapped_column(String(100), default="")
     # 触发关键词，逗号分隔
     keywords: Mapped[str] = mapped_column(String(500), default="")
     content: Mapped[str] = mapped_column(Text, default="")
@@ -378,6 +401,12 @@ class RpgWorldEntry(Base):
     constant: Mapped[bool] = mapped_column(Boolean, default=False)
     # 插入深度：0 = 拼进 system；n>0 = 插到倒数第 n 条消息开头
     depth: Mapped[int] = mapped_column(Integer, default=0)
+    # 只放一次。「她终于肯叫你名字了」这种一次性剧情，条件一直满足就会一直
+    # 注入、让模型每轮重演一次「终于」。
+    #
+    # 放过的 id 记在 RpgSession.fired_entries 里，**不记在这一条上**——词条是
+    # 模组资产、跨局共用，记在这儿会让第二局开局就少一段剧情
+    once: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 数值门槛。空 = 无条件（和以前一样）。格式见 services/rpg_state.py。
     # 语义唯一：条件是「附加约束」，全部满足才算生效——
@@ -443,6 +472,11 @@ class RpgNpc(Base):
     slot_locations: Mapped[dict] = mapped_column(JSON, default=dict)
     # 仅在这些时段执行随机移动；空列表保持旧行为，表示所有时段都可随机移动。
     random_movement_slots: Mapped[list] = mapped_column(JSON, default=list)
+    # 随机移动只能去这几个地点（存地点名，同 slot_locations 的值和 at_location
+    # 的口径）。空列表 = 不限制，可以去模组里任何地点，语义和上面那张时段表
+    # 逐字一致。地点改名或删掉之后这里会留下对不上的名字，一律静默滤掉
+    # （同 apply_tweak 对不上就跳过），但前端要把它显出来，否则作者不知道少了一格
+    random_movement_places: Mapped[list] = mapped_column(JSON, default=list)
     # 额外触发词：人不在场但被提到也注入，匹配方式同世界书
     keywords: Mapped[str] = mapped_column(String(500), default="")
 
@@ -457,6 +491,20 @@ class RpgNpc(Base):
     initial_state: Mapped[dict] = mapped_column(JSON, default=dict)
     relation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     relation_stat_names: Mapped[list] = mapped_column(JSON, default=list)
+
+    # 这个人有多强：{"境界": 4, "剑术": 18}，键是模组 stat_defs 里的名字。
+    # 判定时玩家不再对一个固定基准，而是对这里的数字（见 rpg_dice.resolve_rate）。
+    #
+    # **稀疏**：只给真会跟玩家对上的人填。不在表里 = 这一项不参与对抗，
+    # 那一轮就只剩难度档位说话。所以 {} 是常态，老模组一个字不用改。
+    # 0 是**合法值**（作者明写的「凡人」），和「没填」是两件事，读的时候
+    # 一律用 is None 判，别用真值判。
+    #
+    # 刻意**不进 session.npc_states 快照**：这是作者定的「这个人本来有多强」，
+    # 作者把 BOSS 从 5 级调到 8 级，已经开着的局跟着变才是他要的——正好和
+    # npc_activities（存这一局发生的事）相反。而且 npc_states 里所有非 met
+    # 的键都被当关系数字用，塞进去会被 clamp 到关系数值的上下限里
+    ability_stats: Mapped[dict] = mapped_column(JSON, default=dict)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -739,6 +787,15 @@ class RpgSession(Base):
     # 会被一次无关的重复置位推到永远不到。删掉 flag 时这里也删——那件事等于
     # 没发生过，留着日期会让重新触发时立刻满足三天
     flag_days: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 这一局里已经放过的一次性词条 id（RpgWorldEntry.once）。[12, 31]
+    #
+    # 存 id 不存名字，同 npc_states——名字会改，id 不会。
+    # 和 flag_days 是同一类：模型一个字都碰不到，只有引擎在 mark_fired 里记，
+    # 所以能安全地这么存。
+    #
+    # **必须进 SNAPSHOT_FIELDS**：读档回到那件事发生之前，它就该能再放一次——
+    # 这也是「重新武装」的唯一入口，界面上不另做按钮
+    fired_entries: Mapped[list] = mapped_column(JSON, default=list)
     # {"3": {"好感": 2, "信任": 40, "met": true}}，键是 npc_id 的字符串——
     # 名字会改，id 不会。数值项按模组的 relation_stat_defs 初始化，
     # met 是内部标记（控制首次见面才注入外貌），渲染面板时跳过
@@ -780,6 +837,25 @@ class RpgSession(Base):
     # 和 npc_notes 分开同理，那张表是 GM 从叙事里读出来的近况，这张是调度替
     # 不在场的人编的行动，两个写手共用一个键空间迟早互相盖
     npc_activities: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 上面那句话按时段留下的短流水，形状同 npc_history：
+    # {"3": [{"day": 4, "slot": "晚", "content": "在图书馆翻了一下午旧报纸"}]}。
+    # 一个人最多 ACTIVITY_LOG_LINES 条，一格只留最后一句，满了丢最旧的。
+    #
+    # 为什么不直接往 npc_history 里追加（这是最先想到的做法，别再回头试）：
+    # 经历那一列每条都过了结算的取证门禁——必须在正文里找得到原话，而且只有
+    # **参与了本轮**的人才写得进去。调度写的是不在场的人、凭人设编出来的背景
+    # 活动，一条正文依据都没有。混进去之后「玩出来的事」和「模型编的事」在
+    # 同一条时间线上再也分不开，而经历是要喂回模型的，等于让它把自己编的
+    # 背景当成发生过的事实接着编下去。
+    #
+    # **只给人看，不进 prompt**。它存在的理由是玩家按了一串「结束时段」之后
+    # 想知道这几格她在忙什么——那几格没产生正文，经历里理所当然是空的。
+    # 要注入的长期记忆已经有经历和里程碑两份，再加一份编出来的只会挤掉它们。
+    #
+    # 进 SNAPSHOT_FIELDS，理由同 npc_activities；不进 STATE_FIELDS，
+    # 理由也同它：结算不碰这一列，写它的只有 apply_npc_activity 一个入口
+    npc_activity_log: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 这一局里每个人身上过了什么事，只追加不覆盖：
     # {"3": [{"day": 4, "slot": "晚", "content": "在图书馆翻了一下午旧报纸"}]}。
@@ -887,6 +963,11 @@ class RpgSession(Base):
     # 键是 NPC id 的字符串（JSON 的键只能是字符串）
     thread_summaries: Mapped[dict] = mapped_column(JSON, default=dict)
     thread_upto: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 已经嵌进向量库的消息推到哪了（见 rpg_vectors.sync_session）。和上面两个
+    # 指针一样，**回溯时必须跟着回退**——否则被删掉的「未来」还留在向量库里，
+    # 检索得回来，那正是 RpgSave 注释里说的最难查的一类 bug
+    vector_upto_id: Mapped[int] = mapped_column(Integer, default=0)
 
     # 结算顺带认出来的、模组里还没登记的人/地方/东西，等作者勾选：
     # [{"id": "a1b2...", "kind": "npc|place|item", "name": "老周", "hint": "正文原话", "message_id": 88}]

@@ -55,8 +55,124 @@ export function CommaInput({
   )
 }
 
+/**
+ * 数字输入框。**打得进负号**，这是它存在的全部理由。
+ *
+ * 病因和 CommaInput 完全一样，只是被吃掉的字符从逗号变成了减号：写成
+ * value={n} + onChange={Number(e.target.value) || 0} 的话，敲下「-」的那一刻
+ * 浏览器给的 value 是空串（"-" 不是合法数字），当场被压成 0 并回写进 value，
+ * 输入框里那个减号就没了——负数永远输不进去，只能靠上下箭头一格格点。
+ * 「3」删成空也一样：变成 0 之后光标前面多个 0，再敲就成了「05」。
+ *
+ * 所以中间态（""、"-"、"1e"）留在本地 text 里，只在**能解析成数字**时才
+ * 往外发。allowEmpty 的那一档发 null，给「留空 = 无上限」那种字段用。
+ */
+export function NumInput({
+  value, onChange, allowEmpty, clamp, className, placeholder, title, disabled,
+}: {
+  value: number | null | undefined
+  onChange: (next: number | null) => void
+  /** 留空是不是合法值（「无上限」「不限」）。true 时清空发 null，否则清空不发 */
+  allowEmpty?: boolean
+  /** 夹一下范围。只在往外发的那一刻夹，不碰输入框里的字——边敲边夹的话
+   *  下限是 1 时「10」的那个 1 会被夹成 1 再拼成 110，越敲越离谱 */
+  clamp?: (n: number) => number
+  className?: string
+  placeholder?: string
+  title?: string
+  disabled?: boolean
+}) {
+  const [text, setText] = useState(() => (value ?? '').toString())
+  const emitted = useRef((value ?? '').toString())
+
+  useEffect(() => {
+    const next = (value ?? '').toString()
+    if (next !== emitted.current) {
+      emitted.current = next
+      setText(next)
+    }
+  }, [value])
+
+  return (
+    // type=text 而不是 number：number 的 value 在中间态下被规范成空串，
+    // 读不出用户到底敲了什么，光标也会跳。inputMode 让手机出数字键盘，
+    // 上下箭头那两个小按钮换成键盘上下键（下面的 onKeyDown）
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      onChange={e => {
+        const raw = e.target.value
+        // 只收数字、负号、小数点：拦住输入法蹦进来的汉字，也拦住粘贴一段话
+        if (raw && !/^-?\d*\.?\d*$/.test(raw)) return
+        setText(raw)
+        if (raw === '' || raw === '-' || raw === '.' || raw === '-.') {
+          if (allowEmpty && raw === '') {
+            emitted.current = ''
+            onChange(null)
+          }
+          return
+        }
+        const n = clamp ? clamp(Number(raw)) : Number(raw)
+        emitted.current = raw
+        onChange(n)
+      }}
+      onBlur={() => {
+        // 离开时把中间态收干净：留着一个光秃秃的「-」，下次 useEffect 比对
+        // 不上就再也刷不回去了
+        const n = Number(text)
+        if (text === '' || Number.isNaN(n)) {
+          setText(allowEmpty ? '' : (value ?? 0).toString())
+          return
+        }
+        const fixed = clamp ? clamp(n) : n
+        setText(fixed.toString())
+        emitted.current = fixed.toString()
+        if (fixed !== value) onChange(fixed)
+      }}
+      onKeyDown={e => {
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+        e.preventDefault()
+        const base = Number(text) || 0
+        const next = base + (e.key === 'ArrowUp' ? 1 : -1)
+        const fixed = clamp ? clamp(next) : next
+        setText(fixed.toString())
+        emitted.current = fixed.toString()
+        onChange(fixed)
+      }}
+      placeholder={placeholder}
+      className={className ?? INPUT}
+      title={title}
+      disabled={disabled}
+    />
+  )
+}
+
 /** 面板的公共壳。侧栏那四张重复的 rounded-xl border bg-card/70 p-3 也用它 */
 export const PANEL = 'rpg-panel rounded-xl border bg-card/70'
+
+/** 要等的事情正在跑时的那条进度条。样式和动画在 index.css 的 .rpg-wait-bar。
+ *
+ *  刻意是**不定长**的：这些等待全是一次模型调用，后端不上报进度，也没有
+ *  可信的时长可估。画一根自己往 90% 爬的假条子，卡在那儿的时候比什么都不画
+ *  更像卡死了。这根只回答一件事——还在跑。
+ *
+ *  不用 framer-motion：纯 CSS 的一句 keyframes 够了，而这东西会同时出现在
+ *  好几处（推时段、瞬移、重新结算、补档案、帮我想想）。
+ */
+export function WaitBar({ label = '', className = '' }: { label?: string; className?: string }) {
+  return (
+    <div className={className}>
+      <div
+        className="rpg-wait-bar relative h-0.5 overflow-hidden rounded-full bg-primary/10"
+        role="progressbar"
+        // 不定长就是不给 now/min/max：读屏器据此念「忙碌」而不是念一个编出来的百分比
+        aria-label={label || '正在处理'}
+      />
+      {label && <p className="mt-1 text-[11px] text-muted-foreground">{label}</p>}
+    </div>
+  )
+}
 
 /** 板块色。变量定在 index.css 的 .mode-game 里，18 套主题下是同一个身份——
  *  换个主题就找不到道具在哪的话，这套辨识度就白做了。

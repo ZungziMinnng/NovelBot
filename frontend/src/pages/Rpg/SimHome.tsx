@@ -6,7 +6,7 @@ import { actionBlocked, checkCondition, norm, visibleLocations } from './conditi
 import { actionTimeHint, effectPreview } from './actionFeedback'
 import { kindMeta, splitSuggestions, suggestionLabel } from './suggestion'
 import RpgAvatar from './RpgAvatar'
-import { PANEL } from './rpgUi'
+import { PANEL, WaitBar } from './rpgUi'
 
 interface Props {
   module?: RpgModule
@@ -102,6 +102,9 @@ export default function SimHome({
               {suggesting ? '在想…' : '帮我想想'}
             </button>
           </div>
+
+          {/* 一次模型调用。按钮里那个转圈太小，主页这一屏功能按钮又多 */}
+          {suggesting && <WaitBar className="mb-3" />}
 
           {/* 结构化那几件：逐字复用下面动作卡片的样子，点了直接走引擎 */}
           {structured.length > 0 && (

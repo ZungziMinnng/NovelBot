@@ -517,7 +517,10 @@ class FreeCostsSlotTests(unittest.IsolatedAsyncioTestCase):
 
     # ── 替身 ──
     async def _fake_context(self, *args, **kwargs):
-        return [{"role": "user", "content": "x"}], {"npcs_here": [], "npcs_onstage": []}
+        # triggered 和 npcs_here 一样是 run_turn 硬取的键，替身少一个就 KeyError
+        return [{"role": "user", "content": "x"}], {
+            "npcs_here": [], "npcs_onstage": [], "triggered": [],
+        }
 
     async def _fake_settle(self, *args, **kwargs):
         return {

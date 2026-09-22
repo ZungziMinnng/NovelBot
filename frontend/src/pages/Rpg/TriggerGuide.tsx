@@ -11,7 +11,8 @@ import { UserPlus, DoorOpen, EyeOff } from 'lucide-react'
  *
  * 例子统一用「触碰古镜 → 古镜空间」这条线，别换回项目里那个敏感题材的旧例子。
  *
- * 文案里出现的字段名（数值门槛 / 常驻 / 玩家数值变化 / 生效条件 / 进入条件）
+ * 文案里出现的字段名（数值门槛 / 条件到了才发生的事 / 只触发一次 / 玩家数值变化 /
+ * 生效条件 / 进入条件）
  * 全是各面板上已经印着的原话，别在这儿另造名词——对不上就等于没写。
  */
 
@@ -97,12 +98,15 @@ export default function TriggerGuide() {
 
         <Step n={3}>
           <div className="leading-relaxed">
-            <Field>世界书</Field> 面板 → 加一条词条，勾上 <Field>常驻</Field>，
-            正文写清「发生什么、谁出现」。然后在 <Field>生效条件</Field> 里加一条
-            <Field>数值门槛</Field>：<Field>触碰古镜次数 &gt;= 1</Field>。
+            <Field>世界书</Field> 面板 → <Field>添加词条</Field> → 选
+            <Field>条件到了才发生的事</Field>，正文写清「发生什么、谁出现」。然后在
+            <Field>生效条件</Field> 里加一条 <Field>数值门槛</Field>：
+            <Field>触碰古镜次数 &gt;= 1</Field>。
           </div>
           <Note>
-            常驻 = 不看关键词，每轮都注入。真正决定它这轮出不出现的是底下的生效条件。
+            这个类型自带常驻 = 不看关键词，每轮都问一遍条件；真正决定它这轮出不出现的
+            就是底下的生效条件。只该发生一次的剧情（「她终于肯叫你名字了」）记得勾上
+            <Field>只触发一次</Field>，否则条件一直满足，它就每轮都递过去、让 AI 反复重演。
           </Note>
         </Step>
 

@@ -31,7 +31,7 @@ from app.models.rpg import (
     RpgSession,
     RpgSkill,
 )
-from app.services import llm_client, rpg_settlement
+from app.services import llm_client, rpg_settlement, rpg_vectors
 from app.services.context_budget import estimate_tokens, truncate_to_token_budget
 from app.services.llm_json import call_json
 from app.services.rpg_context import (
@@ -45,7 +45,10 @@ from app.services.rpg_context import (
     message_slots,
     named_npcs,
     npc_place,
+    opposed_for,
+    opposed_roster,
     present_ids,
+    rank_stat_of,
     ref_roster,
     resolve_refs,
     slot_summary,
@@ -55,7 +58,9 @@ from app.services.rpg_context import (
     turn_present,
     world_npcs,
 )
-from app.services.rpg_dice import DEFAULT_BAND, OUTCOME_LABELS, normalize_band, resolve_rate, roll
+from app.services.rpg_dice import (
+    DEFAULT_BAND, OUTCOME_LABELS, RATE_PER_POINT, normalize_band, resolve_rate, roll,
+)
 from app.services.rpg_prompts import render
 from app.services.rpg_operation import retain_task
 from app.services.rpg_state import (
@@ -71,9 +76,11 @@ from app.services.rpg_state import (
     check_condition,
     check_full,
     check_zero,
+    def_map,
     effect_cost_reason,
     chronicle_lines,
     for_check_stats,
+    mark_fired,
     mark_met,
     match_npc,
     match_place,
@@ -83,10 +90,12 @@ from app.services.rpg_state import (
     note_visited,
     npc_activity,
     push_chronicle,
+    random_movement_ok,
     set_cooldown,
     skill_cooldown_left,
     spend_slot_action,
     tick_cooldowns,
+    tier_of,
 )
 from app.services.rpg_suggestions import (
     MAX_FREE,
@@ -155,6 +164,9 @@ def _state_payload(sess: RpgSession) -> dict:
         "npc_appearance": sess.npc_appearance or {},
         # AI 调度给不在场的人记的「最近在做什么」，同理
         "npc_activities": sess.npc_activities or {},
+        # 那句话按时段留的底。跟着一起带回去：档案里「她这几格在忙什么」
+        # 和上面那一句是同一次写入的两面，只刷一个会让两处对不上
+        "npc_activity_log": sess.npc_activity_log or {},
         # 这一轮记下的经历和关系转折：角色档案的「经历」那一页要当场长出来，
         # 不带的话玩家点进去看到的还是上一轮的样子
         "npc_history": sess.npc_history or {},
@@ -1261,8 +1273,15 @@ def _fallback_attr(module: RpgModule, stats: dict) -> str:
     """模型给了表里没有的数值名时回落到哪一项。
 
     优先第一个标了 for_check 的：资金和声望能拿来判定没有任何意义。
+
+    等级项排到最后：作者十有八九会把「境界」标成 for_check，于是它成了第一个，
+    每一次回落都变成「用境界检定」——而没有对手的等级检定不产生任何修正，
+    等于这一轮的数值全白点。有别的项就先用别的。
     """
     usable = [n for n in for_check_stats(module.stat_defs) if n in (stats or {})]
+    rank = rank_stat_of(module)
+    if rank:
+        usable.sort(key=lambda n: n == rank)
     if usable:
         return usable[0]
     keys = list(stats or {})
@@ -1291,6 +1310,8 @@ async def adjudicate(
         recent=recent,
         ledger=(sess.dc_ledger or [])[-LEDGER_LIMIT:],
         roster=ref_roster(list(npcs)),
+        # 没人填能力数值就是空的，整块（含 opponent 字段说明）都不渲染
+        opposed=opposed_roster(module, npcs),
     )
     model, api_format = llm_client.get_agent_client("memory", module.adjudication_model_ref or module.fast_model_ref)
     data, in_tok, out_tok = await call_json(
@@ -1309,17 +1330,71 @@ async def adjudicate(
         # 模型认出来的人，按模组名单收敛（它编出来的名字进不来）。
         # 这几个名字会被并进扫描文本，让那几张卡这一轮就发出去
         "refs": resolve_refs(data.get("refs"), list(npcs)),
+        # 这一次要对上的人。原样留着名字，认人交给 opposed_for（它用 match_npc，
+        # 比 refs 那条宽松子串匹配严）。模组没开对抗时模型根本看不到这个字段
+        "opponent": str(data.get("opponent") or "").strip(),
         "reason": str(data.get("reason") or "").strip(),
     }, in_tok, out_tok
 
 
-def apply_roll(module: RpgModule, sess: RpgSession, judgement: dict) -> dict:
-    """把档位换成成功率并判一次。纯 Python，没有 LLM 插手的余地。"""
+def apply_roll(module: RpgModule, sess: RpgSession, judgement: dict, npcs=()) -> dict:
+    """把档位换成成功率并判一次。纯 Python，没有 LLM 插手的余地。
+
+    judgement 一律用 .get() 读：玩家在输入框旁手选检定项那一条路上，它是手搓的
+    五个键的字面量，连 refs 都没有；而这个调用点不在那个 try 里面，一次 KeyError
+    就是整轮 500——那还是玩家每次用下拉框都会走的路。
+
+    npcs 给默认值，老调用不用改。
+    """
+    stats = sess.stats or {}
+    attr = judgement.get("attr") or ""
+    rank = rank_stat_of(module)
+    card, rival = opposed_for(module, npcs, judgement.get("opponent"), attr)
+
+    if rank and rival is not None:
+        # 等级制真的碰上人了：比的一律是等级项，attr 只进叙事和台账
+        stat = rank
+        value = stats.get(rank)
+        opposed = rival
+        per_point = int(getattr(module, "rank_per_level", 0) or 0) or RATE_PER_POINT
+    else:
+        stat = attr
+        value = stats.get(attr)
+        # 没对手时 None = 对 STAT_BASELINE 比，也就是老行为
+        opposed = rival
+        per_point = RATE_PER_POINT
+        if rank and attr == rank and rival is None:
+            # 裁判挑中了等级项，又没有对手（等级制下这是最常见的情形）。
+            # 等级尺和属性尺不是一把尺，落回 STAT_BASELINE=10 会让境界 3 的人
+            # 练个功都必败。比自己 → 差为 0 → 这一项不产生任何修正
+            opposed = value
+
     rate = resolve_rate(
-        module.rate_table, judgement["band"],
-        (sess.stats or {}).get(judgement["attr"]), module.difficulty_bias,
+        module.rate_table, judgement.get("band"), value, module.difficulty_bias,
+        opposed=opposed, per_point=per_point,
     )
-    return {**judgement, **roll(rate, module.random_check)}
+    out = {**judgement, **roll(rate, module.random_check)}
+    # 三个键一律覆写：模型报上来的名字如果没认出人，原样留着就会让判定条写出
+    # 「对 阿隼」而实际上什么都没对上。认出了就报，哪怕那一项没填——判定条
+    # 照样写「对 魔尊」。opposed_stat 只在真比了的时候给，前端拿它查 tiers
+    out["opponent"] = card.name if card is not None else ""
+    out["opposed_stat"] = stat if rival is not None else ""
+    out["opposed_value"] = rival
+    # 给叙事模型看的那一句。在这儿拼是因为只有这里同时握着模组定义、玩家数值
+    # 和对手数值；judgement_blocks 手上只有一份 judgement
+    out["opposed_note"] = ""
+    if card is not None and rival is not None:
+        spec = def_map(module.stat_defs).get(stat)
+        out["opposed_note"] = f"{stat} {_tier_text(spec, value)} 对 {_tier_text(spec, rival)}"
+    return out
+
+
+def _tier_text(spec, value) -> str:
+    """一个数值写给人看的样子：有档名就用档名（元婴期），没有就是裸数字。"""
+    if value is None:
+        return "未知"
+    tier = tier_of(spec, value)
+    return str(tier.get("label") or value) if tier else str(value)
 
 
 async def _store_roll(
@@ -1435,6 +1510,30 @@ async def _settle(
 # 摘要给模型看的一句话前缀。和 suggest 那边保持一致
 SUMMARY_MAX_TOKENS = 1200
 
+# 每一格概要的**硬**上限，字数。模板里那句「500 字以内」是撑不住的：这是累积式
+# 概要，模型手里那份旧的可能已经一千多字，外加一句「不要丢掉旧信息」，出来就是
+# 一千多字。真实存档里实测过 1518 字和 1431 字的格子，提示词一次都没拦住。
+# 所以闸得在引擎这边。两份数（这里和模板）要一起改
+SUMMARY_CHARS = 500
+
+
+def _clip_summary(text: str) -> str:
+    """把概要截到 SUMMARY_CHARS 字，尽量落在句号上。
+
+    **切尾巴、留开头**，看着反直觉，但对着架构看是对的：这一格概要只覆盖
+    `thread_upto` 之前的消息，之后的仍然以原文发出去——所以尾巴上那段新事在
+    上下文里还有另一份，而开头那段旧事除了这份概要哪儿都没有（履历只注入
+    最后 5 条）。切尾巴是切掉重复的那一份。
+
+    半句话比没有还糟（同 EFFECT_CHARS 那句）：模型下一轮会把读到的半句当成
+    事实往长里写。落不到句号上就补个省略号，至少看得出这儿断了。
+    """
+    body = text[:SUMMARY_CHARS].rstrip()
+    if len(text) <= SUMMARY_CHARS:
+        return body
+    head = max(body.rfind(mark) for mark in "。！？\n")
+    return body[:head + 1] if head >= SUMMARY_CHARS // 2 else body + "…"
+
 
 async def _maybe_summarize(session_id: int) -> bool:
     """哪个格子的窗口满了，就把它自己溢出的那一段折成它自己的概要。
@@ -1527,7 +1626,7 @@ async def _maybe_summarize(session_id: int) -> bool:
             temperature=0.3,
             max_tokens=SUMMARY_MAX_TOKENS,
         )
-        return (text or "").strip()
+        return _clip_summary((text or "").strip())
 
     # 并发而不是排队：一场群戏散场时可能几个格子同时满，串着调的话玩家要等
     # 好几次摘要才看得到这一轮结束。谁失败谁不动，不连累别人
@@ -1568,6 +1667,15 @@ async def _maybe_summarize(session_id: int) -> bool:
 
 
 # ── ⑨ 外场简报：推时段时给大事记补一句「别处在发生什么」──────────────────
+
+# 外场简报和 AI 调度这两次调用各自的上限。**必须有**：底层 httpx 客户端没设
+# 超时，于是 OpenAI SDK 退回它自己的默认值（read 600s × 最多 3 次尝试），
+# 单次调用能合法占住半小时。这两次都跑在 exclusive_session 的租约里、心跳会
+# 一直替它续期，卡住的不只是这一下，而是整局——玩家再点什么都是 409。
+#
+# 写死 60 秒不做成配置项：它们都是「一两句背景描写」的快模型调用，实测个位数
+# 秒级。真超了 60 秒，等下去也不会更好，宁可这一格没有简报
+AUX_CALL_TIMEOUT = 60
 
 # 模型的输出上限。一两句话而已，给多了它就会开始编长篇
 OFFSCREEN_MAX_TOKENS = 200
@@ -1640,13 +1748,21 @@ async def offscreen_brief(session_id: int, from_slot: str = "") -> list[str]:
         )
 
     try:
-        text = await llm_client.dispatch_chat_complete(
-            messages=[{"role": "user", "content": prompt}],
-            model=model,
-            api_format=api_format,
-            temperature=0.8,
-            max_tokens=OFFSCREEN_MAX_TOKENS,
+        text = await asyncio.wait_for(
+            llm_client.dispatch_chat_complete(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                api_format=api_format,
+                temperature=0.8,
+                max_tokens=OFFSCREEN_MAX_TOKENS,
+            ),
+            timeout=AUX_CALL_TIMEOUT,
         )
+    except TimeoutError:
+        # 单独一条、而且只是 warning：超时不是缺陷，是这一格不值得再等下去。
+        # 混在下面的 exception 里只会看到一段没有信息量的 CancelledError 栈
+        logger.warning("RPG 局 %s 外场简报超时（%s 秒）", session_id, AUX_CALL_TIMEOUT)
+        return []
     except Exception:
         logger.exception("RPG 局 %s 外场简报生成失败", session_id)
         return []
@@ -1681,9 +1797,32 @@ ACTIVITY_MAX_TOKENS = 500
 # 给模型看的「最近一段剧情」长度。只为对齐时间轴，不给它全文
 ACTIVITY_RECENT_CHARS = 300
 
+# 「她答应了等你」这类话里会出现的词。近况里撞上任意一个，随机移动这一格就
+# 跳过她——**光靠提示词拦不住**：随机移动是引擎在调模型**之前**就写进
+# npc_places 的，等模型开口时人已经挪走了，它再听话也只能照新地点编。
+#
+# 为什么是关键词而不是一个正经的「承诺」字段：结算那边已经有 promise 这个
+# 事件类型，但它落在 rpg_messages 的报告里、是给检索用的流水，没有「这个约
+# 到什么时候失效」可言。真要做成字段，得让模型判「这句话算不算一个约、管几个
+# 时段」——那是一次新的语义判断，判错的代价是把人锁死在原地不动。
+#
+# ponytail: 关键词匹配，天花板是换个说法就漏（「说好了」以外的各种讲法）。
+# 漏了的后果只是回到今天这个样子（她照旧被挪走），不会锁死谁。真觉得不够用
+# 就给 npc_notes 的键名约定一个前缀，比在这儿堆同义词表靠谱
+_PROMISE_HINTS = ("答应", "说好", "约好", "等你", "等着", "在等", "承诺", "保证")
+
+
+def _has_promise(sess, npc_id: int) -> bool:
+    """她近况里有没有「等你 / 答应了」这类还没了结的约。"""
+    notes = (sess.npc_notes or {}).get(str(npc_id)) or {}
+    if not isinstance(notes, dict):
+        return False
+    text = "".join(f"{key}{value}" for key, value in notes.items())
+    return any(hint in text for hint in _PROMISE_HINTS)
+
 
 async def idle_npc_activities(
-    session_id: int, engaged_ids: set[int],
+    session_id: int, engaged_ids: set[int], *, from_clock: bool = False,
 ) -> dict[str, str]:
     """给这一轮没被提到的、勾了「AI 调度」的角色各记一句「最近在做什么」。
 
@@ -1691,12 +1830,22 @@ async def idle_npc_activities(
     build_rpg_messages 的 diag 里取。他们这一轮归叙事模型管，不该再被调度器
     另写一份——两边各写一遍，玩家下回见面时听到的会和自己刚经历的对不上。
 
+    from_clock = 这一次是玩家按「结束时段」推来的，不是一个回合。两条路上
+    「最后一条正文」的含义不一样，见下面 protected_ids 那一段。
+
     **一次调用写完所有人**，不是一人一次：勾了调度的角色可能有一屋子，
     一人一次的话玩家每轮要为 N 次调用付钱、等 N 次往返。
 
-    有三件事是刻意不做的，写在这里免得后来改的人顺手加上：
-    - **不让模型改位置**。启用随机移动时，引擎先从模组地点中选好去处，
-      写入本局 npc_places，再把确定的地点交给模型描述活动。
+    **谁准动是引擎的事，去哪儿是模型的事**，这条分界是有来由的。原先两头都在
+    引擎：去处由 `random.choice` 在候选里抽一个，它没有任何是非判断——厕所、
+    女子浴室和公园在它眼里等价，于是真实存档里出现过「她被挪到菜市场厕所」。
+    模型手上有她的人设、近况和前几轮正文，挑得出说得通的地方。
+    反过来「谁准动」不能交出去：跟着你的人、许过约的人、站在你跟前的人、
+    时段不对的人，判错的代价是她当着玩家的面凭空消失或者当场毁诺。
+
+    还有三件事是刻意不做的，写在这里免得后来改的人顺手加上：
+    - **不让模型自己编地名**。去处只能从这个人的白名单里挑（`destinations`），
+      对不上就当它没写——凭空一个地名会让侧栏显示玩家走不过去的地方。
     - **不写大事记**。这是「她一个人干了什么」，不是「已经传开的事」；写进去
       等于每条对话线上的所有人都知道了，chronicle 那条规矩禁的正是这个。
     - **不碰任何数值**。数值归引擎，模型只能提议改动，这条是全模式的地基。
@@ -1723,14 +1872,21 @@ async def idle_npc_activities(
             .order_by(RpgMessage.id.desc())
             .limit(1)
         )).scalars().first()
-        protected_ids = set(sess.npc_followers or []) | {
-            npc.id for npc in named_npcs(npcs, last.content if last else "")
-        }
+        # 跟着走的人永远不挪。**正文里点过名的人只在回合那条路上不挪**：
+        # 那时 last 就是刚生成的这一轮，「刚露过面的人别凭空瞬移」成立。
+        # 按时钟不产生正文，last 会一直停在同一条，连按几格护的都是同一批人，
+        # 于是勾了随机移动的人一次都动不了。真正还在场的人由下面「站在玩家
+        # 位置上的不挪」那道兜住，这条路上不需要再拿正文当挡箭牌
+        protected_ids = set(sess.npc_followers or [])
+        if not from_clock:
+            protected_ids |= {
+                npc.id for npc in named_npcs(npcs, last.content if last else "")
+            }
         slot = (sess.slot or "").strip()
         places = dict(sess.npc_places or {})
         random_places = dict(getattr(sess, "npc_random_places", None) or {})
         location_changed = False
-        # 随机移动只在配置的时段生效；离开这些时段后撤销随机覆盖，
+        # 随机移动只在配置的时段、配置的地点里生效；出了这个范围就撤销随机覆盖，
         # npc_place() 才能重新使用作息表或常驻地点。只处理调度器自己写入的覆盖。
         for npc in idle:
             key = str(npc.id)
@@ -1742,8 +1898,9 @@ async def idle_npc_activities(
                 random_places.pop(key, None)
                 location_changed = True
                 continue
-            slots = {str(value).strip() for value in (npc.random_movement_slots or []) if str(value).strip()}
-            if not npc.random_movement or (slots and slot not in slots):
+            # 连白名单一起判，同 rpg_state._clear_expired_random_places：
+            # 作者把这个地点移出白名单之后，这条覆盖当场过期
+            if not random_movement_ok(npc, slot, marked):
                 places.pop(key, None)
                 random_places.pop(key, None)
                 location_changed = True
@@ -1751,20 +1908,21 @@ async def idle_npc_activities(
         sess.npc_random_places = random_places
         movable = [
             npc for npc in idle
-            if npc.random_movement and npc.id not in protected_ids
-            and (
-                not (npc.random_movement_slots or [])
-                or slot in {
-                    str(slot).strip() for slot in (npc.random_movement_slots or [])
-                    if str(slot).strip()
-                }
-            )
+            # 这一步只问「准不准动」，去哪儿下面挑，所以不传 place
+            if random_movement_ok(npc, slot) and npc.id not in protected_ids
+            # 许过约的人不挪。她答应等你回来吃午饭、你一按结束时段她就被扔到
+            # 公园去，那个约当场作废，而玩家看到的是她莫名其妙毁诺
+            and not _has_promise(sess, npc.id)
             and (
                 not norm_name(sess.location or "")
                 or norm_name(npc_place(npc, sess.slot, sess.npc_places))
                 != norm_name(sess.location)
             )
         ]
+        # 每个准动的人各自的候选地点。模型在这份名单里挑，挑不中就不动——
+        # 白名单整张对不上（地点改名/删了）时这个人的名单为空，等于不准动，
+        # 比「退回全量地点表」安全（那是个不报错的静默破功）
+        destinations: dict[int, list[str]] = {}
         if movable:
             locations = list((await store.execute(
                 select(RpgLocation).where(RpgLocation.module_id == module.id)
@@ -1774,10 +1932,22 @@ async def idle_npc_activities(
             ))
             for npc in movable:
                 current = npc_place(npc, sess.slot, sess.npc_places)
-                choices = [name for name in names if norm_name(name) != norm_name(current)] or names
-                if choices:
-                    apply_npc_place(sess, npc.id, random.choice(choices), source="random")
-                    location_changed = True
+                pool = [name for name in names if random_movement_ok(npc, slot, name)]
+                # 排掉她此刻所在的地方：留着的话「原地不动」和「挑中了这里」
+                # 在落库那一步没有区别，而前者本来就该零写入
+                spots = [name for name in pool if norm_name(name) != norm_name(current)]
+                if spots:
+                    # **候选顺序每次都洗一遍。** 白名单是按模组的地点表排的，
+                    # 每一格给模型的是同一份、同一个顺序的名单，而它手上另外
+                    # 那几样（人设、位置、上次那句）也几乎不变——于是它每次都挑
+                    # 同一个，玩家看到的就是「一直在那几个地方」。这不是模型
+                    # 的毛病：同样的输入本该得到同样的输出，随机性得由我们给。
+                    #
+                    # 洗顺序而不是替它抽一个：抽签抽不出「厕所和公园不一样」，
+                    # 那正是当初把 random.choice 拿掉的理由（见本函数开头）。
+                    # 洗完仍然是它按人设挑，只是不再有个天生排第一的。
+                    random.shuffle(spots)
+                    destinations[npc.id] = spots
         if location_changed:
             await store.commit()
         prompt = render(
@@ -1795,6 +1965,22 @@ async def idle_npc_activities(
                     ) or "行踪不明",
                     "persona": (n.persona or n.description or "").strip()[:60],
                     "activity": npc_activity(sess, n.id),
+                    # 引擎上次替她挑的那个地方（`npc_random_places` 本来就记着，
+                    # 不用新存一份）。**给了它模型才有理由换地方**：洗牌只是
+                    # 去掉「天生排第一」，可她此刻就在上次那个地方，模型照着
+                    # 人设推，最说得通的往往还是留下——一直在那几个地方的另
+                    # 一半原因在这儿。空 = 这一格是她第一次被挪，或上次没动
+                    "last_place": str((getattr(sess, "npc_random_places", None) or {}).get(str(n.id)) or ""),
+                    # 她眼下的近况。**必须给**：结算把「答应了等你回来吃午饭」
+                    # 这类承诺记在这儿，而调度不读正文——不给的话它只知道她的
+                    # 性格和位置，于是理直气壮地写一句和刚许的诺冲突的话。
+                    # 同 offscreen_brief 的名单，长度也照它 60 字
+                    "notes": "；".join(
+                        f"{k} {v}" for k, v in ((sess.npc_notes or {}).get(str(n.id)) or {}).items()
+                    )[:60],
+                    # 她这一格准去的地方。空 = 不准动（没勾随机移动、时段不对、
+                    # 跟着你、许过约、就站在你跟前），模板据此换一套写法
+                    "destinations": destinations.get(n.id, []),
                 }
                 for n in idle
             ],
@@ -1803,13 +1989,22 @@ async def idle_npc_activities(
 
     try:
         model, api_format = llm_client.get_agent_client("memory", model_ref)
-        text = await llm_client.dispatch_chat_complete(
-            messages=[{"role": "user", "content": prompt}],
-            model=model,
-            api_format=api_format,
-            temperature=0.9,
-            max_tokens=ACTIVITY_MAX_TOKENS,
+        text = await asyncio.wait_for(
+            llm_client.dispatch_chat_complete(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                api_format=api_format,
+                temperature=0.9,
+                max_tokens=ACTIVITY_MAX_TOKENS,
+            ),
+            timeout=AUX_CALL_TIMEOUT,
         )
+    except TimeoutError:
+        # 理由同 offscreen_brief。**去处也跟着一起丢**：它和活动是同一次调用的
+        # 两半，模型没开口就等于这一格没人动——过期清理那一步已经提交了，
+        # 那部分不受影响（test_..._survives_..._failure 钉的）
+        logger.warning("RPG 局 %s 角色调度超时（%s 秒）", session_id, AUX_CALL_TIMEOUT)
+        return {}
     except Exception:
         logger.exception("RPG 局 %s 角色调度失败", session_id)
         return {}
@@ -1817,6 +2012,7 @@ async def idle_npc_activities(
     # 模型写的是名字，落库要的是 id。名字对不上就整行丢掉——**不报 warning**：
     # 这是玩家没要求过的后台动作，为它的瑕疵打断他一轮剧情不划算
     updates: dict[str, str] = {}
+    moves: dict[int, str] = {}
     for raw in (text or "").splitlines():
         line = re.sub(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw).strip()
         if not line:
@@ -1829,18 +2025,33 @@ async def idle_npc_activities(
         says = parts[1].strip().strip('"“”「」『』')
         if who is None or not says:
             continue
+        # 准动的人那一行是「名字：地点｜做什么」。竖线两侧都要有东西，
+        # 缺一半就当它只写了活动——半句话不该换来一次位置改动
+        spots = destinations.get(who.id) or []
+        if spots and ("｜" in says or "|" in says):
+            where, _, says = (says.replace("|", "｜")).partition("｜")
+            where, says = where.strip(), says.strip()
+            # 地名只认白名单里的那几个。模型现编一个的话侧栏会显示它、
+            # 地点总览里却找不到，玩家照提示走不过去
+            hit = next((name for name in spots if norm_name(name) == norm_name(where)), None)
+            if hit and says:
+                moves[who.id] = hit
+        if not says:
+            continue
         # 「赫敏：无」也算没写。不挡住的话角色卡上会挂一行「最近：无」，
         # 而且它会一直留在那儿，模型下一轮还照着它编
         if says.lower() in _OFFSCREEN_NONE:
             continue
         updates[str(who.id)] = says
-    if not updates:
+    if not updates and not moves:
         return {}
 
     async with AsyncSessionLocal() as store:
         sess = await store.get(RpgSession, session_id)
         if sess is None:
             return {}
+        for npc_id, place in moves.items():
+            apply_npc_place(sess, npc_id, place, source="random")
         for npc_id, says in updates.items():
             apply_npc_activity(sess, int(npc_id), says)
         await store.commit()
@@ -1849,9 +2060,15 @@ async def idle_npc_activities(
 
 # ── 帮我想想：玩家主动要三条建议 ──────────────────────────────────────────
 
-# 给模型的最近剧情条数。RPG 一轮就是一整段叙事，比酒馆的单条回复长得多，
-# 所以条数比酒馆的 6 条略多一点，约合 4 个回合
-SUGGEST_WINDOW = 8
+# 给模型的最近剧情条数。**从前是 8**（约 4 个回合），而叙事模型看的是
+# context_turns * 2（默认 40 条）：同一局里写正文的看得见四十条，编建议的只看
+# 得见最后八条，于是三四个回合前埋下的线在建议里等于没发生过——玩家看到的就是
+# 「建议和上下文不搭」。抬到 16（约 8 个回合）不跟着 context_turns 走，是因为
+# 这一路的读者是便宜档，跟着作者那个数走会把它拖到四十条
+SUGGEST_WINDOW = 16
+# 剧情原文那一段的上限。**必须有**：窗口抬宽之后它是唯一没有闸的一块，
+# 一轮一千字的模组能靠它一家把资料段全挤出模型的视野
+SUGGEST_TRANSCRIPT_BUDGET = 2400
 
 
 def _usable_actions(
@@ -1907,9 +2124,11 @@ async def suggest_actions(
     here = [n for n in world_npcs(sources.npcs) if here_ids is None or n.id in here_ids]
     sources = replace(sources, module=module, usable=_usable_actions(sess, sources, here, module))
 
-    transcript = "\n".join(
+    # keep_end：超预算时切的是**最早**那几条。建议要贴的是眼前这一刻，
+    # 丢掉开头远比丢掉刚刚发生的那一段划算
+    transcript = truncate_to_token_budget("\n".join(
         f"{'你' if m.role == 'user' else 'GM'}：{m.content}" for m in recent
-    )
+    ), SUGGEST_TRANSCRIPT_BUDGET, keep_end=True)
     prompt = render(
         "rpg_suggest.jinja2",
         char_name=(sess.char_name or "").strip() or DEFAULT_CHAR_NAME,
@@ -1929,7 +2148,11 @@ async def suggest_actions(
         messages=[{"role": "user", "content": prompt}],
         model=model,
         api_format=api_format,
-        temperature=0.95,
+        # 0.7，**从前是 0.95**。高温本来是为了让三条别写成同一件事的三种说法，
+        # 代价是它也会往剧情外面飘——而这是个必须贴着眼前这一段走的任务。
+        # 「三条要拉开」现在由提示词里那句「拉开的是走向的不同」管着，
+        # 比靠温度撞出来的差异靠得住
+        temperature=0.7,
         max_tokens=900,
     )
 
@@ -1956,6 +2179,7 @@ async def run_turn(
     user_message_id: int,
     content: str,
     attr_override: str = "",
+    opponent_override: str = "",
     action_id: int | None = None,
     item_name: str = "",
     item_qty: int = 1,
@@ -2081,6 +2305,9 @@ async def run_turn(
             judgement = {
                 "need_check": True, "attr": attr_override, "band": DEFAULT_BAND,
                 "intent": content, "reason": "玩家指定",
+                # 对手也是手选的。不给这条路一个入口的话，等级制下玩家只要
+                # 用一次下拉框，就能把一次 -75 的对抗换成常规检定
+                "opponent": opponent_override,
             }
         else:
             try:
@@ -2098,6 +2325,10 @@ async def run_turn(
                 # 为一次裁决失败让整轮发不出去才是真的坏
                 logger.warning("RPG 局 %s 裁决失败，本轮按纯叙事处理: %s", session_id, e)
                 yield "warning", "这一轮没能判定，先按纯叙事写了"
+            # 手选的对手压过模型报的那个。那个下拉框的一半理由就是「模型没认出
+            # 对手」时的人工兜底，让模型的空串盖掉它等于这一半白做
+            if judgement and opponent_override:
+                judgement["opponent"] = opponent_override
 
         if module.check_mode == "always" and judgement and not judgement["need_check"]:
             judgement["need_check"] = True
@@ -2105,7 +2336,7 @@ async def run_turn(
 
     if judgement:
         if judgement["need_check"] and judgement["attr"]:
-            judgement = apply_roll(module, sess, judgement)
+            judgement = apply_roll(module, sess, judgement, npcs)
         else:
             # 没有一项数值可判（模组还没定义），退回纯叙事
             judgement["need_check"] = False
@@ -2115,11 +2346,17 @@ async def run_turn(
             "band": judgement["band"],
             "intent": judgement["intent"],
             "reason": judgement["reason"],
+            "opponent": judgement.get("opponent", ""),
         }
         if judgement["need_check"]:
+            # 这两个 dict 是手写白名单，不是 judgement 本身。漏了对手的话，
+            # 本轮那条判定条上不显示对手，刷新页面重读 row.roll 才有
             yield "roll", {
                 "rate": judgement["rate"], "dice": judgement["dice"],
                 "outcome": judgement["outcome"], "attr": judgement["attr"],
+                "opponent": judgement.get("opponent", ""),
+                "opposed_stat": judgement.get("opposed_stat", ""),
+                "opposed_value": judgement.get("opposed_value"),
             }
         try:
             await _store_roll(session_id, user_message_id, judgement, aux_in, aux_out)
@@ -2151,6 +2388,9 @@ async def run_turn(
         # 只认 npcs_here：被提到一句的人这一轮也拿到了设定，但玩家并没见到他，
         # 记成见过会让他的外貌永远等不到该出现的那一次
         mark_met(fresh_sess, [n["id"] for n in diag["npcs_here"]])
+        # 一次性词条也已经随这次上下文发出去了，就地记一笔。位置和理由同上一行：
+        # 叙事失败也算放过，模型确实已经拿到过那段文字。想让它重来只有读档
+        mark_fired(fresh_sess, [t["id"] for t in diag["triggered"] if t.get("once")])
         # 时间跳跃那句话已经随这次上下文发出去了，就地清掉，只在推过时段之后的那
         # 一轮出现。同样放在开流之前：叙事失败也算发过，模型确实已经拿到那句话了
         fresh_sess.time_jump_from = ""
@@ -2313,6 +2553,11 @@ async def run_turn(
         await _maybe_summarize(session_id)
     except Exception:
         logger.exception("RPG 局 %s 概要生成失败，上下文退化为纯截断", session_id)
+
+    # 向量补写跟着压缩走，排在它后面：这一轮的结算已经落库，事实才嵌得全。
+    # 模组没配嵌入模型时这一句一次网络都不发；失败也不吭声（函数自己吞），
+    # 召回退回 BM25 + 词面两路，玩家看不出区别
+    await rpg_vectors.sync_session(session_id)
 
     # AI 调度排在最后：它要知道这一轮提到了谁，那是 build_rpg_messages 算的。
     # **这是唯一一次「玩家说完话了还在调模型」**，所以它必须排在 done 之前——

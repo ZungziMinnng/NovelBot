@@ -72,6 +72,31 @@ class RpgPromptTests(unittest.TestCase):
                 "rpg_adjudicate.jinja2", "{{ action }} 上次是 {{ ledger[0].band }}"
             )
 
+    def test_no_opponent_no_tokens(self):
+        """没人填能力数值时，裁决提示词里连 opponent 这个词都不该出现。
+
+        这是「对抗对老模组零成本」那个承诺唯一可执行的检验。多出来的不只是
+        几个 token——多一个输出字段，那个便宜的裁决模型就多一个能填错的格子。
+        """
+        blank = rpg_prompts.render(
+            "rpg_adjudicate.jinja2", action="撬锁", stats={"敏捷": 12},
+            location="地窖", recent="", ledger=[], roster="", opposed=[],
+        )
+        self.assertNotIn("opponent", blank)
+        self.assertNotIn("对上", blank)
+
+        live = rpg_prompts.render(
+            "rpg_adjudicate.jinja2", action="砍他", stats={"境界": 3},
+            location="山门", recent="", ledger=[], roster="",
+            opposed=[{"name": "魔尊无涯", "note": "境界 元婴期（4）"}],
+        )
+        self.assertIn("opponent", live)
+        self.assertIn("魔尊无涯", live)
+        # 强弱由系统算，档位只描述情境。少了这句，裁决看见 4 级对手就给
+        # extreme，后端再减一轮，等级差彻底失去分辨率——而且没有任何测试
+        # 抓得到，功能看着做完了实际完全没生效
+        self.assertIn("不归你管", live)
+
     def test_missing_runtime_variable_fails_loudly(self):
         current_user_var.set(_FakeUser({"rpg_gm.jinja2": "{{ reply_length }}"}))
         with self.assertRaises(TemplateError):

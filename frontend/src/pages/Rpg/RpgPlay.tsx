@@ -45,8 +45,9 @@ import SaveTab from './sidebar/SaveTab'
 import TaskResolutionsModal from './TaskResolutionsModal'
 import RpgTurnStatus from './RpgTurnStatus'
 import SettlementReport from './SettlementReport'
+import { WaitBar } from './rpgUi'
 import { styleLabel } from './stylePresets'
-import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, type RpgModelField } from './modelSettings'
+import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, isEmbeddingField, type RpgModelField } from './modelSettings'
 import { playSfx } from './useSfx'
 import GameHud, { type GameOutcome } from './GameHud'
 import TurnCostPanel, { type TurnCost } from './TurnCostPanel'
@@ -83,6 +84,8 @@ interface TurnExtra {
   target_npc?: string
   mode?: TurnMode
   private_with?: number | null
+  /** 手选的对手。后端拿它盖掉裁判报的那个名字 */
+  opponent?: string
 }
 
 /** 三级：地点总览 → 某个地点 → 时间线。总览是中枢，进去靠点，回来靠面包屑。
@@ -128,6 +131,14 @@ const mentionedOnly = (meta: RpgTurnMeta) => {
   return (meta.npcs_onstage || []).filter(n => !here.has(n.id)).map(n => n.name)
 }
 
+/** 诊断行用：超了总闸时被整块丢掉的那几段，翻成人话。
+ *  只有后端 DROP_ORDER 里那几个 key 会出现在这里；护栏、状态、摘要、
+ *  长期事实是保底块，永远不会被丢 */
+const DROPPED_LABEL: Record<string, string> = {
+  sample: '叙事样例', roster: '角色总表', chronicle: '外场',
+  worldbook: '世界书', catalog: '道具与技能',
+}
+
 /** 这条戏当时谁在跟前——也就是它会进谁的记忆。
  *  null 是迁移过来的老消息，当时的名单没记下来，那就什么都别说 */
 const rosterLabel = (present: number[] | null, npcs: RpgNpc[]) => {
@@ -170,6 +181,8 @@ export default function RpgPlay() {
 
   const [input, setInput] = useState('')
   const [attr, setAttr] = useState('')
+  // 手选的对手。和 attr 同一个「掌控感」理由，另外也给「模型没认出对手」兜底
+  const [opponent, setOpponent] = useState('')
 
   // 「正在生成的那一轮」整套状态在 store 里，不在这儿。
   // 切走时这个页面是真的卸载（App.tsx 的 <Route> 没带 key），而 `send` 里那条
@@ -186,8 +199,12 @@ export default function RpgPlay() {
 
   // 正在改哪条消息。id 是库里的行，没落库的（流式占位）不给改
   const [editing, setEditing] = useState<{ id: number; role: string; text: string } | null>(null)
-  // 瞬移 / 推时段在跑。都是毫秒级的纯引擎请求，但手滑连点两下就会发两个
+  // 瞬移 / 推时段在跑。瞬移是毫秒级的纯引擎请求，推时段在勾了外场简报或
+  // AI 调度时会串行等两次模型（秒级），两种都靠这个挡手滑连点
   const [engineBusy, setEngineBusy] = useState(false)
+  // engineBusy 那件事叫什么，给进度条当说明。空串 = 不画条：瞬移是毫秒级的，
+  // 画一条闪一下的进度条比不画更晃眼（见 go 里那句注释）
+  const [engineWait, setEngineWait] = useState('')
   const [settlingId, setSettlingId] = useState<number | null>(null)
   const settlingRef = useRef(false)
   useEffect(() => {
@@ -461,6 +478,12 @@ export default function RpgPlay() {
     if (target && !hereNpcs.some(n => n.name === target)) setTarget('')
   }, [hereNpcs, target])
 
+  // 对手同理，而且更要紧：人走了还留着名字，后端认不出这张卡就悄悄退回常规检定，
+  // 界面上那个框却还写着他的名字
+  useEffect(() => {
+    if (opponent && !hereNpcs.some(n => n.name === opponent)) setOpponent('')
+  }, [hereNpcs, opponent])
+
   // 点别处收起「移动」下拉，同 PlayParams 那个
   useEffect(() => {
     if (!moveOpen) return
@@ -511,6 +534,8 @@ export default function RpgPlay() {
   const turnExtra = (): TurnExtra => ({
     mode: effectiveMode,
     private_with: effectiveMode === 'private' ? privateWith : null,
+    // 空串照传：后端只在认得出这张卡时才用它，认不出就当没选
+    opponent,
   })
 
   const privateNpc = privateWith ? npcs.find(n => n.id === privateWith) ?? null : null
@@ -965,6 +990,10 @@ export default function RpgPlay() {
     || (chatNudge > 0 && (sess.slot_chats || 0) >= chatNudge)
     || !!slotHint
   )
+  /** 按下「结束这个时段」会不会叫模型。判据和按钮 title 里那句话逐字同源
+   *  （见 routes/rpg.py 的 advance_time：外场简报 + AI 调度两处加料，
+   *  一个都没勾就是纯引擎的毫秒级请求，不值得画进度条） */
+  const slowAdvance = !!module?.offscreen_brief || npcs.some(n => n.ai_scheduled)
 
   /** 真的把这一轮发出去。对象已经定了（`who` 可以是空串 = 这动作不需要对象）。
    *
@@ -1114,6 +1143,9 @@ export default function RpgPlay() {
   const advance = async () => {
     if (locked || engineBusy) return
     setEngineBusy(true)
+    // 只有会叫模型的那两种加料才画进度条（判据和按钮 title 里那句一致）。
+    // 纯引擎的那一格是毫秒级的，画一条闪一下就没的条子比不画更晃眼
+    setEngineWait(slowAdvance ? '正在结束这个时段…' : '')
     try {
       const { session: next, facts } = await rpgApi.sessions.advance(sessionId)
       qc.setQueryData(['rpg-session', sessionId], next)
@@ -1126,8 +1158,13 @@ export default function RpgPlay() {
       refreshSaves()
     } catch {
       toast.error('没能推进时段')
+      // **失败也要去问一次真实状态**：后端是先提交时段再调那两次模型的，
+      // 所以「请求失败」不等于「时段没走」。不刷的话界面留着旧时段，玩家
+      // 再按一下就真的推了两格
+      qc.invalidateQueries({ queryKey: ['rpg-session', sessionId] })
     } finally {
       setEngineBusy(false)
+      setEngineWait('')
     }
   }
 
@@ -1333,6 +1370,12 @@ export default function RpgPlay() {
   // 判定关着的时候整个下拉都不该出现，那是骰子味道的东西
   const checkable = module?.check_mode !== 'never'
     ? (module?.stat_defs || []).filter(d => d.for_check && d.name in (sess.stats || {}))
+    : []
+
+  // 能正面对上的人：在场、且作者给他填过能力数值。谁都没填就一个框都不出——
+  // 这也是「老模组零回归」那条承诺在界面上的样子
+  const rivals = module?.check_mode !== 'never'
+    ? hereNpcs.filter(n => Object.keys(n.ability_stats || {}).length > 0)
     : []
 
   // 点开一个人的档案。档案现在住在侧栏那一列里，所以得先把侧栏切到「角色」；
@@ -1622,8 +1665,17 @@ export default function RpgPlay() {
                 <span className="truncate">
                   生效词条：
                   <span className="text-primary">
+                    {/* 名字优先：条件事件全是「常驻 + 无关键词」，只报关键词的话
+                        这一行会变成一串「常驻」，看不出是哪条生效了。
+                        没填名字的老词条照旧按关键词显示 */}
                     {meta.triggered
-                      .map(t => (t.constant ? `常驻${t.keywords ? `（${t.keywords}）` : ''}` : t.keywords) || `#${t.id}`)
+                      .map(t => {
+                        const name = t.title
+                          || (t.constant ? `常驻${t.keywords ? `（${t.keywords}）` : ''}` : t.keywords)
+                          || `#${t.id}`
+                        // 一次性的这一轮用掉就不再来了，明说一句，省得作者以为它坏了
+                        return t.once ? `${name}·一次性` : name
+                      })
                       .join(' / ')}
                   </span>
                 </span>
@@ -1632,7 +1684,10 @@ export default function RpgPlay() {
               )}
               {meta.system_tokens !== undefined && (
                 <span className="sm:ml-auto">
-                  设定 {meta.system_tokens} · 状态 {meta.state_tokens ?? 0}
+                  {/* 分母是模组里填的总闸。两个数贴着看才知道离超还有多远——
+                      实测平时只用到两三成 */}
+                  设定 {meta.system_tokens}{meta.budget_total ? ` / ${meta.budget_total}` : ''}
+                  {' · '}状态 {meta.state_tokens ?? 0}
                   {/* 模组里定义过的道具和技能那一份说明书。它是静态的，每轮
                       一样大，所以这个数字基本不动——动了就是作者刚加了东西 */}
                   {' · '}物技 {meta.catalog_tokens ?? 0}
@@ -1656,6 +1711,12 @@ export default function RpgPlay() {
                       诊断行说她在场、结算的提示又说她不在场 */}
                   {mentionedOnly(meta).length > 0
                     && ` · 提到 ${mentionedOnly(meta).join('、')}`}
+                  {/* 平时不显示。一出现就说明设定写爆了总闸，该去缩那一块 */}
+                  {meta.dropped && meta.dropped.length > 0 && (
+                    <span className="text-amber-500">
+                      {' · '}已丢 {meta.dropped.map(k => DROPPED_LABEL[k] || k).join('、')}
+                    </span>
+                  )}
                 </span>
               )}
             </div>
@@ -1846,7 +1907,7 @@ export default function RpgPlay() {
                           {b.roll && (
                             <div className="flex justify-end">
                               <div className="max-w-[80%] mr-[38px]">
-                                <DiceRoll roll={b.roll} animate={b.fresh} />
+                                <DiceRoll roll={b.roll} animate={b.fresh} statDefs={module?.stat_defs || []} />
                               </div>
                             </div>
                           )}
@@ -1972,6 +2033,14 @@ export default function RpgPlay() {
                       )}
                     </button>
                   </div>
+                )}
+
+                {/* 要等的那几件事共用一条。勾了外场简报或 AI 调度的话推时段要
+                    串行等两次模型（秒级），「帮我想想」也是一次调用——按钮只是
+                    灰掉的话玩家看不出是在跑还是点空了。
+                    条件互斥：locked 期间点不了「帮我想想」，反之亦然 */}
+                {(engineWait || suggesting) && (
+                  <WaitBar label={engineWait || '正在想接下来能做什么…'} />
                 )}
 
                 {/* 等待/结算提示钉在输入框上面。它原先跟在消息列表末尾，可玩家
@@ -2220,6 +2289,18 @@ export default function RpgPlay() {
                       {checkable.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
                     </select>
                   )}
+                  {rivals.length > 0 && (
+                    <select
+                      value={opponent}
+                      onChange={e => setOpponent(e.target.value)}
+                      disabled={locked}
+                      title="这一轮在跟谁较劲。选了就按双方的数值对着算，不选则由 GM 判断"
+                      className="text-xs border rounded-lg px-2 h-9 bg-background/60 focus:outline-none disabled:opacity-50"
+                    >
+                      <option value="">不指定对手</option>
+                      {rivals.map(n => <option key={n.id} value={n.name}>{n.name}</option>)}
+                    </select>
+                  )}
                   <button
                     onClick={suggest}
                     disabled={locked || suggesting || lineBubbles.length === 0}
@@ -2422,6 +2503,8 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
   // 按供应商分组，和小说那边的模型下拉一样。同一个模型名在两家都有的时候，
   // 不写供应商就是两条一模一样的选项
   const groups = groupModelsByProvider(models)
+  // 向量检索那一格要的是模型库里标了 embedding 的那拨，和上面这份互斥
+  const embeddingGroups = groupModelsByProvider(models, 'embedding')
 
   // 点别处收起来。用 document 监听而不是铺一层 fixed 幕布：页头带 backdrop-blur，
   // 而 backdrop-filter 会给 fixed 子元素当包含块，幕布只盖得住页头那一条
@@ -2474,7 +2557,11 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
         className="w-full border rounded-lg px-2.5 py-1.5 text-xs bg-background/60"
       >
         <option value="">{empty}</option>
-        {groups.map(g => (
+        {/* 一个嵌入模型都没注册时这里是空的，那和「这功能坏了」长得一模一样 */}
+        {isEmbeddingField(key) && embeddingGroups.length === 0 && (
+          <option disabled>模型库里还没有嵌入模型，先去「设置 → 模型库」添加</option>
+        )}
+        {(isEmbeddingField(key) ? embeddingGroups : groups).map(g => (
           <optgroup key={g.provider} label={g.provider}>
             {g.items.map(m => (
               <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>
@@ -2509,7 +2596,7 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
         >
           {GAMEPLAY_MODEL_FIELDS.map(({ label, key, empty, hint }) => row(label, key, empty, hint))}
           <details className="border-t pt-2">
-            <summary className="text-xs text-muted-foreground cursor-pointer">默认与立绘模型</summary>
+            <summary className="text-xs text-muted-foreground cursor-pointer">默认 / 立绘 / 向量模型</summary>
             <div className="space-y-3 pt-2">
               {EXTRA_MODEL_FIELDS.map(({ label, key, empty, hint }) => row(label, key, empty, hint))}
             </div>

@@ -1,6 +1,6 @@
 import type { RpgCondition, RpgNpc, RpgStatDef } from '@/api/client'
 import { ANY_NPC } from './condition'
-import { AddRow, CommaInput, DeleteButton, INPUT } from './rpgUi'
+import { AddRow, CommaInput, DeleteButton, INPUT, NumInput } from './rpgUi'
 
 /** 后端 check_condition 认得的比较符，顺序即下拉顺序 */
 const OPS = ['>=', '>', '<=', '<', '==', '!='] as const
@@ -84,10 +84,10 @@ export default function ConditionEditor({
             <select value={row.op} onChange={e => setStat(name, 'op', e.target.value)} className={SELECT}>
               {OPS.map(op => <option key={op} value={op}>{op}</option>)}
             </select>
-            <input
-              type="number"
+            {/* 门槛经常是负的：「好感 ≤ -20 才触发」是最常见的敌对分支写法 */}
+            <NumInput
               value={row.value}
-              onChange={e => setStat(name, 'value', e.target.value)}
+              onChange={n => setStat(name, 'value', String(n ?? 0))}
               className={`${INPUT} w-24 py-1.5`}
             />
             <DeleteButton onClick={() => dropStat(name)} />
@@ -112,10 +112,9 @@ export default function ConditionEditor({
             <select value={row.op} onChange={e => setRelation(i, 'op', e.target.value)} className={SELECT}>
               {OPS.map(op => <option key={op} value={op}>{op}</option>)}
             </select>
-            <input
-              type="number"
+            <NumInput
               value={row.value}
-              onChange={e => setRelation(i, 'value', e.target.value)}
+              onChange={n => setRelation(i, 'value', String(n ?? 0))}
               className={`${INPUT} w-20 py-1.5`}
             />
             <DeleteButton onClick={() => patch({ relations: relations.filter((_, n) => n !== i) })} />
@@ -171,12 +170,9 @@ export default function ConditionEditor({
             </select>
             {value.day && (
               <>
-                <input
-                  type="number"
+                <NumInput
                   value={value.day.value}
-                  onChange={e => patch({
-                    day: { op: value.day!.op, value: Number(e.target.value) || 0 },
-                  })}
+                  onChange={n => patch({ day: { op: value.day!.op, value: n ?? 0 } })}
                   className={`${INPUT} w-20 py-1`}
                 />
                 <span className="text-xs text-muted-foreground">天</span>
@@ -225,10 +221,11 @@ export default function ConditionEditor({
               className={`${INPUT} flex-1 py-1.5`}
             />
             <span className="text-xs text-muted-foreground shrink-0">之后</span>
-            <input
-              type="number"
+            <NumInput
               value={row.days}
-              onChange={e => setAfter(i, 'days', e.target.value)}
+              onChange={n => setAfter(i, 'days', String(n ?? 0))}
+              // 天数没有负的，但「删到空」不该当场变 0 再拼出个 05
+              clamp={n => Math.max(0, n)}
               className={`${INPUT} w-20 py-1.5`}
             />
             <span className="text-xs text-muted-foreground shrink-0">天</span>

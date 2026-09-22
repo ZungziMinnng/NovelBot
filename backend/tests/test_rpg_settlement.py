@@ -197,10 +197,74 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(self.npcs[0].id), self.sess.npc_places)
 
     async def test_arriving_npc_can_join_the_fixed_player_location(self):
+        # 赶过来当然可以，但和「离场」共用同一道门：要有她自己的 move 事件
         row = await self.make_reply("园丁甲推开柴房的门，走到你面前。", fixed_location="柴房")
-        result = await self.settle(row, proposal(row.content, npc_places={"园丁甲": "柴房"}))
+        data = proposal(row.content, npc_places={"园丁甲": "柴房"})
+        data["events"] = [{"kind": "move", "quote": row.content, "domains": ["scene"],
+                           "participants": [self.npcs[0].id]}]
+        result = await self.settle(row, data)
         self.assertEqual(result["settlement"]["status"], "done")
         self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], self.sess.location)
+
+    async def test_an_npc_elsewhere_cannot_appear_at_the_player_without_coming_over(self):
+        """调度到别处的人，不许因为玩家走进来就出现在跟前。
+
+        真实存档里的样子：她被随机调度到菜市场，玩家「前往家」，模型写她从
+        家里的厨房出来。她的名字因此出现在正文里，allowed = original | named
+        把这一句认成「剧情真的动了这个人」，位置改成家——玩家看到的是她从
+        菜市场瞬移回来，而两张表都不报错。
+        """
+        self.sess.npc_places = {str(self.npcs[0].id): "灵药园"}
+        await self.store.commit()
+        row = await self.make_reply("你回到柴房，园丁甲正从里屋走出来。", fixed_location="柴房")
+        result = await self.settle(row, proposal(row.content, npc_places={"园丁甲": "柴房"}))
+        self.assertEqual(result["settlement"]["status"], "partial")
+        self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], "灵药园")
+
+    async def test_the_recorder_is_told_what_each_stat_means(self):
+        """记录员要看得见作者写的「这一项影响什么」，否则它只会单向加。
+
+        真实存档里 21 轮的账：羞耻值提议 +11 次 / -4 次，堕落度 +6 次 / 一次
+        没减过。而作者写的是「撒谎、出轨、羞辱会让羞耻下降」——方向正好相反。
+        它只拿到了数值的名字，于是把「羞耻值」读成「这一轮有没有发生羞耻的
+        事」，次次往上加。叙事那一侧早就有这份说明（_meaning_block 那一块），
+        动数字的这一侧一直没有。
+        """
+        self.module.stat_defs = [{"name": "精力", "initial": 50, "min": 0, "max": 100,
+                                  "effect": "干什么都扣，归零只能回家睡觉"}]
+        self.module.relation_stat_defs = [{"name": "羞耻值", "initial": 10, "min": 0, "max": 100,
+                                           "effect": "撒谎、出轨、羞辱会让它下降"}]
+        await self.store.commit()
+        row = await self.make_reply("你在她面前把那句谎话说圆了。")
+        seen = []
+
+        async def capture(messages, *args, **kwargs):
+            seen.append(messages[0]["content"])
+            return proposal(row.content), 1, 1
+
+        await self.settle(row, capture)
+        self.assertIn("撒谎、出轨、羞辱会让它下降", seen[0])
+        self.assertIn("干什么都扣，归零只能回家睡觉", seen[0])
+        # 光给说明不够，还得明说这事是双向的
+        self.assertIn("数值是双向的", seen[0])
+
+    async def test_a_move_event_whose_quote_never_says_she_came_is_not_evidence(self):
+        """过路条上得真写着她走了这一趟。
+
+        真实存档里模型交上来的就是这个：kind=move，quote 是「她侧躺在床上，
+        蜷着身子」（确实逐字出自正文），summary 自己写着「已从菜市场回到
+        家中卧室」。正文里她根本没走这一趟——模型先当她在家写完了一整段，
+        再回头补一张事件。只查「有没有 move 事件」的话这一步一路放行。
+        """
+        self.sess.npc_places = {str(self.npcs[0].id): "灵药园"}
+        await self.store.commit()
+        row = await self.make_reply("园丁甲侧躺在柴房的草堆上，蜷着身子睡着了。", fixed_location="柴房")
+        data = proposal(row.content, npc_places={"园丁甲": "柴房"})
+        data["events"] = [{"kind": "move", "quote": row.content, "domains": ["scene"],
+                           "participants": [self.npcs[0].id]}]
+        result = await self.settle(row, data)
+        self.assertEqual(result["settlement"]["status"], "partial")
+        self.assertEqual(self.sess.npc_places[str(self.npcs[0].id)], "灵药园")
 
     async def test_scene_repair_can_keep_a_colocated_npc_in_place(self):
         self.npcs[0].location = "柴房"

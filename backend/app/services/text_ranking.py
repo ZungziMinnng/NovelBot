@@ -43,15 +43,19 @@ def bm25_rank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
 def rrf_fuse(
     ranked_a: list[dict],
     ranked_b: list[dict],
+    *more: list[dict],
     key: Callable[[dict], Any],
     k: int = 60,
 ) -> list[dict]:
     """RRF 名次融合：每条得分 = Σ 1/(k+名次)，按 key 去重。只看名次不看原始分，
     规避向量距离与 BM25 分数量纲不可比的问题。同 key 保留先出现的（ranked_a
-    优先，向量侧 dict 带 similarity 等字段）。"""
+    优先，向量侧 dict 带 similarity 等字段）。
+
+    前两路是位置参数、再多的走 *more，纯粹是为了不动已有的三处两路调用；
+    `key` 本来就只能用关键字传（它排在 *more 后面），旧调用照旧。"""
     scores: dict = {}
     keep: dict = {}
-    for ranked in (ranked_a, ranked_b):
+    for ranked in (ranked_a, ranked_b, *more):
         for rank, hit in enumerate(ranked):
             key_val = key(hit)
             scores[key_val] = scores.get(key_val, 0.0) + 1.0 / (k + rank + 1)

@@ -270,6 +270,31 @@ class MaybeSummarizeTests(unittest.IsolatedAsyncioTestCase):
         async with self.sessions() as db:
             return await db.get(RpgSession, session_id)
 
+    async def test_an_overlong_summary_is_clipped_to_the_hard_cap(self):
+        """模板那句「500 字以内」撑不住，闸得在引擎这边。
+
+        这是累积式概要：模型手里那份旧的可能已经一千多字，外加一句「不要丢掉
+        旧信息」，出来就是一千多字。真实存档里实测过 1518 字和 1431 字的格子。
+        """
+        session_id = await self._seed(6)
+        long = "第一件事发生了。" * 200  # 1600 字，远超上限
+
+        async def fake(messages, **_kwargs):
+            return long
+
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                await rpg_turn._maybe_summarize(session_id)
+
+        saved = (await self._reload(session_id)).summary
+        self.assertLessEqual(len(saved), rpg_turn.SUMMARY_CHARS)
+        # 切在句号上，不留半句
+        self.assertTrue(saved.endswith("。"))
+        # 切尾巴而不是开头：开头那段旧事除了这份概要哪儿都没有
+        self.assertTrue(saved.startswith("第一件事发生了。"))
+
     async def test_a_short_history_is_left_alone(self):
         session_id = await self._seed(2)
         with patch.object(rpg_turn.llm_client, "dispatch_chat_complete") as call:

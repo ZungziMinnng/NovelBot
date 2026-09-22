@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import type { RpgDiscovery } from '@/api/client'
-import { PANEL } from '../rpgUi'
+import { PANEL, WaitBar } from '../rpgUi'
 import Empty from './Empty'
 
 const KIND_LABELS: Record<RpgDiscovery['kind'], string> = {
@@ -97,6 +97,8 @@ export default function FoundTab({
         {applyingDiscoveries && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
         {applyingDiscoveries ? '正在补全档案…' : `加入模组${live.length ? `（${live.length}）` : ''}`}
       </button>
+      {/* 补全档案要调一次模型。侧栏这一格窄，按钮里那个转圈只有十几像素 */}
+      {applyingDiscoveries && <WaitBar />}
     </>
   )
 }

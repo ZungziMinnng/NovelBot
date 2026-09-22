@@ -1,5 +1,6 @@
 import { Loader2, RotateCcw } from 'lucide-react'
 import type { RpgNpc, RpgSettlement } from '@/api/client'
+import { WaitBar } from './rpgUi'
 
 const LABELS: Record<string, string> = {
   scene: '地点与在场人物', stats: '数值', inventory: '背包',
@@ -31,6 +32,9 @@ export default function SettlementReport({ report, latest, busy, disabled, npcs,
           </button>
         )}
       </div>
+      {/* 重新结算是一次模型调用，几秒到十几秒。上面那句文案换了、按钮上多了个
+          转圈，可整块面板在一屏报告里毫不显眼，加一条横贯的 */}
+      {busy && <WaitBar />}
       {!!report.engine_facts?.length && (
         <div className="space-y-1">
           {report.engine_facts.map((fact, index) => <p key={index}>{fact}</p>)}

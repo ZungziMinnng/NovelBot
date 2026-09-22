@@ -39,7 +39,12 @@ def _best_snippet(content: str, query: str) -> str:
 
 def event_memory(history, audience: set[int], query: str, budget: int = 1100,
                  window_ids: set[int] | None = None,
-                 out_participants: set[int] | None = None) -> str:
+                 out_participants: set[int] | None = None,
+                 vector_keys: list[str] | None = None) -> str:
+    # vector_keys：向量召回命中的候选 key，按相似度从高到低（见 rpg_vectors.search）。
+    # **只是一串 key，不带内容**——候选仍然只从下面这个池子里认领，于是可见性闸门
+    # 只有池子那一处。向量那条路自己再抄一份 witnesses / present 的判据，
+    # 两份迟早分叉，而分叉的那一次是把私密事实漏给不该知道的人
     # out_participants：传一个 set 进来，函数把**入选**往事牵涉到的 NPC id 塞进去。
     # 这是第二跳的数据出口——「提到往事 → 往事里的人也加载」靠调用方拿这份 id 补卡。
     # 用出参而非改返回：十几处调用把返回值直接当字符串用，改签名会连坐全破
@@ -96,6 +101,13 @@ def event_memory(history, audience: set[int], query: str, budget: int = 1100,
     # dict，所以「被 BM25 捞到」这件事只能另记一份 key 集合
     bm25_ranked = bm25_rank(query, pool, BM25_TOP_K)
     bm25_keys = {c["key"] for c in bm25_ranked}
+    # 向量那一路：把命中的 key 在池子里认领回来，认不领的（不可见、已在窗口里、
+    # 消息被删了、事实被改稿作废了）一概丢掉。名次按向量给的顺序排
+    hit_order = {key: index for index, key in enumerate(vector_keys or [])}
+    vector_ranked = sorted(
+        (c for c in pool if c["key"] in hit_order), key=lambda c: hit_order[c["key"]],
+    )
+    vector_hits = {c["key"] for c in vector_ranked}
     # 原文摘录必须确有词面相关性才留下，事实不受此限：没审过的原文 0 分入选
     # 就是往 prompt 里倒垃圾。
     #
@@ -103,14 +115,20 @@ def event_memory(history, audience: set[int], query: str, budget: int = 1100,
     # 召回本来就宽，BM25 在这里的价值是**排序**（idf 让「药园」压过「你」「把」），
     # 不是召回。让它单独当入场口的话，jieba 切出来的单字停用词会把无关消息顶进
     # 那 3 行摘录额度——实测问「答应过什么、药园那把火」会捞回「买了一把断刃」
-    pool = [c for c in pool if "fact" in c or c["surface"] > 0]
-    # 两个列表必须同筛：rrf_fuse 取的是并集，只筛 pool 的话被淘汰的候选会从
-    # BM25 那一路原样回来
+    #
+    # **向量命中的原文豁免这道门槛**：词面对不上正是向量要补的短板——同义表述、
+    # 换了称呼的旧事，字面永远匹配不到。豁免的只是入场，EXCERPT_LINE_CAP 那
+    # 3 行的上限照旧，没审过的原文仍然挤不掉审过的事实
+    pool = [c for c in pool
+            if "fact" in c or c["surface"] > 0 or c["key"] in vector_hits]
+    # 三个列表必须同筛：rrf_fuse 取的是并集，只筛 pool 的话被淘汰的候选会从
+    # 另外两路原样回来
     kept = {c["key"] for c in pool}
     bm25_ranked = [c for c in bm25_ranked if c["key"] in kept]
+    vector_ranked = [c for c in vector_ranked if c["key"] in kept]
     # +2 的类型加成在 RRF 下依然生效：它抬高的是 surface 侧的名次，而 RRF 只看名次
     surface_ranked = sorted(pool, key=lambda c: (c["surface"], c["message_id"]), reverse=True)
-    fused = rrf_fuse(surface_ranked, bm25_ranked, key=lambda c: c["key"])
+    fused = rrf_fuse(surface_ranked, bm25_ranked, vector_ranked, key=lambda c: c["key"])
     lines = []
     excerpts = 0
     for cand in fused:

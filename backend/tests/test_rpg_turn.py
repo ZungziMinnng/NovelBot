@@ -12,6 +12,7 @@ from app.models.rpg import (
     RpgAction, RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession,
     RpgSkill,
 )
+from app.services.context_budget import estimate_tokens
 from app.services.rpg_context import (
     SUGGEST_PLACES_BUDGET, SUGGEST_TAG_GUIDE, SUGGEST_TOKEN_BUDGET,
 )
@@ -127,8 +128,9 @@ class SuggestTests(_Base):
             "看看四周", history=_history(("user", "我推开门")),
         )
         # 六行（三条能做的 + 三句台词）得给够位置，所以是 900 不是 600。
-        # 温度也钉住：低了几条会是同一件事的几种说法，那就白搭了
-        self.assertEqual(captured["kwargs"]["temperature"], 0.95)
+        # 温度钉住 0.7：这是个必须贴着眼前那一段走的任务，从前的 0.95 会往
+        # 剧情外面飘。「三条要拉开」交给提示词管，不靠温度撞
+        self.assertEqual(captured["kwargs"]["temperature"], 0.7)
         self.assertEqual(captured["kwargs"]["max_tokens"], 900)
 
     async def test_numbering_quotes_and_bullets_are_stripped(self):
@@ -168,10 +170,13 @@ class SuggestTests(_Base):
         self.assertIn("刚说的一句", captured["prompt"])
 
     async def test_only_the_recent_tail_is_sent(self):
-        history = _history(*[("user", f"第{i}句") for i in range(1, 13)])
+        # 条数跟着 SUGGEST_WINDOW 走：写死 12 条的话，窗口一抬宽这个断言就
+        # 从「只发尾巴」悄悄变成「全发了也算过」
+        n = rpg_turn.SUGGEST_WINDOW + 4
+        history = _history(*[("user", f"第{i}句") for i in range(1, n + 1)])
         _, captured = await self._suggest("推门进去", history=history)
         self.assertNotIn("第1句", captured["prompt"])
-        self.assertIn("第12句", captured["prompt"])
+        self.assertIn(f"第{n}句", captured["prompt"])
 
     async def test_a_misconfigured_model_reaches_the_route(self):
         # 路由靠这个 ValueError 转成 400。吞掉它的话，模型配错时前端
@@ -399,6 +404,49 @@ class AppendedBlockTests(_Base):
         self.assertIn("【地方】", prompt)
         self.assertIn("后山", prompt)
 
+    async def test_the_world_and_the_persona_and_your_history_with_her_reach_the_prompt(self):
+        """建议「不贴上下文」的三块料：这是个什么世界、对面什么脾气、你俩之间有过什么。
+
+        从前这三样一个都不给：建议模型只看得见数值名、地名和一个 30 字简介，
+        于是那三句台词写得放到任何一个模组里都成立。
+        """
+        _, captured = await self._suggest(
+            "推门进去",
+            history=_history(("user", "我推开门")),
+            sess=_session(
+                location="地窖", npc_states={"5": {"好感": 70}},
+                thread_summaries={"5": "她答应过替你瞒下那件事"},
+            ),
+            module=_module(worldview="灵气枯竭三百年，剑修改吃丹药"),
+            sources=_sources(npcs=[RpgNpc(
+                id=5, module_id=1, name="柳如烟", role="npc", persona="嘴硬，怕被人看出在乎",
+            )]),
+            here_ids={5},
+        )
+        prompt = captured["prompt"]
+        self.assertIn("灵气枯竭三百年", prompt)
+        self.assertIn("嘴硬", prompt)
+        self.assertIn("她答应过替你瞒下那件事", prompt)
+        # 玩家自己那格由模板的 summary 变量给，这一块只补 NPC 那几份，
+        # 两处都拼会让同一段出现两遍
+        self.assertEqual(prompt.count("她答应过替你瞒下那件事"), 1)
+
+    async def test_a_long_transcript_cannot_squeeze_out_the_reference_blocks(self):
+        """剧情原文是窗口抬宽之后唯一没有闸的一块，得有个上限。"""
+        history = _history(*[("assistant", "很长的一段叙事" * 200) for _ in range(20)])
+        _, captured = await self._suggest(
+            "推门进去", history=history,
+            sess=_session(location="地窖", stats={"精力": 42}),
+        )
+        prompt = captured["prompt"]
+        self.assertLessEqual(
+            estimate_tokens(prompt.split("=== 最近发生的事 ===")[1].split("【你】")[0]),
+            rpg_turn.SUGGEST_TRANSCRIPT_BUDGET + 50,
+        )
+        # 资料段和结尾那段指令都还在
+        self.assertIn("【你】", prompt)
+        self.assertTrue(prompt.endswith(SUGGEST_TAG_GUIDE))
+
     async def test_the_tag_guide_is_the_last_thing_in_the_prompt(self):
         # 资料段排在模板那句「只输出 3 行」之后，靠结尾这段指令扳回来。
         # 位置一挪，模型的注意力就跟着挪
@@ -444,6 +492,139 @@ class AppendedBlockTests(_Base):
         self.assertEqual(captured["diag"]["count"], 3)
         self.assertEqual(captured["diag"]["structured"], 1)
         self.assertIn("prompt_tokens", captured["diag"])
+
+
+class ApplyRollTests(unittest.TestCase):
+    """对抗接线。random_check=False 让结果确定，测的是那个成功率数字。"""
+
+    STATS = [
+        {"name": "境界", "initial": 3, "max": 9, "for_check": True},
+        {"name": "剑术", "initial": 12, "max": 20, "for_check": True},
+        {"name": "资金", "initial": 50},
+    ]
+
+    def _mod(self, **over):
+        base = dict(
+            stat_defs=list(self.STATS), rate_table=None, difficulty_bias=0,
+            random_check=False, check_mode="smart", rank_stat="", rank_per_level=15,
+        )
+        base.update(over)
+        return _module(**base)
+
+    def _sess(self):
+        return _session(stats={"境界": 3, "剑术": 12, "资金": 50})
+
+    def _rate(self, module, attr, opponent="", npcs=()):
+        out = rpg_turn.apply_roll(
+            module, self._sess(),
+            {"need_check": True, "attr": attr, "band": "medium",
+             "intent": "砍他", "reason": "", "opponent": opponent},
+            npcs,
+        )
+        return out
+
+    def _boss(self, ability):
+        npc = _npc(2, "魔尊")
+        npc.ability_stats = ability
+        return npc
+
+    def test_no_opponent_is_byte_for_byte_the_old_behaviour(self):
+        # 剑术 12 对基准 10：55 + 2*4
+        self.assertEqual(self._rate(self._mod(), "剑术")["rate"], 63)
+
+    def test_numeric_mode_compares_the_same_named_stat(self):
+        boss = self._boss({"剑术": 17})
+        got = self._rate(self._mod(), "剑术", "魔尊", [boss])
+        # 12 对 17：55 - 5*4
+        self.assertEqual(got["rate"], 35)
+        self.assertEqual(got["opponent"], "魔尊")
+        self.assertEqual(got["opposed_stat"], "剑术")
+        self.assertEqual(got["opposed_value"], 17)
+
+    def test_level_mode_compares_the_rank_stat_whatever_the_judge_picked(self):
+        boss = self._boss({"境界": 4, "剑术": 17})
+        got = self._rate(self._mod(rank_stat="境界"), "剑术", "魔尊", [boss])
+        # 境界 3 对 4，每级 15：55 - 15。剑术那 17 一点都不算进去
+        self.assertEqual(got["rate"], 40)
+        self.assertEqual(got["attr"], "剑术")          # 叙事和台账还是用剑术
+        self.assertEqual(got["opposed_stat"], "境界")  # 真比的是境界
+
+    def test_level_mode_with_an_opponent_who_never_filled_that_in(self):
+        # 认出人了但没填等级：不产生修正，但判定条照样写「对 魔尊」
+        boss = self._boss({"剑术": 17})
+        got = self._rate(self._mod(rank_stat="境界"), "剑术", "魔尊", [boss])
+        self.assertEqual(got["rate"], 63)
+        self.assertEqual(got["opponent"], "魔尊")
+        self.assertEqual(got["opposed_stat"], "")
+        self.assertIsNone(got["opposed_value"])
+
+    def test_level_mode_picking_the_rank_stat_with_nobody_to_beat(self):
+        """等级制下最常见的那一格：运功疗伤、以境界压人。
+
+        境界 3 若落回 STAT_BASELINE=10，(3-10)*15 = -105，练个功都必败。
+        """
+        self.assertEqual(self._rate(self._mod(rank_stat="境界"), "境界")["rate"], 55)
+
+    def test_level_mode_leaves_ordinary_stats_alone_when_unopposed(self):
+        # 没对手的剑术还是老规矩：对基准 10 比，每点 4
+        self.assertEqual(self._rate(self._mod(rank_stat="境界"), "剑术")["rate"], 63)
+
+    def test_a_judgement_missing_every_new_key_does_not_blow_up(self):
+        """玩家用下拉框手选检定项那条路：judgement 是手搓的字面量。
+
+        这个调用点不在 try 里面，一次 KeyError 就是整轮 500。
+        """
+        out = rpg_turn.apply_roll(
+            self._mod(rank_stat="境界"), self._sess(),
+            {"need_check": True, "attr": "剑术", "band": "medium",
+             "intent": "砍他", "reason": "玩家指定"},
+            [self._boss({"境界": 4})],
+        )
+        self.assertEqual(out["rate"], 63)
+        self.assertEqual(out["opponent"], "")
+
+    def test_the_protagonist_card_cannot_be_conscripted_as_an_opponent(self):
+        me = _npc(3, "阿隼", role="protagonist")
+        me.ability_stats = {"境界": 9}
+        got = self._rate(self._mod(rank_stat="境界"), "剑术", "阿隼", [me])
+        self.assertEqual(got["rate"], 63)
+        # 名字认不出人就得擦掉，否则判定条会写出「对 阿隼」而其实没对上谁
+        self.assertEqual(got["opponent"], "")
+
+    def test_rank_per_level_zero_falls_back_instead_of_flattening_everything(self):
+        boss = self._boss({"境界": 4})
+        got = self._rate(self._mod(rank_stat="境界", rank_per_level=0), "剑术",
+                         "魔尊", [boss])
+        self.assertEqual(got["rate"], 51)   # 差 1 级，回落到每点 4
+
+
+class FallbackAttrTests(unittest.TestCase):
+    """回落挑哪一项。等级项必须排最后。"""
+
+    def test_the_rank_stat_goes_last_even_though_authors_mark_it_for_check(self):
+        mod = _module(
+            stat_defs=[
+                {"name": "境界", "for_check": True},
+                {"name": "剑术", "for_check": True},
+            ],
+            rank_stat="境界",
+        )
+        stats = {"境界": 3, "剑术": 12}
+        self.assertEqual(rpg_turn._fallback_attr(mod, stats), "剑术")
+
+    def test_the_rank_stat_is_still_better_than_nothing(self):
+        mod = _module(stat_defs=[{"name": "境界", "for_check": True}], rank_stat="境界")
+        self.assertEqual(rpg_turn._fallback_attr(mod, {"境界": 3}), "境界")
+
+    def test_numeric_mode_keeps_the_original_order(self):
+        mod = _module(
+            stat_defs=[
+                {"name": "境界", "for_check": True},
+                {"name": "剑术", "for_check": True},
+            ],
+            rank_stat="",
+        )
+        self.assertEqual(rpg_turn._fallback_attr(mod, {"境界": 3, "剑术": 12}), "境界")
 
 
 if __name__ == "__main__":

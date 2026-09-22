@@ -12,6 +12,13 @@ export const GAMEPLAY_MODEL_FIELDS = [
 export const EXTRA_MODEL_FIELDS = [
   { key: 'fast_model_ref', label: '辅助默认模型', empty: '跟随系统辅助默认', hint: '未单独指定的结算、判定、建议、总结、NPC 调度和外场简报使用它。保留原「判定与结算模型」的设置。' },
   { key: 'image_model_ref', label: '立绘 tag 模型', empty: '自动选择', hint: '将中文外貌转换为 danbooru tag。留空依次使用辅助默认、叙事模型，再跟随系统角色默认。' },
+  { key: 'embedding_model_ref', label: '向量检索模型', empty: '留空 = 不启用向量检索', hint: '把旧剧情嵌成向量，让换了说法的往事也能被回忆起来。留空则整条向量路关着，一次嵌入请求都不发。' },
 ] as const
 
 export type RpgModelField = (typeof GAMEPLAY_MODEL_FIELDS)[number]['key'] | (typeof EXTRA_MODEL_FIELDS)[number]['key']
+
+/** 这个槽位要选的是嵌入模型，不是聊天模型。两拨在模型库里是互斥的
+ *  `model_type`，拿聊天模型那份列表去填它，列出来的全是选不中的东西——
+ *  后端 `_resolve_embedding_entry` 只认 `model_type == 'embedding'`，
+ *  选错了它静默拒绝，界面上看不出任何异常 */
+export const isEmbeddingField = (key: RpgModelField) => key === 'embedding_model_ref'

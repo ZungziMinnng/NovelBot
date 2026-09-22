@@ -54,6 +54,12 @@ APPEARANCE_CHARS = 40
 # 它和近况并排画在同一张卡上，长了两行挤在一起
 ACTIVITY_CHARS = 40
 
+# 那句话按时段留下的短流水，一个人最多几条（见 models.npc_activity_log）。
+# 12 条约合四个游戏日。不设成「和经历一样不封顶」：经历每一条都过了取证门禁
+# （必须在正文里找得到原话），这一列是模型随口编的背景活动，攒成一本无限长的
+# 流水只会把真正玩出来的那几条淹掉
+ACTIVITY_LOG_LINES = 12
+
 # NPC 留言。比 ACTIVITY_CHARS 宽一点：它会原样落成一条真消息给玩家看，
 # 太短会像半句话被截断。INBOX_PER_NPC 是一个人最多攒几条——不封顶的话，
 # 玩家一直不理她，红点上的数字会涨到没边，而那些话早就过时了。
@@ -72,10 +78,16 @@ PLACE_LIMIT = 30
 # 数值「影响」那段最长多少字。这是**提示词预算**的上限，不是排版上限——它每轮
 # 随数值表发一遍，数值多的模组会把上下文吃掉。之前是 30，太紧：像「金钱」这种
 # 要说清用途的数值，一句话写不完就被切在半句上，模型读到半句比没有还糟。
-# 档位标签/说明是另一回事，它们跟在每个数字后面画在侧栏上，长了就换行，所以照旧紧。
+# 档位标签是另一回事：它跟在侧栏每个数字后面画出来（StatBar），长了就换行，所以照旧紧。
 EFFECT_CHARS = 150
 TIER_LABEL_CHARS = 6
-TIER_NOTE_CHARS = 20
+# 档位说明不上界面——编辑器里那一栏自己写着「只给模型看，玩家看不见」，
+# 它唯一的去处是 _meaning_block。所以它跟 label 不是一类，跟 effect 才是一类，
+# 之前 20 字是照着 label 一起定的，属于顺手：「70 起 出轨妇=会主动说脏话但还会脸红」
+# 这种一句话就到头了，而档位说明恰恰是最该写清的那句——数值的含义靠 effect，
+# 到了这个数**具体是什么表现**只有它能说。同 EFFECT_CHARS 的理由封在预算上：
+# 一档一句，档数乘上去才是每轮的开销，所以给得比 effect 保守
+TIER_NOTE_CHARS = 60
 
 # 引擎自己写进大事记的两类行。前缀是**合并的判据**——认不出「上一行也是
 # 移动」的话，玩家在镇上连点五个地点就会刷出五条「你去了 X」
@@ -265,6 +277,46 @@ def cap_delta(specs: dict[str, dict], delta) -> tuple[dict, list[str]]:
             warnings.append(f"{name} 这一轮只动了 {got}（本来要动 {want}，每轮上限 {top}）")
         out[name] = got
     return out, warnings
+
+
+# 等级一轮最多升几级。刻意**只夹上行**：修为被废从 8 掉到 0 是正当的剧情，
+# 而「打赢一场就从练气飞到元婴」不是。cap_delta 的 step_max 是对称的，
+# 所以这一条不能借它来实现
+RANK_GAIN_MAX = 1
+
+
+def rank_stat_of(module) -> str:
+    """模组的等级项名字。空串 = 数值制。
+
+    用 getattr 是因为结算那边传的是 working 副本、测试里的 module 常是手搓
+    对象，两种都可能没有这个属性（同下面 stat_defs 的写法）。
+    """
+    return str(getattr(module, "rank_stat", "") or "").strip()
+
+
+def cap_rank_gain(module, delta) -> tuple[dict, list[str]]:
+    """等级这一项一轮最多升 RANK_GAIN_MAX 级。只夹正的那一头。
+
+    作者自己在这一项上填了 step_max 就听他的（含填 0 = 一点都不许动）——
+    那时 cap_delta 会接手，这里不再插手。数值制（rank_stat 为空）一律不动。
+    """
+    if not isinstance(delta, dict):
+        return {}, []
+    rank = rank_stat_of(module)
+    if not rank or rank not in delta:
+        return dict(delta), []
+    spec = def_map(getattr(module, "stat_defs", None)).get(rank) or {}
+    if spec.get("step_max") is not None:
+        return dict(delta), []
+    amount = delta[rank]
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return dict(delta), []
+    want = _num(amount)
+    if want <= RANK_GAIN_MAX:
+        return dict(delta), []
+    out = dict(delta)
+    out[rank] = RANK_GAIN_MAX
+    return out, [f"{rank} 这一轮只升了 {RANK_GAIN_MAX}（本来要升 {want}，一轮最多 {RANK_GAIN_MAX} 级）"]
 
 
 def tier_list(spec: dict | None) -> list[dict]:
@@ -750,7 +802,12 @@ def apply_npc_activity(sess, npc_id: int, text) -> None:
     """记下、或清掉一个角色「最近在做什么」。
 
     空串 / None = 清掉（玩家手动划掉走这条路）。**每个角色只有一句**，
-    新的一次直接盖掉旧的——这是「最近」，不是日志。
+    新的一次直接盖掉旧的——这是「最近」，不是日志。被盖掉的那句不会没影：
+    每次写入顺带往 npc_activity_log 里留一条按时段盖章的底。
+
+    **清掉只清「最近」，不动那条流水**：流水是盖过时间戳的旧账，同经历，
+    玩家在档案里看到的是「她那几格在忙什么」。划掉当前这句是说「现在别再
+    拿它编下去了」，不是说那几天没发生过。
 
     和 npc_notes 分开存：那张表是 GM 从这一轮叙事里读出来的近况（伤在哪、
     身上带着什么），这张是调度替不在场的人写的行动。两个写手共用一套键名的
@@ -767,7 +824,27 @@ def apply_npc_activity(sess, npc_id: int, text) -> None:
         if len(value) > ACTIVITY_CHARS:
             value = value[:ACTIVITY_CHARS] + "…"
         table[key] = value
+        _log_npc_activity(sess, key, value)
     sess.npc_activities = table
+
+
+def _log_npc_activity(sess, key: str, value: str) -> None:
+    """把刚记下的那句话按时段留一条底（见 models.RpgSession.npc_activity_log）。
+
+    **同一格只留最后一句**：调度在回合那条路上每轮都跑，一格里能跑好几次，
+    不按时段去重的话一天就能把窗口撑满，而玩家想看的是「那一格她在干嘛」。
+
+    时间戳由引擎在写入这一刻盖，同经历那边——调度那次调用压根没被告知今天
+    第几天。满 ACTIVITY_LOG_LINES 条丢最旧的。
+    """
+    day = max(1, int(getattr(sess, "day", 1) or 1))
+    slot = str(getattr(sess, "slot", "") or "")
+    rows = [row for row in (sess.npc_activity_log or {}).get(key) or []
+            if not (row.get("day") == day and row.get("slot") == slot)]
+    rows.append({"day": day, "slot": slot, "content": value})
+    sess.npc_activity_log = {
+        **(sess.npc_activity_log or {}), key: rows[-ACTIVITY_LOG_LINES:],
+    }
 
 
 def push_npc_inbox(sess, npc_id: int, text, place="") -> None:
@@ -909,6 +986,27 @@ def mark_met(sess, npc_ids) -> None:
             changed = True
     if changed:
         sess.npc_states = states
+
+
+def mark_fired(sess, entry_ids) -> None:
+    """记一笔「这条一次性词条已经放过了」（RpgWorldEntry.once）。
+
+    语义同 mark_met：**上下文发出去就算放过**，叙事失败也算——模型确实已经
+    拿到过那段文字了。想让它重来只有读档一条路（fired_entries 进
+    SNAPSHOT_FIELDS），界面上不另做「重新武装」。
+
+    只追加、不覆写整列：和 flag_days 一样是引擎独占的列，模型碰不到。
+    """
+    fired = list(sess.fired_entries or [])
+    known = set(fired)
+    changed = False
+    for entry_id in entry_ids or []:
+        if entry_id not in known:
+            fired.append(entry_id)
+            known.add(entry_id)
+            changed = True
+    if changed:
+        sess.fired_entries = fired
 
 
 def starting_inventory(module, items) -> list[dict]:
@@ -1536,6 +1634,35 @@ def slot_table(module, sess) -> list[str]:
     return [str(s).strip() for s in raw if str(s).strip()]
 
 
+def random_movement_ok(npc, slot, place="") -> bool:
+    """这个人此刻准不准被随机挪，以及挪到 place 算不算合法。
+
+    三处共用：调度挑地点前的 movable 过滤、调度自己的对账循环、推时段时的
+    _clear_expired_random_places。三处问的是同一件事，各写一遍必然漂移——
+    作者事后改了白名单，漏掉哪一处的症状都是她永久停在一个已经不该待的地方，
+    而且两边都不报错（同 npc_place 与前端 condition.npcPlace 那对镜像的教训）。
+
+    place 留空 = 只问「此刻准不准随机移动」，不问去哪儿。
+    两张白名单都是空列表 = 不限制，老数据行为逐字不变。
+    """
+    if npc is None or not getattr(npc, "random_movement", False):
+        return False
+    slots = {
+        str(value).strip()
+        for value in (getattr(npc, "random_movement_slots", None) or [])
+        if str(value).strip()
+    }
+    if slots and str(slot or "").strip() not in slots:
+        return False
+    allowed = {
+        norm_name(value)
+        for value in (getattr(npc, "random_movement_places", None) or [])
+        if str(value).strip()
+    }
+    # place 为空时不查这一张：那是「准不准动」的问法，去哪儿由调用方接着挑
+    return not (allowed and place and norm_name(place) not in allowed)
+
+
 def _clear_expired_random_places(sess, npcs=()) -> None:
     random_places = dict(getattr(sess, "npc_random_places", None) or {})
     if not random_places:
@@ -1543,23 +1670,22 @@ def _clear_expired_random_places(sess, npcs=()) -> None:
     by_id = {str(getattr(npc, "id", "")): npc for npc in (npcs or [])}
     places = dict(sess.npc_places or {})
     for key, marked in list(random_places.items()):
-        npc = by_id.get(str(key))
-        slots = {
-            str(value).strip()
-            for value in (getattr(npc, "random_movement_slots", None) or [])
-            if str(value).strip()
-        }
-        expired = (
-            npc is None
-            or not getattr(npc, "random_movement", False)
-            or (slots and (sess.slot or "").strip() not in slots)
-        )
-        if expired:
+        # marked 是引擎上次挑的那个地方，所以这一问连白名单一起判：
+        # 作者把那个地点移出白名单之后，这条覆盖当场过期、位置落回作息表
+        if not random_movement_ok(by_id.get(str(key)), sess.slot, marked):
             if norm_name(places.get(str(key))) == norm_name(marked):
                 places.pop(str(key), None)
             random_places.pop(str(key), None)
     sess.npc_places = places
     sess.npc_random_places = random_places
+
+
+def _has_schedule(npc) -> bool:
+    """作者给这个人排过作息表吗——哪怕只排了一格。"""
+    table = getattr(npc, "slot_locations", None)
+    if not isinstance(table, dict):
+        return False
+    return any(str(value).strip() for value in table.values())
 
 
 def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
@@ -1593,6 +1719,35 @@ def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
         str(npc.id): here
         for npc in here_npcs(list(npcs), here, sess.slot, sess.npc_places, sess.npc_followers)
         if str(npc.id) not in followers
+    })
+    # 引擎写的随机位置不在这一轮清理范围内。上面那两句清的是**结算写的**覆盖
+    # （「你过来」办完事就该回作息表），而随机移动的覆盖有自己的到期规则：
+    # 下面 _clear_expired_random_places 按「离开配置的时段」判。
+    #
+    # 一起清掉的后果是人会瞬移回常驻地：韩曼宁常驻「家」、没有作息表，被随机
+    # 挪到菜市场之后玩家一推时段，覆盖没了 → 落回「家」。而 npc_random_places
+    # 那张标记表这一步不动，于是两边对不上，下一次调度的对账循环发现现值和
+    # 标记不一致，默默把标记也删了——两处都不报错，人就这么回了家
+    random_places = dict(getattr(sess, "npc_random_places", None) or {})
+    retained.update({
+        key: place for key, place in (sess.npc_places or {}).items()
+        if key in random_places and norm_name(random_places[key]) == norm_name(place)
+        and key not in followers
+    })
+    # 一格子都没排过作息表的人，上面那两句同样不该清。清空的目的是「时段一变
+    # 作息表重新说了算」，可她没有作息表——落回去的是常驻地那个常数，不是任何
+    # 排期。实际后果是剧情刚把她挪去的地方被时钟抹掉，然后瞬移回常驻地：
+    # 韩曼宁常驻「家」、作息表是空的，剧情写了她出门去健身房，玩家一按结束
+    # 时段她就出现在同样在家的玩家面前。同上面 random_places 那条：清空为的是
+    # 保住作者的排期手段，没有排期可保的时候它就只剩副作用。
+    #
+    # 判据是「**一格都没排**」，不是「这一格没排」。后者看着更贴切，实则会把
+    # 那张表废掉：排了别的格子的人一旦留下这条覆盖，覆盖在取值链里排在作息表
+    # 前面，他从此再也回不到自己排的那几格去（推时段那条测试逮住的就是这个）
+    by_id = {str(npc.id): npc for npc in (npcs or [])}
+    retained.update({
+        key: place for key, place in (sess.npc_places or {}).items()
+        if key not in followers and not _has_schedule(by_id.get(str(key)))
     })
     sess.npc_places = retained
 
@@ -1691,7 +1846,11 @@ def apply_state_delta(
 
     # 幅度上限只夹这一路。这个函数是模型提议的入口，引擎那条路
     # （rpg_turn._use_item / _run_action）直接调 apply_stats / apply_relations
-    stats_delta, stats_caps = cap_delta(def_map(module.stat_defs), delta.get("stats"))
+    # 等级先单独夹一道再进 cap_delta：那一道是对称的，借它来限「一轮最多升
+    # 1 级」会把「修为被废，8 掉到 0」也锁成 -1
+    ranked, rank_caps = cap_rank_gain(module, delta.get("stats"))
+    warnings.extend(rank_caps)
+    stats_delta, stats_caps = cap_delta(def_map(module.stat_defs), ranked)
     warnings.extend(stats_caps)
 
     steps = [

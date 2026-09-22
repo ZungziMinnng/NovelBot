@@ -26,7 +26,8 @@ const TABS: { key: Tab; label: string; icon: typeof User }[] = [
  * 遮罩和固定宽度：外面多宽它就多宽，320px 也得站得住。
  */
 export default function NpcDetail({
-  npc, relationDefs, state, notes, appearance, activity, history, milestones, here, place, following,
+  npc, relationDefs, state, notes, appearance, activity, history, activityLog,
+  milestones, here, place, following,
   summary, onSaveSummary,
   onUnfollow, onBack, onDeleteNote, onDeleteAppearance, onDeleteActivity, onSaved,
 }: {
@@ -43,6 +44,10 @@ export default function NpcDetail({
   activity: string
   /** 她这一局的经历，按发生顺序攒下来的。空数组 = 这一局还没发生过什么 */
   history: RpgNpcHistoryEntry[]
+  /** 上面那句 activity 按时段留的底，最多 12 条。画在经历下面、**分开标题**：
+   *  经历是玩出来的（每条都在正文里有原话），这一列是调度编的背景活动。
+   *  玩家按一串「结束时段」时经历理所当然是空的，能看的只有这一列 */
+  activityLog: RpgNpcHistoryEntry[]
   /** 整局的关系里程碑，**没按人筛过**：一条里程碑连着两个人，
    *  筛哪一头是这儿的事（见下面 myMilestones） */
   milestones: RpgMilestone[]
@@ -130,6 +135,7 @@ export default function NpcDetail({
       : relationDefs
   // 新的排在上面：这一列多半只看得见头几行，而玩家想知道的是「她最近怎么了」
   const historyRows = [...(history || [])].reverse()
+  const activityRows = [...(activityLog || [])].reverse()
   // 结算时两侧的名字已经归一成名册上的写法了，所以这里能按名字直接挑
   const myMilestones = (milestones || []).filter(m => m.a === npc.name || m.b === npc.name)
 
@@ -272,8 +278,31 @@ export default function NpcDetail({
             <Empty>
               {myMilestones.length > 0
                 ? '除此之外还没记下她别的经历。'
-                : '这一局还没记下她的事。接着玩，结算时会把她经历过的写在这儿。'}
+                : activityRows.length > 0
+                  // 这一格最容易让人以为是 bug：玩家按了一串「结束时段」，下面
+                  // 那条流水一直在长、这儿却空着。说清两列各归谁写
+                  ? '这一局还没和她一起经历什么。只有你在场的那些回合才会写在这儿。'
+                  : '这一局还没记下她的事。接着玩，结算时会把她经历过的写在这儿。'}
             </Empty>
+          )}
+
+          {activityRows.length > 0 && (
+            // 单独一块、标题写明是推算的：混进上面那条时间线会让「玩出来的事」
+            // 和「模型替她编的背景」看着一样真，而只有上面那些过了正文取证
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">你不在的时候</p>
+              <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+                AI 调度按她的人设推的，没有正文依据，也不会喂给模型
+              </p>
+              {activityRows.map((row, i) => (
+                <div key={i} className="border-l-2 border-dashed border-border/60 pl-3">
+                  <p className="text-[11px] text-muted-foreground">
+                    第 {row.day} 天{row.slot ? ` · ${row.slot}` : ''}
+                  </p>
+                  <p className="text-sm leading-relaxed text-muted-foreground">{row.content}</p>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       ) : draft ? (

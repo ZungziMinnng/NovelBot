@@ -1,5 +1,6 @@
 import { Activity, CalendarClock, Flag, MapPin, Zap } from 'lucide-react'
 import type { RpgModule, RpgSession } from '@/api/client'
+import { bandOf } from './StatBar'
 import { styleLabel } from './stylePresets'
 import { PANEL } from './rpgUi'
 
@@ -86,12 +87,18 @@ export default function GameHud({
     const ratio = max !== null && max !== undefined && max > (def.min ?? 0)
       ? Math.max(0, Math.min(1, (value - (def.min ?? 0)) / (max - (def.min ?? 0))))
       : null
+    // 填了档表就以档名为准：等级项在这儿显示「境界 3/9」而别处都显示「元婴期」，
+    // 四个数值显示端里只有 HUD 没接这个，和 StatePanel 一样数字和档名都留
+    const label = bandOf(def, value)?.label
     return (
       // 横条上几条并排、各有个上限免得撑开；竖排一列里就该占满整列宽
       <div key={name} className={column ? 'w-full' : 'min-w-[120px] flex-1 max-w-[190px]'}>
         <div className="flex items-center justify-between gap-2 text-[11px]">
           <span className="truncate text-muted-foreground">{name}</span>
-          <span className="tabular-nums font-medium">{value}{ratio !== null ? `/${max}` : ''}</span>
+          <span className="flex items-center gap-1 shrink-0">
+            {label && <span className="text-primary">{label}</span>}
+            <span className="tabular-nums font-medium">{value}{ratio !== null ? `/${max}` : ''}</span>
+          </span>
         </div>
         {ratio !== null && (
           <div className="mt-1 h-1.5 rounded-full bg-muted overflow-hidden">

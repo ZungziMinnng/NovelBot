@@ -23,7 +23,12 @@ const turns = loadSource('src/store/rpgTurnStore.ts')
 const SkillTab = loadSource('src/pages/Rpg/sidebar/SkillTab.tsx', {
   '../condition': condition, '../rpgUi': { PANEL: '' }, './Empty': { default: () => null },
 }).default
-const SettlementReport = loadSource('src/pages/Rpg/SettlementReport.tsx').default
+// rpgUi 整块在 node 里跑不起来（它 import '@/api/client' 和 react-hot-toast）。
+// 只有 WaitBar 用得上，替一个同形状的桩进去，同 SkillTab 那行 PANEL
+const rpgUi = { WaitBar: () => null }
+const SettlementReport = loadSource('src/pages/Rpg/SettlementReport.tsx', {
+  './rpgUi': rpgUi,
+}).default
 const TweakPanel = loadSource('src/pages/Rpg/TweakPanel.tsx', {
   '@/api/client': { rpgApi: {} }, './condition': condition,
 }).default

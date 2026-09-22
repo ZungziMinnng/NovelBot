@@ -38,9 +38,9 @@ import BatchGenerate from './BatchGenerate'
 import ConditionEditor from './ConditionEditor'
 import { norm, npcPlace } from './condition'
 import { GENRE_PRESETS, type GenrePreset } from './genrePresets'
-import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS } from './modelSettings'
+import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, isEmbeddingField } from './modelSettings'
 import {
-  ACCENT, AddRow, Assist, CommaInput, DeleteButton, Field, INPUT, PANEL, Section,
+  ACCENT, AddRow, Assist, CommaInput, DeleteButton, Field, INPUT, NumInput, PANEL, Section,
 } from './rpgUi'
 import {
   PLAY_STYLES, STYLE_BLOCKS, STYLE_EXAMPLES, blockTitle, styleLabel, type BlockName,
@@ -364,6 +364,9 @@ export default function RpgModule() {
     npcs: (
       <NpcSection
         moduleId={moduleId}
+        statDefs={form.stat_defs || []}
+        rankStat={form.rank_stat || ''}
+        checkOff={form.check_mode === 'never'}
         relationDefs={form.relation_stat_defs || []}
         slotNames={form.time_slots || []}
         assistContext={assistContext}
@@ -1305,6 +1308,18 @@ function DifficultySettings({
 }) {
   const table = form.rate_table
   const off = form.check_mode === 'never'
+  const defs = (form.stat_defs || []).filter(d => (d.name || '').trim())
+  const rank = (form.rank_stat || '').trim()
+  // 指向已删或改名的数值项。后端到这儿是安静降级成「无对抗」的，玩家看不出
+  // 任何异常——只有这行红字能告诉作者他的等级制其实根本没生效
+  const dangling = rank !== '' && !defs.some(d => d.name === rank)
+  const perLevel = Number(form.rank_per_level) || 0
+  // 阶梯预览按「普通」档算：base + 等级差 × 每级百分点 + 整体偏移，两头夹 5/95。
+  // 不给预览作者不可能发现 15/级在普通档的可用量程只有 −3…+2，九阶天梯撞平了
+  const ladder = [0, -1, -2, -3].map(diff => ({
+    diff,
+    rate: Math.max(5, Math.min(95, table.medium + diff * perLevel + form.difficulty_bias)),
+  }))
 
   return (
     <div className="space-y-5">
@@ -1357,10 +1372,11 @@ function DifficultySettings({
 
           <div className="w-40">
             <label className="text-xs font-medium mb-1.5 block">整体难度偏移</label>
-            <input
-              type="number" min={-30} max={30}
+            {/* 「-10 更硬核」写在下面那行提示里，负号必须打得进去 */}
+            <NumInput
               value={form.difficulty_bias}
-              onChange={e => set('difficulty_bias', Math.max(-30, Math.min(30, Number(e.target.value) || 0)))}
+              onChange={n => set('difficulty_bias', n ?? 0)}
+              clamp={n => Math.max(-30, Math.min(30, n))}
               className={INPUT}
             />
             <p className="text-xs text-muted-foreground mt-1.5">
@@ -1382,6 +1398,93 @@ function DifficultySettings({
               </p>
             </div>
           </label>
+
+          <div className="pt-1 border-t">
+            <label className="text-xs font-medium mb-1.5 block">跟人对上的时候比什么</label>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => set('rank_stat', '')}
+                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                  rank === ''
+                    ? 'bg-primary/15 text-primary border-primary/40'
+                    : 'hover:bg-muted text-muted-foreground'
+                }`}
+              >
+                数值制
+              </button>
+              <button
+                // 切过去得先落一个具体项，否则「等级制」这个选中态存不住
+                onClick={() => set('rank_stat', rank || defs[0]?.name || '')}
+                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                  rank !== ''
+                    ? 'bg-primary/15 text-primary border-primary/40'
+                    : 'hover:bg-muted text-muted-foreground'
+                }`}
+                disabled={defs.length === 0}
+              >
+                等级制
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1.5">
+              {rank === ''
+                ? '比 AI 挑中的那一项：玩家用剑术砍人就比双方的剑术，每点 4%。对手卡上没填那一项就照旧对基准 10 算。'
+                : '不管这一轮做的是什么，跟人正面对上时一律比下面这一项。适合修仙、军阶这种「境界压一切」的设定。'}
+            </p>
+            {defs.length === 0 && (
+              <p className="text-xs text-muted-foreground mt-1">先在「数值」里加一项，才能选等级制。</p>
+            )}
+
+            {rank !== '' && (
+              <div className="mt-3 space-y-3">
+                <div className="flex gap-3">
+                  <div className="flex-1 min-w-0">
+                    <label className="text-xs font-medium mb-1.5 block">等级项</label>
+                    <select
+                      value={dangling ? '' : rank}
+                      onChange={e => set('rank_stat', e.target.value)}
+                      className={INPUT}
+                    >
+                      {dangling && <option value="">{rank}（已不存在）</option>}
+                      {defs.map(d => (
+                        <option key={d.name} value={d.name}>{d.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="w-32">
+                    <label className="text-xs font-medium mb-1.5 block">每级百分点</label>
+                    <input
+                      type="number" min={1} max={50}
+                      value={form.rank_per_level}
+                      onChange={e => set('rank_per_level', Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+                      className={INPUT}
+                    />
+                  </div>
+                </div>
+
+                {dangling ? (
+                  <p className="text-xs text-rose-600 dark:text-rose-400">
+                    「{rank}」在「数值」里已经找不到了，对抗不会生效（判定照常跑，只是等级差被当成 0）。重选一项。
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    普通档下的手感：
+                    {ladder.map(({ diff, rate }) => (
+                      <span key={diff}>
+                        {diff === 0 ? '同级' : `低 ${-diff} 级`} {rate}%
+                        {diff === -3 ? '' : ' / '}
+                      </span>
+                    ))}
+                    。险胜档恒定再多 20 个百分点，所以撞到 5% 底板也还有约四分之一能把事情推下去。
+                    撞到两头就再拉不开差距了——量程不够就把每级百分点调小。
+                  </p>
+                )}
+
+                <p className="text-xs text-muted-foreground">
+                  对手的数值填在角色卡的「能力数值」里，不填的人照旧按基准算。升级一轮最多 1 级。
+                </p>
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
@@ -1468,6 +1571,16 @@ function GenerationParams({
       {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
     </optgroup>
   ))
+  // 向量检索那一格要的是模型库里标了 embedding 的那拨，和上面这份互斥
+  const embeddingGroups = groupModelsByProvider(models, 'embedding')
+  // 一个嵌入模型都没注册时下拉是空的，那和「这功能坏了」长得一模一样，说清楚
+  const embeddingOptions = embeddingGroups.length > 0
+    ? embeddingGroups.map(g => (
+      <optgroup key={g.provider} label={g.provider}>
+        {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
+      </optgroup>
+    ))
+    : <option disabled>模型库里还没有嵌入模型，先去「设置 → 模型库」添加</option>
   // 负温度 = 整个参数不发给供应商，llm_client 里 `if temperature >= 0` 已有这个约定
   const tempOff = form.temperature < 0
 
@@ -1490,7 +1603,7 @@ function GenerationParams({
         ))}
       </div>
       <details className="border rounded-lg bg-background/40">
-        <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer">默认与立绘模型</summary>
+        <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer">默认 / 立绘 / 向量模型</summary>
         <div className="px-3 pb-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
           {EXTRA_MODEL_FIELDS.map(({ key, label, empty, hint }) => (
             <div key={key}>
@@ -1501,7 +1614,7 @@ function GenerationParams({
                 className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
               >
                 <option value="">{empty}</option>
-                {options}
+                {isEmbeddingField(key) ? embeddingOptions : options}
               </select>
               <p className="text-xs text-muted-foreground mt-1.5">{hint}</p>
             </div>
@@ -1568,6 +1681,23 @@ function GenerationParams({
           <p className="text-xs text-muted-foreground mt-1.5">tokens，安全网。</p>
         </div>
       </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium mb-1 block">设定总闸</label>
+          <input
+            type="number" min={2000} max={200000} step={500}
+            value={form.context_budget}
+            onChange={e => set('context_budget', Math.max(1, Number(e.target.value) || 21500))}
+            className={INPUT}
+          />
+          {/* 这个数只管 system 那一大段（世界观、角色卡、回忆……），不含对话
+              历史，所以它和模型的上下文窗口不是一回事，别照着窗口填满 */}
+          <p className="text-xs text-muted-foreground mt-1.5">
+            tokens。世界观、角色、回忆这些块按比例分这个数，21500 是原来的额度。
+          </p>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1575,16 +1705,64 @@ function GenerationParams({
 // ── 世界书 ────────────────────────────────────────────────────────────────
 
 interface EntryForm {
+  title: string
   keywords: string
   content: string
   constant: boolean
   depth: number
+  once: boolean
   trigger_condition: RpgCondition
 }
 
 const EMPTY_ENTRY: EntryForm = {
-  keywords: '', content: '', constant: false, depth: 0, trigger_condition: {},
+  title: '', keywords: '', content: '', constant: false, depth: 0, once: false,
+  trigger_condition: {},
 }
+
+/** 一条词条实际在干的三件事之一。
+ *
+ *  **纯前端的填表模式，不落库**：三种都是 (constant, keywords, trigger_condition)
+ *  的组合，加一个 kind 列就等于把同一件事记两遍，两边还会对不上。它只决定
+ *  「新建时先问什么、空栏折不折起来」。
+ */
+type EntryKind = 'lore' | 'rule' | 'event'
+
+const ENTRY_KINDS: { kind: EntryKind; label: string; desc: string; preset: Partial<EntryForm> }[] = [
+  {
+    kind: 'lore',
+    label: '补充设定',
+    desc: '提到某个词，才把这段递给 AI。不提到就不占 token。',
+    preset: { constant: false },
+  },
+  {
+    kind: 'rule',
+    label: '一直生效的规则',
+    desc: '每轮都递，不看关键词。代价是一直占 token。',
+    preset: { constant: true },
+  },
+  {
+    kind: 'event',
+    label: '条件到了才发生的事',
+    desc: '好感≥50 → 她开始主动找你。条件不满足时一个字都不发。',
+    preset: { constant: true },
+  },
+]
+
+/** 一条已有的词条算哪一类。**只用来决定空栏折不折起来**，不改任何数据。
+ *
+ *  有条件的一律算事件，哪怕它同时带着关键词——那种词条（提到地窖「且」第 3 天
+ *  之后）两头的性质都有，按事件展开能让作者看见条件那一栏。 */
+function entryKindOf(entry: { constant: boolean; trigger_condition?: RpgCondition }): EntryKind {
+  if (Object.keys(entry.trigger_condition || {}).length > 0) return 'event'
+  return entry.constant ? 'rule' : 'lore'
+}
+
+/** 插入深度的人话版。作者真正用得上的只有这三档，其余留给下面那个数字框 */
+const DEPTH_CHOICES: { value: number; label: string }[] = [
+  { value: 0, label: '放在开场设定里' },
+  { value: 1, label: '贴在我这句话前面' },
+  { value: 2, label: '再往前一条' },
+]
 
 /** 常用 GM 指令：把当下输入框里那段存起来，换个模组也能取用。
  *  照酒馆 TavernCard 的 InstructionPresets。存的是文本副本，之后各模组独立不联动。 */
@@ -1788,19 +1966,40 @@ function WorldBookSection({
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<EntryForm>(EMPTY_ENTRY)
+  // 新建时先选这个，选完才出表单；编辑已有的直接按它的形状推
+  const [kind, setKind] = useState<EntryKind>('lore')
+  const [picking, setPicking] = useState(false)
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-world-book', moduleId] })
-  const reset = () => { setForm(EMPTY_ENTRY); setEditingId(null); setShowForm(false) }
+  const reset = () => {
+    setForm(EMPTY_ENTRY); setEditingId(null); setShowForm(false); setPicking(false)
+  }
 
   const startEdit = (entry: RpgWorldEntry) => {
     // 换一条之前先把上一条欠着的那一次存掉。它自带 id，所以哪怕请求是在
     // 表单已经换人之后才发出去的，也不会写到新那一条身上
     void autosave.flush()
     setEditingId(entry.id)
+    setKind(entryKindOf(entry))
     setForm({
+      title: entry.title || '',
       keywords: entry.keywords, content: entry.content, constant: entry.constant,
-      depth: entry.depth, trigger_condition: entry.trigger_condition || {},
+      depth: entry.depth, once: !!entry.once,
+      trigger_condition: entry.trigger_condition || {},
     })
+    setPicking(false)
+    setShowForm(true)
+  }
+
+  /** 选完「这条是干什么的」，按预设开一张空表 */
+  const startAdd = (picked: EntryKind) => {
+    setKind(picked)
+    setForm({
+      ...EMPTY_ENTRY,
+      ...(ENTRY_KINDS.find(k => k.kind === picked)?.preset || {}),
+    })
+    setEditingId(null)
+    setPicking(false)
     setShowForm(true)
   }
 
@@ -1852,65 +2051,120 @@ function WorldBookSection({
     }
   }
 
-  const renderForm = () => (
+  const renderForm = () => {
+    // 哪些栏要露出来。**任何已经有值的栏一律显示**——推断出的类型只决定空栏
+    // 折不折起来。一条「关键词 + 条件」的词条会被推断成事件，藏掉关键词栏的话
+    // 这一栏是自动保存的，作者改一下别的就把关键词悄悄清了（同 PlaceSelect 那个坑）
+    const showKeywords = kind === 'lore' || !!form.keywords.trim()
+    const showCondition = kind === 'event' || Object.keys(form.trigger_condition).length > 0
+    const showConstant = kind !== 'event' || form.constant !== true
+    const kindLabel = ENTRY_KINDS.find(k => k.kind === kind)?.label || ''
+
+    return (
         <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">{editingId ? '编辑词条' : '新增词条'}</span>
+            <span className="text-sm font-medium">
+              {editingId ? '编辑词条' : `新增 · ${kindLabel}`}
+            </span>
             <button onClick={close} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
           </div>
           <input
-            value={form.keywords}
-            onChange={e => setForm({ ...form, keywords: e.target.value })}
-            disabled={form.constant}
-            placeholder={form.constant ? '常驻词条不看关键词' : '关键词（逗号或顿号分隔，如：地窖，锈锁）'}
-            className={`${INPUT} disabled:opacity-50`}
+            value={form.title}
+            onChange={e => setForm({ ...form, title: e.target.value })}
+            placeholder="名字（只给你自己看，比如：她开始主动找你）"
+            className={INPUT}
           />
+          {showKeywords && (
+            <input
+              value={form.keywords}
+              onChange={e => setForm({ ...form, keywords: e.target.value })}
+              disabled={form.constant}
+              placeholder={form.constant ? '常驻词条不看关键词' : '关键词（逗号或顿号分隔，如：地窖，锈锁）'}
+              className={`${INPUT} disabled:opacity-50`}
+            />
+          )}
           <textarea
             value={form.content}
             onChange={e => setForm({ ...form, content: e.target.value })}
-            placeholder="要注入的设定内容"
+            placeholder={kind === 'event' ? '条件到了之后，要让 AI 知道发生了什么' : '要注入的设定内容'}
             className={`${INPUT} resize-y min-h-[6rem]`}
           />
-          <label className="flex items-start gap-2.5 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={form.constant}
-              onChange={e => setForm({ ...form, constant: e.target.checked })}
-              className="mt-0.5 accent-[hsl(var(--primary))]"
-            />
+          {showConstant && (
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.constant}
+                onChange={e => setForm({ ...form, constant: e.target.checked })}
+                className="mt-0.5 accent-[hsl(var(--primary))]"
+              />
+              <div>
+                <span className="text-sm">常驻</span>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  不看关键词，每轮都注入。代价是一直占 token。
+                </p>
+              </div>
+            </label>
+          )}
+          {showCondition && (
             <div>
-              <span className="text-sm">常驻</span>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                不看关键词，每轮都注入。代价是一直占 token。
+              <label className="text-xs font-medium mb-1.5 block">生效条件</label>
+              <ConditionEditor
+                value={form.trigger_condition}
+                onChange={v => setForm({ ...form, trigger_condition: v })}
+                statDefs={statDefs}
+                relationDefs={relationDefs}
+                npcs={npcs}
+                slotNames={slotNames}
+              />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                条件只是附加约束：关键词词条要「命中关键词并且满足条件」；常驻词条则是满足条件后每轮都注入。
               </p>
             </div>
-          </label>
-          <div>
-            <label className="text-xs font-medium mb-1 block">插入深度</label>
-            <input
-              type="number" min={0} max={20}
-              value={form.depth}
-              onChange={e => setForm({ ...form, depth: Math.max(0, Number(e.target.value) || 0) })}
-              className={`${INPUT} w-24`}
-            />
+          )}
+          {showCondition && (
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.once}
+                onChange={e => setForm({ ...form, once: e.target.checked })}
+                className="mt-0.5 accent-[hsl(var(--primary))]"
+              />
+              <div>
+                <span className="text-sm">只触发一次</span>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  「她终于肯叫你名字了」这种只该发生一次的勾上。不勾的话条件一直满足，
+                  这段话就每轮都递过去，AI 会让她每轮重演一次「终于」。
+                  想让它重来只能读档回到那之前。
+                </p>
+              </div>
+            </label>
+          )}
+          <Fold title="高级">
+            <label className="text-xs font-medium mb-1 block">这段话贴在哪儿</label>
+            {DEPTH_CHOICES.some(c => c.value === form.depth) ? (
+              <select
+                value={form.depth}
+                onChange={e => setForm({ ...form, depth: Number(e.target.value) })}
+                className={`${INPUT} w-56`}
+              >
+                {DEPTH_CHOICES.map(c => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+            ) : (
+              // 老词条填过 3 以上的值。**不能塞进上面那个 select**：value 对不上
+              // 任何 option 会渲染成空白行，作者随手一改就把原值覆盖没了
+              <input
+                type="number" min={0} max={20}
+                value={form.depth}
+                onChange={e => setForm({ ...form, depth: Math.max(0, Number(e.target.value) || 0) })}
+                className={`${INPUT} w-24`}
+              />
+            )}
             <p className="text-xs text-muted-foreground mt-1.5">
-              0 = 放在系统提示词里。填 1 会贴在玩家这一条发言前面，2 是再往前一条。离当前对话越近模型越不会忽略。
+              离当前对话越近，模型越不会忽略它。拿不准就放开场设定里。
             </p>
-          </div>
-          <div>
-            <label className="text-xs font-medium mb-1.5 block">生效条件</label>
-            <ConditionEditor
-              value={form.trigger_condition}
-              onChange={v => setForm({ ...form, trigger_condition: v })}
-              statDefs={statDefs}
-              relationDefs={relationDefs}
-              npcs={npcs}
-              slotNames={slotNames}
-            />
-            <p className="text-xs text-muted-foreground mt-1.5">
-              条件只是附加约束：关键词词条要「命中关键词并且满足条件」；常驻词条则是满足条件后每轮都注入。
-            </p>
-          </div>
+          </Fold>
           <div className="flex items-center gap-2 justify-end">
             {/* 新的这条还没有 id，没得存，所以不挂状态条——「取消 / 添加」已经
                 把话说清楚了 */}
@@ -1937,7 +2191,77 @@ function WorldBookSection({
             )}
           </div>
         </div>
-  )
+    )
+  }
+
+  const renderEntry = (entry: RpgWorldEntry) => {
+    // 既不常驻又没关键词 = 谁都唤不醒它。原先只淡淡写一句「（没有关键词）」，
+    // 看不出这条是死的
+    const dead = !entry.constant && !entry.keywords.trim()
+    return (
+      <div key={entry.id} className="space-y-2">
+      <div className={`border rounded-lg px-3 py-2 ${entry.enabled ? '' : 'opacity-60'}`}>
+        <div className="flex items-start gap-3">
+          <div className="flex-1 min-w-0">
+            {/* 有名字就让名字打头，剩下那些徽章退到第二行。没名字的老词条
+                第一行还是徽章，和以前一模一样 */}
+            {entry.title && <p className="text-sm font-medium truncate">{entry.title}</p>}
+            <div className={`flex flex-wrap items-center gap-1.5 ${entry.title ? 'mt-1' : ''}`}>
+              {entry.constant && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15
+                  text-amber-700 dark:text-amber-300 flex items-center gap-1">
+                  <Pin className="w-2.5 h-2.5" /> 常驻
+                </span>
+              )}
+              {Object.keys(entry.trigger_condition || {}).length > 0 && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                  有条件
+                </span>
+              )}
+              {entry.once && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                  一次性
+                </span>
+              )}
+              {entry.keywords
+                // 分隔符必须与后端保持一致，否则这里显示成两个词、实际却当成一个来匹配
+                ? entry.keywords.split(/[,，、;；\n]+/).filter(Boolean).map((kw, i) => (
+                    <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                      {kw}
+                    </span>
+                  ))
+                : dead && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-destructive/10 text-destructive">
+                      这条永远不会触发
+                    </span>
+                  )}
+              {entry.depth > 0 && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                  深度 {entry.depth}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1.5 whitespace-pre-wrap line-clamp-3">{entry.content}</p>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={() => toggle(entry)} className="text-xs px-2 py-1 rounded border hover:bg-muted">
+              {entry.enabled ? '停用' : '启用'}
+            </button>
+            <button onClick={() => startEdit(entry)} className="text-xs px-2 py-1 rounded border hover:bg-muted">
+              编辑
+            </button>
+            <DeleteButton onClick={() => remove(entry)} />
+          </div>
+        </div>
+      </div>
+      {showForm && editingId === entry.id && renderForm()}
+      </div>
+    )
+  }
+
+  const events = entries.filter(e => entryKindOf(e) === 'event')
+  const lore = entries.filter(e => entryKindOf(e) !== 'event')
+  const split = lore.length > 0 && events.length > 0
 
   return (
     <Section
@@ -1963,57 +2287,35 @@ function WorldBookSection({
       </div>
 
       <div className="space-y-2">
-        {entries.map(entry => (
-          <div key={entry.id} className="space-y-2">
-          <div className={`border rounded-lg px-3 py-2 ${entry.enabled ? '' : 'opacity-60'}`}>
-            <div className="flex items-start gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {entry.constant && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15
-                      text-amber-700 dark:text-amber-300 flex items-center gap-1">
-                      <Pin className="w-2.5 h-2.5" /> 常驻
-                    </span>
-                  )}
-                  {Object.keys(entry.trigger_condition || {}).length > 0 && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                      有条件
-                    </span>
-                  )}
-                  {entry.keywords
-                    // 分隔符必须与后端保持一致，否则这里显示成两个词、实际却当成一个来匹配
-                    ? entry.keywords.split(/[,，、;；\n]+/).filter(Boolean).map((kw, i) => (
-                        <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                          {kw}
-                        </span>
-                      ))
-                    : !entry.constant && <span className="text-xs text-muted-foreground">（没有关键词）</span>}
-                  {entry.depth > 0 && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                      深度 {entry.depth}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-muted-foreground mt-1.5 whitespace-pre-wrap line-clamp-3">{entry.content}</p>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button onClick={() => toggle(entry)} className="text-xs px-2 py-1 rounded border hover:bg-muted">
-                  {entry.enabled ? '停用' : '启用'}
-                </button>
-                <button onClick={() => startEdit(entry)} className="text-xs px-2 py-1 rounded border hover:bg-muted">
-                  编辑
-                </button>
-                <DeleteButton onClick={() => remove(entry)} />
-              </div>
-            </div>
-          </div>
-          {showForm && editingId === entry.id && renderForm()}
-          </div>
-        ))}
+        {/* 只有两类都非空才分段。词条少的模组照旧是一条大列表，界面不变 */}
+        {split && <p className="text-xs font-medium text-muted-foreground px-1">设定词条</p>}
+        {lore.map(renderEntry)}
+        {split && <p className="text-xs font-medium text-muted-foreground px-1 pt-2">触发事件</p>}
+        {events.map(renderEntry)}
 
         {showForm && editingId === null && renderForm()}
-        {!showForm && (
-          <AddRow onClick={() => setShowForm(true)}>添加词条</AddRow>
+        {picking && (
+          <div className="border rounded-lg p-3 bg-muted/30 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">这条是干什么的？</span>
+              <button onClick={() => setPicking(false)} className="p-1 rounded hover:bg-muted">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {ENTRY_KINDS.map(k => (
+              <button
+                key={k.kind}
+                onClick={() => startAdd(k.kind)}
+                className="w-full text-left border rounded-lg px-3 py-2 hover:bg-muted"
+              >
+                <span className="text-sm">{k.label}</span>
+                <p className="text-xs text-muted-foreground mt-0.5">{k.desc}</p>
+              </button>
+            ))}
+          </div>
+        )}
+        {!showForm && !picking && (
+          <AddRow onClick={() => setPicking(true)}>添加词条</AddRow>
         )}
       </div>
     </Section>
@@ -2032,6 +2334,7 @@ interface NpcForm {
   location: string
   slot_locations: Record<string, string>
   random_movement_slots: string[]
+  random_movement_places: string[]
   keywords: string
   ai_scheduled: boolean
   random_movement: boolean
@@ -2040,6 +2343,8 @@ interface NpcForm {
   initial_state: Record<string, number | boolean>
   relation_enabled: boolean
   relation_stat_names: string[]
+  /** 稀疏：只给要正面对上的人填，键是玩家那张表里的项名 */
+  ability_stats: Record<string, number>
 }
 
 const EMPTY_NPC: NpcForm = {
@@ -2047,8 +2352,10 @@ const EMPTY_NPC: NpcForm = {
   location: '', slot_locations: {}, keywords: '', ai_scheduled: false,
   random_movement: false,
   random_movement_slots: [],
+  random_movement_places: [],
   profile_sections: {}, dialogue_examples: [], initial_state: {},
   relation_enabled: false, relation_stat_names: [],
+  ability_stats: {},
 }
 
 // 后端拿 key 当标签直接拼进提示词，所以这里存的就是中文。
@@ -2085,9 +2392,15 @@ function PlaceSelect({ value, onChange, names, empty }: {
 }
 
 function NpcSection({
-  moduleId, relationDefs, slotNames, assistContext, genre, imageConfig,
+  moduleId, statDefs, rankStat, checkOff, relationDefs, slotNames, assistContext, genre, imageConfig,
 }: {
   moduleId: number
+  /** 玩家那张表的数值项。这儿只为了「能力数值」那一栏：填的就是同名的项 */
+  statDefs: RpgStatDef[]
+  /** 模组的等级项。非空 = 等级制，对上人的时候一律比这一项 */
+  rankStat: string
+  /** 模组整个关了判定。那就没有对抗，这一栏填了也不会被用到，说明里要讲清 */
+  checkOff: boolean
   relationDefs: RpgStatDef[]
   /** 模组的时段表。空 = 这个模组没有时钟，作息表那一栏整个不出现 */
   slotNames: string[]
@@ -2133,6 +2446,7 @@ function NpcSection({
       persona: npc.persona, appearance: npc.appearance,
       location: npc.location, slot_locations: npc.slot_locations || {},
       random_movement_slots: npc.random_movement_slots || [],
+      random_movement_places: npc.random_movement_places || [],
       keywords: npc.keywords,
       ai_scheduled: npc.ai_scheduled,
       random_movement: npc.random_movement ?? false,
@@ -2141,6 +2455,7 @@ function NpcSection({
       initial_state: npc.initial_state || {},
       relation_enabled: npc.relation_enabled ?? false,
       relation_stat_names: npc.relation_stat_names || [],
+      ability_stats: npc.ability_stats || {},
     })
     setShowForm(true)
   }
@@ -2221,9 +2536,29 @@ function NpcSection({
     : new Set(relationDefs.map(def => def.name))
   const activeRelationDefs = relationDefs.filter(def => activeRelationNames.has(def.name))
 
+  // 等级制下只有等级项参与对抗，别的项填了也不进公式，那就别摊一屏输入框
+  const abilityDefs = (rankStat
+    ? statDefs.filter(def => def.name === rankStat)
+    : statDefs.filter(def => def.for_check)
+  ).filter(def => (def.name || '').trim())
+
+  /** 清空必须 delete 这个键：稀疏语义下写 0 是把人设成「凡人」，不是没填 */
+  const setAbility = (name: string, raw: string) => setForm(f => {
+    const next = { ...f.ability_stats }
+    if (raw.trim() === '') delete next[name]
+    else next[name] = Number(raw) || 0
+    return { ...f, ability_stats: next }
+  })
+
+  /** 随机移动范围里还对得上的那几个。全部对不上 = 她不会移动（后端 pool 为空） */
+  const allowedRandomPlaces = form.random_movement_places.filter(n => placeNames.includes(n))
+
   const placeHint = !form.ai_scheduled ? ''
     : form.random_movement
-      ? (placeNames.length === 0 ? '随机移动需要至少一个地点，请先去「地点」里添加。' : '')
+      ? (placeNames.length === 0 ? '随机移动需要至少一个地点，请先去「地点」里添加。'
+        : form.random_movement_places.length > 0 && allowedRandomPlaces.length === 0
+          ? '随机移动范围里的地点都不在地点表里了（改名或删掉了），她不会移动。改一下上面那排勾选。'
+          : '')
     : slotNames.length === 0
       ? '这个模组没设时段（右边「时段」那一格是空的），她不会换地方——调度只替她写「在做什么」。'
       : !Object.values(form.slot_locations).some(v => (v || '').trim())
@@ -2376,8 +2711,55 @@ function NpcSection({
                         </p>
                       </div>
                     )}
+                    {/* 随机移动的地点范围。语义和上面那排时段勾选框一致：不勾 = 不限制。
+                        孤儿名字（地点改名/删了）单独显出来，否则作者不知道自己少了一格 */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium block">随机移动范围</label>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {placeNames.map(name => (
+                          <label key={name} className="flex items-center gap-1 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={form.random_movement_places.includes(name)}
+                              onChange={event => setForm(f => ({
+                                ...f,
+                                random_movement_places: event.target.checked
+                                  ? [...f.random_movement_places, name]
+                                  : f.random_movement_places.filter(place => place !== name),
+                              }))}
+                              className="accent-primary"
+                            />
+                            {name}
+                          </label>
+                        ))}
+                        {form.random_movement_places
+                          .filter(name => !placeNames.includes(name))
+                          .map(name => (
+                            <label
+                              key={name}
+                              className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"
+                            >
+                              <input
+                                type="checkbox"
+                                checked
+                                onChange={() => setForm(f => ({
+                                  ...f,
+                                  random_movement_places: f.random_movement_places
+                                    .filter(place => place !== name),
+                                }))}
+                                className="accent-primary"
+                              />
+                              {name}（地点表里没有这个地方）
+                            </label>
+                          ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        只在勾选的地点之间随机移动；不勾选表示可以去任何地点。
+                        只勾一个地点等于把她钉在那儿——她会一直待在那里不动。
+                      </p>
+                    </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      每轮结束时，闲置角色会从模组已有地点中随机选择去处，再由 AI 记录活动。
+                      每轮结束时，闲置角色会从允许的地点中随机选择去处，再由 AI 记录活动。
                       无需填写常驻地点或作息表，也不需要设置时段；在场、被提到或跟随你的角色不会随机移动。
                     </p>
                     </>
@@ -2564,12 +2946,12 @@ function NpcSection({
                 {activeRelationDefs.map(def => (
                   <div key={def.name} className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground shrink-0">{def.name}</span>
-                    <input
-                      type="number"
-                      value={String(form.initial_state[def.name] ?? def.initial)}
-                      onChange={e => setForm({
+                    {/* 关系数值的初始值常是负的（敌对阵营从 -30 起） */}
+                    <NumInput
+                      value={Number(form.initial_state[def.name] ?? def.initial)}
+                      onChange={n => setForm({
                         ...form,
-                        initial_state: { ...form.initial_state, [def.name]: Number(e.target.value) || 0 },
+                        initial_state: { ...form.initial_state, [def.name]: n ?? 0 },
                       })}
                       className={INPUT}
                     />
@@ -2578,6 +2960,67 @@ function NpcSection({
               </div>
               <p className="text-xs text-muted-foreground mt-1.5">
                 不填就用数值表里的起点。这里是给「一见面就恨你」这种角色开小灶的。
+              </p>
+            </Fold>
+          )}
+
+          {/* 门卫只看 role：能力数值填的是玩家那张表里的项，跟关系数值表无关，
+              所以不能照抄上面两块的 relationDefs.length > 0 */}
+          {form.role === 'npc' && abilityDefs.length > 0 && (
+            <Fold title="能力数值（选填）">
+              <div className="grid grid-cols-2 gap-2">
+                {abilityDefs.map(def => {
+                  const filled = form.ability_stats[def.name]
+                  // 没填 at 的行（作者刚点「添加一档」）后端会跳过，这儿也一样
+                  const tiers = (def.tiers || [])
+                    .filter(t => typeof t?.at === 'number')
+                    .map(t => ({ at: t.at as number, label: t.label }))
+                    .sort((a, b) => a.at - b.at)
+                  const isRank = def.name === rankStat
+                  return (
+                    <div key={def.name} className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground shrink-0">{def.name}</span>
+                      {isRank && tiers.length > 0 ? (
+                        <select
+                          value={filled === undefined ? '' : String(filled)}
+                          onChange={e => setAbility(def.name, e.target.value)}
+                          className={INPUT}
+                        >
+                          <option value="">没填</option>
+                          {tiers.map(t => (
+                            <option key={t.at} value={String(t.at)}>
+                              {t.label || t.at}（{t.at}）
+                            </option>
+                          ))}
+                          {/* 档表改过之后落下的旧值：不补一条 option 就渲染成空白行，
+                              作者看着像「没填」，随手一动就把原值盖掉了 */}
+                          {filled !== undefined && !tiers.some(t => t.at === filled) && (
+                            <option value={String(filled)}>{filled}（档表里没有这一档）</option>
+                          )}
+                        </select>
+                      ) : (
+                        <input
+                          type="number"
+                          value={filled === undefined ? '' : String(filled)}
+                          onChange={e => setAbility(def.name, e.target.value)}
+                          placeholder="没填"
+                          className={INPUT}
+                        />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1.5">
+                {checkOff
+                  ? '这个模组关了判定，填了也用不上——想要对抗先去「判定」里打开。'
+                  : rankStat
+                    ? `只有「${rankStat}」参与对抗：玩家跟他正面对上时比这一项，差一级就差一档成功率。别的项填了只是给你自己看。`
+                    : '玩家跟他正面对上、而 AI 挑中的正是这里填过的那一项时，比的就是双方这一项。'}
+                {' '}留空的项按基准算，等于不占优势也不吃亏——0 是「凡人」，和留空不是一回事。
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                这一栏是作者设定的「他有多强」，不随存档走：你把 BOSS 从 5 改成 8，老存档下一轮就变难。
               </p>
             </Fold>
           )}

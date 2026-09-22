@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { Loader2, Lock, X } from 'lucide-react'
 import { rpgApi, type RpgModule, type RpgSession } from '@/api/client'
-import { INPUT, splitList } from './rpgUi'
+import { INPUT, NumInput, splitList } from './rpgUi'
 import { protagonistCard, protagonistDesc } from './protagonist'
 
 /** 开局：角色属于这一局而不是模组，所以每次开局都重填一遍。
@@ -26,8 +26,10 @@ export default function CharacterForm({
     Object.fromEntries(defs.map(d => [d.name, d.initial])),
   )
   const [creating, setCreating] = useState(false)
-  // 时段表建局时改一份自己的，模组之后改了不追溯这一局
-  const [slotText, setSlotText] = useState((module.time_slots || []).join('，'))
+  // 时段表预填模组那一份，玩家想改随时改——但**不动就不发**（见 submit）。
+  // 记下模组原样那一份，用来判断「动没动过」
+  const moduleSlots = module.time_slots || []
+  const [slotText, setSlotText] = useState(moduleSlots.join('，'))
 
   const { data: npcs = [] } = useQuery({
     queryKey: ['rpg-npcs', module.id],
@@ -52,12 +54,17 @@ export default function CharacterForm({
     const charName = name.trim()
     if (!charName || creating) return
     setCreating(true)
+    // 和模组那份一字不差 = 玩家没动过 → 发空数组，这一局跟着模组走；真改过才发
+    // 他改的，从此刻起这一局冻住（两种行为的定义见后端 rpg_state.slot_table）。
+    // 从前这里无条件把预填的那份发回去，于是每一局建出来都当场冻住自己一份，
+    // 「跟模组走」那条路一局都没走到过——作者给模组加一格，已经开着的局纹丝不动
+    const slots = splitList(slotText)
     try {
       onCreated(await rpgApi.sessions.create(module.id, {
         char_name: charName,
         char_desc: desc.trim(),
         stats,
-        time_slots: splitList(slotText),
+        time_slots: slots.join('，') === moduleSlots.join('，') ? [] : slots,
       }))
     } catch {
       toast.error('开局失败')
@@ -129,10 +136,9 @@ export default function CharacterForm({
                 {defs.map(def => (
                   <div key={def.name} className="flex items-center gap-2">
                     <span className="text-sm text-muted-foreground shrink-0">{def.name}</span>
-                    <input
-                      type="number"
+                    <NumInput
                       value={stats[def.name] ?? def.initial}
-                      onChange={e => setStats(prev => ({ ...prev, [def.name]: Number(e.target.value) || 0 }))}
+                      onChange={n => setStats(prev => ({ ...prev, [def.name]: n ?? 0 }))}
                       className={INPUT}
                     />
                   </div>

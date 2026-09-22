@@ -59,8 +59,25 @@ def normalize_band(band) -> str:
     return text if text in BANDS else DEFAULT_BAND
 
 
-def resolve_rate(rate_table, band, stat_value, bias: int = 0) -> int:
-    """档位 + 数值 → 成功率（%）。模组表里缺这一档就用内置默认。"""
+def resolve_rate(
+    rate_table, band, stat_value, bias: int = 0, *,
+    opposed=None, per_point: int = RATE_PER_POINT,
+) -> int:
+    """档位 + 数值 → 成功率（%）。模组表里缺这一档就用内置默认。
+
+    opposed 是这一次要比过的那个数，三种写法对应三件事：
+
+    - ``None``：对 STAT_BASELINE 比，也就是「假想对手 10 级」。没有对抗时的老行为
+    - 对手那一项的数值：真的在跟人比
+    - **玩家自己的值**：差为 0，这一项不产生任何修正
+
+    第三种是给等级项留的。等级尺（1~9）和属性尺（0~20）不是一把尺，等级项
+    落回 STAT_BASELINE=10 会让「没有对手」这种最常见的情形直接撞死在 RATE_MIN
+    上——境界 3 的人 (3-10)*15 = -105，练个功都必败。
+
+    新参数是 keyword-only：bias 是第 4 个位置参数，而调用点就是位置传的，
+    不挡一下迟早有人写出 resolve_rate(t, b, v, 0, 8) 这种把 8 当 bias 的代码。
+    """
     key = normalize_band(band)
     table = rate_table if isinstance(rate_table, dict) else {}
     try:
@@ -68,7 +85,10 @@ def resolve_rate(rate_table, band, stat_value, bias: int = 0) -> int:
     except (TypeError, ValueError):
         base = DEFAULT_RATE_TABLE[key]
     try:
-        base += (int(stat_value) - STAT_BASELINE) * RATE_PER_POINT
+        # 两个数放在同一个 try 里：任一边坏掉就整项不修正。分开写会算出
+        # 「玩家那半边算了、对手那半边没算」的怪数字，比不修正更难查
+        baseline = STAT_BASELINE if opposed is None else int(opposed)
+        base += (int(stat_value) - baseline) * int(per_point)
     except (TypeError, ValueError):
         pass
     try:

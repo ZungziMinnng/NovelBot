@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Backpack, ScrollText, Sparkles, Users, Zap } from 'lucide-react'
 import type {
   RpgItem, RpgModule, RpgNpc, RpgSession, RpgSkill, RpgStatDef,
@@ -7,6 +7,7 @@ import { following, npcPlace, onstage } from './condition'
 import useColumnResize from './useColumnResize'
 import CastTab from './sidebar/CastTab'
 import NpcDetail from './sidebar/NpcDetail'
+import SelfDetail from './sidebar/SelfDetail'
 import BagTab from './sidebar/BagTab'
 import SkillTab from './sidebar/SkillTab'
 import TaskTab from './sidebar/TaskTab'
@@ -80,9 +81,8 @@ interface Props {
 /** 常驻菜单。角色/道具/新发现三格，和日式游戏的菜单一个意思：
  *  始终在屏幕上，不用先想起来「我能看这个」。
  *
- *  第一格是「角色」：你自己的卡（数值挂在上面，这是数值驱动模式的门面）
- *  加上已经登记在册的人。数值没有单独的一格——它跟着「你」这张卡走，
- *  不然玩家要在两格之间来回翻才能看完一件事。
+ *  第一格是「角色」：你自己那一行，加上已经登记在册的人。数值没有单独的一格——
+ *  它跟着「你」走，在你自己那一页里，不然玩家要在两格之间来回翻才能看完一件事。
  *
  *  点开一个人看档案是**在这一列里主从切换**，不另开一列也不弹窗：这一列
  *  最宽 520，剧情区是 max-w-3xl 居中，再分一列出去正文就被挤扁了；而弹窗
@@ -98,6 +98,12 @@ export default function StatusSidebar({
 }: Props) {
   // 不落盘。编辑器那边也没存，玩家每次进来都是默认宽度
   const [width, setWidth] = useState(320)
+  /** 在不在看自己那一页。不提到 RpgPlay 上：它只从这一格的名单点得开，
+   *  不像 NPC 档案还要被地点页调起 */
+  const [openSelf, setOpenSelf] = useState(false)
+  // 地点页点一张脸时自己这一页得让位；不清掉的话从那个人的档案返回会退回自己
+  // 这一页，而玩家按那个箭头是想回名单
+  useEffect(() => { if (openNpc) setOpenSelf(false) }, [openNpc])
   // 侧栏在**左边**，手柄在它的右缘：往右拖才是变宽
   const onResizeDown = useColumnResize(setWidth, 280, 520, 'right')
   const found = sess.discoveries || []
@@ -131,7 +137,7 @@ export default function StatusSidebar({
             key={key}
             // 切走再切回来时档案应该已经收起：留着的话玩家点「角色」是想看名单，
             // 结果还停在上一个人的档案上
-            onClick={() => { onTab(key); onOpenNpc(null) }}
+            onClick={() => { onTab(key); onOpenNpc(null); setOpenSelf(false) }}
             style={tab === key ? { color: `hsl(${accent})`, borderColor: `hsl(${accent})` } : undefined}
             className={`relative flex-1 flex flex-col items-center gap-1 py-2.5 text-[11px] border-b-2 transition-colors
               ${tab === key ? 'bg-foreground/[0.04] font-medium' : 'border-transparent text-muted-foreground hover:bg-muted/50'}`}
@@ -168,6 +174,7 @@ export default function StatusSidebar({
           onDeleteAppearance={onDeleteAppearance}
           activity={activity}
           history={sess.npc_history?.[String(openNpc.id)] || []}
+          activityLog={sess.npc_activity_log?.[String(openNpc.id)] || []}
           milestones={sess.npc_milestones || []}
           here={onstage(openNpc, sess)}
           place={npcPlace(
@@ -182,6 +189,14 @@ export default function StatusSidebar({
           onDeleteActivity={onDeleteActivity}
           onSaved={onSaveNpc}
         />
+      ) : tab === 'cast' && openSelf ? (
+        <SelfDetail
+          sess={sess}
+          module={module}
+          statDefs={statDefs}
+          onBack={() => setOpenSelf(false)}
+          onSaveSummary={text => onSaveSummary(PLAYER_SLOT, text)}
+        />
       ) : (
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
           {tab === 'cast' && (
@@ -189,10 +204,9 @@ export default function StatusSidebar({
               sess={sess}
               module={module}
               npcs={npcs}
-              statDefs={statDefs}
               relDefs={relDefs}
               onOpenNpc={onOpenNpc}
-              onSaveSummary={text => onSaveSummary(PLAYER_SLOT, text)}
+              onOpenSelf={() => setOpenSelf(true)}
             />
           )}
 

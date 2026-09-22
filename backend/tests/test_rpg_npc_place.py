@@ -242,6 +242,94 @@ class SlotResetTests(unittest.TestCase):
         self.assertEqual(advance_slot(module, sess), [])
         self.assertEqual(sess.npc_places, {"3": "校长办公室"})
 
+    def test_a_random_override_is_not_swept_up_with_the_scene_ones(self):
+        """引擎写的随机位置有自己的到期规则，不该跟着结算那批一起被清。
+
+        真实存档里的样子：她常驻「家」、没有作息表，被随机挪到菜市场之后
+        玩家一推时段，覆盖没了 → 落回「家」。玩家看到的是她从菜市场瞬移
+        回家，而两张表都没报错。
+        """
+        module = self._module()
+        npc = _npc(location="家", random_movement=True, ai_scheduled=True)
+        sess = _sess(
+            slot="中", location="物业办公室",
+            npc_places={"3": "菜市场"}, npc_random_places={"3": "菜市场"},
+        )
+        advance_slot(module, sess, [npc])
+        self.assertEqual(sess.npc_places, {"3": "菜市场"})
+        self.assertEqual(sess.npc_random_places, {"3": "菜市场"})
+
+    def test_a_random_override_still_expires_when_the_slot_leaves_the_set(self):
+        # 放行不等于永久豁免：配了时段的人走出那几格照旧回作息表，
+        # 这条由 _clear_expired_random_places 管，别让上面那个放行盖过它
+        module = self._module()
+        npc = _npc(location="家", random_movement=True, ai_scheduled=True,
+                   random_movement_slots=["中"])
+        sess = _sess(
+            slot="中", location="物业办公室",
+            npc_places={"3": "菜市场"}, npc_random_places={"3": "菜市场"},
+        )
+        advance_slot(module, sess, [npc])  # 中 → 晚，不在随机时段里了
+        self.assertEqual(sess.slot, "晚")
+        self.assertEqual(sess.npc_places, {})
+        self.assertEqual(sess.npc_random_places, {})
+
+    def test_a_stale_random_mark_does_not_resurrect_a_place(self):
+        # 标记还在、现值已经被结算改成别处：那不再是随机覆盖，按结算那批处理。
+        # **菜市场不能复活**才是这一条要钉的；现值留下是因为她作息表一格都没排
+        # （见下一条），清掉只会把她扔回常驻地
+        module = self._module()
+        npc = _npc(location="家", random_movement=True, ai_scheduled=True)
+        sess = _sess(
+            slot="中", location="物业办公室",
+            npc_places={"3": "药店"}, npc_random_places={"3": "菜市场"},
+        )
+        advance_slot(module, sess, [npc])
+        self.assertEqual(sess.npc_places, {"3": "药店"})
+
+    def test_a_story_place_survives_when_the_schedule_has_nothing_to_say(self):
+        """作息表对她这一格没安排，清掉覆盖落回的就是常驻地那个常数。
+
+        真实存档里的样子：韩曼宁常驻「家」、作息表是空的，剧情写了她出门去
+        健身房，玩家一按结束时段，覆盖被清 → 落回「家」，而玩家当时也在家，
+        于是她**瞬间出现在他面前**。玩家看到的是她刚说完去健身房就站在跟前，
+        而两张表都没报错。
+        """
+        module = self._module()
+        npc = _npc(location="家", ai_scheduled=True)
+        sess = _sess(
+            slot="早", location="家", npc_places={"3": "健身房"},
+        )
+        advance_slot(module, sess, [npc])
+        self.assertEqual(sess.slot, "中")
+        self.assertEqual(sess.npc_places, {"3": "健身房"})
+
+    def test_a_story_place_is_still_cleared_when_the_schedule_does_say(self):
+        # 另一半不能丢：作者排了班，那一格就该作息表说了算
+        module = self._module()
+        npc = _npc(location="家", slot_locations={"中": "教室"}, ai_scheduled=True)
+        sess = _sess(
+            slot="早", location="物业办公室", npc_places={"3": "健身房"},
+        )
+        advance_slot(module, sess, [npc])
+        self.assertEqual(sess.slot, "中")
+        self.assertEqual(sess.npc_places, {})
+
+    def test_a_schedule_that_skips_this_slot_still_gets_its_turn_back(self):
+        """排了别的格子的人照旧清。
+
+        「这一格没排」看着更该放行，实则会把那张表废掉：留下的覆盖在取值链
+        里排在作息表前面，他从此再也回不到自己排过的格子去。
+        """
+        module = self._module()
+        npc = _npc(location="家", slot_locations={"晚": "教室"}, ai_scheduled=True)
+        sess = _sess(
+            slot="早", location="物业办公室", npc_places={"3": "健身房"},
+        )
+        advance_slot(module, sess, [npc])
+        self.assertEqual(sess.slot, "中")
+        self.assertEqual(sess.npc_places, {})
+
 
 class PromptBlockTests(unittest.TestCase):
     """结算提示词末尾那一段。不写进去，模型压根不知道有这个字段。"""

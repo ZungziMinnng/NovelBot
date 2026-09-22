@@ -6,21 +6,24 @@
    提示里的承诺，加了新功能之后它不能变成假话。
 2. 只写玩家见过的人。没见过的人进了大事记，等于所有对话线都能随口提起一个
    玩家还不该知道的名字。
-3. 生成失败不能拖垮时钟本身。
+3. 生成失败**或卡住**不能拖垮时钟本身。卡住比失败更坏：这一次跑在
+   exclusive_session 的租约里，心跳会替它一直续期，于是整局都点不动。
 """
+import asyncio
 import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agents import rpg_turn
 from app.api.routes.rpg import advance_time
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
-from app.models.rpg import RpgModule, RpgNpc, RpgSession
+from app.models.rpg import RpgLocation, RpgModule, RpgNpc, RpgSession
 from app.services.rpg_state import OFFSCREEN_CHARS, OFFSCREEN_TAG
 
 STAT_DEFS = [{"name": "精力", "initial": 100, "min": 0, "max": 100}]
@@ -136,6 +139,23 @@ class OffscreenBriefTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines, [])
         self.assertEqual(await self._chronicle(session_id), [])
 
+    async def test_a_hanging_model_gives_up_instead_of_holding_the_whole_session(self):
+        # 底层 httpx 没设超时，OpenAI SDK 的默认值是 read 600 秒 × 最多 3 次尝试。
+        # 这一次跑在 exclusive_session 的租约里、心跳会替它一直续期，所以不夹
+        # 一刀的话卡住的不是这一下而是整局：玩家再点什么都是 409
+        _m, session_id, _n = await self._setup()
+
+        async def never_answers(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        # 走真的 wait_for，只把上限调小：换掉 wait_for 就只是在验证 mock 自己
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
+             patch.object(rpg_turn.llm_client, "dispatch_chat_complete", never_answers), \
+             patch.object(rpg_turn, "AUX_CALL_TIMEOUT", 0.05):
+            lines = await rpg_turn.offscreen_brief(session_id, "中")
+        self.assertEqual(lines, [])
+        self.assertEqual(await self._chronicle(session_id), [])
+
 
 class AdvanceRouteTests(unittest.IsolatedAsyncioTestCase):
     """路由那一层：简报要跑在写事务之外，而且新写的大事记要跟着这次响应回去。
@@ -192,6 +212,41 @@ class AdvanceRouteTests(unittest.IsolatedAsyncioTestCase):
         # 简报是另开一条连接写进去的，路由手里这个对象必须被刷回来，
         # 否则玩家这一下看不到、下一轮却突然多出一条
         self.assertTrue(any(line.startswith(OFFSCREEN_TAG) for line in out.session.chronicle))
+
+    async def test_the_scheduler_runs_first_so_the_brief_sees_the_new_places(self):
+        """顺序有后果：随机移动是调度写的，简报的名单里要带上移动**之后**的位置。
+
+        反过来的话同一格里大事记写着「她在家洗衬衫」、侧栏显示她在楼道——
+        真实存档里出现过的那个「诡异」就是这么来的。
+        """
+        async with self.sessions() as db:
+            npc = (await db.execute(select(RpgNpc))).scalars().one()
+            npc.ai_scheduled = True
+            npc.random_movement = True
+            db.add(RpgLocation(module_id=npc.module_id, name="有求必应屋"))
+            await db.commit()
+
+        seen = []
+
+        async def fake_dispatch(messages=None, **kwargs):
+            seen.append(messages[0]["content"])
+            return "赫敏：有求必应屋｜在翻旧报纸"
+
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
+             patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake_dispatch):
+            await advance_time(self.session_id, self.user, self.db)
+
+        self.assertEqual(len(seen), 2, "调度和简报各一次")
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, self.session_id)
+        # 去处是模型自己写的那一半（候选里只有这一个）
+        self.assertEqual(list(sess.npc_random_places.values()), ["有求必应屋"])
+        # 「刚过去的时段是」只有简报那份模板里有，拿它认出谁是第二次调用
+        self.assertNotIn("刚过去的时段是", seen[0])
+        self.assertIn("刚过去的时段是", seen[1])
+        # 这才是这条测试要钉的：简报的名单上写的是移动之后的地方
+        self.assertIn("有求必应屋", seen[1])
+        self.assertNotIn("格兰芬多塔", seen[1])
 
     async def test_the_switch_off_route_still_never_calls_a_model(self):
         async with self.sessions() as db:

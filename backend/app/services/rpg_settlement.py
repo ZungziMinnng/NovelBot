@@ -18,7 +18,7 @@ from app.services.rpg_context import npc_place, turn_present, world_npcs
 from app.services.rpg_dice import OUTCOME_LABELS
 from app.services.rpg_memory import invalidate_summaries, text_revision
 from app.services.rpg_prompts import render
-from app.services.rpg_state import apply_flags, apply_state_delta, check_condition, check_full, check_zero, def_map, mark_met, match_npc, norm_name, open_task_names, push_chronicle
+from app.services.rpg_state import RANK_GAIN_MAX, apply_flags, apply_state_delta, check_condition, check_full, check_zero, def_map, mark_met, match_npc, norm_name, open_task_names, push_chronicle, rank_stat_of
 from app.services.rpg_suggestions import SuggestSources, clean_suggestions
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ participants 和 witnesses 填下面角色表中的数字 id。提到一个人�
 visibility 默认 witnessed；只有正文明确写出已经传播/公告的事件可填 public。私聊事件不能公开。
 relations/npc_notes/npc_places 的角色键优先写 npc:数字id，地名使用完整登记名称。
 同场 NPC 改到别处（包括清空位置恢复作息）必须有该 NPC 实际离场的 move 事件，participants 包含该 NPC 的 id，quote 引用其离场过程。玩家的移动事件不能作为 NPC 离场的依据。
+反过来也一样：角色表里写着在别处的 NPC 要改到玩家所在地，必须有该 NPC 赶来的 move 事件。玩家自己走到某地不等于那里的人来了，也不等于原本在别处的人出现在那里。
 人物坐在房间、站在门边等场景描写不是移动。主角地点由引擎锁定时，不得仅因正文换用了偏殿、后院等地名，就把仍与主角交谈的 NPC 单独移走。
 已有的伤势痊愈、物品给出、目标结束时，相关近况或处境写 null 删除，不能留下过期事实。
 引擎已结算的移动、数值、物品和关系效果不可再次应用。
@@ -1023,11 +1024,37 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                         proposed_places.pop(str(npc.id), None)
                     next_place = npc_place(npc, working.slot, proposed_places,
                                            working.npc_followers, working.location)
-                    departure = any(event["kind"] == "move" and npc.id in event["participants"]
-                                    for event in events)
+                    moved = any(event["kind"] == "move" and npc.id in event["participants"]
+                                for event in events)
                     if (norm_name(current_place) == norm_name(fixed)
-                            and norm_name(next_place) != norm_name(fixed) and not departure):
+                            and norm_name(next_place) != norm_name(fixed) and not moved):
                         issues[domain].append(f"「{npc.name}」仍与玩家同场，缺少该角色实际离场的原文依据，未将其移到别处")
+                        continue
+                    # 反方向同一道门：**别处的人不许凭空出现在玩家跟前**。
+                    # 上面那半只挡「同场的人被挪走」，于是调度到菜市场的人被写
+                    # 成从玩家家的厨房出来时一路放行——她的名字因此出现在正文里，
+                    # allowed = original | named 把这一句认成「剧情真的动了这个人」，
+                    # 位置改成家。玩家看到的是她从菜市场瞬移回来，两张表都不报错。
+                    #
+                    # 走过来当然可以，但得有原文依据（她推门进来那一句）。
+                    #
+                    # **这个方向上不能只看有没有 move 事件**：事件的 quote 只被
+                    # 校验过「逐字出自正文」，没人校验过那句话真的写了她过来。
+                    # 真实存档里模型交上来的就是一条 kind=move、quote 是
+                    # 「韩曼宁侧躺在床上，蜷着身子」的事件，summary 自己写着
+                    # 「已从菜市场回到家中卧室」——正文里她根本没走这一趟，
+                    # 是模型先当她在家写完了，再回头补一张过路条。
+                    # 所以这半边要求 quote 里有「来 / 进 / 回」这类动作词
+                    came = any(
+                        event["kind"] == "move" and npc.id in event["participants"]
+                        and re.search(r"来|进|回|到|赶|返|现身|出现|推门|敲门", event["quote"])
+                        for event in events
+                    )
+                    if (norm_name(current_place) != norm_name(fixed)
+                            and norm_name(next_place) == norm_name(fixed) and not came):
+                        issues[domain].append(
+                            f"「{npc.name}」原本在「{current_place}」，缺少该角色赶来的原文依据，未将其移到玩家跟前"
+                        )
                         continue
             if key in {"relations", "npc_notes", "npc_appearance"} and value is not None and not isinstance(value, dict):
                 issues[domain].append(f"人物「{npc.name}」的变化格式错误")
@@ -1249,6 +1276,19 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
     # 一个数，但**夹取本身不受影响**——apply_state_delta 两路各查各的 def_map
     step_caps = {name: spec["step_max"] for name, spec in {**stat_specs, **relation_specs}.items()
                  if spec.get("step_max") is not None}
+    # 等级那一项有一道作者没填过的隐式上限（cap_rank_gain）。不告诉模型的话，
+    # 它每轮提 +3，每轮换回来一条「境界这一轮只升了 1」的噪音。作者自己填了
+    # step_max 时上面那行已经写进去了，这里不覆盖
+    rank = rank_stat_of(module)
+    if rank and rank in stat_specs and rank not in step_caps:
+        step_caps[rank] = RANK_GAIN_MAX
+    # 两张表合一份，同 step_caps。只收作者真填了 effect 的项：没填的给个空行
+    # 等于告诉模型「这一项没有意思」，不如不提
+    stat_meanings = {
+        name: " ".join(str(spec.get("effect") or "").split())
+        for name, spec in {**stat_specs, **relation_specs}.items()
+        if str(spec.get("effect") or "").strip()
+    }
     prompt = render(
         # outcome_failed 是从 label 推出来的，不另传一个档位键：先跟模型把
         # 「失败要留代价」说在前面，比等它交了空 delta 再打回去便宜一整轮调用
@@ -1275,6 +1315,12 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
         } for npc in participants],
         note_keys=sorted({key for notes in (sess.npc_notes or {}).values() if isinstance(notes, dict) for key in notes}),
         relation_names=list(relation_specs), step_caps=step_caps,
+        # 作者写的「这一项影响什么」。**不给的话模型只知道数值的名字**，于是它
+        # 只会顺着字面意思单向加：羞耻值被读成「这一轮有没有发生羞耻的事」，
+        # 于是次次 +2，从没有一轮让它跌——可作者写的是「撒谎、出轨、羞辱会让
+        # 羞耻下降」，方向正好相反。叙事那一侧早就有这份说明（_meaning_block），
+        # 记录员这一侧一直没有：它是唯一真正动数字的人
+        stat_meanings=stat_meanings,
         engine_note=report.get("engine_note", ""), chronicle=(sess.chronicle or [])[-10:],
         # 还开着的待办。模型只能在这份清单里挑「看着像办完了」的，挑不出就别提
         tasks=_open_tasks(sess),
@@ -1580,7 +1626,8 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
             fresh_row.aux_output_tokens = (fresh_row.aux_output_tokens or 0) + output_tokens
             await store.commit()
             state = {**capture(fresh), "day": clock[0], "slot": clock[1], "time_slots": clock[3],
-                     "npc_activities": fresh.npc_activities or {}}
+                     "npc_activities": fresh.npc_activities or {},
+                     "npc_activity_log": fresh.npc_activity_log or {}}
             suggestions = fresh_row.suggestions
         return {"state": state, "warnings": report["warnings"], "suggestions": suggestions,
                 "outcome_consistent": data.get("outcome_consistent"), "aux_input_tokens": input_tokens,

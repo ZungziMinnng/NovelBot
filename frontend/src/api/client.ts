@@ -263,9 +263,15 @@ export const modelSelectValue = (models: ModelEntry[], stored: string): string =
 
 // 按供应商分组，给 <optgroup> 用。同一个 model_id 在几家都有的时候，光看
 // 模型名分不出这一条是哪家的（编辑器和酒馆的模型下拉就是这么排的）
-export function groupModelsByProvider(models: ModelEntry[]) {
+//
+// 聊天和嵌入是互斥的两拨，默认只给聊天那拨——绝大多数下拉都是选聊天模型。
+// 要选嵌入模型的槽位（向量检索）必须显式传 'embedding'，否则列出来的会是
+// 完全选不中的那一半，而且后端只会静默拒绝，界面上看不出哪里不对
+export function groupModelsByProvider(models: ModelEntry[], modelType: 'chat' | 'embedding' = 'chat') {
+  const wanted = (m: ModelEntry) =>
+    modelType === 'embedding' ? m.model_type === 'embedding' : m.model_type !== 'embedding'
   const groups = new Map<string, ModelEntry[]>()
-  for (const m of models.filter(m => m.model_type !== 'embedding')) {
+  for (const m of models.filter(wanted)) {
     const key = m.provider || '未分组'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)!.push(m)
@@ -1221,8 +1227,18 @@ export interface RpgModule {
   check_mode: 'smart' | 'always' | 'never'
   /** 开了判定之后，掷不掷随机数。关掉则同一存档重玩结果一样 */
   random_check: boolean
+  /** 空 = **数值制**：跟人对碰时比裁判挑中的那一项的同名数值。
+   *  非空 = **等级制**：一律比这一项（stat_defs 里的某个 name），每级
+   *  rank_per_level 个百分点。等级的**名字**（金丹期）用那一项自己的 tiers */
+  rank_stat: string
+  /** 等级每差一级多少个百分点。默认 15——可用量程只有 ±3 级，
+   *  编辑器里那行阶梯预览就是为了让作者看见这件事 */
+  rank_per_level: number
   scan_depth: number
   context_turns: number
+  /** system 提示词的总闸（token）。各个块按比例从这里分，默认 21500 =
+   *  从前写死的那套额度，一个字不变 */
+  context_budget: number
   temperature: number
   max_tokens: number
   reply_length: number
@@ -1238,6 +1254,8 @@ export interface RpgModule {
   summary_model_ref: string
   /** 立绘 tag 转换用。空 = 跟着 fast_model_ref 走 */
   image_model_ref: string
+  /** 长期记忆的向量检索用。**空 = 整条向量路关着**，一次嵌入请求都不发 */
+  embedding_model_ref: string
   /** 推时段时写一句「别处此刻在发生什么」进大事记。**默认关**：
    *  开了之后「结束这个时段」就不再是零模型调用了 */
   offscreen_brief: boolean
@@ -1566,6 +1584,9 @@ export interface RpgAction {
 export interface RpgWorldEntry {
   id: number
   module_id: number
+  /** 这条叫什么。只给人看：列表上认条目、游戏里那行诊断报「本轮生效了谁」。
+   *  空 = 回退到按关键词显示 */
+  title: string
   keywords: string
   content: string
   enabled: boolean
@@ -1574,6 +1595,8 @@ export interface RpgWorldEntry {
   constant: boolean
   /** 0 = 拼进 system；n>0 = 并进倒数第 n 条消息开头 */
   depth: number
+  /** 只放一次。放过的 id 记在这一局的 fired_entries 上，读档才能重来 */
+  once: boolean
   /** 附加条件。空 = 无条件。常驻 + 条件 = 跨过某条线就解锁 */
   trigger_condition: RpgCondition
   created_at: string
@@ -1608,6 +1631,9 @@ export interface RpgNpc {
   slot_locations: Record<string, string>
   /** 仅这些时段执行随机移动；空数组表示所有时段 */
   random_movement_slots: string[]
+  /** 随机移动只能去这几个地点（地点名）；空数组表示不限制。
+   *  地点改名或删掉之后这里会留下对不上的名字，后端静默滤掉 */
+  random_movement_places: string[]
   /** 额外触发词：人不在场但被提到也注入 */
   keywords: string
   /** 勾上之后，这一轮没提到她时她自己过日子：模型写一句「最近在做什么」，
@@ -1621,6 +1647,10 @@ export interface RpgNpc {
   initial_state: Record<string, number | boolean>
   relation_enabled: boolean
   relation_stat_names: string[]
+  /** 这个人的**能力**数值（不是关系数值）：`{"境界": 4, "剑术": 18}`。
+   *  **稀疏**——只给关键对手填，键不在 = 没填。`0` 是作者明写的「凡人」，
+   *  和没填是两回事，所以清空输入框要 delete 这个键，不能写 0 */
+  ability_stats: Record<string, number>
   sort_order: number
   created_at: string
   updated_at: string
@@ -1713,6 +1743,11 @@ export interface RpgSession {
   /** AI 调度给不在场的人记的那一句「最近在做什么」。{"3": "在图书馆翻旧报纸"}。
    *  和 npc_notes 分开存，后端的 rpg_state.apply_npc_activity 是同一个意思 */
   npc_activities: Record<string, string>
+  /** 上面那句话按时段留的短流水，形状同 npc_history，一个人最多 12 条。
+   *  **和经历刻意分开**：经历每条都要在正文里找得到原话、且只写参与了本轮的人，
+   *  这一列是调度替不在场的人编的背景活动。混在一条时间线上，玩出来的事和
+   *  模型编的事就再也分不开了。只画给玩家看，不进 prompt */
+  npc_activity_log: Record<string, RpgNpcHistoryEntry[]>
   /** 每个人这一局的经历，{"3": [...]}，按发生顺序往后追加。和 npc_notes 分开存：
    *  那边同名键会被盖掉（她现在怎么样），这边只增不改（她经历过什么） */
   npc_history: Record<string, RpgNpcHistoryEntry[]>
@@ -1775,6 +1810,12 @@ export interface RpgRoll {
   /** 掷点 1~100，越低越好。0 = 关了随机，前端只显示成功率 */
   dice?: number
   outcome?: RpgOutcome
+  /** 这一次对上的人。空 = 没有对抗。**必须可选**：老历史记录里没有这三项 */
+  opponent?: string
+  /** 双方真比的是哪一项。等级制下它是模组的等级项，不是 attr */
+  opposed_stat?: string
+  /** 对手那一项的数值。0 是作者明写的「凡人」，和没填不是一回事 */
+  opposed_value?: number | null
 }
 
 /** 五档结果。narrow = 险胜：做成了但付出看得见的代价 */
@@ -1825,6 +1866,8 @@ export interface RpgMessage {
     target_npc?: string
     mode?: 'group' | 'private' | 'solo'
     private_with?: number | null
+    /** 手选的对手。重发这一句时要照原样带回去，否则退回常规检定 */
+    opponent?: string
   } | null
   /** 这条消息发生在哪个地点。统一时间线之后一屏里会混着几个地方的戏，
    *  前端靠它在换地方的地方插一条分隔 */
@@ -2100,10 +2143,15 @@ export const rpgApi = {
     get: (id: number) => api.get<RpgSession>(`/rpg/sessions/${id}`).then(r => r.data),
     create: (moduleId: number, data: { char_name: string; char_desc?: string; title?: string; stats?: Record<string, number>; location?: string; time_slots?: string[] }) =>
       api.post<RpgSession>(`/rpg/modules/${moduleId}/sessions/`, data).then(r => r.data),
-    /** 结束当前时段。纯引擎，不调模型，所以是普通请求不是 SSE */
+    /** 结束当前时段。不产生叙事，所以是普通请求不是 SSE。
+     *
+     *  但**不一定是纯引擎**：模组勾了「外场简报」、角色勾了「AI 调度」时，
+     *  后端会先串行调两次模型才回。默认的 30 秒盖不住（后端每次夹 60 秒），
+     *  超时的后果尤其坏——时段在调模型之前就已经提交了，前端拿不到新状态就会
+     *  一直显示旧时段，而那一局的租约还被攥着，再点什么都是 409 */
     advance: (id: number) =>
       api.post<{ session: RpgSession; facts: string[] }>(
-        `/rpg/sessions/${id}/advance`,
+        `/rpg/sessions/${id}/advance`, undefined, { timeout: 180000 },
       ).then(r => r.data),
     /** 瞬移：从地点总览点一个地方就直接过去。同样零 LLM 调用 */
     move: (id: number, target: string) =>
@@ -2805,6 +2853,10 @@ export function streamTavernTurn(
 export interface RpgTurnMeta {
   user_message_id?: number
   system_tokens?: number
+  /** 这一局的总闸（RpgModule.context_budget），和 system_tokens 对着看 */
+  budget_total?: number
+  /** 这一轮被整块丢掉的段落 key。**平时应该是空的**，不空就是某一块写爆了 */
+  dropped?: string[]
   state_tokens?: number
   /** 【道具与技能】那一块占了多少 token：模组定义过的东西的说明书，每轮都在 */
   catalog_tokens?: number
@@ -2820,7 +2872,17 @@ export interface RpgTurnMeta {
   /** 【场面】那一块占了多少 token：地点描述加在场名单，每轮都在 */
   scene_tokens?: number
   history_count?: number
-  triggered?: { id: number; keywords: string; constant: boolean; depth: number }[]
+  triggered?: {
+    id: number
+    /** 词条名字。诊断条优先显示它——条件事件全是「常驻 + 无关键词」，
+     *  只发关键词的话那一行会变成一串「常驻」，看不出是哪条 */
+    title: string
+    keywords: string
+    constant: boolean
+    depth: number
+    /** 这条是一次性的，刚被用掉了 */
+    once: boolean
+  }[]
   npcs_onstage?: { id: number; name: string }[]
   /** 真的和玩家站在同一个地点的那些人。诊断行的「在场」读这一份——
    *  npcs_onstage 还含「只是被提到」的人，那是给提示词注入用的宽名单 */
@@ -2848,6 +2910,8 @@ export interface RpgStatePatch {
   /** 被永久改写掉的外貌。同上，不带回来的话要整页重拉才看得见 */
   npc_appearance: Record<string, Record<string, string>>
   npc_activities: Record<string, string>
+  /** 那句话按时段留的底。和上面那一句同一次写入，只刷一个会让档案里两处对不上 */
+  npc_activity_log: Record<string, RpgNpcHistoryEntry[]>
   npc_history: Record<string, RpgNpcHistoryEntry[]>
   npc_milestones: RpgMilestone[]
   npc_places: Record<string, string>
@@ -2923,6 +2987,8 @@ export function streamRpgTurn(
     /** 动作用在谁身上（好感加给他）。和「这段叙事归谁看」无关——
      *  那个由消息上的 present 快照决定，不由请求参数决定 */
     target_npc?: string
+    /** 这一轮跟谁较劲。后端按双方的数值对着算成功率；认不出这个名字就当没选 */
+    opponent?: string
   },
   onMessage: (msg: RpgSSEMessage) => void,
   onClose: () => void,

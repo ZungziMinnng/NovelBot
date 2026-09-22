@@ -36,8 +36,14 @@ class RpgModuleCreate(BaseModel):
     difficulty_bias: int = 0
     check_mode: str = "never"
     random_check: bool = True
+    # 空 = 数值制，非空 = 等级制（比这一项）。裸 str/int，理由同 stat_defs
+    rank_stat: str = ""
+    rank_per_level: int = 15
     scan_depth: int = 3
     context_turns: int = 20
+    # 整段 system 的总闸，按 rpg_budget.SECTION_BASE 等比摊给各块。
+    # 默认值就是原来写死的那个数，不填 = 今天的行为一个字不变
+    context_budget: int = 21500
     temperature: float = 0.9
     max_tokens: int = 2048
     reply_length: int = 300
@@ -51,6 +57,8 @@ class RpgModuleCreate(BaseModel):
     discovery_model_ref: str = ""
     summary_model_ref: str = ""
     image_model_ref: str = ""
+    # 空 = 向量召回整条关着，一次嵌入接口都不调
+    embedding_model_ref: str = ""
     offscreen_brief: bool = False
     # 时段推进的两个阈值，0 = 关，形状见 models.RpgModule
     # slot_budget 默认 3：建模组这条路会把这份默认值原样传给 RpgModule(**dump)，
@@ -87,8 +95,12 @@ class RpgModuleUpdate(BaseModel):
     difficulty_bias: Optional[int] = None
     check_mode: Optional[str] = None
     random_check: Optional[bool] = None
+    # 切回数值制要传空字符串，不能传 null——路由是 exclude_none
+    rank_stat: Optional[str] = None
+    rank_per_level: Optional[int] = None
     scan_depth: Optional[int] = None
     context_turns: Optional[int] = None
+    context_budget: Optional[int] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     reply_length: Optional[int] = None
@@ -102,6 +114,7 @@ class RpgModuleUpdate(BaseModel):
     discovery_model_ref: Optional[str] = None
     summary_model_ref: Optional[str] = None
     image_model_ref: Optional[str] = None
+    embedding_model_ref: Optional[str] = None
     offscreen_brief: Optional[bool] = None
     slot_budget: Optional[int] = None
     chat_nudge: Optional[int] = None
@@ -137,8 +150,13 @@ class RpgModuleOut(BaseModel):
     difficulty_bias: int
     check_mode: str
     random_check: bool
+    # 给默认值：老模组的行读出来没有这两项，理由同上面 lock_protagonist
+    rank_stat: str = ""
+    rank_per_level: int = 15
     scan_depth: int
     context_turns: int
+    # 给默认值：老模组的行读出来没有这一项，不给就整份校验失败
+    context_budget: int = 21500
     temperature: float
     max_tokens: int
     reply_length: int
@@ -152,6 +170,7 @@ class RpgModuleOut(BaseModel):
     discovery_model_ref: str = ""
     summary_model_ref: str
     image_model_ref: str
+    embedding_model_ref: str = ""
     offscreen_brief: bool
     # 给默认值：老模组的行读出来没有这两项，不给就整份校验失败
     slot_budget: int = 0
@@ -368,34 +387,40 @@ class RpgWizardExtractOut(BaseModel):
 # ── 世界书 ────────────────────────────────────────────────────────────────
 
 class RpgWorldEntryCreate(BaseModel):
+    title: str = ""
     keywords: str = ""
     content: str = ""
     enabled: bool = True
     sort_order: int = 0
     constant: bool = False
     depth: int = 0
+    once: bool = False
     trigger_condition: dict = {}
 
 
 class RpgWorldEntryUpdate(BaseModel):
+    title: Optional[str] = None
     keywords: Optional[str] = None
     content: Optional[str] = None
     enabled: Optional[bool] = None
     sort_order: Optional[int] = None
     constant: Optional[bool] = None
     depth: Optional[int] = None
+    once: Optional[bool] = None
     trigger_condition: Optional[dict] = None
 
 
 class RpgWorldEntryOut(BaseModel):
     id: int
     module_id: int
+    title: str
     keywords: str
     content: str
     enabled: bool
     sort_order: int
     constant: bool
     depth: int
+    once: bool
     trigger_condition: dict
     created_at: datetime
     updated_at: datetime
@@ -420,6 +445,7 @@ class RpgNpcCreate(BaseModel):
     location: str = ""
     slot_locations: dict = {}
     random_movement_slots: list[str] = []
+    random_movement_places: list[str] = []
     keywords: str = ""
     ai_scheduled: bool = False
     random_movement: bool = False
@@ -428,6 +454,9 @@ class RpgNpcCreate(BaseModel):
     initial_state: dict = {}
     relation_enabled: bool = False
     relation_stat_names: list[str] = []
+    # 这个人有多强，稀疏：{"境界": 4}。裸 dict 不写 dict[str, int]——
+    # 一个脏值会 422 掉整张角色卡的保存，理由同 stat_defs
+    ability_stats: dict = {}
     sort_order: int = 0
 
 
@@ -445,6 +474,7 @@ class RpgNpcUpdate(BaseModel):
     location: Optional[str] = None
     slot_locations: Optional[dict] = None
     random_movement_slots: Optional[list[str]] = None
+    random_movement_places: Optional[list[str]] = None
     keywords: Optional[str] = None
     ai_scheduled: Optional[bool] = None
     random_movement: Optional[bool] = None
@@ -453,6 +483,8 @@ class RpgNpcUpdate(BaseModel):
     initial_state: Optional[dict] = None
     relation_enabled: Optional[bool] = None
     relation_stat_names: Optional[list[str]] = None
+    # 清空要传 {}，不能传 null——路由是 exclude_none
+    ability_stats: Optional[dict] = None
     sort_order: Optional[int] = None
 
 
@@ -499,6 +531,7 @@ class RpgNpcOut(BaseModel):
     location: str
     slot_locations: dict
     random_movement_slots: list[str] = []
+    random_movement_places: list[str] = []
     keywords: str
     ai_scheduled: bool
     random_movement: bool = False
@@ -507,6 +540,8 @@ class RpgNpcOut(BaseModel):
     initial_state: dict
     relation_enabled: bool
     relation_stat_names: list[str]
+    # 给默认值：老角色卡的行读出来没有这一项
+    ability_stats: dict = {}
     sort_order: int
     created_at: datetime
     updated_at: datetime
@@ -873,6 +908,9 @@ class RpgSessionOut(BaseModel):
     npc_history: dict = {}
     npc_milestones: list = []
     npc_activities: dict
+    # 上面那句话按时段留的短流水。给默认值：老局的行里没有这一列。
+    # 形状见 models/rpg.py 的 npc_activity_log
+    npc_activity_log: dict = {}
     npc_places: dict
     # 跟着玩家走的人，npc id 列表。见 RpgSession.npc_followers
     npc_followers: list = []
@@ -956,6 +994,9 @@ class RpgTurnRequest(BaseModel):
     content: str
     # 玩家自己指定用哪项数值判定。给了就跳过裁决那次调用，零延迟零成本
     attr: str = ""
+    # 玩家自己指定这一次对上谁（角色名，空 = 不对抗）。和 attr 同一条路：
+    # 跳过裁决就没人报对手了，得有个地方补上
+    opponent: str = ""
     # 「点出来的」行动。全空就是自由打字，走 AI 结算；给了任意一个
     # 就走引擎，数字由模组定义算死，AI 只负责写成画面
     action_id: Optional[int] = None

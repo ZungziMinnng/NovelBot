@@ -1,4 +1,4 @@
 【本回合判定 · 已由系统裁定，不可更改】
-你尝试：{{ intent }}（{{ attr }} · 成功率 {{ rate }}%{% if dice %} · 掷出 {{ dice }}{% endif %}）
+你尝试：{{ intent }}（{{ attr }}{% if opponent %} · 对上 {{ opponent }}{% if opposed_note %}（{{ opposed_note }}）{% endif %}{% endif %} · 成功率 {{ rate }}%{% if dice %} · 掷出 {{ dice }}{% endif %}）
 结果：{{ outcome_label }} —— {{ guidance }}
 写法要求：把这个结果落到实处，写成读者能看见的画面。不要用"差点""险些""好在"这类词把它含糊过去，也不要在写着写着的时候把它翻转成别的结果。

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { RpgBand, RpgOutcome, RpgRoll } from '@/api/client'
+import type { RpgBand, RpgOutcome, RpgRoll, RpgStatDef } from '@/api/client'
+import { bandOf } from './StatBar'
 import { playSfx } from './useSfx'
 
 /** 数字翻滚多久。这段等待是故意留的：判定那次调用本来就要花一两秒，
@@ -46,8 +47,13 @@ const BAND_LABEL: Record<RpgBand, string> = {
  *
  * dice = 0 表示模组关了随机，结果纯看数值，那就不画掷点。
  * animate 只在这一轮刚判出来时为真，翻历史不该每条都再抖一遍。
+ * statDefs 只为了把对手那个数字显示成档名（元婴期），没传就显示裸数字。
  */
-export default function DiceRoll({ roll, animate = false }: { roll: RpgRoll; animate?: boolean }) {
+export default function DiceRoll({ roll, animate = false, statDefs = [] }: {
+  roll: RpgRoll
+  animate?: boolean
+  statDefs?: RpgStatDef[]
+}) {
   const rate = roll.rate ?? 0
   const dice = roll.dice ?? 0
   const random = dice > 0
@@ -76,6 +82,16 @@ export default function DiceRoll({ roll, animate = false }: { roll: RpgRoll; ani
   if (!roll.need_check || !roll.outcome) return null
 
   const style = OUTCOME_STYLE[roll.outcome]
+  // 「对 魔尊 元婴期」。认出了人就写人，那一项没填就只写人（成功率里也确实
+  // 没算他）。等级制下真比的那一项可能不是 attr，所以用 opposed_stat 查档表
+  const rival = (roll.opponent || '').trim()
+  const rivalStat = (roll.opposed_stat || '').trim()
+  const rivalValue = roll.opposed_value
+  const rivalDef = rivalStat ? statDefs.find(d => d.name === rivalStat) : undefined
+  const rivalTier = rivalDef && typeof rivalValue === 'number' ? bandOf(rivalDef, rivalValue) : null
+  const rivalNote = typeof rivalValue === 'number'
+    ? (rivalTier?.label || String(rivalValue))
+    : ''
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-primary/20 bg-primary/[0.06] px-3 py-2">
@@ -89,6 +105,12 @@ export default function DiceRoll({ roll, animate = false }: { roll: RpgRoll; ani
       <div className="min-w-0 flex-1 text-xs">
         <p className="flex items-center gap-1.5 flex-wrap">
           <span className="font-medium text-primary">{roll.attr}</span>
+          {rival && (
+            <span className="text-muted-foreground">
+              对 {rival}
+              {rivalNote && ` ${rivalStat && rivalStat !== roll.attr ? `${rivalStat} ` : ''}${rivalNote}`}
+            </span>
+          )}
           <span className="text-muted-foreground">
             {BAND_LABEL[roll.band]} · 成功率 {rate}%
           </span>

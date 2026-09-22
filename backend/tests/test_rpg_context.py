@@ -13,7 +13,8 @@ from app.models.rpg import (
     RpgWorldEntry,
 )
 from app.services.rpg_context import (
-    build_rpg_messages, here_npcs, onstage_npcs, ref_roster, triggered_entries,
+    build_rpg_messages, here_npcs, onstage_npcs, opposed_for, ref_roster,
+    triggered_entries,
 )
 from app.services.rpg_state import EFFECT_CHARS
 
@@ -321,6 +322,43 @@ class ThresholdTests(_Base):
         self.assertEqual(len(diag["triggered"]), 1)
 
 
+class OnceTests(_Base):
+    """一次性词条：放过一次就不再出现，判据是这一局的 fired_entries。"""
+
+    async def test_a_fired_entry_does_not_come_back(self):
+        entry = await self._add(RpgWorldEntry(
+            module_id=self.module.id, constant=True, once=True,
+            title="她终于肯叫你名字了", content="她第一次直呼其名。",
+        ))
+        _, diag = await self._build("我看着她")
+        self.assertEqual([t["id"] for t in diag["triggered"]], [entry.id])
+        # 名字和 once 都要报给前端：诊断条靠 title 认条目、rpg_turn 靠 once 记账
+        self.assertEqual(diag["triggered"][0]["title"], "她终于肯叫你名字了")
+        self.assertTrue(diag["triggered"][0]["once"])
+
+        self.sess.fired_entries = [entry.id]
+        messages, diag = await self._build("我看着她")
+        self.assertEqual(diag["triggered"], [])
+        self.assertNotIn("她第一次直呼其名。", messages[0]["content"])
+
+    async def test_a_plain_entry_ignores_the_fired_list(self):
+        # once 没勾的照旧每轮都来，哪怕 id 躺在 fired_entries 里
+        entry = await self._add(RpgWorldEntry(
+            module_id=self.module.id, constant=True, content="天一直阴着。",
+        ))
+        self.sess.fired_entries = [entry.id]
+        _, diag = await self._build("我抬头")
+        self.assertEqual([t["id"] for t in diag["triggered"]], [entry.id])
+
+    def test_without_a_session_once_is_not_filtered(self):
+        # 纯关键词测试和预览都没有局，这时候不该按 fired 过滤
+        # enabled 要显式给：没落库的 ORM 对象不套用列默认值，它是 None
+        entries = [RpgWorldEntry(
+            module_id=1, id=7, keywords="锁", content="留下的", once=True, enabled=True,
+        )]
+        self.assertEqual(len(triggered_entries(entries, "我撬开那把锁")), 1)
+
+
 class NpcTests(_Base):
     async def test_current_place_roster_survives_location_whitespace(self):
         await self._add(RpgNpc(
@@ -451,9 +489,48 @@ class NpcTests(_Base):
         ))
         system = (await self._build("我回想那天的事"))[0][0]["content"]
         self.assertIn("老板娘", system)
-        self.assertIn("常在酒馆", system)
+        self.assertIn("在酒馆", system)
         self.assertIn("酒馆的老板，镇上没有她不知道的事。", system)
         self.assertNotIn("TAVERN_PERSONA", system)
+
+    async def test_the_roster_shows_where_she_is_now_not_where_she_lives(self):
+        """总表写的是**此刻在哪**，不是作者字段里那个常驻地。
+
+        真实存档里的样子：她常驻「家」、被随机调度到了菜市场，玩家走进家。
+        总表若照旧写「常在家」，模型手上唯一一条关于她的位置信息就是「在家」，
+        于是它让她从厨房出来；这句正文又会被结算的 allowed = original | named
+        认成「剧情真的动了这个人」，把她的位置改成家——玩家看到她从菜市场
+        瞬移回家，而两张表都没报错。
+        """
+        npc = await self._add(RpgNpc(
+            module_id=self.module.id, name="韩曼宁", location="家",
+        ))
+        self.sess.location = "家"
+        self.sess.npc_places = {str(npc.id): "菜市场"}
+        system = (await self._build("我推开门"))[0][0]["content"]
+        self.assertIn("韩曼宁（在菜市场）", system)
+        self.assertNotIn("韩曼宁（在家）", system)
+
+    async def test_a_mentioned_npc_who_is_elsewhere_gets_told_so_on_her_card(self):
+        """只是被提到的人，卡上必须明写她不在跟前。
+
+        这张卡发给两种人：站在玩家跟前的，和这一轮只是被提到的。两种人的卡
+        一模一样的话，被调度到菜市场的人被提到时，模型拿到的是一张完整的
+        「姓名 + 长相 + 眼下 + 最近」，没有一个字说她不在这儿——真实存档里
+        它就让她在卧室里睡着了。「最近：挑了几样青菜」治不了这个：那是活动，
+        模型完全可以读成「她买完菜回来了」。
+        """
+        npc = await self._add(RpgNpc(
+            module_id=self.module.id, name="韩曼宁", location="家",
+        ))
+        self.sess.location = "家"
+        self.sess.npc_places = {str(npc.id): "菜市场"}
+        system = (await self._build("我找找韩曼宁在不在"))[0][0]["content"]
+        self.assertIn("此刻不在你跟前：她在菜市场", system)
+        # 站在跟前的人不该挂这一行，否则每张卡上都写着「不要让她出场」
+        self.sess.npc_places = {}
+        system = (await self._build("我找找韩曼宁在不在"))[0][0]["content"]
+        self.assertNotIn("此刻不在你跟前", system)
 
     async def test_every_name_survives_when_the_roster_overflows(self):
         # 简介先砍、名字最后留。掉一个名字，那个人就回到了「模型只能拿称谓
@@ -1257,6 +1334,102 @@ class HistoryTests(_Base):
         self.assertEqual(
             sent,
             ["开场白", "一个人翻箱子", "只跟老兵说的", "只跟老板娘说的", "接着说"],
+        )
+
+
+class OpposedTests(unittest.TestCase):
+    """对手解析。纯函数，不落库——这些卡都没 flush 过，属性就是 Python 默认值。"""
+
+    STATS = [
+        {"name": "境界", "initial": 1, "max": 9, "for_check": True},
+        {"name": "剑术", "initial": 10, "max": 20, "for_check": True},
+    ]
+
+    def _module(self, rank_stat="境界"):
+        return RpgModule(user_id=1, name="天梯", rank_stat=rank_stat,
+                         stat_defs=list(self.STATS))
+
+    def _npc(self, name, ability=None, role="npc"):
+        return RpgNpc(module_id=1, name=name, role=role,
+                      ability_stats={} if ability is None else ability)
+
+    def test_level_mode_always_compares_the_rank_stat(self):
+        # 玩家使剑术，比的仍然是境界。魔尊卡上没有剑术，按 attr 比就会
+        # 落回一个默认值，魔尊反倒比凡人好打
+        boss = self._npc("魔尊", {"境界": 8})
+        card, value = opposed_for(self._module(), [boss], "魔尊", "剑术")
+        self.assertIs(card, boss)
+        self.assertEqual(value, 8)
+
+    def test_numeric_mode_compares_whatever_the_judge_picked(self):
+        rival = self._npc("柳生", {"境界": 3, "剑术": 17})
+        card, value = opposed_for(self._module(""), [rival], "柳生", "剑术")
+        self.assertIs(card, rival)
+        self.assertEqual(value, 17)
+
+    def test_protagonist_card_can_never_be_an_opponent(self):
+        # 主角模板是开局预填玩家自己的那张卡，填了能力值也不登场
+        me = self._npc("阿隼", {"境界": 9}, role="protagonist")
+        self.assertEqual(opposed_for(self._module(), [me], "阿隼", "境界"), (None, None))
+
+    def test_a_half_written_name_resolves_but_an_ambiguous_one_does_not(self):
+        boy = self._npc("魔尊座下童子", {"境界": 2})
+        boss = self._npc("魔尊无涯", {"境界": 8})
+        # 只有童子在场时，「魔尊」是前缀，唯一命中——这是 match_npc 的既有尺度
+        self.assertEqual(opposed_for(self._module(), [boy], "魔尊", "境界")[1], 2)
+        # 两个都在场就对上两个人，当没对上。认错人比不认更糟
+        self.assertEqual(
+            opposed_for(self._module(), [boy, boss], "魔尊", "境界"), (None, None),
+        )
+
+    def test_three_villagers_with_the_same_name_fold_to_the_last(self):
+        crowd = [self._npc("村民", {"境界": i}) for i in (1, 2, 3)]
+        self.assertEqual(opposed_for(self._module(), crowd, "村民", "境界")[1], 3)
+
+    def test_zero_is_a_filled_in_mortal_not_a_blank(self):
+        mortal = self._npc("店小二", {"境界": 0})
+        self.assertEqual(opposed_for(self._module(), [mortal], "店小二", "境界")[1], 0)
+
+    def test_an_unfilled_stat_keeps_the_card_but_gives_no_number(self):
+        # 判定条照样写「对 店小二」，只是不产生修正
+        mortal = self._npc("店小二")
+        card, value = opposed_for(self._module(), [mortal], "店小二", "境界")
+        self.assertIs(card, mortal)
+        self.assertIsNone(value)
+
+    def test_a_dangling_rank_stat_degrades_quietly(self):
+        # 作者把「境界」这一项删了或改了名，卡上的数字还在。安静降级成无对抗，
+        # 编辑器那边会为这种情况标红字
+        boss = self._npc("魔尊", {"境界": 8})
+        mod = RpgModule(user_id=1, name="天梯", rank_stat="境界",
+                        stat_defs=[{"name": "剑术", "initial": 10}])
+        self.assertEqual(opposed_for(mod, [boss], "魔尊", "剑术"), (None, None))
+
+    def test_no_opponent_named_and_nobody_matched(self):
+        boss = self._npc("魔尊", {"境界": 8})
+        for name in ("", None, "  ", "不存在的人"):
+            self.assertEqual(opposed_for(self._module(), [boss], name, "境界"),
+                             (None, None))
+
+    def test_junk_on_the_card_never_raises(self):
+        # ability_stats 是裸 dict，schema 一个字都不校验。True 尤其要挡——
+        # 它是 int 的子类，混进去会变成「境界 1」
+        for junk in ({"境界": True}, {"境界": "元婴期"}, {"境界": None},
+                     {"境界": [3]}, "坏了", None):
+            card, value = opposed_for(self._module(), [self._npc("魔尊", junk)],
+                                      "魔尊", "境界")
+            self.assertIsNotNone(card)
+            self.assertIsNone(value)
+
+    def test_a_string_number_still_counts(self):
+        # 前端 input 存出来的可能是字符串
+        boss = self._npc("魔尊", {"境界": "8"})
+        self.assertEqual(opposed_for(self._module(), [boss], "魔尊", "境界")[1], 8)
+
+    def test_numeric_mode_needs_the_attr_to_be_a_real_stat(self):
+        rival = self._npc("柳生", {"轻功": 19})
+        self.assertEqual(
+            opposed_for(self._module(""), [rival], "柳生", "轻功"), (None, None),
         )
 
 

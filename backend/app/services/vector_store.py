@@ -11,7 +11,10 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client: chromadb.ClientAPI | None = None
-_novel_ef_cache: dict[int, chromadb.EmbeddingFunction] = {}
+# 键是 (namespace, id)。加 namespace 是因为 RPG 也要用这套库，而它的 session id
+# 和小说 id 是两套各自从 1 开始的编号——裸 id 当键的话，1 号存档会读到 1 号小说的
+# 嵌入函数、写进 1 号小说的 collection
+_novel_ef_cache: dict[tuple[str, int], chromadb.EmbeddingFunction] = {}
 # 本地默认嵌入函数的惰性状态：实例 = 可用，字符串 = 不可用及原因，None = 还没探测
 _default_ef_state: "chromadb.EmbeddingFunction | str | None" = None
 
@@ -99,12 +102,13 @@ def configure_embedding(
     api_key: str = "",
     base_url: str = "",
     use_proxy: bool = True,
+    namespace: str = "novel",
 ):
     """注册小说的嵌入函数。空 model_id 使用本地默认模型。"""
     if not model_id:
-        _novel_ef_cache.pop(novel_id, None)
+        _novel_ef_cache.pop((namespace, novel_id), None)
         return
-    _novel_ef_cache[novel_id] = _FastOpenAIEmbeddingFunction(
+    _novel_ef_cache[(namespace, novel_id)] = _FastOpenAIEmbeddingFunction(
         api_key=api_key,
         model_name=model_id,
         api_base=base_url or "https://api.openai.com/v1",
@@ -112,21 +116,17 @@ def configure_embedding(
     )
 
 
-async def ensure_embedding_configured(novel_id: int, db) -> None:
-    """从 DB 加载小说的嵌入模型配置到缓存。已缓存则跳过。"""
-    if novel_id in _novel_ef_cache:
-        return
-    from app.models.novel import Novel
+async def _resolve_embedding_entry(ref: str, db):
+    """把「嵌入模型」那个字段解析成 (model_id, api_key, base_url, use_proxy)。
+
+    从 ensure_embedding_configured 里抽出来，好让 RPG 那边复用同一套解析——
+    它读的是 RpgModule.embedding_model_ref，字段名不同，规则一模一样。
+    """
     from app.models.model_library import ModelEntry
     from app.models.api_provider import ApiProvider
     from sqlalchemy import select
 
-    novel = await db.get(Novel, novel_id)
-    if not novel or not novel.embedding_model:
-        return
-
-    # embedding_model 可能是 ModelEntry.id（新方案，精确定位供应商）或旧的 model_id 字符串
-    ref = novel.embedding_model
+    # ref 可能是 ModelEntry.id（新方案，精确定位供应商）或旧的 model_id 字符串
     entry = None
     if ref.isdigit():
         entry = await db.get(ModelEntry, int(ref))
@@ -144,7 +144,7 @@ async def ensure_embedding_configured(novel_id: int, db) -> None:
         )
         entry = result.scalar_one_or_none()
     if not entry:
-        raise ValueError(f"嵌入模型未在模型库中配置或未标记为 embedding: {novel.embedding_model}")
+        raise ValueError(f"嵌入模型未在模型库中配置或未标记为 embedding: {ref}")
 
     api_key = ""
     base_url = ""
@@ -157,16 +157,38 @@ async def ensure_embedding_configured(novel_id: int, db) -> None:
             use_proxy = provider.use_proxy
 
     if not api_key or not base_url:
-        raise ValueError(f"嵌入模型缺少供应商 API Key 或 Base URL: {novel.embedding_model}")
+        raise ValueError(f"嵌入模型缺少供应商 API Key 或 Base URL: {ref}")
 
-    configure_embedding(novel_id, entry.model_id, api_key, base_url, use_proxy)
+    return entry.model_id, api_key, base_url, use_proxy
 
 
-def _get_collection(novel_id: int):
+async def ensure_embedding_for(namespace: str, key_id: int, ref: str, db) -> None:
+    """按 ref 把嵌入函数装进 (namespace, key_id) 这一格。已装过则跳过。"""
+    if (namespace, key_id) in _novel_ef_cache:
+        return
+    if not (ref or "").strip():
+        return
+    model_id, api_key, base_url, use_proxy = await _resolve_embedding_entry(ref.strip(), db)
+    configure_embedding(key_id, model_id, api_key, base_url, use_proxy, namespace)
+
+
+async def ensure_embedding_configured(novel_id: int, db) -> None:
+    """从 DB 加载小说的嵌入模型配置到缓存。已缓存则跳过。"""
+    if ("novel", novel_id) in _novel_ef_cache:
+        return
+    from app.models.novel import Novel
+
+    novel = await db.get(Novel, novel_id)
+    if not novel or not novel.embedding_model:
+        return
+    await ensure_embedding_for("novel", novel_id, novel.embedding_model, db)
+
+
+def _get_collection(novel_id: int, namespace: str = "novel"):
     client = _get_client()
-    ef = _novel_ef_cache.get(novel_id) or _local_default_ef()
+    ef = _novel_ef_cache.get((namespace, novel_id)) or _local_default_ef()
     return client.get_or_create_collection(
-        name=f"novel_{novel_id}",
+        name=f"{namespace}_{novel_id}",
         embedding_function=ef,
         metadata={"hnsw:space": "cosine"},
     )
@@ -201,7 +223,7 @@ def embed_query(novel_id: int, query: str) -> list | None:
     """预计算查询向量，供同一查询的多路检索复用（避免重复调用嵌入端点）。
     失败返回 None，调用方回退到 query_texts 由 Chroma 内部嵌入。"""
     try:
-        ef = _novel_ef_cache.get(novel_id) or _local_default_ef()
+        ef = _novel_ef_cache.get(("novel", novel_id)) or _local_default_ef()
     except ValueError:
         return None
     try:
@@ -249,10 +271,11 @@ def search_similar_with_meta(
     top_k: int = 10,
     where: dict | None = None,
     query_embedding: list | None = None,
+    namespace: str = "novel",
 ) -> list[dict]:
     """语义检索，返回 [{text, metadata, distance}]"""
     try:
-        collection = _get_collection(novel_id)
+        collection = _get_collection(novel_id, namespace)
         results = collection.query(
             **(
                 {"query_embeddings": [query_embedding]}
@@ -285,11 +308,12 @@ def search_similar_with_meta(
 def store_texts_batch(
     novel_id: int,
     items: list[tuple[str, str, dict]],
+    namespace: str = "novel",
 ) -> None:
     """批量写入多段文本到向量库。items: [(doc_id, text, metadata), ...]"""
     if not items:
         return
-    collection = _get_collection(novel_id)
+    collection = _get_collection(novel_id, namespace)
     ids = [item[0] for item in items]
     documents = [item[1] for item in items]
     metadatas = [item[2] for item in items]
@@ -321,18 +345,36 @@ def update_metadata(novel_id: int, doc_id: str, metadata: dict) -> None:
         )
 
 
-def delete_docs(novel_id: int, doc_ids: list[str]) -> None:
+def delete_docs(novel_id: int, doc_ids: list[str], namespace: str = "novel") -> None:
     """按 ID 列表删除向量库中的文档"""
     if not doc_ids:
         return
     try:
-        collection = _get_collection(novel_id)
+        collection = _get_collection(novel_id, namespace)
         collection.delete(ids=doc_ids)
     except Exception:
         logger.warning(
             "向量文档删除失败: novel_id=%s doc_ids=%s",
             novel_id,
             doc_ids,
+            exc_info=True,
+        )
+
+
+def delete_where(novel_id: int, where: dict, namespace: str = "novel") -> None:
+    """按 metadata 条件删除。回溯要删的是「这条消息之后的全部」，而一条消息会
+    摊成好几个 doc（原文一个、每条事实一个），id 数不出来，只能按条件删。"""
+    if not where:
+        return
+    try:
+        collection = _get_collection(novel_id, namespace)
+        collection.delete(where=where)
+    except Exception:
+        logger.warning(
+            "向量文档条件删除失败: namespace=%s id=%s where=%s",
+            namespace,
+            novel_id,
+            where,
             exc_info=True,
         )
 
@@ -381,17 +423,18 @@ def add_with_embeddings(
         raise
 
 
-def delete_novel_collection(novel_id: int) -> None:
+def delete_novel_collection(novel_id: int, namespace: str = "novel") -> None:
     client = _get_client()
     try:
-        client.delete_collection(f"novel_{novel_id}")
+        client.delete_collection(f"{namespace}_{novel_id}")
     except Exception:
         logger.warning(
-            "向量集合删除失败: novel_id=%s",
+            "向量集合删除失败: namespace=%s novel_id=%s",
+            namespace,
             novel_id,
             exc_info=True,
         )
-    _novel_ef_cache.pop(novel_id, None)
+    _novel_ef_cache.pop((namespace, novel_id), None)
 
 
 # ─── 异步包装（避免阻塞事件循环）─────────────────────────────────────────────
@@ -400,8 +443,9 @@ async def astore_text(novel_id: int, doc_id: str, text: str, metadata: dict | No
     await asyncio.to_thread(store_text, novel_id, doc_id, text, metadata)
 
 
-async def astore_texts_batch(novel_id: int, items: list[tuple[str, str, dict]]) -> None:
-    await asyncio.to_thread(store_texts_batch, novel_id, items)
+async def astore_texts_batch(novel_id: int, items: list[tuple[str, str, dict]],
+                             namespace: str = "novel") -> None:
+    await asyncio.to_thread(store_texts_batch, novel_id, items, namespace)
 
 
 async def aembed_query(novel_id: int, query: str) -> list | None:
@@ -412,16 +456,20 @@ async def asearch_similar(novel_id: int, query: str, top_k: int = 3, where: dict
     return await asyncio.to_thread(search_similar, novel_id, query, top_k, where, query_embedding)
 
 
-async def asearch_similar_with_meta(novel_id: int, query: str, top_k: int = 10, where: dict | None = None, query_embedding: list | None = None) -> list[dict]:
-    return await asyncio.to_thread(search_similar_with_meta, novel_id, query, top_k, where, query_embedding)
+async def asearch_similar_with_meta(novel_id: int, query: str, top_k: int = 10, where: dict | None = None, query_embedding: list | None = None, namespace: str = "novel") -> list[dict]:
+    return await asyncio.to_thread(search_similar_with_meta, novel_id, query, top_k, where, query_embedding, namespace)
 
 
 async def aupdate_metadata(novel_id: int, doc_id: str, metadata: dict) -> None:
     await asyncio.to_thread(update_metadata, novel_id, doc_id, metadata)
 
 
-async def adelete_docs(novel_id: int, doc_ids: list[str]) -> None:
-    await asyncio.to_thread(delete_docs, novel_id, doc_ids)
+async def adelete_docs(novel_id: int, doc_ids: list[str], namespace: str = "novel") -> None:
+    await asyncio.to_thread(delete_docs, novel_id, doc_ids, namespace)
+
+
+async def adelete_where(novel_id: int, where: dict, namespace: str = "novel") -> None:
+    await asyncio.to_thread(delete_where, novel_id, where, namespace)
 
 
 async def aget_all_docs(novel_id: int) -> dict:

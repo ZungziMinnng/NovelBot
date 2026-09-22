@@ -1,22 +1,20 @@
-import { ChevronRight, Clock, MapPin } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import type { RpgModule, RpgNpc, RpgSession, RpgStatDef } from '@/api/client'
 import { following, knownNpcs, npcPlace, onstage } from '../condition'
 import RpgAvatar from '../RpgAvatar'
 import StatBar from '../StatBar'
 import { PANEL } from '../rpgUi'
-import SummaryBlock from './SummaryBlock'
 
 export default function CastTab({
-  sess, module, npcs, statDefs, relDefs, onOpenNpc, onSaveSummary,
+  sess, module, npcs, relDefs, onOpenNpc, onOpenSelf,
 }: {
   sess: RpgSession
   module?: RpgModule
   npcs: RpgNpc[]
-  statDefs: RpgStatDef[]
   relDefs: RpgStatDef[]
   onOpenNpc: (npc: RpgNpc) => void
-  /** 改写你自己那格的长期记忆。每个角色那格在她们各自的档案页里改 */
-  onSaveSummary: (text: string) => Promise<void>
+  /** 点自己那一行，去看自己的档案（数值和「你记得的」都在那儿） */
+  onOpenSelf: () => void
 }) {
   // 没见过也不在场的不列：列出来等于把还没登场的人抖出来。
   // 模拟器例外，那边开局就全员在册（见 knownNpcs）
@@ -24,48 +22,31 @@ export default function CastTab({
 
   return (
     <>
-      <div className={`${PANEL} p-3`}>
+      {/* 你自己也只是名单里的一行，和下面那些人同一个形状——数值、天数时段、
+          「你记得的」全在点进去那一页里。从前这儿是一张永远摊开的大卡，
+          一进这一格先被自己占掉大半屏，名单反而看不见。地点和前几条数值
+          GameHud 上一直挂着，不靠这儿常驻 */}
+      <button
+        onClick={onOpenSelf}
+        className={`${PANEL} w-full text-left p-3 hover:bg-muted/40 transition-colors`}
+      >
         <div className="flex items-center gap-2.5">
-          <RpgAvatar name={sess.char_name || '你'} size="md" />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold truncate">{sess.char_name || '无名者'}</p>
-            <p className="text-xs text-muted-foreground truncate flex items-center gap-1">
-              <MapPin className="w-3 h-3 shrink-0" />
+          <RpgAvatar name={sess.char_name || '你'} size="sm" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium flex items-center gap-1.5">
+              <span className="truncate">{sess.char_name || '无名者'}</span>
+              <span className="text-[10px] px-1 py-0.5 rounded shrink-0
+                bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                主角
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground truncate">
               {sess.location || '不知身在何处'}
             </p>
-            {/* 和顶栏同一条判据：有时段表就有时钟，不看 slot 有没有落格 */}
-            {(sess.time_slots?.length || module?.time_slots?.length || 0) > 0 && (
-              <p className="text-xs text-muted-foreground truncate flex items-center gap-1">
-                <Clock className="w-3 h-3 shrink-0" />
-                第 {sess.day} 天{sess.slot ? ` · ${sess.slot}` : ''}
-              </p>
-            )}
           </div>
+          <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
         </div>
-        {statDefs.length > 0 ? (
-          <div className="mt-3 space-y-2">
-            {statDefs.map(def => (
-              <StatBar key={def.name} def={def} value={Number(sess.stats?.[def.name] ?? def.initial)} />
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
-            这个模组还没定义数值。回模组页的「玩家数值」里加几项，这里就会显示。
-          </p>
-        )}
-        {/* 你自己那格的长期记忆，挂在你自己这张卡上——每个角色那格挂在她们
-            各自的档案页里，位置对得上「谁记得这件事」。它和她们那几格是**并列**
-            的：这一份是你亲身经历过的全部（含单独赶路那些），每轮都注入 */}
-        <div className="mt-3">
-          <SummaryBlock
-            title="你记得的"
-            hint="旧剧情压成的一段话，每轮都喂给模型。改它等于改这一局的前情"
-            empty="还没压过：这一局的经过都还在窗口里，原样记着。"
-            text={sess.summary || ''}
-            onSave={onSaveSummary}
-          />
-        </div>
-      </div>
+      </button>
 
       {/* 「登记在册」写出人数，因为这一格的内容是会长的：玩家得看得出
           名单在变。被提到一句不算登记——那只是让模型拿到了他的设定，
@@ -84,6 +65,9 @@ export default function CastTab({
         const state = sess.npc_states?.[String(npc.id)] || {}
         const isHere = onstage(npc, sess)
         const isFollowing = following(npc, sess)
+        // AI 调度记下的那句。从前只在点进去那一页里露面，于是按完「结束时段」
+        // 界面上什么都不变，玩家以为调度根本没跑
+        const activity = sess.npc_activities?.[String(npc.id)] || ''
         return (
           <button
             key={npc.id}
@@ -109,6 +93,12 @@ export default function CastTab({
                     npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
                   ) || '不知在哪'}
                 </p>
+                {/* 一行封顶、超了截断：这句最长 40 字，摊开会把名单顶散 */}
+                {activity && (
+                  <p className="text-[11px] text-muted-foreground/70 truncate">
+                    最近：{activity}
+                  </p>
+                )}
               </div>
               <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             </div>

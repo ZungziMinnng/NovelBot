@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 import type { RpgTaskProposal } from '@/api/client'
+import { WaitBar } from './rpgUi'
 
 /** 「这几桩事看着办完了？」——照抄小说侧伏笔回收的规矩：模型只有提名权，
  *  改不改状态由玩家逐条点头。默认全勾上，因为提议已经过了一遍复核
@@ -98,6 +99,9 @@ export default function TaskResolutionsModal({
             确认{picked.size > 0 ? `（${picked.size}）` : ''}
           </button>
         </div>
+        {/* 这一下要写库并重拉会话。弹窗期间整个界面被遮住，不画条子的话
+            玩家只能看着一个按钮里的小转圈猜还要等多久 */}
+        {saving && <WaitBar className="px-5 pb-4" />}
       </div>
     </div>
   )

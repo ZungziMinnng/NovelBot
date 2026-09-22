@@ -16,12 +16,14 @@ from app.services.rpg_state import (
     apply_state_delta,
     apply_stats, apply_tweak,
     check_condition, check_full, check_zero, clamp, def_map, for_check_stats,
-    ensure_relation_states, init_relation, init_stats, mark_met, match_npc, note_visited, place_note,
+    ensure_relation_states, init_relation, init_stats, mark_fired, mark_met, match_npc, note_visited, place_note,
+    random_movement_ok,
     starting_inventory,
     tier_list, tier_of, visible_defs,
     APPEARANCE_CHARS, APPEARANCE_LIMIT, FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT,
     PLACE_CHARS, PLACE_LIMIT,
     TIER_LABEL_CHARS, TIER_NOTE_CHARS, VISITED_LIMIT,
+    RANK_GAIN_MAX, cap_rank_gain, rank_stat_of,
 )
 
 STAT_DEFS = [
@@ -129,7 +131,7 @@ class TierTests(unittest.TestCase):
         self.assertIsNone(tier_of(spec, 10))
 
     def test_labels_and_notes_are_trimmed_here_so_readers_do_not_each_set_a_cap(self):
-        spec = {"tiers": [{"at": 0, "label": "冷" * 20, "note": "话" * 50}]}
+        spec = {"tiers": [{"at": 0, "label": "冷" * 20, "note": "话" * 200}]}
         got = tier_list(spec)[0]
         self.assertEqual(len(got["label"]), TIER_LABEL_CHARS)
         self.assertEqual(len(got["note"]), TIER_NOTE_CHARS)
@@ -360,6 +362,21 @@ class MarkMetTests(unittest.TestCase):
         sess = _sess(npc_states={"1": {"met": True}})
         mark_met(sess, [1, 2])
         self.assertTrue(sess.npc_states["2"]["met"])
+
+
+class MarkFiredTests(unittest.TestCase):
+    """放过的一次性词条。只追加，重复调用不该长出重复 id。"""
+
+    def test_it_appends_without_duplicating(self):
+        sess = _sess(fired_entries=[7])
+        mark_fired(sess, [7, 12])
+        mark_fired(sess, [12])
+        self.assertEqual(sess.fired_entries, [7, 12])
+
+    def test_an_empty_list_leaves_it_alone(self):
+        sess = _sess(fired_entries=[7])
+        mark_fired(sess, [])
+        self.assertEqual(sess.fired_entries, [7])
 
 
 class NpcNoteTests(unittest.TestCase):
@@ -1135,6 +1152,133 @@ class TweakTests(unittest.TestCase):
         module, sess = _module(), _sess(chronicle=["旧事"])
         apply_tweak(module, sess, stats={"精力": 30}, flags={"开过修改器": True})
         self.assertEqual(sess.chronicle, ["旧事"])
+
+
+class RankGainTests(unittest.TestCase):
+    """等级一轮最多升 1 级。只夹上行——修为被废是正当的剧情。"""
+
+    LEVELS = [{"name": "境界", "initial": 1, "min": 0, "max": 9}]
+
+    def _mod(self, **over):
+        base = {"stat_defs": [dict(d) for d in self.LEVELS], "rank_stat": "境界"}
+        base.update(over)
+        return _module(**base)
+
+    def test_a_single_win_does_not_carry_you_to_the_top(self):
+        module, sess = self._mod(), _sess(stats={"境界": 3})
+        notes = apply_state_delta(module, sess, {"stats": {"境界": 5}})
+        self.assertEqual(sess.stats["境界"], 4)
+        self.assertTrue(any("境界" in n for n in notes))
+
+    def test_losing_everything_is_not_capped(self):
+        # 「修为被废，从 8 掉到 0」是正当的剧情。cap_delta 那道闸是对称的，
+        # 借它实现这条上限就会把这件事也锁成 -1
+        module, sess = self._mod(), _sess(stats={"境界": 8})
+        apply_state_delta(module, sess, {"stats": {"境界": -8}})
+        self.assertEqual(sess.stats["境界"], 0)
+
+    def test_the_author_s_own_step_max_wins_including_zero(self):
+        module = self._mod(stat_defs=[{"name": "境界", "min": 0, "max": 9, "step_max": 3}])
+        sess = _sess(stats={"境界": 3})
+        apply_state_delta(module, sess, {"stats": {"境界": 5}})
+        self.assertEqual(sess.stats["境界"], 6)
+        # 填 0 = 这一项模型一点都不许动，只能靠动作和道具改
+        module = self._mod(stat_defs=[{"name": "境界", "min": 0, "max": 9, "step_max": 0}])
+        sess = _sess(stats={"境界": 3})
+        apply_state_delta(module, sess, {"stats": {"境界": 5}})
+        self.assertEqual(sess.stats["境界"], 3)
+
+    def test_numeric_mode_is_byte_for_byte_unchanged(self):
+        module, sess = self._mod(rank_stat=""), _sess(stats={"境界": 3})
+        self.assertEqual(apply_state_delta(module, sess, {"stats": {"境界": 5}}), [])
+        self.assertEqual(sess.stats["境界"], 8)
+
+    def test_other_stats_are_untouched(self):
+        module = self._mod(stat_defs=STAT_DEFS + [dict(self.LEVELS[0])])
+        sess = _sess(stats={"精力": 10, "境界": 3})
+        apply_state_delta(module, sess, {"stats": {"精力": 40, "境界": 5}})
+        self.assertEqual(sess.stats["精力"], 50)
+        self.assertEqual(sess.stats["境界"], 4)
+
+    def test_the_author_s_module_json_comes_out_untouched(self):
+        """def_map 返回的是 module.stat_defs 里同一批 dict 的引用。
+
+        原地往里塞一个 step_max，只要同一请求里别处 setattr(module, "stat_defs")
+        （编辑器保存、向导回填都会），那个凭空多出来的值就被持久化了。
+        """
+        module = self._mod()
+        before = [dict(d) for d in module.stat_defs]
+        apply_state_delta(module, _sess(stats={"境界": 3}), {"stats": {"境界": 5}})
+        self.assertEqual(module.stat_defs, before)
+
+    def test_settling_the_same_turn_twice_still_only_gives_one_level(self):
+        module, sess = self._mod(), _sess(stats={"境界": 3})
+        apply_state_delta(module, sess, {"stats": {"境界": 5}})
+        self.assertEqual(sess.stats["境界"], 4)
+
+    def test_the_pure_function_on_its_own(self):
+        module = self._mod()
+        self.assertEqual(cap_rank_gain(module, {"境界": 9})[0], {"境界": RANK_GAIN_MAX})
+        self.assertEqual(cap_rank_gain(module, {"境界": 1})[0], {"境界": 1})
+        self.assertEqual(cap_rank_gain(module, {"境界": -4})[0], {"境界": -4})
+        # 坏值原样放过去，交给下游——这里不是校验的地方
+        for junk in (True, "三级", None, [1]):
+            self.assertEqual(cap_rank_gain(module, {"境界": junk})[0], {"境界": junk})
+        self.assertEqual(cap_rank_gain(module, None), ({}, []))
+        self.assertEqual(cap_rank_gain(module, {"精力": 9})[0], {"精力": 9})
+
+    def test_rank_stat_of_tolerates_a_stub_without_the_attribute(self):
+        # 结算传的是 working 副本，测试里的 module 常是手搓对象
+        self.assertEqual(rank_stat_of(object()), "")
+        self.assertEqual(rank_stat_of(self._mod(rank_stat="  境界  ")), "境界")
+
+
+class RandomMovementOkTests(unittest.TestCase):
+    """随机移动的三张判据。三处调用点共用这一个函数，所以在这儿钉组合。"""
+
+    def _npc(self, **over):
+        base = {
+            "name": "赫敏", "random_movement": True,
+            "random_movement_slots": [], "random_movement_places": [],
+        }
+        base.update(over)
+        return RpgNpc(module_id=1, **base)
+
+    def test_no_whitelist_means_no_restriction(self):
+        npc = self._npc()
+        self.assertTrue(random_movement_ok(npc, "晚"))
+        self.assertTrue(random_movement_ok(npc, "晚", "任何地方"))
+        # 没勾随机移动一律不动，这是最外面那道
+        self.assertFalse(random_movement_ok(self._npc(random_movement=False), "晚", "图书馆"))
+        self.assertFalse(random_movement_ok(None, "晚", "图书馆"))
+
+    def test_the_slot_whitelist(self):
+        npc = self._npc(random_movement_slots=["晚", " 早 "])
+        self.assertTrue(random_movement_ok(npc, "晚"))
+        self.assertTrue(random_movement_ok(npc, "早"))
+        self.assertFalse(random_movement_ok(npc, "中"))
+        self.assertFalse(random_movement_ok(npc, ""))
+
+    def test_the_place_whitelist(self):
+        npc = self._npc(random_movement_places=["图书馆", " 禁林 "])
+        self.assertTrue(random_movement_ok(npc, "晚", "图书馆"))
+        self.assertTrue(random_movement_ok(npc, "晚", "禁林"))
+        self.assertFalse(random_movement_ok(npc, "晚", "寝室"))
+        # place 留空是「只问准不准动」，这时白名单不参与
+        self.assertTrue(random_movement_ok(npc, "晚"))
+
+    def test_both_whitelists_must_hold(self):
+        npc = self._npc(random_movement_slots=["晚"], random_movement_places=["图书馆"])
+        self.assertTrue(random_movement_ok(npc, "晚", "图书馆"))
+        self.assertFalse(random_movement_ok(npc, "中", "图书馆"))
+        self.assertFalse(random_movement_ok(npc, "晚", "寝室"))
+
+    def test_a_stub_without_the_columns_behaves_like_no_whitelist(self):
+        # 老库的行、以及测试里的手搓对象都可能缺这两列
+        class Stub:
+            random_movement = True
+
+        self.assertTrue(random_movement_ok(Stub(), "晚", "图书馆"))
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ from app.schemas.rpg import (
     RpgWizardChatIn, RpgWizardExtractIn, RpgWizardExtractOut, RpgWizardFullIn,
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
 )
-from app.services import comfyui, llm_json, rpg_image, rpg_settlement
+from app.services import comfyui, llm_json, rpg_image, rpg_settlement, rpg_vectors, vector_store
 from app.services.rpg_memory import invalidate_summaries
 from app.services.rpg_operation import exclusive_session
 from app.services.rpg_context import (
@@ -1199,6 +1199,10 @@ async def delete_place_note(
 @exclusive_session
 async def delete_session(session_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     sess = await _get_owned_session(db, session_id, user)
+    # 向量库整格删掉。留着的是玩家已经删掉的那一局的原文，既是垃圾也是用户数据
+    module = await db.get(RpgModule, sess.module_id)
+    if (getattr(module, "embedding_model_ref", "") or "").strip():
+        vector_store.delete_novel_collection(sess.id, rpg_vectors.NAMESPACE)
     await db.execute(delete(RpgMessage).where(RpgMessage.session_id == sess.id))
     await db.execute(delete(RpgSave).where(RpgSave.session_id == sess.id))
     await db.delete(sess)
@@ -1228,8 +1232,10 @@ SNAPSHOT_FIELDS = (
     # 待说的断场点。同理：读档回到瞬移之前，下一轮 prompt 里不该还挂着一句
     # 「你离开过那儿」——而那次离开已经被退回去了
     "scene_break_from",
-    # AI 调度的产物。不回滚的话读档之后角色卡上还挂着「未来」的那句行动
-    "npc_activities",
+    # AI 调度的产物。不回滚的话读档之后角色卡上还挂着「未来」的那句行动。
+    # 那条流水跟着一起回滚，同理：读档回到第 2 天，档案里不该还留着第 4 天
+    # 她在忙什么——而那两天已经被退回去了
+    "npc_activities", "npc_activity_log",
     # 每个人的经历和整局的关系转折。这两样只追加、从不改写，所以不回滚的后果
     # 比别的字段更难看：读档回到表白之前，经历里还写着那天她说了什么——
     # 而那一晚已经被你退回去重来了
@@ -1256,6 +1262,9 @@ SNAPSHOT_FIELDS = (
     # flag 的立起日期。必须跟着 flags 一起回滚，否则读档回到那件事之前，
     # flags 里没了它、日期却还留着，重新触发时「之后三天」当场就满足了
     "flag_days",
+    # 已经放过的一次性词条。**这就是「重新武装」的唯一入口**——读档回到那段
+    # 剧情发生之前，它就该能再放一次；不回滚的话那一段永远回不来了
+    "fired_entries",
 )
 AUTO_SAVE_KEEP = 30
 
@@ -1265,7 +1274,8 @@ AUTO_SAVE_KEEP = 30
 SNAPSHOT_DEFAULTS = {
     "time_slots": [], "slot": "", "day": 1, "chronicle": [], "visited": [],
     "npc_notes": {}, "npc_appearance": {}, "thread_summaries": {}, "thread_upto": {},
-    "npc_activities": {}, "npc_places": {}, "npc_random_places": {}, "place_notes": {},
+    "npc_activities": {}, "npc_activity_log": {},
+    "npc_places": {}, "npc_random_places": {}, "place_notes": {},
     # 加这两列之前存的档：补空 = 那时候一条经历、一条转折都没有，和没有这两列时一致
     "npc_history": {}, "npc_milestones": [],
     # 老快照里没有跟随名单。补空 = 谁都没跟着，和加这一列之前逐字一致
@@ -1279,6 +1289,9 @@ SNAPSHOT_DEFAULTS = {
     # 老快照里没有 flag 日期。补空字典 = 那些 flag 没记过日期，
     # after_days 条件判不过，和加这一列之前的行为一致
     "flag_days": {},
+    # 老快照里没有已放过的名单。补空 = 谁都没放过，一次性词条在读回来的老档里
+    # 还能再放一次。宁可多放一次也不能凭空吞掉一段没发生过的剧情
+    "fired_entries": [],
     # 老快照里没有这个起跳点。补空串 = 没有待补的时间，上下文里那句话说都不说，
     # 和加这一列之前逐字一致
     "time_jump_from": "",
@@ -1379,6 +1392,12 @@ async def _rewind_to_save(db: AsyncSession, sess: RpgSession, save: RpgSave) -> 
         RpgMessage.session_id == sess.id,
         RpgMessage.id > save.before_message_id,
     ))
+    # 向量库跟着回退。不删的话被退回去的「未来」还躺在里面，下一轮照样检索得
+    # 回来，模型会照着写玩家没经历过的事——和上面那句 summary 必须一起回滚
+    # 是同一条理由。vector_upto_id 不在 SNAPSHOT_FIELDS 里（它是索引指针不是
+    # 游戏状态），所以在这儿显式退
+    module = await db.get(RpgModule, sess.module_id)
+    await rpg_vectors.forget_after(sess, module, save.before_message_id)
     state = save.state or {}
     for identity, fields in state.get("_message_edits", {}).items():
         message = await db.get(RpgMessage, int(identity))
@@ -1965,7 +1984,9 @@ async def delete_message(message_id: int, user: CurrentUser, db: AsyncSession = 
     row = await db.get(RpgMessage, message_id)
     if not row:
         raise HTTPException(status_code=404, detail="消息不存在")
-    await _get_owned_session(db, row.session_id, user)
+    sess = await _get_owned_session(db, row.session_id, user)
+    module = await db.get(RpgModule, sess.module_id)
+    await rpg_vectors.forget_message(sess, module, row.id)
     await db.delete(row)
     await db.commit()
     return {"ok": True}
@@ -2006,6 +2027,11 @@ async def advance_time(
     角色勾了「AI 调度」会重记一句「她最近在做什么」。那时的花费和等待都写在
     按钮的提示里。
 
+    **两样都勾上时这个接口会串行调两次模型**，不再是毫秒级的。所以：前端那边
+    给它单独写了超时（默认 30 秒盖不住），这边两次调用各自有 AUX_CALL_TIMEOUT
+    夹着——不夹的话卡住的是整局，租约心跳会替那次调用一直续期，玩家再点什么
+    都是 409。
+
     角色调度补在这里，是因为它只该在**时段翻篇时**跑一次，而这颗按钮是玩家
     推时段最主要的入口——回合里那一处只管「这一轮把格子用完了」的情况。
     """
@@ -2030,18 +2056,25 @@ async def advance_time(
     sess.updated_at = datetime.utcnow()
     await db.commit()
 
-    # 简报在写事务提交之后才调模型：这个项目的铁律是写锁绝不跨 LLM 调用。
-    # 简报自己另开一条连接写大事记，写完再把这个 sess 刷回来看新值
-    if module is not None and module.offscreen_brief:
-        facts = facts + await rpg_turn.offscreen_brief(session_id, was)
-
+    # 两次调用都在写事务提交之后才发生：这个项目的铁律是写锁绝不跨 LLM 调用。
+    # 各自另开一条连接写自己那几列，写完最后把这个 sess 刷回来看新值。
+    #
+    # **调度必须排在简报前面**，顺序是有后果的：随机移动是调度那一步写的，
+    # 简报的名单里要带上每个人此刻在哪。反过来的话简报读到的是移动前的位置，
+    # 同一格里大事记写着「韩曼宁在家洗衬衫」、侧栏却显示她在楼道
+    #
     # 时段翻篇了，不在跟前的人该换一句「最近在做什么」。engaged 传空集：按按钮
     # 时没有「这一轮提到了谁」可言，勾了调度的闲人都该被重记一次。
+    # from_clock 告诉它这次不是回合，别拿「最后一条正文」当保护名单——
+    # 按按钮不产生正文，那条消息会一直停在原地（理由写在它的 protected_ids 那儿）。
     # 失败不上抛——时钟已经提交了，为一句背景描写把整次推时段变成 500 不划算
     try:
-        await rpg_turn.idle_npc_activities(session_id, set())
+        await rpg_turn.idle_npc_activities(session_id, set(), from_clock=True)
     except Exception:
         logger.exception("RPG 局 %s 推时段后的角色调度失败", session_id)
+
+    if module is not None and module.offscreen_brief:
+        facts = facts + await rpg_turn.offscreen_brief(session_id, was)
 
     await db.refresh(sess)
     return RpgAdvanceOut(session=sess, facts=facts)
@@ -2300,7 +2333,7 @@ async def stream_turn(
 
     async def event_stream():
         turn = rpg_turn.run_turn(
-            session_id, user_message_id, content, req.attr,
+            session_id, user_message_id, content, req.attr, req.opponent,
             action_id=req.action_id, item_name=req.item_name, item_qty=req.item_qty,
             skill_name=req.skill_name, move_to=move_target,
             target_npc=req.target_npc,

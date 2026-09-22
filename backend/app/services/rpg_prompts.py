@@ -18,18 +18,18 @@ PROMPTS = {
     },
     "rpg_adjudicate.jinja2": {
         "label": "行动裁决",
-        "description": "判断玩家的行动要不要判定、看哪一项数值、有多难。难度只能从五个档位里选，成功率由模组的档位表定死——改动时请保留这一点，否则同一件事的难度会每轮乱跳。判定默认是关着的，只有在模组里手动打开才会走这个模板。",
-        "variables": {"action": "玩家这一轮的输入", "stats": "玩家数值表", "location": "当前位置", "recent": "最近一段剧情", "ledger": "本局此前的判定记录，每项含 key、attr、band", "roster": "模组登记过的角色名单，一行一个，用来把「宗主」「我娘」这类称呼还原成名字"},
+        "description": "判断玩家的行动要不要判定、看哪一项数值、有多难。难度只能从五个档位里选，成功率由模组的档位表定死——改动时请保留这一点，否则同一件事的难度会每轮乱跳。判定默认是关着的，只有在模组里手动打开才会走这个模板。**开了对抗的模组还要保留 opponent 这个输出字段**：你这份里没有它，模型就永远不报对手，等级/数值对抗一次都不会生效，而设置页上它看着是开着的。",
+        "variables": {"action": "玩家这一轮的输入", "stats": "玩家数值表", "location": "当前位置", "recent": "最近一段剧情", "ledger": "本局此前的判定记录，每项含 key、attr、band", "roster": "模组登记过的角色名单，一行一个，用来把「宗主」「我娘」这类称呼还原成名字", "opposed": "在场、作者给填了能力数值的人，每项含 name、note（那几项数值长什么样）。没人填过就是空的，整块不出现"},
     },
     "rpg_judgement.jinja2": {
         "label": "判定结果注入",
         "description": "把判定结果告诉叙事模型。这一段会插在你那句话的最前面，是全局最要紧的一块——建议保留「不可更改」和禁用含糊词的要求，否则模型会把失败写成成功。",
-        "variables": {"intent": "归一化后的行动描述", "attr": "检定的数值名", "rate": "成功率（%）", "dice": "掷出的点数，关掉随机时为 0", "outcome_label": "结果档位（大成功/成功/险胜/失败/大失败）", "guidance": "该档位对应的写法提示，由后端生成"},
+        "variables": {"intent": "归一化后的行动描述", "attr": "检定的数值名", "rate": "成功率（%）", "dice": "掷出的点数，关掉随机时为 0", "outcome_label": "结果档位（大成功/成功/险胜/失败/大失败）", "guidance": "该档位对应的写法提示，由后端生成", "opponent": "这一次对上的角色名，没有对抗时为空", "opposed_note": "双方比的是哪一项、各是多少（「境界 金丹 对 元婴」），没比过就为空"},
     },
     "rpg_settle.jinja2": {
         "label": "回合结算",
         "description": "从刚写出的剧情里读出状态变化，并顺带给出三条建议行动。请保持 JSON 输出格式和字段名，后端按字段名解析。数值名不在模组定义里的会被丢弃。",
-        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "outcome_failed": "这一轮是不是判定失败（失败/大失败）。为真时多一句「失败必须留下代价」——后端也会按这一条校验，空结算会被打回重做", "stats": "玩家当前数值表", "location": "当前位置", "place_note": "这个地方已经记下的那一句近况，提示模型别重复写", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）、relations（这个人当前的关系数字）、appearance（这一局已经被改写掉的外貌）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "step_caps": "作者定了每轮变化上限的数值，{名字: 上限}，没定过的不在里面", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算", "chronicle": "已经传开的事，最近几条，提示模型不要重复记录", "tasks": "手上还没办完的事，每项含 name、goal（怎样才算办完）；模型只能在这份清单里提议收线", "has_clock": "这个模组有没有时段。只有有时段时才问模型「这一幕收尾了吗」（scene_wrapped）"},
+        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "outcome_failed": "这一轮是不是判定失败（失败/大失败）。为真时多一句「失败必须留下代价」——后端也会按这一条校验，空结算会被打回重做", "stats": "玩家当前数值表", "location": "当前位置", "place_note": "这个地方已经记下的那一句近况，提示模型别重复写", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）、relations（这个人当前的关系数字）、appearance（这一局已经被改写掉的外貌）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "step_caps": "作者定了每轮变化上限的数值，{名字: 上限}，没定过的不在里面", "stat_meanings": "作者写的「这一项影响什么」，{名字: 说明}。模型据此判断该往哪边动——不给的话它只会顺着名字字面单向加", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算", "chronicle": "已经传开的事，最近几条，提示模型不要重复记录", "tasks": "手上还没办完的事，每项含 name、goal（怎样才算办完）；模型只能在这份清单里提议收线", "has_clock": "这个模组有没有时段。只有有时段时才问模型「这一幕收尾了吗」（scene_wrapped）"},
     },
     "rpg_suggest.jinja2": {
         "label": "帮我想想",
@@ -49,7 +49,7 @@ PROMPTS = {
     "rpg_activity.jinja2": {
         "label": "角色自由行动",
         "description": "给这一轮没被提到的角色各写一句「最近在做什么」。只在角色卡上勾了「AI 调度」才会走这个模板，默认不调用；写法上最要紧的是不许造新人新地名，也不许写会影响玩家的重大事件——这些句子会常驻在那个人的设定里。",
-        "variables": {"day": "第几天", "slot": "当前时段名", "location": "玩家所在地点", "recent": "最近一段剧情，只用来看时间对不齐", "npcs": "这一轮没被提到、且开了 AI 调度的角色，每项含 name、place、persona、activity（上次记下的那句）"},
+        "variables": {"day": "第几天", "slot": "当前时段名", "location": "玩家所在地点", "recent": "最近一段剧情，只用来看时间对不齐", "npcs": "这一轮没被提到、且开了 AI 调度的角色，每项含 name、place、persona、activity（上次记下的那句）、destinations（这一格准去的地方，空 = 不准动）、last_place（上一格被挪去的地方，提示模型这一格换一个；没动过就是空的）"},
     },
     "rpg_assist.jinja2": {
         "label": "帮我写（模组编辑）",
@@ -110,9 +110,12 @@ def validate(name: str, content: str) -> None:
             # 而少给一个键 StrictUndefined 会当场炸
             "relations": {"好感": 42},
             "place": "铁匠铺", "persona": "话少", "activity": "在磨刀",
+            "destinations": ["集市", "城门口"], "last_place": "河滩",
             # 已经改写过的外貌，同样只有「回合结算」用得上
             "appearance": {"左手": "齐腕断了，已结痂"},
         }], note_keys=["伤势"], step_caps={"好感": 3},
+        stat_meanings={"好感": "决定她愿不愿意帮你"},
+        opposed=[{"name": "魔尊无涯", "note": "境界 元婴期（4）"}],
         chronicle=["后山挖出了尸首"],
         tasks=[{"name": "送信给老周", "goal": "把信交到老周手上"}],
         max_chars=400, is_generate=True,
@@ -131,10 +134,12 @@ def validate(name: str, content: str) -> None:
     template.render(**values)
     values.update(
         reply_length=0, stats={}, ledger=[], inventory=[], flags={}, npcs=[],
-        note_keys=[], relation_names=[], step_caps={},
+        note_keys=[], relation_names=[], step_caps={}, stat_meanings={},
         location="", recent="", summary="", previous_summary="", scope="", dice=0,
         # 一个模组都可能没登记过角色，roster 空的那条分支要走得到
         roster="",
+        # 99% 的模组走的是这一条：没人填能力数值，整块对抗都不出现
+        opposed=[], opponent="", opposed_note="",
         outcome_label="", outcome_failed=False, engine_note="", chronicle=[], tasks=[],
         is_generate=False, context_blocks=[],
         from_slot="", slot="", has_clock=False, others=[],

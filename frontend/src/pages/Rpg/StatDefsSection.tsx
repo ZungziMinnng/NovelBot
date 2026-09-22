@@ -1,5 +1,5 @@
 import type { RpgModule, RpgStatDef, RpgStatTier } from '@/api/client'
-import { AddRow, DeleteButton, INPUT } from './rpgUi'
+import { AddRow, DeleteButton, INPUT, NumInput } from './rpgUi'
 
 const SELECT = 'border rounded-lg px-2 py-1.5 text-xs bg-background/60 focus:outline-none'
 
@@ -15,7 +15,7 @@ const ON_FULL = ['无', '标记'] as const
 // 后端渲染时还会再截一刀（作者可以从别处粘进来），这里挡是为了让他当场看见
 const EFFECT_MAX = 150
 const LABEL_MAX = 6
-const NOTE_MAX = 20
+const NOTE_MAX = 60
 
 // 导出是给「套动作套装时一键补建缺的数值」用的：补出来的项必须和作者手点
 // 「添加一项」长得一模一样，不能另攒一份默认值
@@ -112,12 +112,10 @@ function StatTable({
               <NumBox label="下限" value={def.min} onChange={v => patch(i, { min: v })} />
               <div>
                 <span className="text-[11px] text-muted-foreground block mb-0.5">上限</span>
-                <input
-                  type="number"
-                  value={def.max ?? ''}
-                  onChange={e => patch(i, {
-                    max: e.target.value === '' ? null : Number(e.target.value) || 0,
-                  })}
+                <NumInput
+                  value={def.max}
+                  onChange={n => patch(i, { max: n })}
+                  allowEmpty
                   placeholder="无"
                   className={`${INPUT} w-20 py-1`}
                   title="留空 = 无上限（钱、声望这种）"
@@ -128,12 +126,12 @@ function StatTable({
                   作者排的那条成长曲线直接作废 */}
               <div>
                 <span className="text-[11px] text-muted-foreground block mb-0.5">每轮最多变</span>
-                <input
-                  type="number"
-                  value={def.step_max ?? ''}
-                  onChange={e => patch(i, {
-                    step_max: e.target.value === '' ? null : Math.abs(Number(e.target.value) || 0),
-                  })}
+                <NumInput
+                  value={def.step_max}
+                  onChange={n => patch(i, { step_max: n })}
+                  allowEmpty
+                  // 「一轮最多变多少」是个幅度，负数没有意义
+                  clamp={Math.abs}
                   placeholder="不限"
                   className={`${INPUT} w-20 py-1`}
                   title="只管住 AI 的结算：一轮最多让它动这么多点，超出的直接截掉。动作和道具上写死的加减不受这里限制。填 0 = 这一项只能靠动作和道具改"
@@ -286,10 +284,11 @@ function TierEditor({
           <span className="text-[11px] text-muted-foreground tabular-nums w-16 shrink-0 text-right">
             {typeof tier?.at === 'number' ? rangeOf(tier.at) : '待填'}
           </span>
-          <input
-            type="number"
-            value={typeof tier?.at === 'number' ? tier.at : ''}
-            onChange={e => patch(i, { at: e.target.value === '' ? undefined : Number(e.target.value) })}
+          {/* 档位阈值经常是负的：好感 -50 算「厌恶」正是这一栏要填的东西 */}
+          <NumInput
+            value={typeof tier?.at === 'number' ? tier.at : null}
+            onChange={n => patch(i, { at: n ?? undefined })}
+            allowEmpty
             placeholder="≥"
             className={`${INPUT} w-16 py-1 text-xs`}
             title="到这个数（含）算这一档"
@@ -322,10 +321,10 @@ function NumBox({ label, value, onChange }: { label: string; value: number; onCh
   return (
     <div>
       <span className="text-[11px] text-muted-foreground block mb-0.5">{label}</span>
-      <input
-        type="number"
+      {/* 「下限」走的也是这里，负数是正常值（欠债、负面情绪都能到 -100） */}
+      <NumInput
         value={value}
-        onChange={e => onChange(Number(e.target.value) || 0)}
+        onChange={n => onChange(n ?? 0)}
         className={`${INPUT} w-20 py-1`}
       />
     </div>

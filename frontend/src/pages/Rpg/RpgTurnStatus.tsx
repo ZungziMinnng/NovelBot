@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { Calculator, Dices, Loader2, Search, Sparkles } from 'lucide-react'
+import { WaitBar } from './rpgUi'
 
 /**
  * 一轮 AI 正在忙的时候显示的分阶段提示。
@@ -41,11 +42,16 @@ export default function RpgTurnStatus({
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 6 }}
           className="rounded-2xl border border-primary/15 bg-card/60 backdrop-blur-sm
-            px-5 py-3 text-sm text-muted-foreground flex items-center gap-2"
+            px-5 py-3 text-sm text-muted-foreground space-y-2"
         >
-          <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-          <Icon className="w-3.5 h-3.5" />
-          <span>{config.label}</span>
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+            <Icon className="w-3.5 h-3.5" />
+            <span>{config.label}</span>
+          </div>
+          {/* 转圈之外再加一条：转圈只有十几个像素，藏在一屏文字里很容易被当成
+              装饰。横贯整块的条子才看得出这一轮在跑。它不定长，理由见 WaitBar */}
+          <WaitBar />
         </motion.div>
       )}
     </AnimatePresence>

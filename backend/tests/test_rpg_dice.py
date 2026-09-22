@@ -59,6 +59,123 @@ class ResolveRateTests(unittest.TestCase):
         self.assertEqual(resolve_rate(self.table, "impossible", 10), 55)
 
 
+class OpposedRateTests(unittest.TestCase):
+    """对抗：opposed 换掉「假想对手 10 级」那个基准。
+
+    上面那一整组 ResolveRateTests 一个字都没改，这就是「不传新参数行为不变」
+    的护栏——对抗是加出来的一条路，不是改了原来那条。
+    """
+
+    def setUp(self):
+        self.table = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
+
+    def test_opposing_a_stronger_rival_hurts_a_weaker_one_helps(self):
+        # 敏捷 12 打 14：差 2 点，每点 4% → 55 - 8
+        self.assertEqual(resolve_rate(self.table, "medium", 12, opposed=14), 47)
+        self.assertEqual(resolve_rate(self.table, "medium", 14, opposed=12), 63)
+
+    def test_zero_is_a_real_opponent_not_a_missing_one(self):
+        # 0 是作者明写的「凡人」，不是「没填」。混了的话凡人会比 4 级魔头难打
+        self.assertEqual(resolve_rate(self.table, "medium", 3, opposed=0), 67)
+        self.assertEqual(resolve_rate(self.table, "medium", 3, opposed=None), 27)
+        self.assertNotEqual(
+            resolve_rate(self.table, "medium", 3, opposed=0),
+            resolve_rate(self.table, "medium", 3, opposed=None),
+        )
+
+    def test_opposing_yourself_means_this_stat_does_not_weigh_in(self):
+        # 等级项在没有对手时走这一条：差为 0，只剩档位
+        for level in (1, 3, 9, 50):
+            self.assertEqual(
+                resolve_rate(self.table, "medium", level, opposed=level, per_point=15),
+                55,
+            )
+
+    def test_level_scale_would_die_on_the_default_baseline(self):
+        """这条测的是那个 bug 本身：等级尺不能对 STAT_BASELINE 比。
+
+        境界 3 的人如果落回基准 10，(3-10)*15 = -105，练个功都必败。
+        所以「没有对手」必须走 opposed=自己，不能走 opposed=None。
+        """
+        self.assertEqual(
+            resolve_rate(self.table, "medium", 3, opposed=None, per_point=15), RATE_MIN,
+        )
+        self.assertEqual(
+            resolve_rate(self.table, "medium", 3, opposed=3, per_point=15), 55,
+        )
+
+    def test_per_point_scales_the_gap(self):
+        # 同样差 1，等级每级 15 个百分点，普通数值每点 4 个
+        self.assertEqual(resolve_rate(self.table, "medium", 3, opposed=4, per_point=15), 40)
+        self.assertEqual(resolve_rate(self.table, "medium", 3, opposed=4), 51)
+
+    def test_clamps_still_leave_room_at_both_ends(self):
+        # 差 4 级撞底，但底是 5% 不是 0——越级挑战永远有奇迹
+        self.assertEqual(
+            resolve_rate(self.table, "medium", 1, opposed=5, per_point=15), RATE_MIN,
+        )
+        self.assertEqual(
+            resolve_rate(self.table, "medium", 9, opposed=1, per_point=15), RATE_MAX,
+        )
+
+    def test_garbage_opponent_cancels_the_whole_modifier(self):
+        # 坏值不该算出「玩家那半边算了、对手那半边没算」的怪数字
+        for bad in ("元婴期", object()):
+            self.assertEqual(resolve_rate(self.table, "medium", 12, opposed=bad), 55)
+
+    def test_new_params_are_keyword_only(self):
+        # 第 4 个位置参数是 bias，别让人把对手的等级传进去当难度旋钮
+        with self.assertRaises(TypeError):
+            resolve_rate(self.table, "medium", 3, 0, 4)
+
+
+class LevelLadderTests(unittest.TestCase):
+    """等级阶梯的手感护栏，和 FeelTests 同一个理由。
+
+    这张表就是编辑器里那行阶梯预览要显示的东西。谁想动 rank_per_level
+    的默认值 15、或者动 NARROW_MARGIN，都得先来这儿重新想一遍。
+    """
+
+    PER_LEVEL = 15
+    TABLE = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
+
+    def _rate(self, gap):
+        """gap = 玩家等级 − 对手等级。"""
+        return resolve_rate(
+            self.TABLE, "medium", 5 + gap, opposed=5, per_point=self.PER_LEVEL,
+        )
+
+    def test_the_ladder_authors_will_see_in_the_preview(self):
+        self.assertEqual(
+            {gap: self._rate(gap) for gap in range(-4, 4)},
+            {-4: 5, -3: 10, -2: 25, -1: 40, 0: 55, 1: 70, 2: 85, 3: 95},
+        )
+
+    def test_being_outclassed_is_never_hopeless(self):
+        """险胜档恒定吃 20 个百分点，所以越级挑战不是纯挨打。
+
+        差 3 级仍有三成机会「办成了但付代价」。要「魔尊面前你连出手的
+        资格都没有」就得动 classify，那会影响所有模组，不在这一层解决。
+        """
+        rng = random.Random(20260921)
+        counts = Counter(
+            roll(self._rate(-3), rng=rng)["outcome"] for _ in range(10000)
+        )
+        got = (counts["crit_success"] + counts["success"] + counts["narrow"]) / 10000
+        self.assertGreaterEqual(got, 0.25)
+        self.assertLessEqual(got, 0.35)
+
+    def test_usable_range_is_only_about_three_levels(self):
+        """15/级在 medium 档撞顶撞底的位置：−3…+2 之外就没有分辨率了。
+
+        九重境界的模组里，练气对元婴和练气对大乘手感完全一样。这不是 bug，
+        是 15 这个默认值的固有量程——阶梯预览存在的理由就是让作者看见它。
+        """
+        self.assertEqual(self._rate(-4), self._rate(-8))
+        self.assertEqual(self._rate(3), self._rate(7))
+        self.assertNotEqual(self._rate(-3), self._rate(-2))
+
+
 class ClassifyTests(unittest.TestCase):
     def test_boundaries(self):
         # 掷得越低越好，和成功率同一把尺子

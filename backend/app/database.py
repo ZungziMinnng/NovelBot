@@ -308,9 +308,14 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_npcs ADD COLUMN ai_scheduled BOOLEAN DEFAULT 0",
         "ALTER TABLE rpg_npcs ADD COLUMN random_movement BOOLEAN DEFAULT 0",
         "ALTER TABLE rpg_npcs ADD COLUMN random_movement_slots JSON DEFAULT '[]'",
+        # 随机移动的地点白名单。老库拿到 '[]' = 不限制，和加这一列之前逐字一致
+        "ALTER TABLE rpg_npcs ADD COLUMN random_movement_places JSON DEFAULT '[]'",
         # AI 调度的产物：{"3": "在图书馆翻了一下午旧报纸"}。老库拿到 '{}' =
         # 谁都没被调度过，角色卡上不出现这一行
         "ALTER TABLE rpg_sessions ADD COLUMN npc_activities JSON DEFAULT '{}'",
+        # 上面那句话按时段留的短流水。老库拿到 '{}' = 之前那些格没留过底，
+        # 档案里那一块是空的，接着玩才开始攒
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_activity_log JSON DEFAULT '{}'",
         # 不在场的人想找玩家说的话，等玩家点开。老库拿到 '[]' = 没有任何留言，
         # 侧栏不出现红点，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_inbox JSON DEFAULT '[]'",
@@ -424,6 +429,28 @@ async def _run_migrations() -> None:
         # 纯引擎瞬移之后留给下一轮 prompt 的断场点。老局拿到 '' = 没有待说的断场，
         # 上下文里那句话说都不说，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN scene_break_from VARCHAR(40) DEFAULT ''",
+        # 上下文总闸。老模组拿到 21500 —— 正是原来写死在 rpg_context 里的那个数，
+        # 按 rpg_budget 等比摊下去每块都和从前逐字节相同
+        "ALTER TABLE rpg_modules ADD COLUMN context_budget INTEGER DEFAULT 21500",
+        # 长期记忆的向量召回。老模组拿到 '' = 这条路整个关着，一次嵌入接口都不调，
+        # 召回仍是 BM25 + 词面两路，和加这一列之前一模一样
+        "ALTER TABLE rpg_modules ADD COLUMN embedding_model_ref VARCHAR(100) DEFAULT ''",
+        # 已嵌入到哪条消息。老局拿到 0 = 一条都还没进过向量库，开了向量路之后
+        # 从头补；没开就永远停在 0
+        "ALTER TABLE rpg_sessions ADD COLUMN vector_upto_id INTEGER DEFAULT 0",
+        # 对抗判定。老模组拿到 '' = 数值制，而且在没人填 ability_stats 之前
+        # 对抗物理上不会发生，判定和加这三列之前逐字节相同
+        "ALTER TABLE rpg_modules ADD COLUMN rank_stat VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE rpg_modules ADD COLUMN rank_per_level INTEGER DEFAULT 15",
+        # 稀疏表，{} = 这个人不参与对抗
+        "ALTER TABLE rpg_npcs ADD COLUMN ability_stats JSON DEFAULT '{}'",
+        # 词条名字。老词条拿到 '' = 列表和诊断条回退到按关键词显示，和加这一列
+        # 之前逐字相同
+        "ALTER TABLE rpg_world_entries ADD COLUMN title VARCHAR(100) DEFAULT ''",
+        # 只放一次。老词条拿到 0 = 照旧每轮都参与匹配
+        "ALTER TABLE rpg_world_entries ADD COLUMN once BOOLEAN DEFAULT 0",
+        # 已经放过的一次性词条 id。老局拿到 [] = 谁都没放过
+        "ALTER TABLE rpg_sessions ADD COLUMN fired_entries JSON DEFAULT '[]'",
     ]
     async with engine.begin() as conn:
         for sql in migrations:

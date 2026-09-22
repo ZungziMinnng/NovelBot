@@ -1,5 +1,5 @@
 import type { RpgStatDef } from '@/api/client'
-import { AddRow, DeleteButton, INPUT } from './rpgUi'
+import { AddRow, DeleteButton, INPUT, NumInput } from './rpgUi'
 
 /**
  * 数值增减 {"精力": 20, "资金": -50}。道具的 effects、动作按钮的 effects 和
@@ -44,10 +44,10 @@ export default function EffectEditor({
             >
               {defs.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
             </select>
-            <input
-              type="number"
+            {/* 这一栏负数是常态（掉血、扣钱），所以它是负号被吃掉时最难用的一处 */}
+            <NumInput
               value={amount}
-              onChange={e => onChange({ ...value, [name]: Number(e.target.value) || 0 })}
+              onChange={n => onChange({ ...value, [name]: n ?? 0 })}
               className={`${INPUT} w-24 py-1.5`}
               title="正数是加，负数是减"
             />
