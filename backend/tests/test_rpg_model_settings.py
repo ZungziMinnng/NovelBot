@@ -23,7 +23,7 @@ from app.services.rpg_suggestions import SuggestSources
 
 NEW_FIELDS = (
     "settlement_model_ref", "adjudication_model_ref", "suggestion_model_ref",
-    "activity_model_ref", "offscreen_model_ref", "discovery_model_ref",
+    "activity_model_ref", "discovery_model_ref",
 )
 
 
@@ -37,7 +37,7 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.user = SimpleNamespace(id=1)
         self.module = RpgModule(
             user_id=1, name="Model settings", model_ref="10", fast_model_ref="20",
-            summary_model_ref="30", context_turns=1, offscreen_brief=True,
+            summary_model_ref="30", context_turns=1,
             **{field: str(index + 40) for index, field in enumerate(NEW_FIELDS)},
         )
         self.store.add(self.module)
@@ -91,12 +91,9 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
         async def activity():
             await rpg_turn.idle_npc_activities(self.session.id, set())
 
-        async def offscreen():
-            await rpg_turn.offscreen_brief(self.session.id)
-
         for field, invoke in (
             ("adjudication_model_ref", adjudicate), ("suggestion_model_ref", suggest),
-            ("activity_model_ref", activity), ("offscreen_model_ref", offscreen),
+            ("activity_model_ref", activity),
         ):
             for chosen in (getattr(self.module, field), ""):
                 with self.subTest(field=field, chosen=chosen):

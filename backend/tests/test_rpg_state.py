@@ -14,10 +14,12 @@ from app.services.rpg_state import (
     apply_flags, apply_inventory, apply_npc_appearance, apply_npc_notes,
     apply_place_note, apply_relations,
     apply_state_delta,
-    apply_stats, apply_tweak,
+    apply_slot_table, apply_stats, apply_tweak,
     check_condition, check_full, check_zero, clamp, def_map, for_check_stats,
     ensure_relation_states, init_relation, init_stats, mark_fired, mark_met, match_npc, note_visited, place_note,
-    random_movement_ok,
+    RANDOM_SLOT,
+    random_movement_ok, random_place_expired, random_slots,
+    slot_table,
     starting_inventory,
     tier_list, tier_of, visible_defs,
     APPEARANCE_CHARS, APPEARANCE_LIMIT, FLAG_LIMIT, NOTE_CHARS, NOTE_LIMIT,
@@ -1154,6 +1156,84 @@ class TweakTests(unittest.TestCase):
         self.assertEqual(sess.chronicle, ["旧事"])
 
 
+class SlotTableTweakTests(unittest.TestCase):
+    """改这一局自己那份时段表。玩家唯一的出口。
+
+    存在的理由是一条没有出口的老 bug：建局表单从前无条件把预填的那份发回来，
+    于是每一局开出来就冻住了自己一份拷贝，作者后来给模组加一格，老局永远见
+    不到。真实存档：模组 7 有「中午」，第 12 局的表里没有，而勾了「中午」可
+    随机移动的角色在这一局等于白勾。
+    """
+
+    MOD = ["早晨", "中午", "下午", "傍晚", "深夜"]
+
+    def test_an_empty_list_falls_back_to_the_module(self):
+        # 空列表 = 退回「跟模组走」，而且是活的：作者以后再加一格也跟着变。
+        # **空和 None 必须分得开**，后者是「玩家没碰这一项」
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=["早晨", "下午"], slot="下午")
+        apply_slot_table(module, sess, [])
+        self.assertEqual(sess.time_slots, [])
+        self.assertEqual(slot_table(module, sess), self.MOD)
+
+    def test_not_touching_it_leaves_a_following_session_alone(self):
+        # 没碰这一项的时候不许把「跟模组走」的局冻住——那正是老 bug 干的事
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=[], slot="早晨")
+        apply_tweak(module, sess, stats={"精力": 30})
+        self.assertEqual(sess.time_slots, [])
+
+    def test_a_custom_table_freezes_this_session(self):
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=[], slot="早晨")
+        apply_slot_table(module, sess, ["白天", "黑夜"])
+        self.assertEqual(sess.time_slots, ["白天", "黑夜"])
+
+    def test_the_current_slot_moves_when_it_is_not_in_the_new_table(self):
+        """当前时段被删掉了就挪到第一格，并说一句。
+
+        不挪的话侧栏显示一个表里没有的时段名，而 advance_slot 找不到它会从头
+        数起——玩家看到的是按一下时钟莫名跳回第一格
+        """
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=[], slot="中午")
+        notes = apply_slot_table(module, sess, ["早晨", "深夜"])
+        self.assertEqual(sess.slot, "早晨")
+        self.assertTrue(any("早晨" in n for n in notes))
+
+    def test_a_slot_that_survives_the_edit_is_left_alone(self):
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=[], slot="深夜")
+        self.assertEqual(apply_slot_table(module, sess, ["早晨", "深夜"]), [])
+        self.assertEqual(sess.slot, "深夜")
+
+    def test_duplicate_names_are_folded(self):
+        # 同名两格会让 advance_slot 的 index 永远停在第一次出现的位置，
+        # 时钟从此在前半张表里打转
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=[], slot="早晨")
+        apply_slot_table(module, sess, ["早晨", "深夜", "早晨", " 深夜 "])
+        self.assertEqual(sess.time_slots, ["早晨", "深夜"])
+
+    def test_a_module_without_a_clock_clears_the_slot(self):
+        # 模组自己都没设时段：这一局没有时钟，slot 该是空的，
+        # 否则侧栏挂着一个谁都推不动的时段名
+        module = _module(time_slots=[])
+        sess = _sess(time_slots=["早晨"], slot="早晨")
+        notes = apply_slot_table(module, sess, [])
+        self.assertEqual(sess.slot, "")
+        self.assertTrue(any("没有时段表" in n for n in notes))
+
+    def test_the_real_save_gets_its_missing_slot_back(self):
+        # session 12 的形状：模组五格，这一局冻着四格，少了「中午」
+        module = _module(time_slots=self.MOD)
+        sess = _sess(time_slots=["早晨", "下午", "傍晚", "深夜"], slot="下午")
+        notes = apply_tweak(module, sess, time_slots=[])
+        self.assertIn("中午", slot_table(module, sess))
+        self.assertEqual(sess.slot, "下午")   # 还在新表里，不该被挪
+        self.assertEqual(notes, [])
+
+
 class RankGainTests(unittest.TestCase):
     """等级一轮最多升 1 级。只夹上行——修为被废是正当的剧情。"""
 
@@ -1279,6 +1359,54 @@ class RandomMovementOkTests(unittest.TestCase):
             random_movement = True
 
         self.assertTrue(random_movement_ok(Stub(), "晚", "图书馆"))
+
+    def test_the_schedule_cell_replaces_the_slot_checkboxes(self):
+        """新配法：作息表里填 RANDOM_SLOT 的那一格准动，别的格子一律不准。"""
+        npc = self._npc(
+            random_movement=False,
+            slot_locations={"早": "家", "中": RANDOM_SLOT, "晚": ""},
+        )
+        self.assertTrue(random_movement_ok(npc, "中"))
+        self.assertFalse(random_movement_ok(npc, "早"))
+        # 排了固定地点的格子和空格子一样都不准动，总开关关着也不影响
+        self.assertFalse(random_movement_ok(npc, "晚"))
+
+    def test_the_new_table_wins_over_the_old_checkboxes(self):
+        """作息表里有随机格时旧字段整个不看——否则存一次新配置也撤不掉旧勾选。"""
+        npc = self._npc(
+            random_movement=True, random_movement_slots=["早"],
+            slot_locations={"中": RANDOM_SLOT},
+        )
+        self.assertEqual(random_slots(npc), {"中"})
+        self.assertTrue(random_movement_ok(npc, "中"))
+        self.assertFalse(random_movement_ok(npc, "早"))
+
+    def test_the_old_empty_list_still_means_every_slot(self):
+        """老档语义不能改口径：勾了总开关、没勾任何时段 = 所有时段都可以。"""
+        npc = self._npc(random_movement=True, random_movement_slots=[])
+        self.assertEqual(random_slots(npc), set())
+        self.assertTrue(random_movement_ok(npc, "早"))
+        self.assertTrue(random_movement_ok(npc, "晚"))
+
+    def test_the_sentinel_is_not_a_schedule(self):
+        """只标了随机的人算「没排过作息表」，所以出了可动时段也不清覆盖。
+
+        算成排期就是 random_place_expired 注释里那个原案：她瞬移回常驻地，
+        而那一格又不准动，看着就是再也不出门。
+        """
+        npc = self._npc(random_movement=False, slot_locations={"中": RANDOM_SLOT})
+        self.assertFalse(random_place_expired(npc, "早", "菜市场"))
+        # 真排了一格地点的人照旧清
+        scheduled = self._npc(
+            random_movement=False,
+            slot_locations={"中": RANDOM_SLOT, "早": "家"},
+        )
+        self.assertTrue(random_place_expired(scheduled, "早", "菜市场"))
+
+    def test_no_random_cell_and_no_old_switch_expires_at_once(self):
+        """作者把随机移动整个撤了，留着的覆盖当场作废。"""
+        npc = self._npc(random_movement=False, slot_locations={})
+        self.assertTrue(random_place_expired(npc, "中", "菜市场"))
 
 
 if __name__ == "__main__":

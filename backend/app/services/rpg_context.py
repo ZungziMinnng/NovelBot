@@ -25,8 +25,8 @@ from app.services.rpg_prompts import render
 from app.services import rpg_vectors
 from app.services.rpg_suggestions import SuggestSources
 from app.services.rpg_state import (
-    EFFECT_CHARS, TIER_LABEL_CHARS, check_condition, chronicle_lines, def_map,
-    match_npc, norm_name, npc_activity, place_note, rank_stat_of, tier_list, tier_of,
+    AWAY, EFFECT_CHARS, RANDOM_SLOT, TIER_LABEL_CHARS, check_condition, def_map,
+    match_npc, norm_name, npc_activity, npc_away, npc_bonds_of, npc_offscreen_of, place_note, rank_stat_of, tier_list, tier_of,
 )
 
 # 跟着 NPC_TOKEN_BUDGET 一起从 8000 抬到 9800、12000、20000，这次到 21500
@@ -66,8 +66,6 @@ STATE_TOKEN_BUDGET = SECTION_BASE["state"]
 # _npc_block 的注释一直声称、但 3000 根本兑现不了的目标。
 # 抬这个数必须同时抬 SYSTEM_TOKEN_BUDGET，否则多出来的是从尾巴上抢的
 NPC_TOKEN_BUDGET = SECTION_BASE["npc"]
-# 【外场】是「已经传开的事」，和状态同类：都是已发生的硬事实
-CHRONICLE_TOKEN_BUDGET = SECTION_BASE["chronicle"]
 # 【数值的含义】是作者写死的一小段，每轮一遍。给得紧：它只该是几行钥匙，
 # 真要长篇解释数值该写在世界观里
 MEANING_TOKEN_BUDGET = SECTION_BASE["meaning"]
@@ -90,6 +88,11 @@ CATALOG_DESC_CHARS = 40
 # 都在【此前剧情】里。额度是单人份，由 _npc_history_lines 从尾部裁
 NPC_HISTORY_LINES = 5
 NPC_HISTORY_TOKEN_BUDGET = SECTION_BASE["npc_history"]
+
+# 卡上挂几条幕后往事（见 models.npc_offscreen）。只要最近几条：它和「最近」
+# 一样是这一局活着的近况，攒多了会把作者写的档案挤出这张卡。按条数不按额度：
+# 一条封顶 80 字，三条撑不破卡片
+NPC_OFFSCREEN_LINES = 3
 
 # 【关系的转折】整段的额度。**不并进 NPC_TOKEN_BUDGET**：那一块是「在场每个人
 # 的卡」按人分，这一块是全局共享的一份事实锚按时间裁。混进去之后，话多的那个人
@@ -182,14 +185,6 @@ SUGGEST_CAST_DESC_CHARS = 30
 # 「玩家能说出口的话」要顶回去还是顺着，全看对面是个什么脾气
 SUGGEST_CAST_PERSONA_CHARS = 60
 SUGGEST_PLACE_DESC_CHARS = 30
-
-# 【外场】的抬头。这段固定话术是**口吻的一部分**，不是客套：大事记注入每
-# 一条线，等于所有 NPC 全知，所以必须明说「听说」不等于「亲眼见过」，
-# 否则玩家在密室里做的事，隔着半个镇子的老兵也会知道
-CHRONICLE_PREAMBLE = (
-    "以下是这一带已经传开的事。人尽皆知的传闻，不等于每个人亲眼见过——"
-    "谁在场、谁只是听说，按各自的位置来。"
-)
 
 # 【关系的转折】的抬头。它挡的是这一块最容易出的事：模型看见一条「动心」，
 # 就让当事人张口把这件事说出来。这些是已经发生过的事实，不是桌上的话题——
@@ -386,6 +381,8 @@ def npc_place(
     挪过（places 里有她）时仍然以剧情为准，那正是「你在这儿等我」该有的效果。
     """
     over = str((places or {}).get(str(npc.id)) or "").strip()
+    if over == AWAY:
+        return ""
     if over:
         return over
     if here and followers and npc.id in followers:
@@ -394,7 +391,10 @@ def npc_place(
     now = (slot or "").strip()
     if now:
         at = str(table.get(now) or "").strip()
-        if at:
+        # RANDOM_SLOT 不是地名，是「这一格让她自己走动」的哨兵。她真被挪去哪儿
+        # 记在 npc_places 里（上面那一支已经拦住了），所以走到这儿说明这一格
+        # 调度还没挑过——落回常驻地，同这一格空着的人
+        if at and at != RANDOM_SLOT:
             return at
     return (npc.location or "").strip()
 
@@ -855,6 +855,46 @@ def _npc_history_lines(sess: RpgSession, npc_id: int,
     return [line for line in body.split("\n") if line.strip()]
 
 
+def _offscreen_lines(sess: RpgSession, npc: RpgNpc) -> list[str]:
+    """她和别的 NPC 之间的关系标签，和她知道的几条幕后往事（AI 调度写的）。
+
+    **玩家还没查明的要标出来，并且告诉模型她会瞒**：这张卡是写正文的模型看的，
+    不说的话它会把秘密当成人人皆知的设定，让她当着玩家的面说出口。反过来也不能
+    干脆不给——她自己心里有数，被问起时的慌、躲、编，都得从这里来。
+    """
+    def names(row: dict, other) -> str:
+        # 名字是写入那一刻快照的，这里手上没有名册
+        return str((row.get("names") or {}).get(str(other)) or "某人")
+
+    lines, hidden = [], False
+    for row in npc_bonds_of(sess, npc.id):
+        other = row["b"] if row.get("a") == npc.id else row["a"]
+        secret = not row.get("exposed")
+        hidden |= secret
+        lines.append(f"和{names(row, other)}：{row.get('label')}" + ("（玩家还不知道）" if secret else ""))
+    events = []
+    for row in npc_offscreen_of(sess, npc.id)[-NPC_OFFSCREEN_LINES:]:
+        when = f"第{row.get('day')}天{row.get('slot') or ''}，在{row.get('place') or '某处'}"
+        if npc.id in (row.get("a"), row.get("b")):
+            other = row["b"] if row.get("a") == npc.id else row["a"]
+            head = f"{when}和{names(row, other)}"
+        else:
+            head = f"{when}撞见{names(row, row.get('a'))}和{names(row, row.get('b'))}"
+        secret = not row.get("exposed")
+        hidden |= secret
+        events.append(f"- {head}：{row.get('content')}" + ("（玩家还不知道）" if secret else ""))
+    if events:
+        lines.append("幕后（玩家没看见的）：\n" + "\n".join(events))
+    if hidden:
+        lines.append(
+            "标着「玩家还不知道」的，是她心里有数、玩家没看见的事。她不会主动说；"
+            "被问起时按她的性格遮掩、搪塞或撒谎，除非玩家拿出实据、当场撞破，"
+            "或者有知情的人说漏。旁白也不许替她说破，只能写她藏不住的痕迹"
+            "（神色、衣着、手机、说辞前后对不上）。"
+        )
+    return lines
+
+
 def _one_npc(
     npc: RpgNpc, sess: RpgSession, specs: dict, examples: bool, profile: bool,
     history_budget: int = NPC_HISTORY_TOKEN_BUDGET,
@@ -931,6 +971,8 @@ def _one_npc(
     place = npc_place(npc, sess.slot, sess.npc_places, sess.npc_followers, here)
     if here and place and norm_name(place) != norm_name(here):
         lines.append(f"此刻不在你跟前：她在{place}。不要让她在这一段里出场、说话或现身。")
+    elif npc_away(sess, npc.id):
+        lines.append("此刻不在你跟前：她已经离开，不知去向。除非剧情写她回来，不要让她出场、说话或现身。")
     # AI 调度替她写的「最近在做什么」。她不在场时在别处自己过，玩家下回撞见
     # 她得看得出这段日子没白过——不然调度就只是个后台空转的计数器。
     # 紧跟在「眼下」后面：两行是一类东西（这一局里活着的近况），
@@ -938,6 +980,7 @@ def _one_npc(
     activity = npc_activity(sess, npc.id)
     if activity:
         lines.append(f"最近：{activity}")
+    lines.extend(_offscreen_lines(sess, npc))
     # 这个人身上过了什么事（只追加的流水，见 models.RpgSession.npc_history）。
     # 排在「眼下」「最近」之后：那两行说「现在什么样」，这一段说「发生过什么」，
     # 越靠后越像背景；但仍排在对话示例之前，理由同 notes——
@@ -1173,6 +1216,45 @@ def _inject_by_depth(messages: list[dict], entries: list[RpgWorldEntry]) -> None
     for idx, blocks in by_index.items():
         note = "【世界设定】\n" + "\n\n".join(blocks)
         messages[idx]["content"] = f"{note}\n\n{messages[idx]['content']}"
+
+
+# 叙事示例最多发几对：它只是定调子，多了就是拿示例挤正文的预算
+_NARRATION_EXAMPLE_LIMIT = 3
+_EXAMPLE_END = "（以上几轮只是文风示范，人物与情节和本局无关。以下是本局的正式内容。）"
+
+
+def narration_example_turns(module) -> list[dict]:
+    """模组的叙事示例摊成 few-shot 消息。两边都有字才算一对；老模组没这列 = 空。"""
+    turns: list[dict] = []
+    for row in getattr(module, "narration_examples", None) or []:
+        if not isinstance(row, dict):
+            continue
+        user = str(row.get("user") or "").strip()
+        assistant = str(row.get("assistant") or "").strip()
+        if not user or not assistant:
+            continue
+        turns.append({"role": "user", "content": user})
+        turns.append({"role": "assistant", "content": assistant})
+        if len(turns) >= _NARRATION_EXAMPLE_LIMIT * 2:
+            break
+    return turns
+
+
+def _splice_examples(messages: list[dict], turns: list[dict]) -> None:
+    """示例轮插在 system 之后，原地改 messages。
+
+    示例以 assistant 收尾，后面紧跟的若也是 assistant（窗口第一条是上一轮正文），
+    Anthropic/Gemini 都不认两条挨着的 assistant，所以补一条界碑 user；后面是 user
+    就把界碑并进它开头。界碑同时划清示例和本局，免得模型把示例里的人当成本局出场过的。
+    """
+    if not turns:
+        return
+    messages[1:1] = turns
+    after = 1 + len(turns)
+    if after < len(messages) and messages[after]["role"] == "user":
+        messages[after]["content"] = f"{_EXAMPLE_END}\n\n{messages[after]['content']}"
+    else:
+        messages.insert(after, {"role": "user", "content": _EXAMPLE_END})
 
 
 def facts_block(facts: list[str]) -> str:
@@ -1501,7 +1583,6 @@ def milestone_block(sess: RpgSession, budget: int = MILESTONE_TOKEN_BUDGET) -> s
 
     截断只作用在条目上、标题和抬头单独拼：整段丢进 truncate 的话，超预算时
     keep_end 砍掉的正好是开头那两行，模型会收到一串没有抬头的裸条目。
-    （注：上面 chronicle_block 是老写法，有同样的问题，这次没动它。）
     """
     rows = [
         entry for entry in (sess.npc_milestones or [])
@@ -1826,7 +1907,7 @@ PROTECTED_SECTIONS = frozenset({"gm", "rules", "state", "summary", "memories"})
 
 # 超预算时整块丢的顺序，最不要紧的排最前。叙事样例只影响文笔，丢了还能写；
 # 道具与技能排最后，因为丢了它模型就不知道这个模组里有哪些东西存在
-DROP_ORDER = ("sample", "roster", "chronicle", "worldbook", "catalog")
+DROP_ORDER = ("sample", "roster", "worldbook", "catalog")
 
 
 def _fit_sections(sections: list[tuple[str, str]], limit: int) -> tuple[str, list[str]]:
@@ -1884,6 +1965,7 @@ async def build_rpg_messages(
     mode: str = GROUP_MODE,
     private_with: int | None = None,
     action_time: tuple[str, str] | None = None,
+    vector_keys: list[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """组装发给叙事模型的 messages，返回 (messages, diag)。
 
@@ -2053,8 +2135,10 @@ async def build_rpg_messages(
     hop_ids: set[int] = set()
     # 向量那一路只回来一串 key，候选仍从 event_memory 自己的池子里认领——
     # 可见性闸门因此只有那一处。模组没配嵌入模型时这里返回空列表，
-    # 于是 event_memory 的行为和加这条路之前逐字相同
-    vector_keys = await rpg_vectors.search(sess, module, new_input, session)
+    # 于是 event_memory 的行为和加这条路之前逐字相同。
+    # 调用方可以提前查好传进来（run_turn 让它和裁决并发），None = 这里现查
+    if vector_keys is None:
+        vector_keys = await rpg_vectors.search(sess, module, new_input, session)
     memories = event_memory(history, present_set, new_input, budget["memories"],
                             window_ids={m.id for m in window},
                             out_participants=hop_ids,
@@ -2072,22 +2156,11 @@ async def build_rpg_messages(
     if npc_block:
         sections.append(("npc", npc_block))
 
-    # 【外场】排在【在场】之后、【世界设定】之前：整体截断从尾部切，
-    # 大事记是「已经发生过的硬事实」，和状态同类；放最后的话一旦超预算，
-    # 被切掉的正好是跨线记忆——那恰恰是它存在的理由。
-    # keep_end=True 保新弃旧：最近传开的事更可能是这一轮用得上的
-    chronicle = chronicle_lines(sess)
-    chronicle_block = ""
-    if chronicle:
-        chronicle_block = truncate_to_token_budget(
-            "【外场】\n" + CHRONICLE_PREAMBLE + "\n"
-            + "\n".join(f"- {line}" for line in chronicle),
-            budget["chronicle"], keep_end=True,
-        )
-        sections.append(("chronicle", chronicle_block))
-
-    # 【场面】紧跟在【外场】后面：两块都是「不在消息里的背景」，位置的理由也
-    # 一样（整体截断从尾部切，背景要排前面）。差别是【外场】讲的是传开的传闻，
+    # 【外场】（大事记）2026-09-29 停掉了：结算从没往里写进过一条「传开的事」，
+    # 常驻的只有移动/换日流水和已删外场简报的残留，每轮白占几百到上千 token。
+    # 列还在库里，不再读也不再写
+    #
+    # 【场面】是「不在消息里的背景」，排前面的理由：整体截断从尾部切。
     # 这一块讲的是眼前这一幕——地点长什么样、谁站在这里
     #
     # **必须在扫完 scan_text 之后**才拼：地点描述扫进关键词的话，写地窖的模组
@@ -2107,9 +2180,23 @@ async def build_rpg_messages(
         )))
 
     # 叙事样例只作为文字引用，不做真实 few-shot 轮：那会让模型学着
-    # 连玩家那一侧一起写，正是酒馆群聊给对话示例降级的同一个理由
+    # 连玩家那一侧一起写，正是酒馆群聊给对话示例降级的同一个理由。
+    # 样例常是从小说里取来的第三人称，不说明的话会跟 GM 规则里的人称互相拉扯
     if (module.narration_sample or "").strip():
-        sections.append(("sample", "【叙事样例】\n" + module.narration_sample.strip()))
+        sections.append((
+            "sample",
+            "【叙事样例】\n（只学腔调和节奏，人称以指令为准）\n" + module.narration_sample.strip(),
+        ))
+    # 叙事示例是真 few-shot 轮（见 _splice_examples），这里只留一句说明。
+    # key 同样用 sample：超预算时和叙事样例一起最先丢——丢的只是说明，示例轮本身
+    # 已经从 system 预算里扣掉了，不参与丢块
+    example_turns = narration_example_turns(module)
+    if example_turns:
+        sections.append((
+            "sample",
+            "【文风示范】对话开头的几轮问答是文风示范：只学笔法和节奏，"
+            "其中的人物、地点、情节都与本局无关，不要引用。",
+        ))
 
     # 概要按格子注入，名单跟窗口用**同一份** present_npcs 而不是 here：那类
     # 一个地点都没建的模组里 here 是空的，拿 here 拼的话她的原文发了、她那份
@@ -2142,8 +2229,10 @@ async def build_rpg_messages(
     scene_anchor = current_scene_block(sess, here, mode, action_time)
 
     anchor_budget = estimate_tokens(scene_anchor) + 2
+    # 示例轮在消息流里，不在 system 里，但占的是同一份总额度
+    example_budget = sum(estimate_tokens(t["content"]) for t in example_turns)
     system_content, dropped = _fit_sections(
-        sections, max(1, budget["system"] - anchor_budget),
+        sections, max(1, budget["system"] - anchor_budget - example_budget),
     )
     system_content = f"{system_content}\n\n{scene_anchor}"
 
@@ -2187,6 +2276,9 @@ async def build_rpg_messages(
     jump_block = time_jump_block(sess, action_time)
     if jump_block:
         messages[-1]["content"] = f"{jump_block}\n\n{messages[-1]['content']}"
+    # 示例轮最后插：深度注入的坐标从尾部数、上面几块都写在 messages[-1]，
+    # 插在开头碰不到它们；界碑若并进最后那条，也要排在所有本局注入之前
+    _splice_examples(messages, example_turns)
 
     diag = {
         "system_tokens": estimate_tokens(system_content),
@@ -2203,7 +2295,6 @@ async def build_rpg_messages(
         # 调 MILESTONE_TOKEN_BUDGET 时看这个数
         "milestone_tokens": estimate_tokens(milestones),
         "roster_tokens": estimate_tokens(roster),
-        "chronicle_tokens": estimate_tokens(chronicle_block),
         # 【场面】那一段的字数。它不再随「进没进私聊线」跳变——线没了，
         # 它每轮都在，大小只跟地点描述写多长有关
         "scene_tokens": estimate_tokens(scene),

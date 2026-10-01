@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import {
   ArrowLeft, Loader2, Plus, Trash2, Beer, BookMarked, Play, X,
   UserRound, Clapperboard, Settings2, ChevronDown, ImagePlus, ScrollText,
-  MessagesSquare, Pin, BookmarkPlus, Eraser, Check, Sparkles,
+  MessagesSquare, Pin, BookmarkPlus, Eraser, Check, Sparkles, Library,
 } from 'lucide-react'
 import {
   tavernApi, modelLibraryApi, modelSelectValue, type ModelEntry, type TavernAssistField, type TavernCard as Card, type TavernWorldEntry,
@@ -13,6 +13,7 @@ import {
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
+import StylePickerModal from '@/components/StyleLibrary/StylePickerModal'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import CardAvatar from './CardAvatar'
 import CardMultiSelect from './CardMultiSelect'
@@ -111,6 +112,7 @@ export default function TavernCard() {
 
   const [form, setForm] = useState(EMPTY)
   const [saving, setSaving] = useState(false)
+  const [stylePickerOpen, setStylePickerOpen] = useState(false)
 
   const { data: card } = useQuery({
     queryKey: ['tavern-card', cardId],
@@ -210,6 +212,30 @@ export default function TavernCard() {
               desc="给两三组问答样例，角色的腔调会立刻贴上去。"
               icon={MessagesSquare}
             >
+              <div className="flex justify-end mb-2">
+                <button
+                  type="button"
+                  onClick={() => setStylePickerOpen(true)}
+                  className="text-xs px-2 py-1 border rounded-md hover:bg-muted inline-flex items-center gap-1"
+                >
+                  <Library className="w-3.5 h-3.5" />
+                  从文风库取用
+                </button>
+              </div>
+              {stylePickerOpen && (
+                <StylePickerModal
+                  mode="tavern"
+                  targetName={form.name}
+                  // {{user}} 出库时换成玩家名：跟角色搭话的那个人对应到它，改 persona 也跟着变
+                  nameOptions={[form.name, '{{user}}'].filter(Boolean)}
+                  onApply={r => {
+                    if (r.examples?.length) {
+                      set('dialogue_examples', [...(form.dialogue_examples || []), ...r.examples])
+                    }
+                  }}
+                  onClose={() => setStylePickerOpen(false)}
+                />
+              )}
               <ExampleTurnsEditor
                 variant="dialogue"
                 value={form.dialogue_examples || []}

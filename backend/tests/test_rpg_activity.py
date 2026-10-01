@@ -10,16 +10,18 @@
 4. 生成失败不能拖垮这一轮（它排在 done 之前，抛出去整轮就报错了）。
 """
 import asyncio
+import shutil
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import database
 from app.agents import rpg_turn
-from app.api.routes.rpg import update_npc
+from app.api.routes.rpg import advance_time, update_npc
 from app.database import Base
 from app.models import sensitive_word, text_replace_backup, llm_usage
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg  # noqa: F401
@@ -28,6 +30,7 @@ from app.schemas.rpg import RpgNpcCreate, RpgNpcOut, RpgNpcUpdate
 from app.services.rpg_context import here_npcs, npc_place
 from app.services.rpg_state import (
     ACTIVITY_CHARS, ACTIVITY_LOG_LINES, apply_npc_activity, npc_activity,
+    slots_in_place,
 )
 
 STAT_DEFS = [{"name": "精力", "initial": 100, "min": 0, "max": 100}]
@@ -88,9 +91,10 @@ class ActivityLogTests(unittest.TestCase):
 
     def test_writing_a_line_stamps_it_with_the_clock(self):
         sess = self._sess(day=3, slot="晚")
-        apply_npc_activity(sess, 3, "在图书馆翻旧报纸")
+        apply_npc_activity(sess, 3, "在图书馆翻旧报纸", place="图书馆")
         self.assertEqual(sess.npc_activity_log, {
-            "3": [{"day": 3, "slot": "晚", "content": "在图书馆翻旧报纸"}],
+            "3": [{"day": 3, "slot": "晚", "content": "在图书馆翻旧报纸",
+                   "place": "图书馆"}],
         })
 
     def test_a_new_slot_appends_instead_of_replacing(self):
@@ -102,14 +106,24 @@ class ActivityLogTests(unittest.TestCase):
         self.assertEqual(sess.npc_activities, {"3": "在靶场练箭"})
         self.assertEqual([row["slot"] for row in sess.npc_activity_log["3"]], ["中", "晚"])
 
-    def test_the_same_slot_keeps_only_the_last_line(self):
-        # 回合那条路上调度每轮都跑，一格里能跑好几次。不去重的话一天就撑满窗口
+    def test_the_same_slot_appends_every_line(self):
+        # 同一格里玩家每说一轮话，调度就续写一句，档案里要看得到她先后干了什么
         sess = self._sess(day=3, slot="晚")
-        apply_npc_activity(sess, 3, "在图书馆")
-        apply_npc_activity(sess, 3, "改主意去了靶场")
+        apply_npc_activity(sess, 3, "在图书馆翻旧报纸", place="图书馆")
+        apply_npc_activity(sess, 3, "把报纸剪下来贴进本子", place="图书馆")
         self.assertEqual(sess.npc_activity_log["3"], [
-            {"day": 3, "slot": "晚", "content": "改主意去了靶场"},
+            {"day": 3, "slot": "晚", "content": "在图书馆翻旧报纸", "place": "图书馆"},
+            {"day": 3, "slot": "晚", "content": "把报纸剪下来贴进本子", "place": "图书馆"},
         ])
+
+    def test_several_lines_in_one_slot_count_as_one_slot(self):
+        # 「连着几格没离开」数的是格子，同一格续写的几条不能把它撑大
+        sess = self._sess(day=3, slot="中")
+        apply_npc_activity(sess, 3, "在家擦灶台", place="家")
+        sess.slot = "晚"
+        apply_npc_activity(sess, 3, "在家做饭", place="家")
+        apply_npc_activity(sess, 3, "在家洗碗", place="家")
+        self.assertEqual(slots_in_place(sess, 3, "家"), 2)
 
     def test_the_same_slot_on_a_different_day_is_a_different_row(self):
         sess = self._sess(day=3, slot="晚")
@@ -127,6 +141,38 @@ class ActivityLogTests(unittest.TestCase):
         self.assertEqual(len(rows), ACTIVITY_LOG_LINES)
         self.assertEqual(rows[0]["day"], 4)  # 前三天被挤掉了
         self.assertEqual(rows[-1]["day"], ACTIVITY_LOG_LINES + 3)
+
+    def test_it_counts_how_many_slots_she_has_not_left(self):
+        """连着几格没换地方。原地不动是零写入，这个数库里没别处记着。
+
+        真实存档里韩曼宁早晨禁动 → 整个早晨在家 → 中午那次调度看到「在家 +
+        在家擦灶台」，于是接着写在家，下午再来一遍。给模型这个数才有量化压力。
+        """
+        sess = self._sess(day=1, slot="早")
+        for day, place in ((1, "家"), (2, "家"), (3, "家")):
+            sess.day = day
+            apply_npc_activity(sess, 3, f"第 {day} 天在家忙", place=place)
+        self.assertEqual(slots_in_place(sess, 3, "家"), 3)
+        # 换了地方就从头数：问的是「在现在这个地方待了多久」
+        sess.day = 4
+        apply_npc_activity(sess, 3, "在药店抓药", place="药店")
+        self.assertEqual(slots_in_place(sess, 3, "药店"), 1)
+        self.assertEqual(slots_in_place(sess, 3, "家"), 0)
+
+    def test_the_count_is_blind_to_rows_from_before_this_column(self):
+        # 老档的行没有 place，从第一条老行就断——算出来偏小不偏大，
+        # 于是最坏情况是这一格少催她一次，不会凭空催她搬家
+        sess = self._sess(log={"3": [
+            {"day": 1, "slot": "早", "content": "在家"},
+            {"day": 1, "slot": "中", "content": "在家", "place": "家"},
+        ]})
+        self.assertEqual(slots_in_place(sess, 3, "家"), 1)
+
+    def test_no_place_means_no_count(self):
+        # 手动清空那条路不传 place，行照旧存，只是不参与计数
+        sess = self._sess(day=1, slot="早")
+        apply_npc_activity(sess, 3, "在家忙")
+        self.assertEqual(slots_in_place(sess, 3, ""), 0)
 
     def test_clearing_the_current_line_leaves_the_log_alone(self):
         # 划掉「最近」是说「别再拿它编下去」，不是说那几天没发生过。
@@ -200,7 +246,8 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
             return module.id, sess.id, ids
 
-    async def _run(self, session_id, text="赫敏：在图书馆翻旧报纸", engaged=(), from_clock=False):
+    async def _run(self, session_id, text="赫敏：在图书馆翻旧报纸", engaged=(), from_clock=False,
+                   same_slot=False):
         """跑一次调度，返回（写入的表, 模型收到的 prompt 列表）。"""
         prompts = []
 
@@ -211,7 +258,7 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
              patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake_dispatch):
             got = await rpg_turn.idle_npc_activities(
-                session_id, set(engaged), from_clock=from_clock,
+                session_id, set(engaged), from_clock=from_clock, same_slot=same_slot,
             )
         return got, prompts
 
@@ -262,6 +309,45 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
         _got, prompts = await self._run(session_id)
         self.assertIn("上次记下：在图书馆翻旧报纸", prompts[0])
+
+    async def test_the_whole_persona_is_shown_not_just_the_opening(self):
+        # 人设整份给。原先夹 60 字，而真实模组里人设 135~331 字，夹完只剩开头
+        # 那半句身份介绍，性格和忌讳全被切掉——凭那半句写出来的东西谁都像
+        _m, session_id, (npc_id,) = await self._setup(("赫敏", "格兰芬多塔", True))
+        persona = (
+            "麻瓜出身的一年级生，功课门门第一，说话快而急。"
+            "认死理，见不得有人不守校规，连朋友也一样要说。"
+            "口头上瞧不起魁地奇，其实每场都去看。怕飞，更怕被人看出来怕。"
+        )
+        self.assertGreater(len(persona), 60)
+        async with self.sessions() as db:
+            npc = await db.get(RpgNpc, npc_id)
+            npc.persona = persona
+            await db.commit()
+        _got, prompts = await self._run(session_id)
+        self.assertIn(persona, prompts[0])
+
+    async def test_the_players_own_last_line_is_shown(self):
+        """玩家上一格发的那句要进提示词。
+
+        和正文是两件事：正文是模型演的一段，玩家那句是他自己的意图。按「结束
+        时段」不产生新消息，连按几格时正文一直是同一段，玩家那句是唯一带新
+        信息的东西。
+        """
+        _m, session_id, (_npc_id,) = await self._setup(("赫敏", "格兰芬多塔", True))
+        # 没有玩家消息时整块不出现，不是一个空标题
+        _got, prompts = await self._run(session_id)
+        self.assertNotIn("玩家上一格说要做的事", prompts[0])
+        async with self.sessions() as db:
+            db.add(RpgMessage(session_id=session_id, role="user", content="我去禁林待一下午"))
+            db.add(RpgMessage(
+                session_id=session_id, role="assistant", content="正文树影压得很低。",
+            ))
+            await db.commit()
+        _got, prompts = await self._run(session_id)
+        self.assertIn("我去禁林待一下午", prompts[0])
+        # 正文那块照旧，两块各归各的
+        self.assertIn("正文树影压得很低。", prompts[0])
 
     async def test_an_unknown_name_is_dropped_silently(self):
         # 认不出人就整行丢掉。这是玩家没要求过的后台动作，
@@ -346,6 +432,37 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
         async with self.sessions() as db:
             self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "寝室"})
 
+    async def test_her_latest_lived_history_reaches_the_scheduler(self):
+        # 只给「上次记下」的话，她跟玩家吵完架离开，调度写得像那件事没发生过
+        _m, session_id, (npc_id,) = await self._setup(("赫敏", "格兰芬多塔", True))
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            sess.npc_history = {str(npc_id): [
+                {"day": 2, "slot": "晚", "content": "在图书馆被你撞见偷看禁书"},
+                {"day": 3, "slot": "早", "content": "和你大吵一架后摔门走了"},
+            ]}
+            await db.commit()
+        _, prompts = await self._run(session_id)
+        self.assertIn("刚和玩家经历过：和你大吵一架后摔门走了", prompts[0])
+        self.assertNotIn("偷看禁书", prompts[0])
+
+    async def test_same_slot_only_continues_and_never_moves(self):
+        # 时段没翻篇：接着写她在原地做什么，不给「可去」，写了地点也不挪
+        _m, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆", "寝室"),
+        )
+        got, prompts = await self._run(
+            session_id, text="赫敏：图书馆｜在图书馆翻旧报纸", same_slot=True,
+        )
+        self.assertIn("同一时段里接着写", prompts[0])
+        self.assertNotIn("。可去：", prompts[0])
+        async with self.sessions() as db:
+            self.assertFalse((await db.get(RpgSession, session_id)).npc_places)
+        # 句子点了别处的登记地名 → 整行丢掉，不能让近况和位置对不上
+        self.assertEqual(got, {})
+        got, _ = await self._run(session_id, text="赫敏：叠好被子躺下看书", same_slot=True)
+        self.assertEqual(got, {str(npc_id): "叠好被子躺下看书"})
+
     async def test_random_movement_leaves_engaged_present_and_following_npcs_alone(self):
         _, session_id, identities = await self._setup(
             ("被提到的人", "寝室", True), ("在场的人", "校长办公室", True),
@@ -384,25 +501,54 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
                 (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "图书馆"},
             )
 
-    async def test_the_clock_still_leaves_followers_and_present_npcs_alone(self):
-        # 放开的只有「正文里点过名」这一条。跟着走的人和站在玩家跟前的人
-        # 照旧不挪——把他们挪走等于当着玩家的面凭空消失
-        _, session_id, identities = await self._setup(
-            ("跟随的人", "寝室", True), ("在场的人", "校长办公室", True),
-            random_movement=True, places=("图书馆",),
+    async def test_the_clock_still_leaves_followers_alone(self):
+        # 跟着走的人照旧不挪：把他挪走等于当着玩家的面凭空消失，而「他这一格
+        # 还跟着你」不会因为时段翻篇就失效
+        _, session_id, (follower_id,) = await self._setup(
+            ("跟随的人", "寝室", True), random_movement=True, places=("图书馆",),
         )
         async with self.sessions() as db:
             sess = await db.get(RpgSession, session_id)
-            sess.npc_followers = [identities[0]]
-            sess.npc_places = {str(identities[0]): "寝室"}
+            sess.npc_followers = [follower_id]
+            sess.npc_places = {str(follower_id): "寝室"}
             await db.commit()
-        _got, prompts = await self._run(session_id, text="赫敏：无", from_clock=True)
+        _got, prompts = await self._run(session_id, text="跟随的人：无", from_clock=True)
         self.assertNotIn("。可去：", prompts[0])
         async with self.sessions() as db:
             self.assertEqual(
-                (await db.get(RpgSession, session_id)).npc_places,
-                {str(identities[0]): "寝室"},
+                (await db.get(RpgSession, session_id)).npc_places, {str(follower_id): "寝室"},
             )
+
+    async def test_the_clock_does_not_pin_someone_just_for_standing_where_you_stand(self):
+        """时钟这条路上「她和你同场」不算保护。
+
+        真实存档：他和妻子都在家，按一下结束时段——调度当场判同场、跳过她，
+        然后他去了公司。她就此留在家，下次推时段他要是又在家，同一件事再来
+        一遍，看着像随机移动整个坏掉了。那道闸门防的是「当着玩家的面凭空
+        消失」，可这一格结束之后玩家人都走了，理由不成立。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("妻子", "家", True), location="家", random_movement=True, places=("菜市场",),
+        )
+        _got, prompts = await self._run(
+            session_id, text="妻子：菜市场｜在挑今天的菜", from_clock=True,
+        )
+        self.assertIn("。可去：", prompts[0])
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "菜市场"},
+            )
+
+    async def test_a_turn_still_pins_someone_standing_where_you_stand(self):
+        # 回合那条路上这道闸门照旧：玩家就在屋里和她说话，这一轮把她挪走，
+        # 下一句她已经不在了。那条路上 sess.location 不会紧接着变
+        _, session_id, (npc_id,) = await self._setup(
+            ("妻子", "家", True), location="家", random_movement=True, places=("菜市场",),
+        )
+        _got, prompts = await self._run(session_id, text="妻子：菜市场｜在挑今天的菜")
+        self.assertNotIn("。可去：", prompts[0])
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
 
     async def test_someone_who_promised_to_wait_is_not_moved(self):
         """她答应了等你，按一下结束时段就被扔到公园去，那个约当场作废。
@@ -427,7 +573,7 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("答应了等你回来吃午饭", prompts[0])
 
     async def test_an_ordinary_note_does_not_pin_her_down(self):
-        # 只有「等你 / 答应」这类话才算约。伤势、情绪这些近况占大多数，
+        # 只有「等你」这类话才算约。伤势、情绪这些近况占大多数，
         # 一并当成约的话勾了随机移动的人基本就再也不动了
         _, session_id, (npc_id,) = await self._setup(
             ("赫敏", "家", True), random_movement=True, places=("公园",),
@@ -441,6 +587,35 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "公园"},
             )
+
+    async def test_a_promise_that_is_not_about_waiting_does_not_pin_her_down(self):
+        """「答应过下周陪你去看房」不该让她从此再也不动。
+
+        近况是结算长期写进去的一张表，这类和位置无关的约一挂就是几十格。
+        从前「答应 / 说好 / 承诺 / 保证」都算约，于是她被永久锁在原地，
+        侧栏上还没有任何说明。这道闸门防的是「刚答应等你回来就跑了」，
+        判据该是「她这会儿该待着不动」，不是「她欠着你一件事」
+        """
+        for note in (
+            "答应过下周陪你去看房", "保证不再喝酒", "说好了生日那天送你礼物",
+            "承诺帮你带一条烟",
+        ):
+            with self.subTest(note=note):
+                _, session_id, (npc_id,) = await self._setup(
+                    ("赫敏", "家", True), random_movement=True, places=("公园",),
+                )
+                async with self.sessions() as db:
+                    sess = await db.get(RpgSession, session_id)
+                    sess.npc_notes = {str(npc_id): {"约定": note}}
+                    await db.commit()
+                await self._run(
+                    session_id, text="赫敏：公园｜在公园长椅上歇着", from_clock=True,
+                )
+                async with self.sessions() as db:
+                    self.assertEqual(
+                        (await db.get(RpgSession, session_id)).npc_places,
+                        {str(npc_id): "公园"},
+                    )
 
     async def test_notes_reach_the_scheduler_at_all(self):
         # 这个洞就是「调度不读正文、也没拿到近况」。承诺记在近况里，
@@ -546,6 +721,222 @@ class IdleNpcActivityTests(unittest.IsolatedAsyncioTestCase):
                 await self._run(session_id, text=said)
                 async with self.sessions() as db:
                     self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+
+    async def test_a_bar_from_someone_who_may_not_move_drops_the_whole_line(self):
+        """不准动的人写了个别处的地名 → 整行丢掉，不是只丢地名。
+
+        真实存档第 12 局：结算把韩曼宁挪进了范建明的暗间（剧情写的位置，不是调度
+        挪的），于是这一格她候选为空，模型仍旧写了「情趣内衣店｜捏着蕾丝边料反复
+        比量」。只削地名留句子的话，一句内衣店的话会落在物业办公室名下——侧栏写
+        她在物业办公室、近况写她在挑内衣，玩家看到的是两处对不上。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), places=("图书馆", "寝室"),
+        )
+        got, _p = await self._run(session_id, text="赫敏：图书馆｜在书架间翻旧报纸")
+        # 那句话也不要：陈旧的上一句好过自相矛盾的新一句
+        self.assertEqual(got, {})
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            self.assertEqual(sess.npc_places, {})
+            self.assertEqual(sess.npc_random_places, {})
+
+    async def test_a_bar_naming_the_place_she_is_already_at_is_kept(self):
+        # 「留在原地」的另一种写法：模板让她这时别写地点，可它有时照写。
+        # 句子和位置本来就对得上，丢掉等于白丢一句近况
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), places=("图书馆", "寝室"),
+        )
+        got, _p = await self._run(session_id, text="赫敏：寝室｜在窗边抄魔药笔记")
+        self.assertEqual(got, {str(npc_id): "在窗边抄魔药笔记"})
+        async with self.sessions() as db:
+            # 她本来就在寝室，不该有任何位置写入
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+
+    async def test_a_registered_place_outside_her_whitelist_drops_the_line(self):
+        """白名单外的登记地名同样算「两处对不上」。
+
+        上面两支都只拿她自己那份白名单比，于是白名单**外**的登记地名会一路漏过去。
+        真实存档第 12 局：「place=家｜在菜市场挑拣中午的青菜」——菜市场是登记地点，
+        但她的白名单里只有菜市场厕所，于是位置不动、近况照存，侧栏写「在家」。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True,
+            places=("图书馆", "禁林", "寝室"), random_places=("图书馆",),
+        )
+        # 禁林是登记地点，但不在她的白名单里 → 挪不过去，那句话也不留
+        got, _p = await self._run(session_id, text="赫敏：在禁林边上捡蘑菇")
+        self.assertEqual(got, {})
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+
+    async def test_a_missing_separator_still_moves_her_if_the_sentence_names_the_place(self):
+        """竖线漏了、地名写进了句子里，照样把她挪过去。
+
+        真实存档：侧栏写「在家」，近况写「在小区物业办公室翻看监控回放」。模板准她
+        提自己「可去」里的地名，所以这种行看着完全合法，只是位置没跟着改。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆",),
+        )
+        got, _p = await self._run(session_id, text="赫敏：在图书馆翻旧报纸")
+        self.assertEqual(got, {str(npc_id): "在图书馆翻旧报纸"})
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "图书馆"},
+            )
+
+    async def test_a_one_character_place_name_is_not_matched_inside_a_sentence(self):
+        """漏了竖线那条兜底是纯字面包含，「家」这种一个字的地名到处命中。
+
+        「在管家房里整理」里的「家」字会把她挪到「家」去——那是句子根本没提的
+        地方。竖线那条路不受影响（整名相等），所以只有「漏了竖线 + 单字候选」
+        这一种组合退回「只记近况」，也就是修这个洞之前的样子
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("家",),
+        )
+        got, _p = await self._run(session_id, text="赫敏：在管家房里整理旧箱子")
+        self.assertEqual(got, {str(npc_id): "在管家房里整理旧箱子"})
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+        # 写清楚了还是照挪：单字地名只是不参与句子里的模糊匹配
+        await self._run(session_id, text="赫敏：家｜在客厅擦桌子")
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "家"},
+            )
+
+    async def test_a_decorated_name_still_matches(self):
+        """「**赫敏**：…」「【赫敏】：…」照旧认得出。
+
+        Markdown 强调和剧本体方括号是模型的常态写法，而从前只削引号，名字段
+        成了「*赫敏**」，match_npc 认不出来于是整行丢掉——她这一格既没换地方
+        也没有近况，界面上一句解释都没有
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆",),
+        )
+        for line in ("**赫敏**：图书馆｜在翻旧报纸", "【赫敏】：图书馆｜在翻旧报纸",
+                     "*赫敏*：图书馆｜在翻旧报纸", "（赫敏）：图书馆｜在翻旧报纸"):
+            with self.subTest(line=line):
+                async with self.sessions() as db:
+                    sess = await db.get(RpgSession, session_id)
+                    sess.npc_places = {}
+                    await db.commit()
+                got, _p = await self._run(session_id, text=line)
+                self.assertEqual(got, {str(npc_id): "在翻旧报纸"})
+                async with self.sessions() as db:
+                    self.assertEqual(
+                        (await db.get(RpgSession, session_id)).npc_places,
+                        {str(npc_id): "图书馆"},
+                    )
+
+    async def test_the_two_halves_written_backwards_still_count(self):
+        """「赫敏：在翻旧报纸｜图书馆」——模板写的是「地点｜活动」，颠倒了也收。
+
+        颠倒过来的行从前两头都废：地名那一侧对不上白名单于是不挪，活动那一侧
+        存进去的是一个光秃秃的地名（角色卡上的「最近」就写着「图书馆」三个字）
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆",),
+        )
+        got, _p = await self._run(session_id, text="赫敏：在翻旧报纸｜图书馆")
+        self.assertEqual(got, {str(npc_id): "在翻旧报纸"})
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "图书馆"},
+            )
+
+    async def test_a_shortened_place_name_still_moves_her(self):
+        """模组里叫「情趣内衣店」，模型写「内衣店」——照旧挪。
+
+        只认全等的话这一行整个作废、她这一格停在原处，而真实白名单里一半地名
+        都是三四个字的复合词。敢放宽是因为候选池就是她自己那份白名单，不是
+        全量地点表；短名同时对上两个就当没写
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("情趣内衣店",),
+        )
+        got, _p = await self._run(session_id, text="赫敏：内衣店｜在挑拣薄纱")
+        self.assertEqual(got, {str(npc_id): "在挑拣薄纱"})
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places,
+                {str(npc_id): "情趣内衣店"},
+            )
+
+    async def test_a_shortened_name_matching_two_places_is_not_guessed(self):
+        """「更衣室」同时像「健身房更衣室」和「商场更衣室」——不猜。
+
+        放宽只放到「短名只对上一个」为止：猜错的代价是把她挪到一个她没去过的
+        地方，玩家照侧栏走过去找不到人。
+
+        近况也跟着丢：竖线左边那个地名是模型对「她在哪儿」的表态，表态没变成
+        一次真实移动，右边那句话就是在一个错的地点语境下写出来的。「在换衣服」
+        恰好在寝室也说得通是巧合，「捏着蕾丝边料反复比量」就不是了
+        （见 test_a_bar_from_someone_who_may_not_move_drops_the_whole_line）。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True,
+            places=("健身房更衣室", "商场更衣室"),
+        )
+        got, _p = await self._run(session_id, text="赫敏：更衣室｜在换衣服")
+        self.assertEqual(got, {})
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
+
+    async def test_a_line_that_walks_through_two_places_is_dropped(self):
+        """「在商场中心逛了逛，又转到情趣内衣店门口看了几眼才回家」——整行作废。
+
+        真实存档第 12 局韩曼宁：这一句里有两个白名单地名，模糊匹配拿不定主意于是
+        只记了近况，结果侧栏写「在家」、近况写她在逛商场，玩家看到的是两处对不上。
+        模板本来就只准写她所在那个地方能发生的事，所以这种行不合规，近况也不该留。
+        """
+        _, session_id, (npc_id,) = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆", "魔药教室"),
+        )
+        got, _p = await self._run(
+            session_id, text="赫敏：在图书馆翻了翻旧书，又去魔药教室看了几眼才回寝室",
+        )
+        self.assertEqual(got, {})
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            self.assertEqual(sess.npc_places, {})
+            self.assertEqual(sess.npc_activities or {}, {})
+        # 只提一个地名照旧照挪：这条兜底本身没被削掉
+        await self._run(session_id, text="赫敏：在图书馆翻旧报纸")
+        async with self.sessions() as db:
+            self.assertEqual(
+                (await db.get(RpgSession, session_id)).npc_places, {str(npc_id): "图书馆"},
+            )
+
+    async def test_a_place_without_an_activity_is_not_a_move(self):
+        """「赫敏：图书馆｜无」——位置改了、近况没写，她换了地方却没人解释为什么。
+
+        和竖线缺一半是同一个道理：半句话不该换来一次位置改动。从前 `moves`
+        写在「无」这道检查**之前**，于是这一行照挪
+        """
+        _, session_id, _ = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆",),
+        )
+        for said in ("赫敏：图书馆｜无", "赫敏：图书馆|（无）", "赫敏：在图书馆｜没有"):
+            with self.subTest(said=said):
+                got, _p = await self._run(session_id, text=said)
+                self.assertEqual(got, {})
+                async with self.sessions() as db:
+                    self.assertEqual(
+                        (await db.get(RpgSession, session_id)).npc_places, {},
+                    )
+
+    async def test_two_places_in_one_sentence_is_not_a_guess(self):
+        # 句子里同时出现两个候选地名 = 她到底在哪儿没写清楚，不猜
+        _, session_id, _ = await self._setup(
+            ("赫敏", "寝室", True), random_movement=True, places=("图书馆", "禁林"),
+        )
+        await self._run(session_id, text="赫敏：从图书馆出来又去禁林边上转了转")
+        async with self.sessions() as db:
+            self.assertEqual((await db.get(RpgSession, session_id)).npc_places, {})
 
     async def test_a_half_width_bar_works_too(self):
         # 全角竖线是模板要求的写法，半角是模型自己换的，两种都收（同冒号）
@@ -761,8 +1152,8 @@ class TurnSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def _noop(self, *args, **kwargs):
         return None
 
-    async def _fake_schedule(self, session_id, engaged):
-        self.scheduled.append(engaged)
+    async def _fake_schedule(self, session_id, engaged, same_slot=False):
+        self.scheduled.append((engaged, same_slot))
         return {}
 
     async def _fake_stream(self, *args, **kwargs):
@@ -780,10 +1171,11 @@ class TurnSchedulingTests(unittest.IsolatedAsyncioTestCase):
             events.setdefault(name, []).append(data)
         return events
 
-    async def test_a_turn_that_does_not_move_the_clock_never_calls_it(self):
+    async def test_a_turn_that_does_not_move_the_clock_continues_the_slot(self):
+        # 同一格里玩家接着说话，不在跟前的人也接着过这一格：照调，只是标 same_slot
         self.wrapped = False
         events = await self._turn()
-        self.assertEqual(self.scheduled, [])
+        self.assertEqual(self.scheduled, [(set(), True)])
         # 跳过调度也要把末尾那条 state 发出去：冷却和这一格的聊天数不在
         # STATE_FIELDS 里，结算那条 state 带不上，吞掉它玩家会看到一颗
         # 明明已经能点的技能还灰着
@@ -792,7 +1184,7 @@ class TurnSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_turn_that_moves_the_clock_still_calls_it(self):
         events = await self._turn()
-        self.assertEqual(self.scheduled, [set()])
+        self.assertEqual(self.scheduled, [(set(), False)])
         async with self.sessions() as db:
             self.assertEqual((await db.get(RpgSession, self.session_id)).slot, "中")
         self.assertIn("done", events)
@@ -934,6 +1326,99 @@ class ActivityInjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_line_no_extra_row(self):
         # 没调度过的人不该在卡上多出一行空的
         self.assertNotIn("最近：", await self._system())
+
+
+class AdvanceRouteTests(unittest.IsolatedAsyncioTestCase):
+    """路由那一层：调度跑在写事务之外，而且挪动的结果要跟着这次响应回去。
+
+    从前这几条挂在外场简报那个文件上（连带验了简报和调度的先后顺序）。简报删掉
+    之后它们没了归宿，可「/advance 这条路上调度到底跑没跑」仍然要有人钉——
+    它是玩家推时段最主要的入口，回合里那一处只管「这一轮把格子用完了」。
+
+    用文件库不用内存库：写锁问题在共用一条连接的内存库上根本看不出来。
+    """
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.tmp}/t.db")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.db = self.sessions()
+        self.user = SimpleNamespace(id=1)
+        self.patcher = patch.object(rpg_turn, "AsyncSessionLocal", self.sessions)
+        self.patcher.start()
+
+        module = RpgModule(
+            user_id=1, name="魔法学院", stat_defs=STAT_DEFS, relation_stat_defs=[],
+            time_slots=["早", "中", "晚"],
+        )
+        self.db.add(module)
+        await self.db.commit()
+        npc = RpgNpc(module_id=module.id, name="赫敏", location="格兰芬多塔")
+        self.db.add(npc)
+        await self.db.commit()
+        sess = RpgSession(
+            module_id=module.id, char_name="阿隼", stats={"精力": 100},
+            location="校长办公室", slot="中", day=3, chronicle=[], status="alive",
+            npc_states={str(npc.id): {"met": True}},
+        )
+        self.db.add(sess)
+        await self.db.commit()
+        self.session_id = sess.id
+
+    async def asyncTearDown(self):
+        self.patcher.stop()
+        await self.db.close()
+        await self.engine.dispose()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_nobody_scheduled_means_the_clock_costs_nothing(self):
+        """没人勾调度时推时段是零模型调用。
+
+        这条承诺写在按钮的提示里。简报那个开关撤掉之后它更硬了：现在**只有**
+        勾了调度的角色能让这颗按钮花钱。
+        """
+        def boom(*_a, **_kw):
+            raise AssertionError("没人勾调度的时候一次模型调用都不该发生")
+
+        with patch.object(rpg_turn.llm_client, "get_agent_client", side_effect=boom), \
+             patch.object(rpg_turn.llm_client, "dispatch_chat_complete", side_effect=boom):
+            out = await advance_time(self.session_id, self.user, self.db)
+
+        self.assertEqual(out.session.slot, "晚")
+        self.assertEqual(out.session.chronicle, [])
+
+    async def test_the_scheduler_moves_her_and_the_route_sees_it(self):
+        """调度是另开一条连接写的，路由手里那个对象必须被刷回来。
+
+        不刷的话玩家这一下看不到她挪了，下一轮却突然换了地方。
+        """
+        async with self.sessions() as db:
+            npc = (await db.execute(select(RpgNpc))).scalars().one()
+            npc.ai_scheduled = True
+            npc.random_movement = True
+            db.add(RpgLocation(module_id=npc.module_id, name="有求必应屋"))
+            await db.commit()
+
+        seen = []
+
+        async def fake_dispatch(messages=None, **kwargs):
+            seen.append(messages[0]["content"])
+            return "赫敏：有求必应屋｜在翻旧报纸"
+
+        with patch.object(rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")), \
+             patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake_dispatch):
+            out = await advance_time(self.session_id, self.user, self.db)
+
+        self.assertEqual(len(seen), 1, "调度一次，再没有第二次调用")
+        self.assertEqual(out.session.npc_places, {str(npc.id): "有求必应屋"})
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, self.session_id)
+        # 去处是模型自己写的那一半（候选里只有这一个）
+        self.assertEqual(list(sess.npc_random_places.values()), ["有求必应屋"])
+        # 调度那句话不进大事记：它是「她一个人干了什么」，不是「已经传开的事」
+        self.assertEqual(sess.chronicle, [])
 
 
 if __name__ == "__main__":

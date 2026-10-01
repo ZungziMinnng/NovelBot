@@ -2,11 +2,13 @@
 Orchestrator: LangGraph 风格的状态机，协调所有 Agent。
 以 AsyncIterator 形式输出 SSE 事件，支持流式渲染。
 """
+import asyncio
 import logging
 import time
 from typing import AsyncIterator, TypedDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete as sql_delete
+from app.database import AsyncSessionLocal
 from app.models.memory import Memory
 
 from app.models.novel import Novel
@@ -62,6 +64,41 @@ async def _prepare_regen_rollback(
     await _retry_on_lock(lambda: session.commit(), "pregen_rollback")
 
 
+# 记忆管线（摘要/角色/实体）在独立任务里跑：正文存好就先告诉前端，客户端断开也不打断；
+# 同一本小说的下一次生成/重写先等它跑完，避免读到未更新的摘要和状态。
+_memory_tasks: dict[int, asyncio.Task] = {}
+
+
+def _pending_memory(novel_id: int) -> asyncio.Task | None:
+    task = _memory_tasks.get(novel_id)
+    return task if task and not task.done() else None
+
+
+def _start_memory_task(novel_id: int, chapter_id: int, state: dict) -> asyncio.Queue:
+    """启动后台记忆任务，返回其事件队列（None 表示结束）；前端断开时任务照常跑完。"""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _job():
+        try:
+            async with AsyncSessionLocal() as s:
+                novel = await s.get(Novel, novel_id)
+                chapter = await s.get(Chapter, chapter_id)
+                # 结束查询开启的事务：管线失败分支会 rollback，事务未结束则 novel 被过期，
+                # 之后读 novel.id 触发异步懒加载报错（原先同会话刚 commit 过，不会踩到）
+                await s.commit()
+                async for event in run_memory_pipeline(s, novel, chapter, state):
+                    queue.put_nowait(event)
+        except Exception:
+            logger.error("后台记忆更新失败 novel=%s chapter=%s", novel_id, chapter_id, exc_info=True)
+        finally:
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(_job())
+    _memory_tasks[novel_id] = task
+    task.add_done_callback(lambda t: _memory_tasks.pop(novel_id, None) if _memory_tasks.get(novel_id) is t else None)
+    return queue
+
+
 async def run_chapter_generation(
     session: AsyncSession,
     novel: Novel,
@@ -104,6 +141,11 @@ async def run_chapter_generation(
     writer_examples = getattr(novel, "writer_examples", []) or []
 
     try:
+        pending = _pending_memory(novel.id)
+        if pending:
+            yield _sse("stage", "waiting_memory")
+            await asyncio.wait({pending})  # 用 wait 而非直接 await：本请求取消时不连带取消记忆任务
+
         # ── 预清理：删除旧摘要 + 回滚状态快照（current_state）──
         await _prepare_regen_rollback(
             session, novel, chapter_number, volume
@@ -195,8 +237,11 @@ async def run_chapter_generation(
         chapter = await _save_chapter(session, state, novel)
         await session.commit()
 
-        # ── Node 5/6: 记忆更新 + 周期性刷新 + 新设定候选（已拆至 memory_pipeline）─
-        async for event in run_memory_pipeline(session, novel, chapter, state):
+        # ── Node 5/6: 记忆更新 + 周期性刷新 + 新设定候选（已拆至 memory_pipeline，后台跑）─
+        # 先起任务再发 chapter_saved：前端拿到正文立刻断开也不会漏跑记忆
+        memory_events = _start_memory_task(novel.id, chapter.id, state)
+        yield _sse("chapter_saved", str(chapter.id))
+        while (event := await memory_events.get()) is not None:
             yield event
 
         # ── Emit total usage ───────────────────────────────────────────────
@@ -226,6 +271,11 @@ async def run_chapter_rewrite(
     pov: str = "",
 ) -> AsyncIterator[str]:
     try:
+        pending = _pending_memory(novel.id)
+        if pending:
+            yield _sse("stage", "waiting_memory")
+            await asyncio.wait({pending})
+
         result = await session.execute(
             select(Chapter).where(
                 Chapter.novel_id == novel.id,

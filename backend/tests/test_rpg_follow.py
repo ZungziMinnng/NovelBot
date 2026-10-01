@@ -33,7 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import database
-from app.agents.rpg_turn import GROUP_MODE, PRIVATE_MODE, parse_company
+from app.agents.rpg_turn import GROUP_MODE, PRIVATE_MODE, missed_dispatch, parse_company
 from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg, sensitive_word, text_replace_backup, llm_usage  # noqa: F401
@@ -386,6 +386,41 @@ class DispatchTests(_CompanyScenario, unittest.TestCase):
                 )
 
 
+class MissedDispatchTests(_CompanyScenario, unittest.TestCase):
+    """漏认派遣的探针：只供日志，判据故意宽松，两头都得有才算。
+
+    量的是「词表一条都没认出来，可这句话里既有登记角色又有登记地名」一天出现
+    几次。假阳性是预期的（它不看动词也不看语序），所以这里只钉两件事：漏认的
+    那几句真能被它捞到，缺了任一头就不出声。
+    """
+
+    def test_it_catches_the_gaps_the_word_list_knowingly_misses(self):
+        # 「待着 / 等着 / 住」这类**指定去处但不带移动动词**的支使，词表整句认不出
+        for content, place in (
+            ("我想让赫敏待在宿舍", "宿舍"),
+            ("我让赫敏在客栈等着", "客栈"),
+            ("告诉赫敏在宿舍等我", "宿舍"),
+            ("赫敏今晚住客栈", "客栈"),
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content), ("", (), (), ()))
+                self.assertEqual(
+                    missed_dispatch(content, self.locations, self.npcs),
+                    ("赫敏", place),
+                )
+
+    def test_one_side_alone_stays_quiet(self):
+        # 没有登记地名（「过来」没说去哪儿，也是刻意不修的那条）／没有登记角色
+        self.assertEqual(
+            missed_dispatch("让赫敏过来", self.locations, self.npcs),
+            ("赫敏", ""),
+        )
+        self.assertEqual(
+            missed_dispatch("这宿舍真冷", self.locations, self.npcs),
+            ("", ""),
+        )
+
+
 class UnfollowTests(_CompanyScenario, unittest.TestCase):
     """解除：unfollow 有值，其余三个字段全空。
 
@@ -570,11 +605,15 @@ class PrivateModeTests(_CompanyScenario, unittest.TestCase):
 
 
 class OffstageTests(_CompanyScenario, unittest.TestCase):
-    """人不在场：认不出携带部分，但玩家自己的移动不受连累。
+    """人不在场：认不出携带部分，但**派遣照认**，玩家自己的移动也不受连累。
 
     产品口径（用户已定）：不认这句的携带部分——不把她从宿舍拽过来——但玩家
     自己的移动照旧。两条腿分开走：识别层只认跟前的人，移动那条线一直是
     「玩家说了算」。
+
+    派遣是第三条腿，和携带反着：「让她回宿舍」的落点本来就在别处，跟她此刻
+    在不在你跟前无关。**点了名**才认（_send_who 走 _named_exactly），所以
+    「带她走」那种代词句仍旧一个字不动。
     """
 
     def setUp(self):
@@ -588,26 +627,96 @@ class OffstageTests(_CompanyScenario, unittest.TestCase):
         )
 
     def test_dispatch_to_someone_who_is_not_here(self):
-        # 她不在跟前，派遣那三条路一条都不许动。**move_to 这一格从前是「客栈」**：
-        # 识别层在「跟前一个人都没有」时整句退回 movement_target，而「派赫敏」里
-        # 的人名不在否定表里，于是把**玩家自己**挪去了客栈——被支使的是她，走的
-        # 却是玩家。现在 _moves_by_someone_else 在退回之前先拦一道，四格全空
-        self.assertEqual(self._four("派赫敏去客栈"), ("", (), (), ()))
+        """点了名的派遣照执行，哪怕她在别的屋。**move_to 必须是空**。
+
+        这一格从前是「客栈」：识别层在「跟前一个人都没有」时整句退回
+        movement_target，而「派赫敏」里的人名不在否定表里，于是把**玩家自己**
+        挪去了客栈——被支使的是她，走的却是玩家。
+
+        dispatch 这一格从前是空：她不在跟前，指令一个字都不执行，交给 AI 去
+        写，再由结算按「缺少原文依据」打回。玩家的输入本身就是指令
+        """
+        self.assertEqual(self._four("派赫敏去客栈"), ("", (), (), ((3, "客栈"),)))
 
     def test_a_named_subject_is_not_the_player_moving(self):
-        # 「赫敏去客栈」动身的是她。她在跟前时这句归 _parse_send（那边认得出
-        # 是谁），不在跟前时那条路够不着，四格必须全空——不能掉到移动识别上
-        # 把玩家挪去客栈
-        for content in ("赫敏去客栈", "赫敏，去客栈", "赫敏回宿舍"):
+        # 「赫敏去客栈」动身的是她——不管她在不在跟前，move_to 都必须是空，
+        # 不能掉到移动识别上把玩家挪去客栈
+        for content in ("赫敏去客栈", "赫敏，去客栈"):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content), ("", (), (), ((3, "客栈"),)))
+        self.assertEqual(self._four("赫敏回宿舍"), ("", (), (), ((3, "宿舍"),)))
+
+    def test_a_statement_about_a_named_person_is_still_an_order(self):
+        """「赫敏回宿舍了」这种陈述语气也算指令——真实存档里的那一句。
+
+        从前句末的「了」一律不认，于是这句交给 AI 写，正文里她用代词出场，
+        结算再以「缺少该角色赶来的原文依据」把位置改动打回：玩家下了指令，
+        引擎、叙事、结算三道关一道都没落地。
+
+        代词主语仍旧不认（「他去后山了」是在讲别人的事），见 NegativeTests
+        """
+        for content in ("赫敏回宿舍了", "赫敏去客栈了", "让赫敏回宿舍了"):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content)[1:3], ((), ()))
+                self.assertNotEqual(self._four(content)[3], ())
+
+    def test_negations_and_conditions_are_not_orders(self):
+        """「别让赫敏回宿舍」「如果让她回宿舍」不是在支使人。
+
+        _SEND 是从「让」开始匹配的，前面那个「别」整个落在匹配之外——没有
+        _SEND_DENY 那道门，引擎反倒替玩家把人派走了
+        """
+        for content in (
+            "别让赫敏回宿舍", "不让赫敏回宿舍", "如果让赫敏回宿舍",
+            "要是派赫敏去客栈", "别叫赫敏去客栈了",
+        ):
             with self.subTest(content=content):
                 self.assertEqual(self._four(content), ("", (), (), ()))
+
+    def test_a_bare_arrival_verb_is_an_order_too(self):
+        """「让赫敏到宿舍等我」「喊赫敏来酒馆」——光身的「到 / 来」照旧算派遣。
+
+        _MOVE_VERBS 里只有「回到 / 来到」这类双字词，于是这两句最自然的支使
+        说法一个字都不动、整句交给 AI，位置改动最后被结算那道「缺少赶来的
+        原文依据」打回。光身的字只加在派遣专用那张表里：加进 _MOVE_VERBS
+        会把玩家自己的「我到家了」读成一次移动
+        """
+        for content, place in (
+            ("让赫敏到宿舍等我", "宿舍"), ("喊赫敏来酒馆", "酒馆"),
+            ("叫赫敏到客栈去", "客栈"),
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content), ("", (), (), ((3, place),)))
+
+    def test_an_adverb_between_the_verb_and_the_name_is_ignored(self):
+        """「让赫敏先回宿舍吧」——who 会把「先」吃进去，全等就此对不上。
+
+        真实说法里这些语气副词到处都是，而它们一个都不改变这句是不是命令
+        """
+        for content in ("让赫敏先回宿舍吧", "让赫敏赶紧回宿舍", "叫赫敏马上去客栈"):
+            with self.subTest(content=content):
+                self.assertNotEqual(self._four(content)[3], ())
+                self.assertEqual(self._four(content)[0], "")
+
+    def test_an_object_fronted_order_counts(self):
+        """「把赫敏叫到宿舍来」——宾语提前，使役动词就不挨着人名了。
+
+        只收招呼类的动词：「把赫敏带到宿舍」的「带」是携带（玩家自己也过去），
+        归携带那条线，收进来会把一次携带记成一次派遣，她被挪走而玩家留在原地
+        """
+        self.assertEqual(self._four("把赫敏叫到宿舍来"), ("", (), (), ((3, "宿舍"),)))
+        self.assertEqual(self._four("把赫敏喊到客栈"), ("", (), (), ((3, "客栈"),)))
+        # 「带」不走这条路：这是携带，玩家自己也去
+        self.assertEqual(self._four("把赫敏带到宿舍")[3], ())
 
     def test_the_players_own_move_survives_someone_elses_name(self):
         """回归：句子里出现她的名字，不等于玩家的移动该被吞掉。
 
-        「动身的是别人」那道闸只认两种形状——派遣短语 + 具名对象，或者移动
-        动词前面**整个**就是一个名字。别的都不许拦，拦了就是玩家该走的时候
-        留在原地。分句也各算各的：前一句安排她，后一句说自己去哪儿
+        「动身的是别人」那道闸只认两种形状——派遣短语 + 具名对象，或者名字出现
+        在移动动词前面。后者放宽成「出现」之后，靠携带动词和第一人称两个例外
+        把玩家自己动身的句子放回来，这个类下面那两条各钉一个。
+
+        分句也各算各的：前一句安排她，后一句说自己去哪儿
         """
         for content, expect in (
             ("我去客栈找赫敏", "客栈"),
@@ -616,6 +725,59 @@ class OffstageTests(_CompanyScenario, unittest.TestCase):
         ):
             with self.subTest(content=content):
                 self.assertEqual(self._four(content)[0], expect)
+
+    def test_a_name_before_the_verb_no_longer_drags_the_player_along(self):
+        """名字后面多挂一个字，从前就把**玩家**挪走了。
+
+        那道闸原先要求动词前面**整个等于**一个名字，于是「赫敏」后面跟上
+        「得 / 这个点该」就对不上，整句落到 movement_target 上——该走的是她，
+        走的却是玩家，下一轮正文里玩家已经站在别处。代词那一侧从来没这个问题
+        （「她这个点该回宿舍了」被 _MOVE_DENY 的字符窗口拦着），两把尺子松紧
+        不一样才是病根。
+
+        现在这几句一个字都不动、整句交回 AI。**这只是不再挪错人，不等于把她
+        挪对了**——要真的挪她得另外补使役动词或让裁决回一个派遣字段
+        """
+        for content in (
+            "赫敏这个点该回宿舍了", "嘱咐赫敏回宿舍",
+            "赫敏得去客栈一趟", "赫敏是不是该回宿舍",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content), ("", (), (), ()))
+
+    def test_the_two_exceptions_that_keep_the_player_moving(self):
+        """放宽之后必须留的两个例外，缺一个都造出新 bug。
+
+        携带动词：「带赫敏去客栈」她不在跟前，_parse_carry 够不着（那条只支使
+        得动跟前的人），落到这道闸上。拦了就是该走的时候玩家留在原地，而 GM
+        照着写一段已经到了的剧情，结算只能报地点冲突。
+
+        第一人称：「我跟赫敏去客栈」动身的确实是玩家（裸「跟」刻意不算携带，
+        方向是反的，见 _CARRY_VERB_TAKE 的注释）
+        """
+        for content, expect in (
+            ("带赫敏去客栈", "客栈"),
+            ("领着赫敏去后山", "后山"),
+            ("我跟赫敏去客栈", "客栈"),
+            ("我和赫敏一起去后山", "后山"),
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content)[0], expect)
+
+    def test_a_retold_move_without_a_place_does_not_swallow_the_players_move(self):
+        """转述她做过的事、又说不出登记地点的分句，不该把玩家这句移动一起拦掉。
+
+        真实输入：「你移动到客厅，看到了有些醉醺醺的晏昭华，……晏昭华表示刚刚
+        送到门口就回去了。」最后一句「晏昭华…送到门口」名字在动词前，从前整句
+        被当成「动身的是别人」交回 AI，玩家留在原地
+        """
+        for content in (
+            "直到深夜，才听见楼下开门的声音。你移动到客栈，看到了有些醉醺醺的赫敏，"
+            "上去扶住她到沙发上，问罗恩呢，赫敏表示刚刚送到门口就回去了。",
+            "我去客栈，赫敏说她刚送到门口就回去了",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._four(content)[0], "客栈")
 
 
 class EmptyRoomTests(_CompanyScenario, unittest.TestCase):

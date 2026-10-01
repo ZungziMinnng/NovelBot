@@ -871,5 +871,90 @@ class GenerateBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["tasks"][0]["objective"], "把信交到老周手上")
 
 
+class GenerateTiersTests(unittest.IsolatedAsyncioTestCase):
+    """给一项数值划档表。清洗过 tier_list（排序、截字数），这里钉的是它管不到的
+    那两件事：档位落在范围外、两档撞同一个下界。两种都不报错，只是那一档白填。"""
+
+    async def _tiers(self, spec, parsed, count=4):
+        async def fake_call_json(*_args, **_kwargs):
+            return parsed, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json), \
+             patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+            return await rpg_wizard.generate_tiers(spec, "按暗恋到热恋划", count, "7")
+
+    async def test_tiers_come_back_sorted_and_trimmed(self):
+        out = await self._tiers(
+            {"name": "好感", "min": 0, "max": 100},
+            {"tiers": [
+                {"at": 60, "label": "亲近", "note": "愿意单独出门"},
+                {"at": 0, "label": "陌生", "note": "客气但有距离"},
+            ]},
+        )
+        self.assertEqual([t["at"] for t in out["tiers"]], [0, 60])
+        self.assertEqual(out["dropped"], [])
+
+    async def test_a_tier_outside_the_range_is_dropped_and_said_out_loud(self):
+        """比 min 还低的那一档最坑：tier_of 取「够得上的最后一档」，值永远够得上
+        它，于是它顶掉真正的最低档，而且不报错。"""
+        out = await self._tiers(
+            {"name": "好感", "min": 0, "max": 100},
+            {"tiers": [
+                {"at": -20, "label": "厌恶", "note": "见了就走"},
+                {"at": 0, "label": "陌生", "note": "客气"},
+                {"at": 180, "label": "痴迷", "note": "离不开"},
+            ]},
+        )
+        self.assertEqual([t["at"] for t in out["tiers"]], [0])
+        self.assertEqual(len(out["dropped"]), 2)
+
+    async def test_two_tiers_on_the_same_floor_keep_only_the_first(self):
+        out = await self._tiers(
+            {"name": "好感", "min": 0, "max": 100},
+            {"tiers": [
+                {"at": 0, "label": "陌生", "note": "客气"},
+                {"at": 0, "label": "冷淡", "note": "不搭话"},
+            ]},
+        )
+        self.assertEqual([t["label"] for t in out["tiers"]], ["陌生"])
+        self.assertEqual(len(out["dropped"]), 1)
+
+    async def test_an_unbounded_stat_says_so_in_the_prompt(self):
+        """没上限的数值（钱）不能写成「0 到 None」——模型会把 None 当成一个数。"""
+        async def fake_call_json(messages, *_args, **_kwargs):
+            self.assertIn("没有上限", messages[0]["content"])
+            return {"tiers": [{"at": 0, "label": "穷", "note": "数着铜板过"}]}, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json), \
+             patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+            out = await rpg_wizard.generate_tiers(
+                {"name": "资金", "min": 0, "max": None}, "", 3, "7",
+            )
+        self.assertEqual(out["tiers"][0]["at"], 0)
+
+    async def test_nothing_usable_is_an_error_not_an_empty_table(self):
+        """空表静默写回去等于把作者原来的档表清了。"""
+        with self.assertRaises(ValueError):
+            await self._tiers({"name": "好感", "min": 0, "max": 100}, {"tiers": []})
+
+    async def test_a_nameless_stat_is_refused(self):
+        with self.assertRaises(ValueError):
+            await self._tiers({"name": "", "min": 0, "max": 100}, {"tiers": []})
+
+    async def test_the_existing_table_is_offered_back_to_the_model(self):
+        """重新分档时要让模型看见作者原来划的，否则它每次都从零编一套。"""
+        async def fake_call_json(messages, *_args, **_kwargs):
+            self.assertIn("60 起 亲近", messages[0]["content"])
+            return {"tiers": [{"at": 0, "label": "陌生", "note": "客气"}]}, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json), \
+             patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+            await rpg_wizard.generate_tiers(
+                {"name": "好感", "min": 0, "max": 100,
+                 "tiers": [{"at": 60, "label": "亲近", "note": ""}]},
+                "", 3, "7",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

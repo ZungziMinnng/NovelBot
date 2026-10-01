@@ -286,7 +286,6 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_modules ADD COLUMN adjudication_model_ref VARCHAR(100) DEFAULT ''",
         "ALTER TABLE rpg_modules ADD COLUMN suggestion_model_ref VARCHAR(100) DEFAULT ''",
         "ALTER TABLE rpg_modules ADD COLUMN activity_model_ref VARCHAR(100) DEFAULT ''",
-        "ALTER TABLE rpg_modules ADD COLUMN offscreen_model_ref VARCHAR(100) DEFAULT ''",
         "ALTER TABLE rpg_modules ADD COLUMN discovery_model_ref VARCHAR(100) DEFAULT ''",
         # 立绘 tag 转换专用模型。老库拿到 ''，消费端写 image_model_ref or
         # fast_model_ref or model_ref，所以老模组从此跟着裁决模型走——这一列
@@ -299,14 +298,12 @@ async def _run_migrations() -> None:
         # 作息表：把「这个人在哪儿」按当前时段取。老库拿到 '{}' = 没有作息表，
         # 一律落回 location，和加这一列之前逐字一致
         "ALTER TABLE rpg_npcs ADD COLUMN slot_locations JSON DEFAULT '{}'",
-        # 时段跳转时的外场简报（一次便宜的模型调用）。默认关：老模组保持
-        # 「结束时段零模型调用」，这是当初就写进文档和界面上的承诺，
-        # 不能因为加了新功能就悄悄把它变成假的
-        "ALTER TABLE rpg_modules ADD COLUMN offscreen_brief BOOLEAN DEFAULT 0",
         # 角色是否交给 AI 调度。默认关：老模组不勾就一个模型调用都不多，
         # 行为和加这一列之前逐字一致
         "ALTER TABLE rpg_npcs ADD COLUMN ai_scheduled BOOLEAN DEFAULT 0",
         "ALTER TABLE rpg_npcs ADD COLUMN random_movement BOOLEAN DEFAULT 0",
+        # 单个角色的去处挑法。老库拿到 '' = 跟随模组
+        "ALTER TABLE rpg_npcs ADD COLUMN move_mode VARCHAR(16) DEFAULT ''",
         "ALTER TABLE rpg_npcs ADD COLUMN random_movement_slots JSON DEFAULT '[]'",
         # 随机移动的地点白名单。老库拿到 '[]' = 不限制，和加这一列之前逐字一致
         "ALTER TABLE rpg_npcs ADD COLUMN random_movement_places JSON DEFAULT '[]'",
@@ -322,10 +319,19 @@ async def _run_migrations() -> None:
         # 调度顺带写留言的开关。老模组拿到 0 = 关，那次调用的输出和以前一样，
         # 多出来的那一行永远不会产生
         "ALTER TABLE rpg_modules ADD COLUMN npc_initiative BOOLEAN DEFAULT 0",
+        # 调度顺带写幕后往事的开关。老模组拿到 0 = 关，调度输出和以前一样
+        "ALTER TABLE rpg_modules ADD COLUMN npc_encounters BOOLEAN DEFAULT 0",
+        # 调度挑去处的办法。老模组拿到 'ai' = 照旧由模型按人设挑
+        "ALTER TABLE rpg_modules ADD COLUMN npc_move_mode VARCHAR(16) DEFAULT 'ai'",
+        # 幕后往事和 NPC 之间的关系标签。老库拿到 '[]' = 谁和谁都没碰过面
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_offscreen JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_bonds JSON DEFAULT '[]'",
         # 剧情挪动的人物位置：{"3": "校长办公室"}。老库拿到 '{}' = 谁的位置
         # 都没被剧情改过，一律按作息表 / 常驻地点算，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_places JSON DEFAULT '{}'",
         "ALTER TABLE rpg_sessions ADD COLUMN npc_random_places JSON DEFAULT '{}'",
+        # 谁和谁正连着待在一处。老库拿到 '{}' = 谁都还没碰上，下一次调度从头数
+        "ALTER TABLE rpg_sessions ADD COLUMN npc_together JSON DEFAULT '{}'",
         # 跟着玩家走的人：[3, 7]。老库拿到 '[]' = 谁都没跟着，位置一律按作息表 /
         # 常驻地点算，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_followers JSON DEFAULT '[]'",
@@ -451,6 +457,15 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_world_entries ADD COLUMN once BOOLEAN DEFAULT 0",
         # 已经放过的一次性词条 id。老局拿到 [] = 谁都没放过
         "ALTER TABLE rpg_sessions ADD COLUMN fired_entries JSON DEFAULT '[]'",
+        # 摘要的历史留档，只给顶栏那个查看器看。老局拿到 '{}' = 还没攒过，
+        # 查看器显示空——**已经被覆盖掉的那些旧版本库里没有，找不回来**，
+        # 所以历史是从这一列上线那天开始往后攒的
+        "ALTER TABLE rpg_sessions ADD COLUMN summary_log JSON DEFAULT '{}'",
+        # 玩家提到没登记的地方就自动建一条。老模组拿到 1 = 跟着开，同新模组
+        "ALTER TABLE rpg_modules ADD COLUMN auto_location BOOLEAN DEFAULT 1",
+        "ALTER TABLE rpg_modules ADD COLUMN narration_examples JSON DEFAULT '[]'",
+        # 文风库（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_style_profiles_user ON style_profiles(user_id)",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -737,7 +752,7 @@ async def seed_builtin_rules(user_ids: list[int] | None = None) -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word, rpg  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word, rpg, style_profile  # noqa: F401
     async with engine.begin() as conn:
         existing = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).has_table("world_rules")

@@ -3,7 +3,7 @@ import { Backpack, ScrollText, Sparkles, Users, Zap } from 'lucide-react'
 import type {
   RpgItem, RpgModule, RpgNpc, RpgSession, RpgSkill, RpgStatDef,
 } from '@/api/client'
-import { following, npcPlace, onstage } from './condition'
+import { following, npcAway, npcPlace, onstage } from './condition'
 import useColumnResize from './useColumnResize'
 import CastTab from './sidebar/CastTab'
 import NpcDetail from './sidebar/NpcDetail'
@@ -176,8 +176,10 @@ export default function StatusSidebar({
           history={sess.npc_history?.[String(openNpc.id)] || []}
           activityLog={sess.npc_activity_log?.[String(openNpc.id)] || []}
           milestones={sess.npc_milestones || []}
+          offscreen={sess.npc_offscreen || []}
+          bonds={sess.npc_bonds || []}
           here={onstage(openNpc, sess)}
-          place={npcPlace(
+          place={npcAway(openNpc, sess) ? '已离开' : npcPlace(
             openNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
           ) || ''}
           following={following(openNpc, sess)}

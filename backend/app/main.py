@@ -14,7 +14,7 @@ from app.database import init_db, seed_admin, seed_builtin_rules, AsyncSessionLo
 from app.api.auth_middleware import AuthMiddleware
 from app.api.routes import novels, chapters, characters, generation, app_settings, chat
 from app.api.routes import model_library, admin, writer_presets, prompt_rules, world_entities, locations, api_providers, novel_notes, factions, techniques, volumes, outlines, prompts, corrections, worldview_changes, glossary, world_rules, story_threads, text_replace, tavern
-from app.api.routes import auth, submission, rpg
+from app.api.routes import auth, submission, rpg, style_profiles
 
 
 async def _auto_migrate_providers(session, admin_id: int):
@@ -111,6 +111,7 @@ app.include_router(text_replace.router,    prefix="/api/text-replace",   tags=["
 app.include_router(tavern.router,          prefix="/api/tavern",         tags=["tavern"])
 app.include_router(submission.router,      prefix="/api/submission",     tags=["submission"])
 app.include_router(rpg.router,             prefix="/api/rpg",            tags=["rpg"])
+app.include_router(style_profiles.router,  prefix="/api/style-profiles", tags=["style-profiles"])
 
 
 _avatars_dir = Path("data/avatars")

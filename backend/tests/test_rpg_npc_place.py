@@ -261,7 +261,35 @@ class SlotResetTests(unittest.TestCase):
 
     def test_a_random_override_still_expires_when_the_slot_leaves_the_set(self):
         # 放行不等于永久豁免：配了时段的人走出那几格照旧回作息表，
-        # 这条由 _clear_expired_random_places 管，别让上面那个放行盖过它
+        # 这条由 _clear_expired_random_places 管，别让上面那个放行盖过它。
+        # **她得真有一张作息表**才落得回去，这一条钉的就是「落回作息表」——
+        # 一格都没排的人见下一条，那时落回去的是常驻地，不是任何排期
+        module = self._module()
+        npc = _npc(location="家", random_movement=True, ai_scheduled=True,
+                   random_movement_slots=["中"], slot_locations={"晚": "宿舍"})
+        sess = _sess(
+            slot="中", location="物业办公室",
+            npc_places={"3": "菜市场"}, npc_random_places={"3": "菜市场"},
+        )
+        advance_slot(module, sess, [npc])  # 中 → 晚，不在随机时段里了
+        self.assertEqual(sess.slot, "晚")
+        self.assertEqual(sess.npc_places, {})
+        self.assertEqual(sess.npc_random_places, {})
+        self.assertEqual(npc_place(npc, sess.slot, sess.npc_places), "宿舍")
+
+    def test_a_random_override_outlives_the_slot_when_she_has_no_schedule(self):
+        """一格作息表都没排的人，出了可移动时段也不清这条覆盖。
+
+        真实存档（session 12 韩曼宁）：常驻「家」、作息表空着、可移动时段是
+        中午到深夜。调度傍晚把她挪去内衣店，第二天早晨这条覆盖到期 → 她瞬移
+        回家；而早晨她又不准动，于是一整个早晨都在家。等到中午闸门开了，她
+        已经在家了，模型顺着「她在家」往下写——玩家看到的就是她再也不出门，
+        每天早晨被拽回家一次。
+
+        清空的目的是「时段一变，作者排的作息表重新说了算」，她没有作息表，
+        落回去的是常驻地那个常数。advance_slot 里那句按 _has_schedule 保留
+        覆盖防的正是这件事，清理这一步不跟着判就等于一行之后把它撤销了
+        """
         module = self._module()
         npc = _npc(location="家", random_movement=True, ai_scheduled=True,
                    random_movement_slots=["中"])
@@ -271,8 +299,27 @@ class SlotResetTests(unittest.TestCase):
         )
         advance_slot(module, sess, [npc])  # 中 → 晚，不在随机时段里了
         self.assertEqual(sess.slot, "晚")
-        self.assertEqual(sess.npc_places, {})
-        self.assertEqual(sess.npc_random_places, {})
+        self.assertEqual(sess.npc_places, {"3": "菜市场"})
+        self.assertEqual(sess.npc_random_places, {"3": "菜市场"})
+
+    def test_a_place_struck_off_the_whitelist_expires_even_without_a_schedule(self):
+        # 上面那条放行只管「时段不对」。作者把这个地点从随机范围里划掉、或者
+        # 干脆关了随机移动，覆盖仍旧当场作废：那时落回常驻地至少是作者写下的
+        # 地方，而留着的是一个他已经划掉的地点
+        module = self._module()
+        for kw in (
+            {"random_movement": True, "random_movement_places": ["药店"]},
+            {"random_movement": False},
+        ):
+            with self.subTest(kw=kw):
+                npc = _npc(location="家", ai_scheduled=True, **kw)
+                sess = _sess(
+                    slot="中", location="物业办公室",
+                    npc_places={"3": "菜市场"}, npc_random_places={"3": "菜市场"},
+                )
+                advance_slot(module, sess, [npc])
+                self.assertEqual(sess.npc_places, {})
+                self.assertEqual(sess.npc_random_places, {})
 
     def test_a_stale_random_mark_does_not_resurrect_a_place(self):
         # 标记还在、现值已经被结算改成别处：那不再是随机覆盖，按结算那批处理。
@@ -344,9 +391,30 @@ class PromptBlockTests(unittest.TestCase):
         block = _place_block([_npc()], [], _sess(npc_places={"3": "校长办公室"}))
         self.assertIn("赫敏 现在在 校长办公室", block)
 
-    def test_nobody_named_means_no_block(self):
-        # 一个字段都不提，省掉几十个字，也免得模型凭空想起要挪人
-        self.assertEqual(_place_block([], ["宿舍"], _sess()), "")
+    def test_nobody_named_means_no_npc_places_field(self):
+        # 一个字段都不提，省掉几十个字，也免得模型凭空想起要挪人。
+        # 时间和地名单照旧拼：它们是给 suggestions 那三条用的，和挪不挪人无关
+        block = _place_block([], ["宿舍"], _sess())
+        self.assertNotIn("npc_places", block)
+        self.assertIn("宿舍", block)
+
+    def test_the_clock_reaches_the_recorder(self):
+        """时段得写进结算提示词，否则建议会把眼下当成别的时候。
+
+        叙事那一侧早就有这一句（_compose_state），记录员这一侧一直没有——
+        于是它编出「明天早上再去找她」而现在就是早上。
+        """
+        self.assertIn("第 2 天 · 晚", _place_block([_npc()], [], _sess(day=2, slot="晚")))
+
+    def test_no_clock_means_no_time_line(self):
+        # 没设时段的模组说「第 1 天」只会让模型以为有个它看不见的日程表
+        self.assertNotIn("现在是什么时候", _place_block([_npc()], [], _sess(slot="")))
+
+    def test_the_place_list_is_offered_once_not_twice(self):
+        # 同一份白名单在提示词里出现两遍，改起来迟早只改一处，
+        # 两份说法打架时模型听哪一份没人说得清
+        block = _place_block([_npc()], ["宿舍", "图书馆"], _sess())
+        self.assertEqual(block.count("宿舍、图书馆"), 1)
 
     def test_a_nameless_person_is_still_shown(self):
         # 作者把名字留空了。这儿写成空串不难看，也不影响别的
@@ -361,7 +429,7 @@ class PromptBlockTests(unittest.TestCase):
 
     def test_no_known_places_means_no_such_line(self):
         # 模组一个地点都没建时，这段不拼，行为和加它之前逐字一致
-        self.assertNotIn("只能填", _place_block([_npc()], [], _sess()))
+        self.assertNotIn("只有这些地方存在", _place_block([_npc()], [], _sess()))
 
 
 class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
@@ -446,7 +514,8 @@ class SettleWiringTests(unittest.IsolatedAsyncioTestCase):
         _got, prompt = await self._run("赫敏推门进来，站在你面前。", {})
         self.assertIn("npc_places", prompt)
         self.assertIn("赫敏 现在在 宿舍", prompt)
-        self.assertIn("只能填这些已有的地名：图书馆", prompt)
+        self.assertIn("只有这些地方存在", prompt)
+        self.assertIn("图书馆", prompt)
 
     async def test_nobody_in_the_text_means_the_field_is_never_offered(self):
         # 一个字都不提，模型也就不会想起要挪谁

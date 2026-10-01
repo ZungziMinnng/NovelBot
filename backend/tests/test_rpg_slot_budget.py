@@ -626,7 +626,6 @@ class FreeCostsSlotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sess.slot, "早")
         # 恢复到上限的七成，不是回满
         self.assertEqual(sess.stats["精力"], 70)
-        self.assertTrue(sess.chronicle)
 
     async def test_clicking_an_action_is_not_charged_twice(self):
         # _resolve_engine 已经记过一格了。这里再记就是一轮扣两格

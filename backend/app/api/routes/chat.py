@@ -181,7 +181,7 @@ async def brainstorm_stream(
     messages += [{"role": m.role, "content": m.content} for m in trimmed]
 
     model, api_format = llm_client.get_agent_client("writer", req.model)
-    return _stream_response(
+    return stream_chat(
         messages, model, api_format, req.temperature, req.max_tokens,
         pre_warning=search_warning,
     )
@@ -232,7 +232,7 @@ async def brainstorm_extract(
             ],
             model,
             api_format,
-            max_tokens=3000,
+            max_tokens=8000,
         )
     except llm_json.JsonCallError as e:
         raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e

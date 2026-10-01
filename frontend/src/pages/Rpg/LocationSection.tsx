@@ -31,6 +31,7 @@ const EMPTY: LocForm = { name: '', description: '', parent_id: null, connections
  *  用 id 会凭空多一套映射，改个地点名就对不上了。 */
 export default function LocationSection({
   moduleId, statDefs, relationDefs, npcs, slotNames, example = '地窖', assistContext,
+  autoLocation = true, onAutoLocation,
 }: {
   moduleId: number
   statDefs: RpgStatDef[]
@@ -41,6 +42,10 @@ export default function LocationSection({
   example?: string
   /** 模组层面的参考（模组名/题材/类别/世界观），「帮我写」要用 */
   assistContext: () => Record<string, string>
+  /** 模组上的 auto_location。摆在这一栏而不是时段那栏：它改的是这张地点表
+   *  会不会自己长出新行，跟时间无关 */
+  autoLocation?: boolean
+  onAutoLocation?: (next: boolean) => void
 }) {
   const qc = useQueryClient()
   const { data: locations = [] } = useQuery({
@@ -447,6 +452,27 @@ export default function LocationSection({
               }}
             />
           </div>
+        )}
+
+        {onAutoLocation && (
+          <label className="flex items-start gap-2.5 cursor-pointer pt-1">
+            <input
+              type="checkbox"
+              checked={autoLocation}
+              onChange={e => onAutoLocation(e.target.checked)}
+              className="mt-0.5 accent-[hsl(var(--primary))]"
+            />
+            <div>
+              <span className="text-sm">玩家说到没有的地方就自动加进来</span>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                玩家打「去太玄大殿密室」而表里没有这个地方，就当场建一条并走过去，
+                免得人留在原地、AI 却照着写一段已经到了的剧情。
+                说的是已有地点的简称（表里有「织云阁地下密室」，玩家打「密室」）
+                算同一个地方，只移动、不新建。建出来的地点没有描述、没有进入条件，
+                在这张表里可以直接改。一局最多自动加 20 个。
+              </p>
+            </div>
+          </label>
         )}
       </div>
     </Section>

@@ -40,6 +40,7 @@ import { actionTimeHint } from './actionFeedback'
 import StatePanel from './StatePanel'
 import FocusPortrait from './FocusPortrait'
 import StatusSidebar, { type SidebarTab } from './StatusSidebar'
+import MemoryLog from './MemoryLog'
 import TweakPanel from './TweakPanel'
 import SaveTab from './sidebar/SaveTab'
 import TaskResolutionsModal from './TaskResolutionsModal'
@@ -135,7 +136,7 @@ const mentionedOnly = (meta: RpgTurnMeta) => {
  *  只有后端 DROP_ORDER 里那几个 key 会出现在这里；护栏、状态、摘要、
  *  长期事实是保底块，永远不会被丢 */
 const DROPPED_LABEL: Record<string, string> = {
-  sample: '叙事样例', roster: '角色总表', chronicle: '外场',
+  sample: '叙事样例', roster: '角色总表',
   worldbook: '世界书', catalog: '道具与技能',
 }
 
@@ -199,8 +200,8 @@ export default function RpgPlay() {
 
   // 正在改哪条消息。id 是库里的行，没落库的（流式占位）不给改
   const [editing, setEditing] = useState<{ id: number; role: string; text: string } | null>(null)
-  // 瞬移 / 推时段在跑。瞬移是毫秒级的纯引擎请求，推时段在勾了外场简报或
-  // AI 调度时会串行等两次模型（秒级），两种都靠这个挡手滑连点
+  // 瞬移 / 推时段在跑。瞬移是毫秒级的纯引擎请求，推时段在有人勾了 AI 调度时
+  // 要等一次模型（秒级），两种都靠这个挡手滑连点
   const [engineBusy, setEngineBusy] = useState(false)
   // engineBusy 那件事叫什么，给进度条当说明。空串 = 不画条：瞬移是毫秒级的，
   // 画一条闪一下的进度条比不画更晃眼（见 go 里那句注释）
@@ -236,6 +237,9 @@ export default function RpgPlay() {
   const [saveOpen, setSaveOpen] = useState(false)
   // 修改器同理挂在页头：手改数值是「这一局之外」的事，和侧栏那五格不是一类
   const [tweakOpen, setTweakOpen] = useState(false)
+  // 记忆历史也挂在页头：它横跨所有格子（你自己那格 + 每个角色各一格），
+  // 而侧栏那几格是「当前这一个人」的视角，放不进去
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const [view, setView] = useState<View>(() => readView(sessionId) ?? 'overview')
   // 地图当前展开的父地点；null 表示大陆/区域级大地图
   const [mapParentId, setMapParentId] = useState<number | null>(null)
@@ -278,10 +282,17 @@ export default function RpgPlay() {
     gcTime: 0,
   })
   const moduleId = sess?.module_id
+  // 每次进来都重新取，同上面那一份会话。**不能吃全局那 30 秒缓存**：玩到一半
+  // 出去改模组设定（页头那颗按钮带着 ?from= 回来），30 秒内进来拿的是改之前的
+  // 那一份。表现最扎眼的是时段——作者刚给模组加了时段表，回到局里时钟还是不
+  // 出现（hasClock 读的就是这份 module），看着像「改了没保存上」，其实库里
+  // 早存好了。slot_budget、行动上限、判定模式全是同一条路
   const { data: module } = useQuery({
     queryKey: ['rpg-module', moduleId],
     queryFn: () => rpgApi.modules.get(moduleId!),
     enabled: !!moduleId,
+    refetchOnMount: 'always',
+    staleTime: 0,
   })
   // 模拟器：主页是中枢，地图退成主页里的一栏。module 还没到时按 false 算，
   // 那一帧只影响默认落哪一级，而那件事等在 landedRef 那个 effect 里做
@@ -991,9 +1002,9 @@ export default function RpgPlay() {
     || !!slotHint
   )
   /** 按下「结束这个时段」会不会叫模型。判据和按钮 title 里那句话逐字同源
-   *  （见 routes/rpg.py 的 advance_time：外场简报 + AI 调度两处加料，
-   *  一个都没勾就是纯引擎的毫秒级请求，不值得画进度条） */
-  const slowAdvance = !!module?.offscreen_brief || npcs.some(n => n.ai_scheduled)
+   *  （见 routes/rpg.py 的 advance_time：只有 AI 调度这一处加料，
+   *  没人勾就是纯引擎的毫秒级请求，不值得画进度条） */
+  const slowAdvance = npcs.some(n => n.ai_scheduled)
 
   /** 真的把这一轮发出去。对象已经定了（`who` 可以是空串 = 这动作不需要对象）。
    *
@@ -1473,6 +1484,29 @@ export default function RpgPlay() {
               第 {sess.day} 天{sess.slot ? ` · ${sess.slot}` : ''}
             </span>
           )}
+          {/* 记忆历史。浮层的做法照抄下面的存档，**同样不能 createPortal**，
+              理由见那条注释 */}
+          <div className="relative">
+            <button
+              onClick={() => setMemoryOpen(open => !open)}
+              title="每一格压出来的长期记忆，按角色分。只能看"
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
+                ${memoryOpen ? 'bg-muted' : ''}`}
+            >
+              <BookMarked className="w-3.5 h-3.5" />记忆
+            </button>
+            {memoryOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setMemoryOpen(false)} />
+                <div
+                  className="absolute right-0 top-full z-40 mt-1.5 w-80 max-h-[70vh] overflow-y-auto
+                    rounded-xl border bg-background p-3 shadow-2xl"
+                >
+                  <MemoryLog sess={sess} npcs={npcs} />
+                </div>
+              </>
+            )}
+          </div>
           {/* 存档从侧栏搬到这儿。浮层留在组件树里用 absolute，**不能 createPortal**：
               --rpg-* 那套颜色变量定在外面的 .mode-game 上，portal 出去就取不到了 */}
           <div className="relative">
@@ -1695,7 +1729,6 @@ export default function RpgPlay() {
                   {/* 全模组角色的花名册，一人一行。角色块是其中几个人的详细卡，
                       所以这一块基本不动、那一块每轮变。私聊时不注入，那一轮是 0 */}
                   {' · '}名册 {meta.roster_tokens ?? 0}
-                  {' · '}外场 {meta.chronicle_tokens ?? 0}
                   {/* 关系里程碑。不按在场筛、只增不减，所以这个数字会一路涨——
                       涨得不对劲就是结算在乱记转折 */}
                   {' · '}转折 {meta.milestone_tokens ?? 0}
@@ -2001,8 +2034,8 @@ export default function RpgPlay() {
                       onClick={advance}
                       disabled={locked || engineBusy}
                       title={[
-                        module?.offscreen_brief
-                          ? '推进到下一个时段。这一下不生成剧情，但会调一次便宜模型写一句「别处」的大事记'
+                        slowAdvance
+                          ? '推进到下一个时段。这一下不生成剧情，但会调一次便宜模型，给勾了 AI 调度的角色各写一句「最近在做什么」'
                           : '推进到下一个时段。这一下不生成剧情，模型也不会参与',
                         // 规则**一直**写在这儿，不是等触发了才说。玩家问过
                         // 「聊多少才会跳时段」——答案是永远不会，那就得让他
@@ -2035,8 +2068,8 @@ export default function RpgPlay() {
                   </div>
                 )}
 
-                {/* 要等的那几件事共用一条。勾了外场简报或 AI 调度的话推时段要
-                    串行等两次模型（秒级），「帮我想想」也是一次调用——按钮只是
+                {/* 要等的那几件事共用一条。有人勾了 AI 调度的话推时段要等一次
+                    模型（秒级），「帮我想想」也是一次调用——按钮只是
                     灰掉的话玩家看不出是在跑还是点空了。
                     条件互斥：locked 期间点不了「帮我想想」，反之亦然 */}
                 {(engineWait || suggesting) && (
@@ -2255,6 +2288,7 @@ export default function RpgPlay() {
                   <span className="text-muted-foreground leading-relaxed">
                     {MODES.find(m => m.key === effectiveMode)?.hint}
                   </span>
+                  {module && <ReplyLengthPicker module={module} disabled={locked} />}
                 </div>
 
                 <div className="relative flex gap-2 items-end">
@@ -2630,6 +2664,52 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
         </div>
       )}
     </div>
+  )
+}
+
+const REPLY_LENGTH_PRESETS = [
+  { label: '不限', value: 0 },
+  { label: '简短', value: 150 },
+  { label: '适中', value: 300 },
+  { label: '详细', value: 600 },
+]
+
+/** 输入框旁边的旁白长度。和 PlayParams 一样改的是模组本身，下一次发送就生效；
+ *  精确字数去模组编辑页填，这里只给几档，填过的非整档值照样显示成当前项 */
+function ReplyLengthPicker({ module, disabled }: { module: RpgModule; disabled: boolean }) {
+  const qc = useQueryClient()
+  const current = module.reply_length
+  const custom = !REPLY_LENGTH_PRESETS.some(p => p.value === current)
+
+  const change = async (value: number) => {
+    try {
+      await rpgApi.modules.update(module.id, { reply_length: value })
+      qc.invalidateQueries({ queryKey: ['rpg-module', module.id] })
+    } catch {
+      toast.error('改旁白长度失败')
+    }
+  }
+
+  return (
+    <label
+      className="ml-auto flex items-center gap-1 text-muted-foreground"
+      title="旁白大约写多少字。软要求，不是硬截断——改的是模组本身，这个模组的其他存档也跟着变"
+    >
+      旁白
+      <select
+        value={current}
+        onChange={e => change(Number(e.target.value))}
+        disabled={disabled}
+        className="border rounded-lg px-2 py-1 bg-background/60 text-foreground focus:outline-none disabled:opacity-50"
+      >
+        {custom && <option value={current}>{current} 字</option>}
+        {REPLY_LENGTH_PRESETS.map(p => (
+          <option key={p.value} value={p.value}>
+            {p.value ? `${p.label} · ${p.value} 字` : p.label}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 

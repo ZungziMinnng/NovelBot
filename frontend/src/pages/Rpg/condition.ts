@@ -3,6 +3,44 @@ import type { RpgAction, RpgCondition, RpgLocation, RpgModule, RpgNpc, RpgSessio
 export const norm = (s: string) => (s || '').trim().toLowerCase()
 
 /**
+ * 作息表里表示「这一格让她自己走动」的那个值。后端 `rpg_state.RANDOM_SLOT`
+ * 的镜像，改一边就要改另一边。
+ *
+ * 它填在 `slot_locations` 里，所以每一处读作息表的地方都得认得它，不然
+ * 症状是侧栏上写着「在 __random__」。
+ */
+export const RANDOM_SLOT = '__random__'
+
+/**
+ * 「已离开」：剧情写她走了、没说去哪。后端 `rpg_state.AWAY` 的镜像。
+ * 存在 npc_places 里，npcPlace 解析成空——她不在任何地方。
+ */
+export const AWAY = '__away__'
+
+export const npcAway = (npc: RpgNpc, sess: RpgSession) =>
+  (sess.npc_places || {})[String(npc.id)] === AWAY
+
+/**
+ * 这个人哪几格准自己走动。后端 `rpg_state.random_slots` 的镜像，两边一个口径。
+ *
+ * 新配法：作息表里那一格填的是 RANDOM_SLOT。旧配法：`random_movement` 总开关 +
+ * `random_movement_slots` 那份勾选。作息表里一个「随机」都没有时才去读旧字段
+ * ——所以老档照旧显示成随机移动，作者在新界面里存一次就转过来了。
+ *
+ * `slotNames` 只为旧配法的空列表准备：它那时的语义是「所有时段都可以」，
+ * 得摊开模组的整张时段表才说得清。
+ */
+export const randomSlots = (npc: RpgNpc, slotNames: string[]): string[] => {
+  const fresh = Object.entries(npc.slot_locations || {})
+    .filter(([slot, at]) => slot.trim() && (at || '').trim() === RANDOM_SLOT)
+    .map(([slot]) => slot.trim())
+  if (fresh.length) return fresh
+  if (!npc.random_movement) return []
+  const legacy = (npc.random_movement_slots || []).map(s => s.trim()).filter(Boolean)
+  return legacy.length ? legacy : slotNames
+}
+
+/**
  * `loc` 是不是挨着 `location`。连接是双向的：作者在 A 里写了 B，B 也算挨着 A。
  *
  * **只给迷雾用**，不是关卡：移动不看连接（后端 _move 也不看），
@@ -91,6 +129,7 @@ export const npcPlace = (
   followers?: number[], here?: string,
 ) => {
   const over = ((places || {})[String(npc.id)] || '').trim()
+  if (over === AWAY) return ''
   if (over) return over
   // 跟着你的那一层：解析出来就是**你此刻的位置**，所以关键随你走、零同步。
   // `here` 必须传玩家当前所在地（sess.location），**不能传要比较的那个地名**
@@ -98,7 +137,10 @@ export const npcPlace = (
   const at = (here || '').trim()
   if (at && (followers || []).includes(npc.id)) return at
   const now = (slot || '').trim()
-  return (now ? ((npc.slot_locations || {})[now] || '').trim() : '') || (npc.location || '')
+  const scheduled = now ? ((npc.slot_locations || {})[now] || '').trim() : ''
+  // RANDOM_SLOT 不是地名。她真被挪去哪儿记在 npc_places 里（上面第一支已经
+  // 拦住了），走到这儿说明这一格调度还没挑过——落回常驻地点，同这一格空着的人
+  return (scheduled === RANDOM_SLOT ? '' : scheduled) || (npc.location || '')
 }
 
 /** 他此刻是不是和玩家在同一个地点 */

@@ -1105,12 +1105,13 @@ class SceneTests(_Base):
         self.assertNotIn("【场面】", messages[0]["content"])
         self.assertEqual(diag["scene_tokens"], 0)
 
-    async def test_the_block_sits_right_after_the_chronicle(self):
+    async def test_old_chronicle_rows_are_no_longer_injected(self):
+        # 【外场】2026-09-29 停掉了；老存档列里还留着流水，不许再进 prompt
         self.sess.chronicle = ["〔开场〕你睁开眼，地窖里只有一盏摇晃的灯。"]
         messages, _ = await self._build("我往前走")
         system = messages[0]["content"]
-        self.assertIn("【外场】", system)
-        self.assertLess(system.index("【外场】"), system.index("【场面】"))
+        self.assertNotIn("【外场】", system)
+        self.assertNotIn("〔开场〕", system)
 
     async def test_the_place_description_is_never_scanned_for_keywords(self):
         # 地点描述不许参与关键词扫描：写地窖的模组每进一次地窖就命中那条词条，
@@ -1431,6 +1432,50 @@ class OpposedTests(unittest.TestCase):
         self.assertEqual(
             opposed_for(self._module(""), [rival], "柳生", "轻功"), (None, None),
         )
+
+
+class NarrationExampleTests(_Base):
+    """叙事示例是真 few-shot 轮：插在 system 之后，不许打断 user/assistant 交替。"""
+
+    def _roles(self, messages):
+        return [m["role"] for m in messages]
+
+    def _assert_alternates(self, messages):
+        roles = self._roles(messages)[1:]
+        self.assertTrue(all(a != b for a, b in zip(roles, roles[1:])), roles)
+
+    async def test_no_examples_leaves_the_prompt_alone(self):
+        messages, _ = await self._build("看看四周")
+        self.assertEqual(self._roles(messages), ["system", "user"])
+        self.assertNotIn("文风示范", messages[0]["content"])
+
+    async def test_examples_go_in_as_turns_and_mark_the_boundary(self):
+        self.module.narration_examples = [
+            {"user": f"阿隼出招{i}", "assistant": f"刀光{i}"} for i in range(5)
+        ] + [{"user": "只有一边", "assistant": ""}]
+        messages, _ = await self._build("我撬开那把锁", facts=["你用掉了「铁丝」"])
+
+        self.assertEqual(self._roles(messages), ["system"] + ["user", "assistant"] * 3 + ["user"])
+        self.assertEqual(messages[1]["content"], "阿隼出招0")
+        self.assertIn("【文风示范】", messages[0]["content"])
+        last = messages[-1]["content"]
+        # 界碑排在所有本局注入之前，事实块还在，玩家那句话还在
+        self.assertTrue(last.startswith("（以上几轮只是文风示范"))
+        self.assertIn("你用掉了「铁丝」", last)
+        self.assertTrue(last.endswith("我撬开那把锁"))
+
+    async def test_window_starting_with_assistant_gets_a_bridge(self):
+        self.module.narration_examples = [{"user": "阿隼出招", "assistant": "刀光"}]
+        history = [
+            RpgMessage(id=1, role="assistant", content="雨还在下。", present=[]),
+            RpgMessage(id=2, role="user", content="我往下走。", present=[]),
+            RpgMessage(id=3, role="assistant", content="台阶湿滑。", present=[]),
+        ]
+        messages, _ = await self._build("继续", history=history)
+
+        self._assert_alternates(messages)
+        self.assertTrue(messages[3]["content"].startswith("（以上几轮只是文风示范"))
+        self.assertEqual(messages[4]["content"], "雨还在下。")
 
 
 if __name__ == "__main__":

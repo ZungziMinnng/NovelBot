@@ -10,6 +10,7 @@ RPG 最该守住的地方：数值的上下界、归零后果、关系数值的�
 warning 给玩家看见。有定义的数值（道具、动作按钮、移动）根本不走模型，
 数字是死的。
 """
+import uuid
 
 # 数值定义缺字段时的兜底。initial 给 0 而不是报错——
 # 模组作者填一半就去开局是很正常的事
@@ -28,10 +29,6 @@ DISPLAY_CELLS = "格子"
 # flags 最多留这么多条。模型很爱往里塞「刚刚打了个喷嚏」这种一次性状态，
 # 不设上限迟早把 system 撑爆
 FLAG_LIMIT = 40
-
-# 大事记最多留这么多条。同 FLAG_LIMIT：不分线之后它要撑起跨线的记忆，
-# 塞满了小事就把真正传开的事挤出去了
-CHRONICLE_LIMIT = 40
 
 # 去过的地点最多记这么多个。同 FLAG_LIMIT 的理由：结算模型能把玩家「移动」到
 # 任何一个它现编的地名上，不设上限就没边了
@@ -55,10 +52,32 @@ APPEARANCE_CHARS = 40
 ACTIVITY_CHARS = 40
 
 # 那句话按时段留下的短流水，一个人最多几条（见 models.npc_activity_log）。
-# 12 条约合四个游戏日。不设成「和经历一样不封顶」：经历每一条都过了取证门禁
+# 同一格能续写好几条（每说一轮话一条），所以比「一格一条」时的 12 放宽。
+# 不设成「和经历一样不封顶」：经历每一条都过了取证门禁
 # （必须在正文里找得到原话），这一列是模型随口编的背景活动，攒成一本无限长的
 # 流水只会把真正玩出来的那几条淹掉
-ACTIVITY_LOG_LINES = 12
+ACTIVITY_LOG_LINES = 30
+
+# 作息表里表示「这一格让她自己走动」的那个值。**存在 slot_locations 里而不是
+# 再开一列**：作者原先要表达「中午到傍晚她会自己走」得填两处（作息表排班 +
+# 随机移动时段勾选），而两张表都按时段索引、语义还互斥——某一格既排了固定
+# 地点又勾了随机移动时，排的那个地点根本不起作用（随机覆盖写进 npc_places，
+# 优先级比作息表高）。合成一张表之后一格只有一个说法。
+#
+# 取一个填不出来的值当哨兵：地名是作者手填的，双下划线包起来的东西不会
+# 和真地名撞上。**npc_place 那两处（后端这份和前端 condition.npcPlace）都要
+# 跳过它**，漏一处的症状是侧栏显示「在 __random__」
+RANDOM_SLOT = "__random__"
+
+# 「已离开」：剧情写她走了、没说去哪。存在 npc_places 里，npc_place 解析成空
+# ——她不在任何地方，谁跟前都没有她。和别的剧情覆盖不同，推时段不清它，调度
+# 也不挪她：只有剧情（正文写她回来）或修改器才放她回来。同 RANDOM_SLOT，
+# 前端 condition.ts 有一份镜像
+AWAY = "__away__"
+
+
+def npc_away(sess, npc_id) -> bool:
+    return (sess.npc_places or {}).get(str(npc_id)) == AWAY
 
 # NPC 留言。比 ACTIVITY_CHARS 宽一点：它会原样落成一条真消息给玩家看，
 # 太短会像半句话被截断。INBOX_PER_NPC 是一个人最多攒几条——不封顶的话，
@@ -67,6 +86,15 @@ ACTIVITY_LOG_LINES = 12
 INBOX_CHARS = 60
 INBOX_PER_NPC = 3
 INBOX_LIMIT = 20
+
+# 幕后往事（见 models.npc_offscreen）。一条比「最近」长：它写的是两个人之间
+# 的一件事，四十字装不下「谁、做了什么、结果怎样」。整局封顶，同 inbox
+OFFSCREEN_CHARS = 80
+OFFSCREEN_LIMIT = 40
+# NPC 之间的关系标签是一个短语（「秘密情人」「互相看不顺眼」），不是一句话
+BOND_CHARS = 12
+# 模型写这些就是「关系没变」，不该盖掉旧的标签
+_BOND_KEEP = {"不变", "没变", "无", "无变化", "同上", "-", "—"}
 
 # 地点近况，每个地点一句。同 ACTIVITY_CHARS 的理由：它跟在地点描述后面
 # 进【场面】块，长了就把作者写的那段挤没了。
@@ -85,23 +113,13 @@ TIER_LABEL_CHARS = 6
 # 它唯一的去处是 _meaning_block。所以它跟 label 不是一类，跟 effect 才是一类，
 # 之前 20 字是照着 label 一起定的，属于顺手：「70 起 出轨妇=会主动说脏话但还会脸红」
 # 这种一句话就到头了，而档位说明恰恰是最该写清的那句——数值的含义靠 effect，
-# 到了这个数**具体是什么表现**只有它能说。同 EFFECT_CHARS 的理由封在预算上：
-# 一档一句，档数乘上去才是每轮的开销，所以给得比 effect 保守
-TIER_NOTE_CHARS = 60
-
-# 引擎自己写进大事记的两类行。前缀是**合并的判据**——认不出「上一行也是
-# 移动」的话，玩家在镇上连点五个地点就会刷出五条「你去了 X」
-MOVE_TAG = "〔移动〕"
-DAY_TAG = "〔日期〕"
-# 开场那一幕也进大事记，理由见 api/routes/rpg.py 的建局处。只取开头这么多字：
-# 大事记是一行一条的硬事实，整段旁白塞进去会常驻吃掉外场那点预算
-OPENING_TAG = "〔开场〕"
-OPENING_CHARS = 120
-
-# 外场简报（见 agents/rpg_turn.offscreen_brief）。用「别处」不用「外场」：
-# 注入时那一整块块的标题就叫【外场】，行内再挂一个同名标签等于说两遍
-OFFSCREEN_TAG = "〔别处〕"
-OFFSCREEN_CHARS = 40
+# 到了这个数**具体是什么表现**只有它能说。
+#
+# 现在和 EFFECT_CHARS 齐平：卡着 60 字的时候，「到了这个数具体什么表现」只够写
+# 一句断言（「会主动说脏话」），而真正有用的是连着写出**表现 + 边界**（什么做得
+# 出、什么还是不肯）——那正好是一句话写不完的长度。预算那一侧同时抬了
+# （SECTION_BASE["meaning"]），不然放宽只是让尾部多切掉几档，见那边的注释
+TIER_NOTE_CHARS = 150
 
 # 背包里同名道具的模糊匹配：去空格后比对。模型写「铁 钥匙」很常见
 _NORMALIZE_TABLE = str.maketrans("", "", " 　\t")
@@ -798,12 +816,40 @@ def npc_activity(sess, npc_id) -> str:
     return str(value or "").strip()
 
 
-def apply_npc_activity(sess, npc_id: int, text) -> None:
+def slots_in_place(sess, npc_id, place) -> int:
+    """她在这个地方连着待了几格。0 = 算不清（没有账，或上一格在别处）。
+
+    **原地不动是零写入**，所以「她在这儿蹲了多久」在库里没有任何一处记着：
+    npc_random_places 只回答「上一格被挪去哪了」，她自己没动过的格子谁也没记。
+    这个数是调度那份名单里唯一的「该换地方了」的量化压力——模板里「默认让他挪」
+    是个形容词，模型顺着人设推，最说得通的永远是留在原地（见 idle_npc_activities
+    里 last_place 那段注释）。
+
+    数的是流水尾部连着几条 place 相同。老档的行没有 place 字段，于是从
+    第一条老行就断——算出来偏小，不会偏大，也就不会凭空催她搬家。
+    """
+    key = norm_name(place or "")
+    if not key:
+        return 0
+    # 数的是格子不是行：同一格里续写出来的几条算一格
+    seen: set[tuple] = set()
+    for row in reversed((sess.npc_activity_log or {}).get(str(npc_id)) or []):
+        if not isinstance(row, dict) or norm_name(str(row.get("place") or "")) != key:
+            break
+        seen.add((row.get("day"), row.get("slot")))
+    return len(seen)
+
+
+def apply_npc_activity(sess, npc_id: int, text, place="") -> None:
     """记下、或清掉一个角色「最近在做什么」。
 
     空串 / None = 清掉（玩家手动划掉走这条路）。**每个角色只有一句**，
     新的一次直接盖掉旧的——这是「最近」，不是日志。被盖掉的那句不会没影：
     每次写入顺带往 npc_activity_log 里留一条按时段盖章的底。
+
+    place 是写下这句话时她在哪儿，只进流水、不进「最近」那一句。给它是为了
+    让 slots_in_place 数得出「连着几格没换地方」；不给（手动清空那条路）就是
+    空串，那一行照旧能存，只是不参与计数。
 
     **清掉只清「最近」，不动那条流水**：流水是盖过时间戳的旧账，同经历，
     玩家在档案里看到的是「她那几格在忙什么」。划掉当前这句是说「现在别再
@@ -824,24 +870,26 @@ def apply_npc_activity(sess, npc_id: int, text) -> None:
         if len(value) > ACTIVITY_CHARS:
             value = value[:ACTIVITY_CHARS] + "…"
         table[key] = value
-        _log_npc_activity(sess, key, value)
+        _log_npc_activity(sess, key, value, place)
     sess.npc_activities = table
 
 
-def _log_npc_activity(sess, key: str, value: str) -> None:
+def _log_npc_activity(sess, key: str, value: str, place: str = "") -> None:
     """把刚记下的那句话按时段留一条底（见 models.RpgSession.npc_activity_log）。
 
-    **同一格只留最后一句**：调度在回合那条路上每轮都跑，一格里能跑好几次，
-    不按时段去重的话一天就能把窗口撑满，而玩家想看的是「那一格她在干嘛」。
+    **同一格可以有好几条**：玩家在这一格里每说一轮话，不在跟前的人也接着
+    过这一格（调度 same_slot 续写），玩家想看的是「那一格她先后干了什么」。
 
     时间戳由引擎在写入这一刻盖，同经历那边——调度那次调用压根没被告知今天
     第几天。满 ACTIVITY_LOG_LINES 条丢最旧的。
     """
     day = max(1, int(getattr(sess, "day", 1) or 1))
     slot = str(getattr(sess, "slot", "") or "")
-    rows = [row for row in (sess.npc_activity_log or {}).get(key) or []
-            if not (row.get("day") == day and row.get("slot") == slot)]
-    rows.append({"day": day, "slot": slot, "content": value})
+    rows = list((sess.npc_activity_log or {}).get(key) or [])
+    # place 是给 slots_in_place 数「连着几格没换地方」用的。同一格多条时
+    # 那边按 day+slot 去重着数，不会把一格数成几格
+    rows.append({"day": day, "slot": slot, "content": value,
+                 "place": str(place or "").strip()})
     sess.npc_activity_log = {
         **(sess.npc_activity_log or {}), key: rows[-ACTIVITY_LOG_LINES:],
     }
@@ -912,6 +960,77 @@ def drop_npc_inbox(sess, entry_id) -> None:
                       if not (isinstance(r, dict) and str(r.get("id") or "") == str(entry_id))]
 
 
+def record_offscreen(sess, a, b, place, content, witnesses=()) -> dict | None:
+    """记一条幕后往事：a 和 b 在 place 碰上了（写进 sess.npc_offscreen）。
+
+    a / b 是 RpgNpc，witnesses 也是——名字在这一刻快照，理由见那一列的说明。
+    谁和谁、在哪儿由调用方核过，这里只管截断、盖时间戳、封顶。
+    满 OFFSCREEN_LIMIT 条丢最旧的：同 inbox，旧的幕后事已经在卡上轮不到了。
+    """
+    value = str(content or "").strip()
+    if not value or a.id == b.id:
+        return None
+    if len(value) > OFFSCREEN_CHARS:
+        value = value[:OFFSCREEN_CHARS] + "…"
+    people = [a, b, *witnesses]
+    row = {
+        "id": uuid.uuid4().hex[:12],
+        "day": _num(getattr(sess, "day", 1), 1),
+        "slot": str(getattr(sess, "slot", "") or "").strip(),
+        "place": str(place or "").strip(),
+        "a": a.id, "b": b.id,
+        "names": {str(n.id): n.name for n in people},
+        "content": value,
+        "witnesses": [n.id for n in witnesses],
+        "exposed": False,
+    }
+    rows = [r for r in (sess.npc_offscreen or []) if isinstance(r, dict)] + [row]
+    sess.npc_offscreen = rows[-OFFSCREEN_LIMIT:]
+    return row
+
+
+def set_npc_bond(sess, a, b, label) -> None:
+    """改写 a 和 b 之间的关系标签（sess.npc_bonds），一对人只有一条。
+
+    空串 / 「不变」一类 = 不动。标签变了才重盖时间戳、并且**重新算未查明**：
+    玩家查明的是「他们是朋友」，现在成了情人，这一层他还不知道。
+    """
+    value = str(label or "").strip().strip("。")
+    if not value or value in _BOND_KEEP or a.id == b.id:
+        return
+    if len(value) > BOND_CHARS:
+        value = value[:BOND_CHARS]
+    lo, hi = sorted((a, b), key=lambda n: n.id)
+    rows = [r for r in (sess.npc_bonds or []) if isinstance(r, dict)]
+    old = next((r for r in rows if r.get("a") == lo.id and r.get("b") == hi.id), None)
+    if old is not None and str(old.get("label") or "") == value:
+        return
+    rows = [r for r in rows if r is not old]
+    rows.append({
+        "a": lo.id, "b": hi.id, "names": {str(lo.id): lo.name, str(hi.id): hi.name},
+        "label": value,
+        "day": _num(getattr(sess, "day", 1), 1),
+        "slot": str(getattr(sess, "slot", "") or "").strip(),
+        "exposed": False,
+    })
+    sess.npc_bonds = rows
+
+
+def npc_bonds_of(sess, npc_id) -> list[dict]:
+    """这个人身上挂着的那几条关系标签。"""
+    key = _num(npc_id, -1)
+    return [r for r in (sess.npc_bonds or [])
+            if isinstance(r, dict) and key in (r.get("a"), r.get("b"))]
+
+
+def npc_offscreen_of(sess, npc_id) -> list[dict]:
+    """这个人知道的幕后往事：自己是当事人的，和自己撞见过的。按发生顺序。"""
+    key = _num(npc_id, -1)
+    return [r for r in (sess.npc_offscreen or [])
+            if isinstance(r, dict)
+            and (key in (r.get("a"), r.get("b")) or key in (r.get("witnesses") or []))]
+
+
 def apply_npc_place(sess, npc_id: int, place, *, source: str = "story") -> None:
     """剧情把这个人挪到哪儿了（写进 sess.npc_places）。
 
@@ -973,8 +1092,7 @@ def apply_npc_followers(sess, npc_id: int, following: bool) -> bool:
 
 def mark_met(sess, npc_ids) -> None:
     """标记见过面。**和注入无关**（外貌改成每轮都发了），它管的是「玩家认识谁」：
-    【外场】只给见过面的、又不在跟前的人写近况（见 rpg_turn 的 offscreen_brief），
-    前端 condition.ts 的 knownNpcs 也拿它筛列表。"""
+    前端 condition.ts 的 knownNpcs 拿它筛列表——没见过面的人连名字都不露。"""
     states = dict(sess.npc_states or {})
     changed = False
     for npc_id in npc_ids or []:
@@ -1342,9 +1460,41 @@ def apply_flags(sess, delta) -> list[str]:
     return warnings
 
 
+def apply_slot_table(module, sess, names) -> list[str]:
+    """改这一局自己那份时段表。空列表 = 退回「跟模组走」。
+
+    存在的理由是一条没有出口的老 bug：建局表单从前无条件把预填的那份时段表
+    发回来，于是每一局开出来就冻住了自己一份拷贝（见 CharacterForm 里那段
+    注释）。前端已经修了，可**已经开着的局还带着当时那份**，而在那之前没有
+    任何地方改得动它——作者后来给模组加一格，老局永远见不到。真实存档：
+    模组 7 有「中午」，第 12 局的表里没有，于是勾了「中午」可移动的角色在
+    这一局等于白勾。
+
+    当前时段不在新表里时**顺手挪到第一格**，并说一句。不挪的话侧栏会显示
+    一个表里没有的时段名，而 advance_slot 找不到它就从头数起（那段逻辑本来
+    是给「建局后改过表」兜底的），玩家看到的是按一下时钟莫名跳回第一格。
+    """
+    table = [str(name).strip() for name in (names or []) if str(name).strip()]
+    # 同一个名字写两遍会让 advance_slot 的 index 永远停在第一次出现的位置
+    table = list(dict.fromkeys(table))
+    sess.time_slots = table
+    notes: list[str] = []
+    active = slot_table(module, sess)
+    if not active:
+        # 模组自己也没设时段：这一局没有时钟，slot 该是空的
+        if str(sess.slot or "").strip():
+            sess.slot = ""
+            notes.append("这个模组没有时段表，时钟已关掉")
+        return notes
+    if str(sess.slot or "").strip() not in active:
+        sess.slot = active[0]
+        notes.append(f"当前时段不在新表里，已挪到「{active[0]}」")
+    return notes
+
+
 def apply_tweak(
     module, sess, stats=None, relations=None, inventory=None, flags=None,
-    *, npc_places=None, npcs=None, locations=None,
+    *, npc_places=None, npcs=None, locations=None, time_slots=None, location=None,
 ) -> list[str]:
     """修改器：玩家自己动手把某一项改成想要的值。返回只给面板看的那几句话。
 
@@ -1367,6 +1517,11 @@ def apply_tweak(
     """
     notes: list[str] = []
 
+    # None = 玩家没碰这一项。空列表是有意义的值（退回「跟模组走」），
+    # 所以这里必须分得开 None 和 []
+    if time_slots is not None:
+        notes.extend(apply_slot_table(module, sess, time_slots))
+
     available_npcs = {
         str(npc.id): npc for npc in (npcs or [])
         if npc.module_id == module.id and npc.role != "protagonist"
@@ -1375,13 +1530,25 @@ def apply_tweak(
         norm_name(place.name): place.name for place in (locations or [])
         if place.module_id == module.id and place.name.strip()
     }
+    # 主角瞬移。不看 enter_requires：玩家的手，同上面那条 cap_delta 的理由。
+    # 跟随者不用另挪，npc_place 按 sess.location 解析，自己就跟过去了
+    if location is not None:
+        target = available_places.get(norm_name(location))
+        if target is None:
+            notes.append(f"主角位置未修改：地点「{location}」不在当前模组中")
+        elif norm_name(target) != norm_name(sess.location):
+            # 同 rpg_turn.move_by_name：记下上一幕在哪，免得 GM 接着旧场面往下写
+            if (sess.location or "").strip() and not (sess.scene_break_from or "").strip():
+                sess.scene_break_from = sess.location
+            sess.location = target
+            note_visited(sess, target)
     for npc_id, destination in (npc_places or {}).items():
         npc = available_npcs.get(str(npc_id))
         if npc is None:
             notes.append(f"忽略了不认识的角色「{npc_id}」")
             continue
         target = (destination or "").strip()
-        if target:
+        if target and target != AWAY:
             target = available_places.get(norm_name(target))
             if target is None:
                 notes.append(f"{npc.name}的位置未修改：地点「{destination}」不在当前模组中")
@@ -1525,57 +1692,10 @@ def check_full(module, sess) -> list[str]:
     return notes
 
 
-# ── 大事记：跨对话线共享的「已经传开的事」──────────────────────────────────
-
-def chronicle_lines(sess) -> list[str]:
-    """这一局的大事记，滤掉空串。"""
-    return [str(x).strip() for x in (sess.chronicle or []) if str(x).strip()]
-
-
-def push_chronicle(sess, lines) -> None:
-    """追加若干条大事记，超上限砍最早的（同 flags）。
-
-    整个列表赋回去才标脏——原地 append JSON 列不会触发更新。
-    """
-    if isinstance(lines, str):
-        items = [lines]
-    elif isinstance(lines, list):
-        items = lines
-    else:
-        items = []
-    now = chronicle_lines(sess)
-    for line in items:
-        text = str(line or "").strip()
-        if text:
-            now.append(text)
-    sess.chronicle = now[-CHRONICLE_LIMIT:]
-
-
-def _move_line(sess, to_name: str) -> str:
-    stamp = f"第 {max(1, _num(sess.day, 1))} 天"
-    slot = str(sess.slot or "").strip()
-    return f"{MOVE_TAG}{stamp}{'·' + slot if slot else ''} 你去了{to_name}"
-
-
-def note_move(sess, to_name: str) -> None:
-    """移动记一笔，**但和上一条移动合并**。
-
-    不合并的话大事记会变成流水账：玩家在镇上逛十个地方，十条「你去了 X」
-    把真正传开的那件事挤没了。上一条不是移动行（比如中间跨了天）才新起一行。
-    """
-    line = _move_line(sess, to_name)
-    now = chronicle_lines(sess)
-    if now and now[-1].startswith(MOVE_TAG):
-        now[-1] = line
-    else:
-        now.append(line)
-    sess.chronicle = now[-CHRONICLE_LIMIT:]
-
-
 def note_visited(sess, name) -> None:
     """去过的地方记一笔（地图的迷雾读它）。
 
-    整个列表赋回去才标脏，同 push_chronicle。去重时把重复的那个挪到末尾，
+    整个列表赋回去才标脏，原地 append JSON 列不会触发更新。去重时把重复的那个挪到末尾，
     于是满了淘汰的是「最久没回去过的」——模型现编的一次性地名会先出局，
     起点那个镇子不会被挤掉。
     """
@@ -1634,6 +1754,36 @@ def slot_table(module, sess) -> list[str]:
     return [str(s).strip() for s in raw if str(s).strip()]
 
 
+def random_slots(npc) -> set[str]:
+    """这个人哪几格准自己走动。**新旧两种配法在这里合流，只此一处。**
+
+    新的：作息表里那一格填的是 RANDOM_SLOT。
+    旧的：random_movement 总开关 + random_movement_slots 那份勾选。
+
+    读时兼容，不迁移数据：作息表里一个「随机」都没有时才去读旧字段。所以老档
+    照旧跑，作者在新界面里存一次就自然转过来了——那一存会把 RANDOM_SLOT 写进
+    作息表，旧字段从此不再被读到。
+
+    返回空集 = 一格都不准动。**注意这和旧的「空列表 = 所有时段都可以」正好
+    相反**，所以旧那一支得把空列表翻译成整张时段表，翻译的地方在下面。
+    """
+    table = getattr(npc, "slot_locations", None)
+    if isinstance(table, dict):
+        fresh = {
+            str(slot).strip() for slot, value in table.items()
+            if str(value).strip() == RANDOM_SLOT and str(slot).strip()
+        }
+        if fresh:
+            return fresh
+    if not getattr(npc, "random_movement", False):
+        return set()
+    return {
+        str(value).strip()
+        for value in (getattr(npc, "random_movement_slots", None) or [])
+        if str(value).strip()
+    }
+
+
 def random_movement_ok(npc, slot, place="") -> bool:
     """这个人此刻准不准被随机挪，以及挪到 place 算不算合法。
 
@@ -1643,16 +1793,24 @@ def random_movement_ok(npc, slot, place="") -> bool:
     而且两边都不报错（同 npc_place 与前端 condition.npcPlace 那对镜像的教训）。
 
     place 留空 = 只问「此刻准不准随机移动」，不问去哪儿。
-    两张白名单都是空列表 = 不限制，老数据行为逐字不变。
+    地点白名单是空列表 = 不限制，老数据行为逐字不变。
+
+    准动的时段由 random_slots 算（新旧两种配法在那儿合流）。**旧字段那一支的
+    空列表仍然是「所有时段都可以」**：那是它上线时的语义，这里不能改口径，
+    否则老模组里勾了随机移动、没勾任何时段的人会一格都不动。新配法没有这个
+    歧义——作息表里没填「随机」的格子就是不准动。
     """
-    if npc is None or not getattr(npc, "random_movement", False):
+    if npc is None:
         return False
-    slots = {
-        str(value).strip()
-        for value in (getattr(npc, "random_movement_slots", None) or [])
-        if str(value).strip()
-    }
-    if slots and str(slot or "").strip() not in slots:
+    slots = random_slots(npc)
+    now = str(slot or "").strip()
+    if slots:
+        if now not in slots:
+            return False
+    elif not getattr(npc, "random_movement", False):
+        # 一格都没算出来，而且总开关也没开 = 不准动。开了总开关却算出空集，
+        # 只可能是旧配法下没勾任何时段，那时的语义是「所有时段都可以」，
+        # 于是这里放过去，接着往下查地点白名单
         return False
     allowed = {
         norm_name(value)
@@ -1661,6 +1819,43 @@ def random_movement_ok(npc, slot, place="") -> bool:
     }
     # place 为空时不查这一张：那是「准不准动」的问法，去哪儿由调用方接着挑
     return not (allowed and place and norm_name(place) not in allowed)
+
+
+def random_place_expired(npc, slot, place) -> bool:
+    """引擎上次挑的这条位置覆盖，到这一格还算不算数。
+
+    两处共用（推时段时的清理、调度自己的对账循环），理由同 random_movement_ok：
+    问的是同一件事，各写一遍必然漂移。
+
+    比「此刻准不准随机移动」松一处：**一格作息表都没排过的人，出了可移动时段
+    也不清这条覆盖。** 清空的目的是「时段一变，作者排的作息表重新说了算」，可
+    她没有作息表——落回去的是常驻地那个常数，不是任何排期。真实存档里韩曼宁
+    常驻「家」、作息表空着、可移动时段是中午到深夜：调度傍晚把她挪去内衣店，
+    第二天早晨这条覆盖到期、她瞬移回家，而早晨她又不准动，于是一整个早晨都在
+    家；等到中午她已经在家了，模型顺着「她在家」往下写，看着就是她再也不出门。
+    advance_slot 里那句按 _has_schedule 保留覆盖防的正是这件事，清理这一步不跟
+    着判，等于一行之后就把它撤销了。
+
+    地点被移出白名单、或者整个关掉了随机移动，仍旧当场作废：那时落回常驻地
+    至少是作者写下的地方，而留着的是一个作者已经划掉的地点。
+    """
+    if npc is None:
+        return True
+    # 「整个关掉了随机移动」现在有两种说法：旧字段的总开关关着，或者新配法下
+    # 作息表里一格随机都没排。两种都当场作废——那时落回常驻地至少是作者写下的
+    # 地方，而留着的是一条作者已经撤销的许可
+    if not random_slots(npc) and not getattr(npc, "random_movement", False):
+        return True
+    allowed = {
+        norm_name(value)
+        for value in (getattr(npc, "random_movement_places", None) or [])
+        if str(value).strip()
+    }
+    if allowed and place and norm_name(place) not in allowed:
+        return True
+    if random_movement_ok(npc, slot, place):
+        return False
+    return _has_schedule(npc)
 
 
 def _clear_expired_random_places(sess, npcs=()) -> None:
@@ -1672,7 +1867,7 @@ def _clear_expired_random_places(sess, npcs=()) -> None:
     for key, marked in list(random_places.items()):
         # marked 是引擎上次挑的那个地方，所以这一问连白名单一起判：
         # 作者把那个地点移出白名单之后，这条覆盖当场过期、位置落回作息表
-        if not random_movement_ok(by_id.get(str(key)), sess.slot, marked):
+        if random_place_expired(by_id.get(str(key)), sess.slot, marked):
             if norm_name(places.get(str(key))) == norm_name(marked):
                 places.pop(str(key), None)
             random_places.pop(str(key), None)
@@ -1681,11 +1876,21 @@ def _clear_expired_random_places(sess, npcs=()) -> None:
 
 
 def _has_schedule(npc) -> bool:
-    """作者给这个人排过作息表吗——哪怕只排了一格。"""
+    """作者给这个人排过作息表吗——哪怕只排了一格。
+
+    **RANDOM_SLOT 不算排期。** 这个问法的用处是「时段一变，作者排的作息表
+    重新说了算，所以该把覆盖清掉」——可标成随机的那一格没有任何地点可落回，
+    清掉只会让她瞬移回常驻地。算上它等于重新引入 random_place_expired 那段
+    注释里记的原案：韩曼宁被挪去内衣店，第二天早晨覆盖到期、瞬移回家，而早晨
+    她又不准动，于是看着就是她再也不出门。
+    """
     table = getattr(npc, "slot_locations", None)
     if not isinstance(table, dict):
         return False
-    return any(str(value).strip() for value in table.values())
+    return any(
+        str(value).strip() and str(value).strip() != RANDOM_SLOT
+        for value in table.values()
+    )
 
 
 def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
@@ -1749,6 +1954,10 @@ def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
         key: place for key, place in (sess.npc_places or {}).items()
         if key not in followers and not _has_schedule(by_id.get(str(key)))
     })
+    # 已离开的人不跟着时钟回来，等剧情或修改器放她回来
+    retained.update({
+        key: place for key, place in (sess.npc_places or {}).items() if place == AWAY
+    })
     sess.npc_places = retained
 
     # 新的一格，两个计数器从零起。归零只写在这里：手动按按钮、动作勾了
@@ -1769,9 +1978,6 @@ def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
     _clear_expired_random_places(sess, npcs)
     sess.day = _num(sess.day, 1) + 1
     reset_daily_tasks(sess, tasks)
-    # 只在翻篇这一格写大事记。每推一格都写的话，时钟噪音会把真正传开的
-    # 事挤出去；一行都不写则换个地点就不知道过了几天
-    push_chronicle(sess, f"{DAY_TAG}第 {sess.day} 天开始了")
     return [f"第 {sess.day} 天，{names[0]}"] + reset_daily(module, sess)
 
 
@@ -1934,8 +2140,11 @@ def apply_state_delta(
                 # 一个没出场的人放到玩家跟前，就是纯凭空的编造
                 warnings.append(f"「{name}」这一轮没在剧情里露面，他的位置没有改")
                 continue
-            # 空串是「放她回作息表」，match_place 原样放行
+            # 空串是「放她回作息表」，match_place 原样放行（AWAY 也是）
             apply_npc_place(sess, who.id, match_place(place, places))
+            if place == AWAY:
+                # 跟着你的人走了就不再跟着，否则她一回来又被拽回你身边
+                apply_npc_followers(sess, who.id, False)
 
     # 对回真地名再存：存错一个字，这里所有人立刻都算「不在你跟前」
     was = str(sess.location or "").strip()

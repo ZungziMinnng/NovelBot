@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { ChevronLeft, MapPin, Pencil, ScrollText, User, X } from 'lucide-react'
-import { rpgApi, type RpgNpc, type RpgNpcHistoryEntry, type RpgMilestone, type RpgStatDef } from '@/api/client'
+import {
+  rpgApi, type RpgNpc, type RpgNpcHistoryEntry, type RpgMilestone, type RpgStatDef,
+  type RpgOffscreenEntry, type RpgNpcBond,
+} from '@/api/client'
 import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
 import { useFormAutosave } from '@/lib/useFormAutosave'
 import RpgAvatar from '../RpgAvatar'
@@ -11,6 +14,10 @@ import Empty from './Empty'
 import SummaryBlock from './SummaryBlock'
 
 type Tab = 'profile' | 'history'
+
+/** 上帝视角开关存在这台机器上、不分局：它是玩家「我想不想被剧透」的偏好，
+ *  不是某一局的状态。默认关——幕后的事要靠自己查 */
+const GOD_VIEW_KEY = 'rpg.godView'
 
 const TABS: { key: Tab; label: string; icon: typeof User }[] = [
   { key: 'profile', label: '资料', icon: User },
@@ -27,7 +34,7 @@ const TABS: { key: Tab; label: string; icon: typeof User }[] = [
  */
 export default function NpcDetail({
   npc, relationDefs, state, notes, appearance, activity, history, activityLog,
-  milestones, here, place, following,
+  milestones, offscreen, bonds, here, place, following,
   summary, onSaveSummary,
   onUnfollow, onBack, onDeleteNote, onDeleteAppearance, onDeleteActivity, onSaved,
 }: {
@@ -44,13 +51,17 @@ export default function NpcDetail({
   activity: string
   /** 她这一局的经历，按发生顺序攒下来的。空数组 = 这一局还没发生过什么 */
   history: RpgNpcHistoryEntry[]
-  /** 上面那句 activity 按时段留的底，最多 12 条。画在经历下面、**分开标题**：
+  /** 上面那句 activity 按时段留的底，最多 30 条，同一格可以有好几条。画在经历下面、**分开标题**：
    *  经历是玩出来的（每条都在正文里有原话），这一列是调度编的背景活动。
    *  玩家按一串「结束时段」时经历理所当然是空的，能看的只有这一列 */
   activityLog: RpgNpcHistoryEntry[]
   /** 整局的关系里程碑，**没按人筛过**：一条里程碑连着两个人，
    *  筛哪一头是这儿的事（见下面 myMilestones） */
   milestones: RpgMilestone[]
+  /** 整局的幕后往事和 NPC 之间的关系，**没筛过**：哪几条和她有关、哪几条玩家
+   *  已经查明，都在这儿筛（见下面 myOffscreen） */
+  offscreen: RpgOffscreenEntry[]
+  bonds: RpgNpcBond[]
   /** 他此刻是不是和玩家在同一个地点 */
   here: boolean
   /** 他此刻在哪儿。**不是角色卡上的常驻地点**——有作息表的人是按时段走的，
@@ -86,6 +97,14 @@ export default function NpcDetail({
   /** 资料是模组作者写死的，经历是这一局长出来的。摊在一页上翻到后面全是
    *  模型写的字，分不清哪句是设定哪句是这一局发生的——和小说侧角色页同一个分法 */
   const [tab, setTab] = useState<Tab>('profile')
+  const [godView, setGodView] = useState(() => {
+    try { return window.localStorage.getItem(GOD_VIEW_KEY) === '1' } catch { return false }
+  })
+  const toggleGodView = () => {
+    const next = !godView
+    setGodView(next)
+    try { window.localStorage.setItem(GOD_VIEW_KEY, next ? '1' : '0') } catch { }
+  }
 
   /** 发给后端的形态。手动提交和自动保存**共用这一份**——两边各写一遍清洗，
    *  迟早分叉成「点保存存对了、自动保存存错了」 */
@@ -138,6 +157,18 @@ export default function NpcDetail({
   const activityRows = [...(activityLog || [])].reverse()
   // 结算时两侧的名字已经归一成名册上的写法了，所以这里能按名字直接挑
   const myMilestones = (milestones || []).filter(m => m.a === npc.name || m.b === npc.name)
+  // 她是当事人的、和她撞见过的。没查明的只在上帝视角里画
+  const myOffscreen = (offscreen || [])
+    .filter(r => r.a === npc.id || r.b === npc.id || (r.witnesses || []).includes(npc.id))
+    .filter(r => godView || r.exposed)
+    .reverse()
+  const myBonds = (bonds || [])
+    .filter(r => r.a === npc.id || r.b === npc.id)
+    .filter(r => godView || r.exposed)
+  // 这一局压根没有幕后往事（模组没开、或者还没碰上过）就不画这一块，
+  // 连开关都不画。按整局判而不是按她判：按她判的话「开关出现了」本身就是剧透
+  const anyOffscreen = (offscreen || []).length + (bonds || []).length > 0
+  const nameIn = (names: Record<string, string>, id: number) => names?.[String(id)] || '某人'
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -259,6 +290,53 @@ export default function NpcDetail({
                   </p>
                 </div>
               ))}
+            </div>
+          )}
+
+          {anyOffscreen && (
+            // 和下面「你不在的时候」一样是调度编的、没有正文依据；分开一块是因为
+            // 这一块默认藏着——那一块是她自己过日子，这一块是她瞒着你的事
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <p className="flex-1 text-xs font-medium text-muted-foreground">
+                  {godView ? '幕后（全部）' : '已查明的幕后'}
+                </p>
+                <button
+                  onClick={toggleGodView}
+                  title={godView ? '关掉之后只看你查明了的' : '打开会看到还没查明的事，等于剧透'}
+                  className={`text-[11px] px-1.5 py-0.5 rounded ring-1 ${godView
+                    ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-500/40'
+                    : 'text-muted-foreground ring-border hover:bg-muted'}`}
+                >
+                  上帝视角{godView ? '：开' : ''}
+                </button>
+              </div>
+              {myBonds.map(r => (
+                <p key={`${r.a}-${r.b}`} className="text-sm leading-relaxed">
+                  <span className="text-muted-foreground">和{nameIn(r.names, r.a === npc.id ? r.b : r.a)}</span>
+                  <span className="mx-1.5 text-muted-foreground/50">·</span>
+                  {r.label}
+                  {!r.exposed && <span className="ml-1.5 text-[10px] text-amber-600">未查明</span>}
+                </p>
+              ))}
+              {myOffscreen.map(r => (
+                <div key={r.id} className="border-l-2 border-dashed border-amber-500/40 pl-3">
+                  <p className="text-[11px] text-muted-foreground">
+                    第 {r.day} 天{r.slot ? ` · ${r.slot}` : ''}{r.place ? ` · ${r.place}` : ''}
+                    {' · '}
+                    {r.a === npc.id || r.b === npc.id
+                      ? `和${nameIn(r.names, r.a === npc.id ? r.b : r.a)}`
+                      : `撞见${nameIn(r.names, r.a)}和${nameIn(r.names, r.b)}`}
+                    {!r.exposed && <span className="ml-1.5 text-amber-600">未查明</span>}
+                  </p>
+                  <p className="text-sm leading-relaxed">{r.content}</p>
+                </div>
+              ))}
+              {myBonds.length === 0 && myOffscreen.length === 0 && (
+                <p className="text-[11px] text-muted-foreground/70">
+                  {godView ? '她背后没发生过什么。' : '还没查明她背后的事。'}
+                </p>
+              )}
             </div>
           )}
 

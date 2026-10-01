@@ -7,6 +7,7 @@ interface Props {
 }
 
 const STAGE_CONFIG: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
+  waiting_memory: { label: '等待上一章记忆更新完成...', icon: Brain },
   building_context: { label: '检索记忆与上下文...', icon: Search },
   writing: { label: 'Writer Agent 创作中...', icon: Pen },
   revising_1: { label: 'Critic 发现问题，修改中（第1次）...', icon: Brain },

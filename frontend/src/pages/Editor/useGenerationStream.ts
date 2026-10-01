@@ -147,6 +147,8 @@ export function useGenerationStream(
 
     let entryCounter = 0
     const runningEntryIds: Map<string, string> = new Map()
+    // 正文已存：生成态提前结束，后续是后台记忆更新的事件
+    let textSaved = false
 
     const ctrl = streamChapterGeneration(
       {
@@ -159,9 +161,11 @@ export function useGenerationStream(
       },
       (msg: SSEMessage) => {
         const s = useGenerationStore.getState()
+        // 已开始新一轮生成：旧流剩下的后台记忆事件不再写进新一轮的状态
+        if (textSaved && s.isGenerating) return
         switch (msg.event) {
           case 'stage':
-            {
+            if (!textSaved) {
               const stage = msg.data as string
               s.setAgentStage(stage)
               if (stage.startsWith('revising_')) {
@@ -207,6 +211,11 @@ export function useGenerationStream(
             s.setTotalTokens(d.input_tokens, d.output_tokens)
             break
           }
+          case 'chapter_saved':
+            textSaved = true
+            s.finishGeneration()
+            qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+            break
           case 'done':
             s.setAgentStage('done')
             qc.invalidateQueries({ queryKey: ['chapters', novelId] })
@@ -336,7 +345,8 @@ export function useGenerationStream(
         }
       },
       () => {
-        useGenerationStore.getState().finishGeneration()
+        // 正文存好时已结束过；此时可能已开始新一轮生成，不能再结束它
+        if (!textSaved) useGenerationStore.getState().finishGeneration()
       },
     )
 

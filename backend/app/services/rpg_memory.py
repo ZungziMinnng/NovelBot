@@ -2,11 +2,20 @@ import hashlib
 import re
 
 from app.services.context_budget import truncate_to_token_budget
+from app.services.rpg_budget import SECTION_BASE
 from app.services.text_ranking import bm25_rank, rrf_fuse
 
 # BM25 只取前 16 名：回忆池很小，再靠后的名次基本是噪声
 BM25_TOP_K = 16
-# 原文摘录没经过结算审核，不许靠名次挤掉审过的事实，所以单独设上限
+# 这一块的基准额度，也是下面两个行数上限的标尺
+BASE_BUDGET = SECTION_BASE["memories"]
+# 总行数上限。**它在这儿的意义是让 token 那道闸几乎咬不到**：
+# truncate_to_token_budget 是从尾部切字符、不认行边界，切出半句「她答应过在药园
+# 那把火之后…」贴给模型比不贴更糟——模型看不出这是残句，会当完整事实往下编。
+# 行数先满，token 就退化成兜底，只在某条 summary 异常长时才真的生效
+LINE_CAP = 8
+# 原文摘录没经过结算审核，不许靠名次挤掉审过的事实，所以单独设上限。
+# 和 LINE_CAP 的差（8-3=5）是留给审过的事实的保底行数
 EXCERPT_LINE_CAP = 3
 # 单条摘录长度上限：摘录只是线索，太长会把 1100 token 的回忆块吃光
 EXCERPT_CHARS = 80
@@ -37,7 +46,17 @@ def _best_snippet(content: str, query: str) -> str:
     return snippet[:EXCERPT_CHARS]
 
 
-def event_memory(history, audience: set[int], query: str, budget: int = 1100,
+def _scaled_cap(base: int, budget: int) -> int:
+    """行数上限跟着额度缩放，整数乘除，至少 1 行。
+
+    额度等于基准值时精确等于 base（和 build_rpg_budget 同一套算法），所以模组
+    不改总闸时召回一行不多一行不少。改大了才有更多行——以前额度翻倍而行数写死，
+    多出来的 token 没人用得上。
+    """
+    return max(1, base * max(1, budget) // BASE_BUDGET)
+
+
+def event_memory(history, audience: set[int], query: str, budget: int = BASE_BUDGET,
                  window_ids: set[int] | None = None,
                  out_participants: set[int] | None = None,
                  vector_keys: list[str] | None = None) -> str:
@@ -117,8 +136,8 @@ def event_memory(history, audience: set[int], query: str, budget: int = 1100,
     # 那 3 行摘录额度——实测问「答应过什么、药园那把火」会捞回「买了一把断刃」
     #
     # **向量命中的原文豁免这道门槛**：词面对不上正是向量要补的短板——同义表述、
-    # 换了称呼的旧事，字面永远匹配不到。豁免的只是入场，EXCERPT_LINE_CAP 那
-    # 3 行的上限照旧，没审过的原文仍然挤不掉审过的事实
+    # 换了称呼的旧事，字面永远匹配不到。豁免的只是入场，下面 excerpt_cap 那道
+    # 上限照旧，没审过的原文仍然挤不掉审过的事实
     pool = [c for c in pool
             if "fact" in c or c["surface"] > 0 or c["key"] in vector_hits]
     # 三个列表必须同筛：rrf_fuse 取的是并集，只筛 pool 的话被淘汰的候选会从
@@ -129,14 +148,16 @@ def event_memory(history, audience: set[int], query: str, budget: int = 1100,
     # +2 的类型加成在 RRF 下依然生效：它抬高的是 surface 侧的名次，而 RRF 只看名次
     surface_ranked = sorted(pool, key=lambda c: (c["surface"], c["message_id"]), reverse=True)
     fused = rrf_fuse(surface_ranked, bm25_ranked, vector_ranked, key=lambda c: c["key"])
+    line_cap = _scaled_cap(LINE_CAP, budget)
+    excerpt_cap = _scaled_cap(EXCERPT_LINE_CAP, budget)
     lines = []
     excerpts = 0
     for cand in fused:
-        if len(lines) >= 8:
+        if len(lines) >= line_cap:
             break
         fact = cand.get("fact")
         if fact is None:
-            if excerpts >= EXCERPT_LINE_CAP:
+            if excerpts >= excerpt_cap:
                 continue
             excerpts += 1
             lines.append(

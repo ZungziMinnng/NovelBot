@@ -14,11 +14,11 @@ from app.models.rpg import (
     RpgItem, RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession, RpgSkill, RpgTask,
 )
 from app.services import fact_guard, llm_client
-from app.services.rpg_context import npc_place, turn_present, world_npcs
+from app.services.rpg_context import _split_keywords, npc_place, turn_present, world_npcs
 from app.services.rpg_dice import OUTCOME_LABELS
 from app.services.rpg_memory import invalidate_summaries, text_revision
 from app.services.rpg_prompts import render
-from app.services.rpg_state import RANK_GAIN_MAX, apply_flags, apply_state_delta, check_condition, check_full, check_zero, def_map, mark_met, match_npc, norm_name, open_task_names, push_chronicle, rank_stat_of
+from app.services.rpg_state import AWAY, RANK_GAIN_MAX, apply_flags, apply_npc_activity, apply_state_delta, check_condition, check_full, check_zero, def_map, mark_met, match_npc, norm_name, open_task_names, rank_stat_of
 from app.services.rpg_suggestions import SuggestSources, clean_suggestions
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ DOMAINS = {
     # 经历和里程碑挂在人物这一域：写它们的是同一段正文、同一次判定
     "characters": ("relations", "npc_notes", "npc_appearance", "npc_history", "npc_milestones"),
     "flags": ("flags",),
-    "memory": ("events", "chronicle"),
+    "memory": ("events",),
 }
 LABELS = {"scene": "地点与在场人物", "stats": "数值", "inventory": "背包", "characters": "人物", "flags": "处境", "memory": "长期记忆"}
 DOMAIN_FIELDS = {
@@ -60,7 +60,7 @@ DOMAIN_FIELDS = {
     # 否则「人物这一块要人工核对」而流水里已经多了一条谁也删不掉的经历
     "characters": ("npc_states", "npc_notes", "npc_appearance", "npc_history", "npc_milestones"),
     "flags": ("flags", "flag_days"),
-    "memory": ("chronicle",),
+    "memory": (),
 }
 PUBLIC_KEYS = ("status", "revision", "attempts", "domains", "changes", "warnings", "facts", "engine_facts", "applied", "proposed", "retryable")
 EVENT_KINDS = {"state", "move", "gain", "loss", "transfer", "injury", "recovery", "relationship", "promise", "rescue", "death", "public"}
@@ -156,6 +156,24 @@ def _name_mentioned(name: str, text: str) -> bool:
     if key in haystack:
         return True
     return len(key) >= 3 and (key[:2] in haystack or key[-2:] in haystack)
+
+
+# 到场的动作词。给 apply_proposal 里那道「她凭什么出现在玩家跟前」用
+_ARRIVE_VERB = re.compile(r"来|进|回|到|赶|返|现身|出现|推门|敲门")
+
+
+def _npc_mentioned(npc, text: str) -> bool:
+    """这一句里认不认得出这个人：真名，或者角色卡上的触发词。
+
+    **口径必须和 rpg_context.named_npcs 一致**。那边宽（认 keywords）、这边严
+    （只认真名）的话，取证这一关会把「妻子推门进来」判成没提到韩曼宁，于是
+    move 事件的 participants 被清空、`came` 恒为假，一条写对了的证据反被打回
+    「缺少该角色赶来的原文依据」。宽的尺子决定谁能被挪，严的尺子验证他凭什么
+    被挪，两把尺子不一样长就会出现「只有直呼其名才过」这种玩家无从理解的脾气。
+    """
+    if npc.name and _name_mentioned(npc.name, text):
+        return True
+    return any(_mentioned_text(kw, text) for kw in _split_keywords(npc.keywords))
 
 
 def _place_ref(value, places):
@@ -657,7 +675,7 @@ def _evidence_events(data, narration, npcs, report):
         if not all(isinstance(value, list) for value in (participants, witnesses, domains)):
             errors.append("事件人物或关联项目格式错误")
             continue
-        possible = original | {npc.id for npc in npcs if npc.name and _name_mentioned(npc.name, quote)}
+        possible = original | {npc.id for npc in npcs if _npc_mentioned(npc, quote)}
         if report.get("mode") == "private":
             possible = original
         participants = [identity for identity in participants if isinstance(identity, int) and identity in known and identity in possible]
@@ -770,7 +788,7 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
                 continue
             # npc_milestones 是跨两个人的一张表、不挂在谁名下，形状同 inventory；
             # 别的键（含 npc_history）都是「按角色名写的一张字典」
-            expected = list if key in {"inventory", "events", "chronicle", "npc_milestones"} else str if key == "location" else dict
+            expected = list if key in {"inventory", "events", "npc_milestones"} else str if key == "location" else dict
             if not isinstance(data[key], expected):
                 issues[domain].append(f"{key} 格式错误")
     events, errors = _evidence_events(data, narration, npcs, report)
@@ -784,8 +802,6 @@ def inspect_proposal(data, narration, npcs, places, report, player_name):
             issues[domain] = [warning for warning in issues[domain]
                               if warning != "已报告变化，但缺少对应更新"]
 
-    if data.get("chronicle") and not any(event["visibility"] == "public" for event in events):
-        issues["memory"].append("公共大事记缺少正文中的传播或公告依据")
     for domain, keys in DOMAINS.items():
         # 经历和里程碑不参与这道门禁：它们自己带原话校验（_grounded），
         # 不需要再配一条 event。否则模型想记一句「她今天终于肯抬头看你」，
@@ -1008,8 +1024,8 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                 if not isinstance(value, str):
                     issues[domain].append(f"人物「{npc.name}」的目的地未登记")
                     continue
-                canonical = _place_ref(value, places)
-                if value and canonical not in known_places:
+                canonical = AWAY if value.strip() == AWAY else _place_ref(value, places)
+                if value and canonical != AWAY and canonical not in known_places:
                     issues[domain].append(f"人物「{npc.name}」的目的地未登记")
                     continue
                 value = canonical
@@ -1045,11 +1061,37 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                     # 「已从菜市场回到家中卧室」——正文里她根本没走这一趟，
                     # 是模型先当她在家写完了，再回头补一张过路条。
                     # 所以这半边要求 quote 里有「来 / 进 / 回」这类动作词
+                    # **证据不限于 quote 那一句**：模型挑的 quote 常常是那件事的
+                    # 引子而不是那件事本身。真实存档第 12 局，玩家在家等了一晚，
+                    # 正文写「韩曼宁侧身挤进来，带进来一股商场中央空调的气味」
+                    # ——她确实到了，可模型给这条 move 配的 quote 是「防盗门那边
+                    # 终于响了。」，一个动作词都没有，于是这条写对了的证据被打回，
+                    # 她留在内衣店，玩家看着她在自己客厅里说话而侧栏写她在商场。
+                    # 所以退一步：正文里只要有一句**既提到她、又有到场动作词**，
+                    # 就算有依据。上面那条假过路条仍旧拦得住——那一句写的是她
+                    # 躺在床上，通篇没有她走这一趟的话
+                    # 提到玩家的那一句不算：「你回到柴房，园丁甲正从里屋走出来」
+                    # 里的「回」是玩家自己走的这一趟，而她的名字只是同句出现。
+                    # 不排掉的话这句话能把任何人放进屋——那正是这道闸最初要拦的
+                    # 瞬移（test_an_npc_elsewhere_cannot_appear_... 钉的就是它）。
+                    #
+                    # ponytail: 按句子里有没有「你」来分主语，天花板是两头都不准
+                    # ——「你抬头，她推门进来」这种真到场会被漏掉（漏了只是位置没
+                    # 跟着改，玩家还能用修改器挪），而「你看见她从里屋出来」这类
+                    # 假到场仍旧拦得住。要更准就得判动作词挂在谁身上，那是一次
+                    # 句法分析，判错的代价是放行凭空瞬移
+                    def _arrived(text: str) -> bool:
+                        return any(
+                            _npc_mentioned(npc, sentence) and _ARRIVE_VERB.search(sentence)
+                            and "你" not in sentence
+                            for sentence in re.split(r"[。！？\n]", str(text or ""))
+                        )
+
                     came = any(
                         event["kind"] == "move" and npc.id in event["participants"]
-                        and re.search(r"来|进|回|到|赶|返|现身|出现|推门|敲门", event["quote"])
+                        and _ARRIVE_VERB.search(event["quote"])
                         for event in events
-                    )
+                    ) or _arrived(report["narration"])
                     if (norm_name(current_place) != norm_name(fixed)
                             and norm_name(next_place) == norm_name(fixed) and not came):
                         issues[domain].append(
@@ -1223,7 +1265,6 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
     if reports["memory"]["status"] == "needs_review":
         facts = []
     elif facts:
-        push_chronicle(working, [event["summary"] for event in facts if event["visibility"] == "public"])
         reports["memory"]["status"] = "updated"
     return reports, facts, here, item_claims
 
@@ -1321,7 +1362,7 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
         # 羞耻下降」，方向正好相反。叙事那一侧早就有这份说明（_meaning_block），
         # 记录员这一侧一直没有：它是唯一真正动数字的人
         stat_meanings=stat_meanings,
-        engine_note=report.get("engine_note", ""), chronicle=(sess.chronicle or [])[-10:],
+        engine_note=report.get("engine_note", ""),
         # 还开着的待办。模型只能在这份清单里挑「看着像办完了」的，挑不出就别提
         tasks=_open_tasks(sess),
         # 有时段才问「这一幕收尾了吗」。没时钟的模组问了也没处用——
@@ -1574,6 +1615,13 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
             await _require_latest(store, fresh_row)
             for field, value in after.items():
                 setattr(fresh, field, value)
+            # 这一轮记了新经历的人，「最近」那句（调度在她不在时写的）已经过时了：
+            # 她刚跟玩家待过，还挂着旧的会和经历、正文对不上，而且叙事模型照读。
+            # 只清「最近」，「你不在的时候」那条流水不动（见 apply_npc_activity）
+            old_history = current.get("npc_history") or {}
+            for key, rows in (after.get("npc_history") or {}).items():
+                if len(rows or []) > len(old_history.get(key) or []):
+                    apply_npc_activity(fresh, int(key), "")
             # 待确认的新道具：重算先清掉自己这一条剧情上一轮记的再追加。
             # 不进 after / report——它不是游戏状态，是「模型说你拿到了，你认不认」。
             # **排在发现项之前**，因为下面要拿这份名单给发现项去重

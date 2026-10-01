@@ -322,6 +322,24 @@ class MaybeSummarizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第0句", seen["prompt"])
         self.assertNotIn("第5句", seen["prompt"])
 
+    async def test_folding_does_not_touch_updated_at(self):
+        """概要和结算并排跑（run_turn），结算拿 updated_at 判冲突。
+
+        概要一落库就顶掉 updated_at 的话，同一轮的结算会误报「这期间有人改过」
+        然后整轮作废——而玩家什么都没做。
+        """
+        session_id = await self._seed(6)
+        before = (await self._reload(session_id)).updated_at
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete", return_value="梗概"):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                self.assertTrue(await rpg_turn._maybe_summarize(session_id))
+
+        sess = await self._reload(session_id)
+        self.assertEqual(sess.summary, "梗概")
+        self.assertEqual(sess.updated_at, before)
+
     async def test_the_next_round_only_folds_what_is_new(self):
         # 指针的用处：第二次压缩要从上次那里接着压，不能把已经折进概要的
         # 那几条再压一遍——那会让同一段往事在概要里越滚越重
@@ -497,11 +515,128 @@ class MaybeSummarizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sess.thread_upto["9"], 6)
 
 
+class SummaryLogTests(unittest.IsolatedAsyncioTestCase):
+    """摘要的历史留档：只给人看的那一份，**按 (day, slot) 去重**。
+
+    一格里会折好几次（真实存档里玩家那格 225 条消息折了近 200 次），一次一条的话
+    存档表立刻撑不住——每个快照都带一份完整的 summary_log，而 AUTO_SAVE_KEEP 是 30。
+    这个类钉的就是「同一格只留最后一版、跨格才多一条」。
+    """
+
+    async def asyncSetUp(self):
+        self.engine = create_async_engine("sqlite+aiosqlite://")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.patcher = patch.object(rpg_turn, "AsyncSessionLocal", self.sessions)
+        self.patcher.start()
+
+    async def asyncTearDown(self):
+        self.patcher.stop()
+        await self.engine.dispose()
+
+    async def _seed(self, count, **kwargs):
+        async with self.sessions() as db:
+            module = RpgModule(
+                user_id=1, name="测试模组", stat_defs=[], relation_stat_defs=[],
+                context_turns=1,
+            )
+            db.add(module)
+            await db.commit()
+            sess = RpgSession(
+                module_id=module.id, char_name="阿隼", stats={}, location="", **kwargs,
+            )
+            db.add(sess)
+            await db.commit()
+            db.add_all([
+                RpgMessage(session_id=sess.id, role="user", content=f"第{i}句")
+                for i in range(count)
+            ])
+            await db.commit()
+            return sess.id
+
+    async def _fold(self, session_id, text):
+        async def fake(messages, **_kwargs):
+            return text
+
+        with patch.object(rpg_turn.llm_client, "dispatch_chat_complete", fake):
+            with patch.object(
+                rpg_turn.llm_client, "get_agent_client", return_value=("m", "openai")
+            ):
+                return await rpg_turn._maybe_summarize(session_id)
+
+    async def _reload(self, session_id):
+        async with self.sessions() as db:
+            return await db.get(RpgSession, session_id)
+
+    async def test_a_fold_records_the_slot_it_happened_in(self):
+        session_id = await self._seed(6, day=9, slot="早晨")
+        await self._fold(session_id, "她把门推开了。")
+        rows = (await self._reload(session_id)).summary_log["player"]
+        self.assertEqual(len(rows), 1)
+        # upto 一起存着，界面上要显示「这份记忆盖到第几条原文」
+        self.assertEqual(
+            {k: v for k, v in rows[0].items() if k != "upto"},
+            {"day": 9, "slot": "早晨", "text": "她把门推开了。"},
+        )
+        self.assertGreater(rows[0]["upto"], 0)
+
+    async def test_folding_twice_in_one_slot_keeps_only_the_last_version(self):
+        """同一格里折第二次是**覆盖**，不是追加。
+
+        中间那几个版本说的是同一段剧情，只是压到的原文一次比一次多，丢掉不可惜；
+        一次一条的话存档体积跟着消息数长，而这一列本来就只是给人看的
+        """
+        session_id = await self._seed(6, day=9, slot="早晨")
+        await self._fold(session_id, "第一版。")
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            db.add_all([
+                RpgMessage(session_id=session_id, role="user", content=f"后来第{i}句")
+                for i in range(4)
+            ])
+            await db.commit()
+        await self._fold(session_id, "第二版。")
+        rows = (await self._reload(session_id)).summary_log["player"]
+        self.assertEqual([r["text"] for r in rows], ["第二版。"])
+
+    async def test_a_new_slot_adds_a_row_instead(self):
+        session_id = await self._seed(6, day=9, slot="早晨")
+        await self._fold(session_id, "早上那件事。")
+        async with self.sessions() as db:
+            sess = await db.get(RpgSession, session_id)
+            sess.slot = "下午"
+            db.add_all([
+                RpgMessage(session_id=session_id, role="user", content=f"后来第{i}句")
+                for i in range(4)
+            ])
+            await db.commit()
+        await self._fold(session_id, "下午那件事。")
+        rows = (await self._reload(session_id)).summary_log["player"]
+        self.assertEqual(
+            [(r["day"], r["slot"]) for r in rows], [(9, "早晨"), (9, "下午")]
+        )
+
+    def test_the_log_drops_the_oldest_when_it_is_full(self):
+        """满了保新弃旧（同 chronicle）：旧的那几格早就被当前那份概要吸收了。"""
+        sess = _sess(day=1, slot="早")
+        rows = []
+        for day in range(1, rpg_turn.SUMMARY_LOG_KEEP + 4):
+            sess.day = day
+            rows = rpg_turn._log_summary(rows, sess, f"第 {day} 天", day)
+        self.assertEqual(len(rows), rpg_turn.SUMMARY_LOG_KEEP)
+        # 掉的是最旧那几天，留着的是最近的
+        self.assertEqual(rows[-1]["text"], f"第 {rpg_turn.SUMMARY_LOG_KEEP + 3} 天")
+        self.assertEqual(rows[0]["day"], 4)
+
+
 class SnapshotCoverageTests(unittest.TestCase):
     def test_the_summary_is_in_the_snapshot(self):
         """漏了不会报错，只会在读档之后留下一份还写着「未来」的概要。"""
         for field in (
             "summary", "summarized_upto_id", "thread_summaries", "thread_upto",
+            # 历史留档只给人看，但读档回到第 3 天，查看器里不该还列着第 9 天
+            "summary_log",
         ):
             with self.subTest(field=field):
                 self.assertIn(field, SNAPSHOT_FIELDS)

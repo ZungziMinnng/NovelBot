@@ -126,7 +126,7 @@
 | ~~NPC 演员的 scene~~ | ~~`{day, slot, turn}`，给记忆里的 when 当参照系~~ | **已随管线撤回**（原 rpg_knowledge.py:451） |
 | 记忆条目 | 每条带 `when`（第 N 天·时段·第 N 回合），时间戳是引擎写入那一刻盖的，不是模型填的 | `_when`（rpg_context.py:729）；~~`when_of`（rpg_knowledge.py:138）~~ 已随管线撤回 |
 | 大事记 / 经历 / 里程碑 | 每行带"第 N 天·时段"前缀；跨天时写一条"第 N 天开始了" | rpg_state.py:1394、:1556 |
-| 外场简报 / AI 调度提示词 | day、slot 变量 | rpg_turn.py:1540、:1744 |
+| AI 调度提示词 | day、slot 变量 | rpg_turn.py 的 `idle_npc_activities`（~~外场简报那一份已于 2026-09-22 删除~~） |
 
 ### 为什么说合理
 

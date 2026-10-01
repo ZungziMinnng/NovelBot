@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, FlaskConical, AlertTriangle, ListChecks, ExternalLink, Palette } from 'lucide-react'
-import { novelsApi, modelLibraryApi, writerPresetsApi, promptRulesApi, modelSelectValue, type Novel, type ModelEntry, type ExampleTurn } from '@/api/client'
+import { X, Save, Loader2, ChevronDown, ChevronRight, Wand2, BookOpen, FileText, Cpu, FlaskConical, AlertTriangle, ListChecks, ExternalLink, Palette, Library } from 'lucide-react'
+import { novelsApi, charactersApi, modelLibraryApi, writerPresetsApi, promptRulesApi, modelSelectValue, type Novel, type ModelEntry, type ExampleTurn } from '@/api/client'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { ContextConfigContent } from '@/components/TokenPanel/TokenPanel'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
+import StylePickerModal from '@/components/StyleLibrary/StylePickerModal'
+import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import { WRITING_STYLES } from '@/constants/writingStyles'
 
 type CreationSection = 'prompt' | 'rules' | 'genreCard' | 'models' | 'review' | 'fulltext' | null
@@ -174,6 +176,7 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const [saved, setSaved] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
   const [showPromptPreview, setShowPromptPreview] = useState(false)
+  const [stylePickerOpen, setStylePickerOpen] = useState(false)
   const [showCardPreview, setShowCardPreview] = useState(false)
   const [generatingBookSummary, setGeneratingBookSummary] = useState(false)
   const [activeSection, setActiveSection] = useState<CreationSection>(null)
@@ -218,6 +221,12 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
   const { data: writerPresets = [] } = useQuery({
     queryKey: ['writer-presets'],
     queryFn: writerPresetsApi.list,
+  })
+
+  // 文风库取用时给名字对照当候选
+  const { data: characters = [] } = useQuery({
+    queryKey: ['characters', novel.id],
+    queryFn: () => charactersApi.list(novel.id),
   })
 
   const { data: promptRules = [], isSuccess: rulesLoaded } = useQuery({
@@ -644,7 +653,36 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
               {activeSection === 'prompt' && (
                 <>
                   <div>
-                    <label className="text-sm font-medium mb-2 block">自定义 Writer 提示词</label>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">自定义 Writer 提示词</label>
+                      <button
+                        type="button"
+                        onClick={() => setStylePickerOpen(true)}
+                        className="text-xs px-2 py-1 border rounded-md hover:bg-muted inline-flex items-center gap-1"
+                      >
+                        <Library className="w-3.5 h-3.5" />
+                        从文风库取用
+                      </button>
+                    </div>
+                    {stylePickerOpen && (
+                      <StylePickerModal
+                        mode="novel"
+                        nameOptions={characters.map(c => c.name)}
+                        onApply={async r => {
+                          if (r.examples?.length) setWriterExamples(prev => [...prev, ...r.examples!])
+                          if (r.styleDesc) {
+                            const ok = !writerSystemPrompt.trim() || await confirmDialog({
+                              title: '覆盖现有提示词？',
+                              detail: '文风说明会替换掉当前的自定义 Writer 提示词，示例照常追加。',
+                              confirmText: '覆盖',
+                            })
+                            if (ok) setWriterSystemPrompt(r.styleDesc)
+                          }
+                          toast.success('已填入，记得保存')
+                        }}
+                        onClose={() => setStylePickerOpen(false)}
+                      />
+                    )}
                     {writerPresets.length > 0 && (
                       <select
                         defaultValue=""

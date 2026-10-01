@@ -1205,6 +1205,8 @@ export interface RpgModule {
   enabled_rule_ids: number[]
   /** 叙事腔调样例，作为文字引用进 system，不做真实 few-shot 轮 */
   narration_sample: string
+  /** 叙事示例「玩家输入 → GM 叙事」，作为真实 few-shot 轮插在 system 之后（后端只用前 3 组） */
+  narration_examples: ExampleTurn[]
   cover_url: string
   /** 玩家数值定义 */
   stat_defs: RpgStatDef[]
@@ -1219,6 +1221,10 @@ export interface RpgModule {
   /** 主角的名字和出身由模组定死，玩家在建局界面改不动。**只在有主角模板卡时
    *  生效**：后端建局那一步也会照卡覆写，所以界面只读不是唯一的防线 */
   lock_protagonist: boolean
+  /** 玩家说到地点表里没有的地方就自动建一条并走过去。默认开。
+   *  判据在后端 rpg_turn.movement_candidate：说的是已有地点的简称算同一个
+   *  地方（只移动），说得比已有地名更长才算新地方 */
+  auto_location: boolean
   /** 档位 → 成功率(%)。绝对难度由模组作者锁定，模型只管相对档位 */
   rate_table: Record<RpgBand, number>
   /** 整体难度旋钮，加到成功率上。-10 轻松 / +10 手软 */
@@ -1248,7 +1254,6 @@ export interface RpgModule {
   adjudication_model_ref: string
   suggestion_model_ref: string
   activity_model_ref: string
-  offscreen_model_ref: string
   discovery_model_ref: string
   /** 压缩旧剧情用。空 = 跟着 fast_model_ref 走 */
   summary_model_ref: string
@@ -1256,9 +1261,6 @@ export interface RpgModule {
   image_model_ref: string
   /** 长期记忆的向量检索用。**空 = 整条向量路关着**，一次嵌入请求都不发 */
   embedding_model_ref: string
-  /** 推时段时写一句「别处此刻在发生什么」进大事记。**默认关**：
-   *  开了之后「结束这个时段」就不再是零模型调用了 */
-  offscreen_brief: boolean
   /** 一个时段最多几格**行动**（点动作/道具/技能/移动，纯对话不算）。
    *  攒满自动推一格。0 = 关，老模组一格都不会自己走 */
   slot_budget: number
@@ -1267,6 +1269,10 @@ export interface RpgModule {
   /** 自由打字收尾时吃掉一格行动。**不是每条都吃**：只有结算判定「这一幕收尾了」
    *  那一轮才算一格，闲聊三句不收尾就是 0 格。默认关 */
   free_costs_slot: boolean
+  /** AI 调度顺带写「两个 NPC 碰上了发生了什么」。默认关 */
+  npc_encounters: boolean
+  /** AI 调度给准动的人挑去处：ai = 模型照人设挑；random = 引擎抽签强制挪，模型只编他在那儿干什么 */
+  npc_move_mode: 'ai' | 'random'
   /** NPC 立绘的出图设置。老模组是 {}，三项都要判空 */
   image_config: RpgImageConfig
   /** 构思向导上次回填写进来的东西。老模组是 {}，回填时按「没有台账」处理 */
@@ -1627,9 +1633,13 @@ export interface RpgNpc {
   /** 常驻地点。等于当前局的 location 即视为在场 */
   location: string
   /** 作息表：{"早": "大礼堂", "晚": "寝室"}。当前时段在这张表里有值就用它，
-   *  没有就落回 location。后端的 rpg_context.npc_place 是同一套算法 */
+   *  没有就落回 location。后端的 rpg_context.npc_place 是同一套算法。
+   *
+   *  某一格的值是 RANDOM_SLOT（condition.ts）时它不是地名，是「这一格让她
+   *  自己走动」——读作息表的地方都得认得它，见 npcPlace */
   slot_locations: Record<string, string>
-  /** 仅这些时段执行随机移动；空数组表示所有时段 */
+  /** 旧配法：仅这些时段执行随机移动，空数组表示所有时段。现在编辑器把随机
+   *  移动填在 slot_locations 里，存一次就会把这两个旧字段清掉，见 randomSlots */
   random_movement_slots: string[]
   /** 随机移动只能去这几个地点（地点名）；空数组表示不限制。
    *  地点改名或删掉之后这里会留下对不上的名字，后端静默滤掉 */
@@ -1639,7 +1649,10 @@ export interface RpgNpc {
   /** 勾上之后，这一轮没提到她时她自己过日子：模型写一句「最近在做什么」，
    *  记在这一局的 npc_activities 里，下回见面时注入。默认关 */
   ai_scheduled: boolean
+  /** 旧配法的随机移动总开关。同 random_movement_slots，只剩兼容读 */
   random_movement: boolean
+  /** 这个人去处怎么挑，盖过模组的 npc_move_mode。'' = 跟随模组 */
+  move_mode: '' | 'ai' | 'random'
   /** 分栏档案，照抄酒馆卡：外貌身材 / 背景故事 / … */
   profile_sections: Record<string, string>
   dialogue_examples: { user: string; assistant: string }[]
@@ -1666,6 +1679,16 @@ export interface RpgDiscovery {
   hint: string
   /** 哪一段剧情认出来的。补全时拿它回去取正文当依据 */
   message_id: number
+}
+
+/** 某一格压出来的那版长期记忆。一格一条：同一格反复压缩只留最后一版 */
+export interface RpgSummaryLogRow {
+  day: number
+  /** 时段名。模组没设时段时是空串 */
+  slot: string
+  /** 这一版盖到第几条原文（比它新的那些仍以原文发出去） */
+  upto: number
+  text: string
 }
 
 /** 结算说「你拿到了这件东西」、还没认领的一条。同 RpgDiscovery 只是待办：
@@ -1699,6 +1722,34 @@ export interface RpgMilestone {
   a: string
   b: string
   content: string
+}
+
+/** 两个 NPC 在玩家看不见的地方碰上了，之间发生的事（AI 调度写的）。
+ *  形状见后端 models.RpgSession.npc_offscreen。exposed = 玩家已经查明 */
+export interface RpgOffscreenEntry {
+  id: string
+  day: number
+  slot: string
+  place: string
+  a: number
+  b: number
+  /** 写入那一刻快照的名字，键是 npc id 的字符串 */
+  names: Record<string, string>
+  content: string
+  /** 同一格在同一处撞见的第三个人 */
+  witnesses: number[]
+  exposed: boolean
+}
+
+/** 两个 NPC 之间的关系，一对人一个文字标签。a < b */
+export interface RpgNpcBond {
+  a: number
+  b: number
+  names: Record<string, string>
+  label: string
+  day: number
+  slot: string
+  exposed: boolean
 }
 
 export interface RpgSession {
@@ -1748,6 +1799,10 @@ export interface RpgSession {
    *  这一列是调度替不在场的人编的背景活动。混在一条时间线上，玩出来的事和
    *  模型编的事就再也分不开了。只画给玩家看，不进 prompt */
   npc_activity_log: Record<string, RpgNpcHistoryEntry[]>
+  /** 幕后往事和 NPC 之间的关系。**全量**，没按「已查明」筛过——
+   *  侧栏默认只画 exposed 的，上帝视角才画全部 */
+  npc_offscreen: RpgOffscreenEntry[]
+  npc_bonds: RpgNpcBond[]
   /** 每个人这一局的经历，{"3": [...]}，按发生顺序往后追加。和 npc_notes 分开存：
    *  那边同名键会被盖掉（她现在怎么样），这边只增不改（她经历过什么） */
   npc_history: Record<string, RpgNpcHistoryEntry[]>
@@ -1781,6 +1836,10 @@ export interface RpgSession {
    *  的字符串。和上面那条是**并列的格子**：那条是你自己记得的，这些是她记得的，
    *  只在她在跟前时注入。同样是溢出才有 */
   thread_summaries: Record<string, string>
+  /** 上面那两份记忆的历史留档，只给顶栏那个查看器读，**不进 prompt**。
+   *  键同 thread_summaries（`player` 是你自己那格），一格一条、同一格反复压缩
+   *  只留最后一版。老局是空的：这一列上线之前被覆盖掉的版本找不回来 */
+  summary_log: Record<string, RpgSummaryLogRow[]>
   turn_count: number
   created_at: string
   updated_at: string
@@ -2033,6 +2092,15 @@ export const rpgApi = {
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/generate/${kind}`, data, {
         timeout: 180000,
       }).then(r => r.data),
+    /** 给一项数值划整张档表。**spec 传表单里那一条的实时值**，不让后端按名字
+     *  回查：作者常常是刚加一项、名字和上下限还没存，库里查不到那一项 */
+    tiers: (
+      moduleId: number,
+      data: { spec: RpgStatDef; instruction?: string; count?: number; model?: string; temperature?: number },
+    ) =>
+      api.post<{ tiers: RpgStatTier[]; dropped: string[] }>(
+        `/rpg/modules/${moduleId}/tiers`, data, { timeout: 180000 },
+      ).then(r => r.data),
   },
   worldEntries: {
     list: (moduleId: number) =>
@@ -2145,8 +2213,8 @@ export const rpgApi = {
       api.post<RpgSession>(`/rpg/modules/${moduleId}/sessions/`, data).then(r => r.data),
     /** 结束当前时段。不产生叙事，所以是普通请求不是 SSE。
      *
-     *  但**不一定是纯引擎**：模组勾了「外场简报」、角色勾了「AI 调度」时，
-     *  后端会先串行调两次模型才回。默认的 30 秒盖不住（后端每次夹 60 秒），
+     *  但**不一定是纯引擎**：有角色勾了「AI 调度」时，后端会先调一次模型
+     *  才回。默认的 30 秒盖不住（后端夹 60 秒），
      *  超时的后果尤其坏——时段在调模型之前就已经提交了，前端拿不到新状态就会
      *  一直显示旧时段，而那一局的租约还被攥着，再点什么都是 409 */
     advance: (id: number) =>
@@ -2220,6 +2288,10 @@ export const rpgApi = {
       inventory?: { name: string; qty: number }[]
       flags?: Record<string, boolean | null>
       npc_places?: Record<string, string | null>
+      /** 主角挪到哪儿（登记地名）。不发 = 没碰 */
+      location?: string
+      /** 这一局自己那份时段表。**不发 = 没碰，发空数组 = 退回「跟模组走」** */
+      time_slots?: string[]
     }) => api.patch<{ session: RpgSession; notes: string[] }>(
       `/rpg/sessions/${id}/tweak`, body,
     ).then(r => r.data),
@@ -2561,6 +2633,7 @@ export type SSEMessage =
   | { event: 'stage'; data: string }
   | { event: 'token'; data: string }
   | { event: 'done'; data: string }
+  | { event: 'chapter_saved'; data: string }
   | { event: 'error'; data: string }
   | { event: 'warning'; data: string }
   | { event: 'agent_start'; data: AgentStartData }
@@ -2864,8 +2937,6 @@ export interface RpgTurnMeta {
   /** 【角色总表】那一块占了多少 token：全模组角色一人一行（名字 + 常驻地 +
    *  一句简介），完整设定仍归 npc_tokens；私聊时不注入，所以那一轮会是 0 */
   roster_tokens?: number
-  /** 【外场】那一块占了多少 token */
-  chronicle_tokens?: number
   /** 【关系的转折】那一块占了多少 token：整局攒下的关系里程碑，
    *  不按在场筛、每轮都在，所以它只增不减 */
   milestone_tokens?: number
@@ -2912,6 +2983,8 @@ export interface RpgStatePatch {
   npc_activities: Record<string, string>
   /** 那句话按时段留的底。和上面那一句同一次写入，只刷一个会让档案里两处对不上 */
   npc_activity_log: Record<string, RpgNpcHistoryEntry[]>
+  npc_offscreen: RpgOffscreenEntry[]
+  npc_bonds: RpgNpcBond[]
   npc_history: Record<string, RpgNpcHistoryEntry[]>
   npc_milestones: RpgMilestone[]
   npc_places: Record<string, string>

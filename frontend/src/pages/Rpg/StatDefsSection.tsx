@@ -1,4 +1,7 @@
-import type { RpgModule, RpgStatDef, RpgStatTier } from '@/api/client'
+import { useState } from 'react'
+import toast from 'react-hot-toast'
+import { Loader2, Sparkles, X } from 'lucide-react'
+import { rpgApi, type RpgModule, type RpgStatDef, type RpgStatTier } from '@/api/client'
 import { AddRow, DeleteButton, INPUT, NumInput } from './rpgUi'
 
 const SELECT = 'border rounded-lg px-2 py-1.5 text-xs bg-background/60 focus:outline-none'
@@ -15,7 +18,7 @@ const ON_FULL = ['无', '标记'] as const
 // 后端渲染时还会再截一刀（作者可以从别处粘进来），这里挡是为了让他当场看见
 const EFFECT_MAX = 150
 const LABEL_MAX = 6
-const NOTE_MAX = 60
+const NOTE_MAX = 150
 
 // 导出是给「套动作套装时一键补建缺的数值」用的：补出来的项必须和作者手点
 // 「添加一项」长得一模一样，不能另攒一份默认值
@@ -36,12 +39,15 @@ export type StatDraft = Pick<RpgModule, 'stat_defs' | 'relation_stat_defs'>
  * 定义变了不会追溯已经开的局：那一局的数值在建局时就拷走了。
  */
 export default function StatDefsSection({
-  form, set, example = '精力',
+  form, set, example = '精力', moduleId,
 }: {
   form: StatDraft
   set: <K extends keyof StatDraft>(key: K, value: StatDraft[K]) => void
   /** 空格子里的示例词，按玩法类别换（见 stylePresets.STYLE_EXAMPLES） */
   example?: string
+  /** 有它才出「AI 分档」：那个端点挂在模组下（要拿模组的模型配置）。
+   *  套装库里编数值是没有模组的，那儿就只有手填 */
+  moduleId?: number
 }) {
   return (
     <div className="space-y-6">
@@ -52,6 +58,7 @@ export default function StatDefsSection({
         onChange={v => set('stat_defs', v)}
         make={newPlayerStat}
         example={example}
+        moduleId={moduleId}
         full
       />
       <StatTable
@@ -60,13 +67,14 @@ export default function StatDefsSection({
         defs={form.relation_stat_defs || []}
         onChange={v => set('relation_stat_defs', v)}
         make={newRelationStat}
+        moduleId={moduleId}
       />
     </div>
   )
 }
 
 function StatTable({
-  label, hint, defs, onChange, make, full, example = '精力',
+  label, hint, defs, onChange, make, full, example = '精力', moduleId,
 }: {
   label: string
   hint: string
@@ -76,6 +84,7 @@ function StatTable({
   /** 玩家数值才有「可判定」和「归零时」两列 */
   full?: boolean
   example?: string
+  moduleId?: number
 }) {
   const patch = (i: number, next: Partial<RpgStatDef>) =>
     onChange(defs.map((d, n) => (n === i ? { ...d, ...next } : d)))
@@ -208,6 +217,8 @@ function StatTable({
               tiers={def.tiers || []}
               max={def.max}
               onChange={tiers => patch(i, { tiers })}
+              moduleId={moduleId}
+              spec={def}
             />
           </div>
         ))}
@@ -234,11 +245,15 @@ function StatTable({
  * 填的时候它会看着乱——那正是提示他该理一理，因为后端也是按这个算的。
  */
 function TierEditor({
-  tiers, max, onChange,
+  tiers, max, onChange, moduleId, spec,
 }: {
   tiers: RpgStatTier[]
   max: number | null
   onChange: (next: RpgStatTier[]) => void
+  /** 空 = 没有模组可挂（套装库），「AI 分档」整个不出现 */
+  moduleId?: number
+  /** 整条数值定义，发给后端当分档的依据（名字、上下限、「影响」那句话） */
+  spec: RpgStatDef
 }) {
   const under = tiers
     .map(t => t?.at)
@@ -255,16 +270,23 @@ function TierEditor({
   const patch = (i: number, next: Partial<RpgStatTier>) =>
     onChange(tiers.map((t, n) => (n === i ? { ...t, ...next } : t)))
 
-  // 一档都没有的时候只留一个按钮：绝大多数数值用不上分档，
+  const ai = moduleId != null && (spec.name || '').trim()
+    ? <TierAssist moduleId={moduleId} spec={spec} onApply={onChange} />
+    : null
+
+  // 一档都没有的时候只留两个按钮：绝大多数数值用不上分档，
   // 摊开一张空表会让作者以为这是必填的
   if (tiers.length === 0) {
     return (
-      <button
-        onClick={() => onChange([{ at: 0, label: '', note: '' }])}
-        className="text-[11px] text-muted-foreground hover:text-foreground"
-      >
-        + 分档（到多少会怎样）
-      </button>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => onChange([{ at: 0, label: '', note: '' }])}
+          className="text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          + 分档（到多少会怎样）
+        </button>
+        {ai}
+      </div>
     )
   }
 
@@ -272,6 +294,7 @@ function TierEditor({
     <div className="rounded-lg bg-muted/30 px-2.5 py-2 space-y-1.5">
       <div className="flex items-center gap-2">
         <span className="text-[11px] text-muted-foreground flex-1">分档（推出来的范围 → 标签 · 表现）</span>
+        {ai}
         <button
           onClick={() => onChange([])}
           className="text-[11px] text-muted-foreground hover:text-foreground"
@@ -313,6 +336,128 @@ function TierEditor({
         </div>
       ))}
       <AddRow onClick={() => onChange([...tiers, { at: 0, label: '', note: '' }])}>添加一档</AddRow>
+    </div>
+  )
+}
+
+/**
+ * 「AI 分档」：按这一项的名字、上下限和「影响」那句话划出整张档表。
+ *
+ * 先预览再写回，同这一摊其他几个生成入口（BatchGenerate、Assist）：**这是一次
+ * 整表替换**，直接落下去会把作者已经调好的档一起冲掉，而这一栏是自动保存的、
+ * 没有撤销。落在范围外和下界撞车的档由后端剔掉并说明，照样显示出来。
+ */
+function TierAssist({
+  moduleId, spec, onApply,
+}: {
+  moduleId: number
+  spec: RpgStatDef
+  onApply: (tiers: RpgStatTier[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [instruction, setInstruction] = useState('')
+  const [count, setCount] = useState(4)
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState<RpgStatTier[] | null>(null)
+  const [dropped, setDropped] = useState<string[]>([])
+
+  const reset = () => { setOpen(false); setInstruction(''); setDraft(null); setDropped([]) }
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      const res = await rpgApi.modules.tiers(moduleId, { spec, instruction, count })
+      setDraft(res.tiers)
+      setDropped(res.dropped || [])
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'AI 分档失败')
+    } finally { setBusy(false) }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="text-[11px] text-primary hover:underline flex items-center gap-1 shrink-0"
+        title="按这一项的名字、范围和「影响」划出整张档表"
+      >
+        <Sparkles className="w-3 h-3" /> AI 分档
+      </button>
+    )
+  }
+
+  return (
+    <div
+      className="w-full rounded-lg border px-2.5 py-2 space-y-2"
+      style={{ borderColor: 'hsl(var(--primary) / 0.3)', background: 'hsl(var(--primary) / 0.04)' }}
+    >
+      <div className="flex items-center gap-1.5">
+        <Sparkles className="w-3 h-3 text-primary shrink-0" />
+        <span className="text-[11px] font-medium text-primary flex-1">给「{spec.name}」分档</span>
+        <button onClick={reset} className="p-0.5 rounded hover:bg-primary/10 text-muted-foreground">
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <input
+          value={instruction}
+          onChange={e => setInstruction(e.target.value)}
+          placeholder="想怎么分（选填），如：从暗恋到热恋"
+          className={`${INPUT} flex-1 py-1 text-xs`}
+          disabled={busy}
+        />
+        <NumInput
+          value={count}
+          onChange={n => setCount(n ?? 4)}
+          clamp={n => Math.max(2, Math.min(8, n))}
+          className={`${INPUT} w-12 py-1 text-xs`}
+          title="分几档"
+          disabled={busy}
+        />
+        <button
+          onClick={run}
+          disabled={busy}
+          className="text-xs px-2.5 py-1 rounded-md bg-primary text-primary-foreground
+            hover:opacity-90 disabled:opacity-40 flex items-center gap-1 shrink-0"
+        >
+          {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+          {draft ? '重新分' : '分档'}
+        </button>
+      </div>
+
+      {draft && (
+        <div className="space-y-1">
+          {draft.map((tier, i) => (
+            <p key={i} className="text-[11px] text-muted-foreground leading-relaxed">
+              <span className="tabular-nums text-foreground">{tier.at} 起</span>
+              {tier.label && <span className="text-foreground"> {tier.label}</span>}
+              {tier.note && ` — ${tier.note}`}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {dropped.length > 0 && (
+        <div className="text-[11px] text-amber-600 dark:text-amber-400 space-y-0.5">
+          {dropped.map((d, i) => <p key={i}>· {d}</p>)}
+        </div>
+      )}
+
+      {draft && (
+        <div className="flex justify-end gap-1.5">
+          <button onClick={reset} className="text-xs px-2 py-1 rounded-md text-muted-foreground hover:bg-muted">
+            不用
+          </button>
+          <button
+            onClick={() => { onApply(draft); reset() }}
+            className="text-xs px-2.5 py-1 rounded-md bg-primary text-primary-foreground hover:opacity-90"
+            title="整张档表换成这个，原来的档会没掉"
+          >
+            用这套
+          </button>
+        </div>
+      )}
     </div>
   )
 }

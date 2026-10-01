@@ -7,7 +7,7 @@ import {
   ArrowLeft, Loader2, Plus, Trash2, Dices, BookMarked, X, Users, ScrollText,
   Globe2, Clapperboard, Settings2, ImagePlus, Pin, Backpack, UserRound,
   Swords, MapPin, Gauge, Sparkles, Clock, Check, Wand2, MessageSquare,
-  ChevronLeft, ChevronRight, BookOpen, BookmarkPlus, Eraser,
+  ChevronLeft, ChevronRight, BookOpen, BookmarkPlus, Eraser, Library,
 } from 'lucide-react'
 import {
   rpgApi, modelLibraryApi, modelSelectValue, groupModelsByProvider,
@@ -16,6 +16,8 @@ import {
   type RpgPlayStyle, type RpgImageConfig,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
+import StylePickerModal from '@/components/StyleLibrary/StylePickerModal'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
 import { useFormAutosave } from '@/lib/useFormAutosave'
@@ -36,7 +38,7 @@ import ImageSettingsDrawer from './ImageSettingsDrawer'
 import TriggerGuide from './TriggerGuide'
 import BatchGenerate from './BatchGenerate'
 import ConditionEditor from './ConditionEditor'
-import { norm, npcPlace } from './condition'
+import { norm, npcPlace, randomSlots, RANDOM_SLOT } from './condition'
 import { GENRE_PRESETS, type GenrePreset } from './genrePresets'
 import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, isEmbeddingField } from './modelSettings'
 import {
@@ -82,6 +84,7 @@ export default function RpgModule() {
   const backToPlay = Number.isInteger(fromSession) && fromSession > 0 ? fromSession : null
 
   const [formState, setForm] = useState<Module | null>(null)
+  const [stylePickerOpen, setStylePickerOpen] = useState(false)
 
   const { data: module, isLoading } = useQuery({
     queryKey: ['rpg-module', moduleId],
@@ -187,7 +190,7 @@ export default function RpgModule() {
         {/* 工具条放在这儿而不是 StatDefsSection 内部：那个编辑器套装库自己也在用，
             在库里编辑一套数值时出现「从库套用」是荒谬的 */}
         <div className="mb-4"><StatPresetBar form={form} set={set} /></div>
-        <StatDefsSection form={form} set={set} example={example.stat} />
+        <StatDefsSection form={form} set={set} example={example.stat} moduleId={moduleId} />
       </Section>
     ),
     slots: (
@@ -261,22 +264,41 @@ export default function RpgModule() {
             </p>
           </div>
         </label>
+        {/* 挂在时间这一栏：幕后往事只在时段翻篇、AI 调度跑的那一下才会发生 */}
         <label className="flex items-start gap-2.5 cursor-pointer mt-3">
           <input
             type="checkbox"
-            checked={!!form.offscreen_brief}
-            onChange={e => set('offscreen_brief', e.target.checked)}
+            checked={!!form.npc_encounters}
+            onChange={e => set('npc_encounters', e.target.checked)}
             className="mt-0.5 accent-[hsl(var(--primary))]"
           />
           <div>
-            <span className="text-sm">推时段时写一句「别处」</span>
+            <span className="text-sm">NPC 之间会在你背后来往</span>
             <p className="text-xs text-muted-foreground mt-0.5">
-              每次结束时段多调一次便宜模型，把玩家见过、此刻不在他身边的人在干什么，
-              写一两句进大事记。开着的话按一下时钟就会花钱、也要等一下；
-              不勾就是原来那样，纯引擎、零调用。角色卡里的作息表决定每个人这个时段在哪儿。
+              时段翻篇时，勾了「AI 调度」的两个人要是落在同一处（又不在你跟前），
+              之间就可能发生点什么，关系也会跟着变。当事人自己记得，被你问起可能撒谎；
+              你没查明之前，侧栏不会画出来。不多花一次调用。
             </p>
           </div>
         </label>
+        {/* 同样只在时段翻篇、AI 调度跑的那一下起作用 */}
+        <div className="mt-3">
+          <span className="text-sm">AI 调度怎么挑去处</span>
+          <select
+            value={form.npc_move_mode === 'random' ? 'random' : 'ai'}
+            onChange={e => set('npc_move_mode', e.target.value as Module['npc_move_mode'])}
+            className={`${INPUT} mt-1`}
+          >
+            <option value="ai">按人设挑（AI 自己决定去哪、要不要留下）</option>
+            <option value="random">随机强制（系统抽一个地方挪过去，AI 照着编他在那儿干什么）</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            只管勾了「AI 调度」、这一格准动的人，去处都只在他角色卡上的「随机移动范围」里。
+            按人设挑最说得通，但人容易老在那几个地方转；随机强制每格一定换地方，
+            可抽签不分好坏，不想让他去的地方记得从随机移动范围里去掉勾。
+            这是全模组的默认，个别人可以在他的角色卡上单独改。
+          </p>
+        </div>
       </Section>
     ),
     actions: (
@@ -334,6 +356,8 @@ export default function RpgModule() {
         slotNames={form.time_slots || []}
         example={example.location}
         assistContext={assistContext}
+        autoLocation={form.auto_location !== false}
+        onAutoLocation={v => set('auto_location', v)}
       />
     ),
     protagonist: (
@@ -423,7 +447,40 @@ export default function RpgModule() {
             }}
           />
         </div>
-        <Field label="叙事样例" multiline value={form.narration_sample} onChange={v => set('narration_sample', v)} placeholder="贴一两段你想要的旁白，定下腔调。" assist={{ moduleId, field: 'narration_sample', context: assistContext }} />
+        <div>
+          <Field label="叙事样例" multiline value={form.narration_sample} onChange={v => set('narration_sample', v)} placeholder="贴一两段你想要的旁白，定下腔调。" assist={{ moduleId, field: 'narration_sample', context: assistContext }} />
+        </div>
+        <div>
+          <ExampleTurnsEditor
+            variant="narration"
+            value={form.narration_examples || []}
+            onChange={v => set('narration_examples', v)}
+          />
+          <button
+            type="button"
+            onClick={() => setStylePickerOpen(true)}
+            className="mt-1.5 text-xs px-2 py-1 border rounded-md hover:bg-muted inline-flex items-center gap-1"
+          >
+            <Library className="w-3.5 h-3.5" />
+            从文风库取用
+          </button>
+          {stylePickerOpen && (
+            <StylePickerModal
+              mode="rpg_narration"
+              targetName={protagonistCard(npcs)?.name || ''}
+              nameOptions={npcs.map(n => n.name)}
+              onApply={r => {
+                if (r.examples?.length) {
+                  setForm(prev => (prev ? {
+                    ...prev,
+                    narration_examples: [...(prev.narration_examples || []), ...r.examples!],
+                  } : prev))
+                }
+              }}
+              onClose={() => setStylePickerOpen(false)}
+            />
+          )}
+        </div>
         <RulesSection
           selected={form.enabled_rule_ids || []}
           onChange={ids => set('enabled_rule_ids', ids)}
@@ -2332,12 +2389,12 @@ interface NpcForm {
   persona: string
   appearance: string
   location: string
+  /** 某一格填 RANDOM_SLOT = 那一格让她自己走动。旧的那两个随机字段不在这儿了 */
   slot_locations: Record<string, string>
-  random_movement_slots: string[]
   random_movement_places: string[]
   keywords: string
   ai_scheduled: boolean
-  random_movement: boolean
+  move_mode: RpgNpc['move_mode']
   profile_sections: Record<string, string>
   dialogue_examples: { user: string; assistant: string }[]
   initial_state: Record<string, number | boolean>
@@ -2350,9 +2407,7 @@ interface NpcForm {
 const EMPTY_NPC: NpcForm = {
   name: '', role: 'npc', age: '', description: '', persona: '', appearance: '',
   location: '', slot_locations: {}, keywords: '', ai_scheduled: false,
-  random_movement: false,
-  random_movement_slots: [],
-  random_movement_places: [],
+  move_mode: '', random_movement_places: [],
   profile_sections: {}, dialogue_examples: [], initial_state: {},
   relation_enabled: false, relation_stat_names: [],
   ability_stats: {},
@@ -2374,17 +2429,20 @@ const PROFILE_KEYS: Array<[string, string]> = [
  * option 时渲染成一个空白行（presetLib 里已经踩过一次），作者看着像「没填」，
  * 随手改一下就把原来那个名字覆盖没了——而这一栏是自动保存的，没有撤销。
  */
-function PlaceSelect({ value, onChange, names, empty }: {
+function PlaceSelect({ value, onChange, names, empty, random }: {
   value: string
   onChange: (v: string) => void
   names: string[]
   empty: string
+  /** 多给一档「这一格她自己走动」。只有作息表那一栏要，常驻地点不要 */
+  random?: boolean
 }) {
   return (
     <select value={value} onChange={e => onChange(e.target.value)} className={INPUT}>
       <option value="">{empty}</option>
+      {random && <option value={RANDOM_SLOT}>随机移动（她自己挑地方）</option>}
       {names.map(n => <option key={n} value={n}>{n}</option>)}
-      {!!value && !names.includes(value) && (
+      {!!value && value !== RANDOM_SLOT && !names.includes(value) && (
         <option value={value}>{value}（地点表里没有这个地方）</option>
       )}
     </select>
@@ -2427,6 +2485,7 @@ function NpcSection({
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<NpcForm>(EMPTY_NPC)
+  const [stylePickerOpen, setStylePickerOpen] = useState(false)
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['rpg-npcs', moduleId] })
   const reset = () => { setForm(EMPTY_NPC); setEditingId(null); setShowForm(false) }
@@ -2444,12 +2503,17 @@ function NpcSection({
       name: npc.name, role: npc.role, age: npc.age || '',
       description: npc.description,
       persona: npc.persona, appearance: npc.appearance,
-      location: npc.location, slot_locations: npc.slot_locations || {},
-      random_movement_slots: npc.random_movement_slots || [],
+      location: npc.location,
+      // 旧配法在这一步翻成新的：打开这张卡看到的就是合流之后的样子
+      // （randomSlots 和后端同一个口径），存一次就把旧字段作废掉，见 payload
+      slot_locations: {
+        ...(npc.slot_locations || {}),
+        ...Object.fromEntries(randomSlots(npc, slotNames).map(slot => [slot, RANDOM_SLOT])),
+      },
       random_movement_places: npc.random_movement_places || [],
       keywords: npc.keywords,
       ai_scheduled: npc.ai_scheduled,
-      random_movement: npc.random_movement ?? false,
+      move_mode: npc.move_mode || '',
       profile_sections: npc.profile_sections || {},
       dialogue_examples: npc.dialogue_examples || [],
       initial_state: npc.initial_state || {},
@@ -2468,6 +2532,11 @@ function NpcSection({
     slot_locations: Object.fromEntries(
       Object.entries(form.slot_locations).filter(([, v]) => (v || '').trim()),
     ),
+    // 旧那两个随机字段就在这一存里作废。后端只在作息表里一个「随机」都没有时
+    // 才去读它们（random_slots），清空之后那条兜底路径再也走不到——不清的话，
+    // 作者在新界面里把所有随机格都撤掉，旧勾选会当场复活
+    random_movement: false,
+    random_movement_slots: [],
   })
 
   /** 改哪一格就存哪一格。名字空着整份不发——后端这一列非空，存一个空名字进去，
@@ -2552,12 +2621,16 @@ function NpcSection({
 
   /** 随机移动范围里还对得上的那几个。全部对不上 = 她不会移动（后端 pool 为空） */
   const allowedRandomPlaces = form.random_movement_places.filter(n => placeNames.includes(n))
+  /** 作息表里标成「随机移动」的格子。非空 = 这个人有随机移动 */
+  const randomCells = Object.entries(form.slot_locations)
+    .filter(([, v]) => (v || '').trim() === RANDOM_SLOT)
+    .map(([slot]) => slot)
 
   const placeHint = !form.ai_scheduled ? ''
-    : form.random_movement
+    : randomCells.length > 0
       ? (placeNames.length === 0 ? '随机移动需要至少一个地点，请先去「地点」里添加。'
         : form.random_movement_places.length > 0 && allowedRandomPlaces.length === 0
-          ? '随机移动范围里的地点都不在地点表里了（改名或删掉了），她不会移动。改一下上面那排勾选。'
+          ? '随机移动范围里的地点都不在地点表里了（改名或删掉了），她不会移动。改一下下面那排勾选。'
           : '')
     : slotNames.length === 0
       ? '这个模组没设时段（右边「时段」那一格是空的），她不会换地方——调度只替她写「在做什么」。'
@@ -2644,14 +2717,19 @@ function NpcSection({
                       }))}
                       names={placeNames}
                       empty="留空 = 用常驻地点"
+                      // 「随机移动」也是这一格的一个取值，不是另一张表：原先排班和
+                      // 随机移动时段是两处勾选，两处都按时段索引、语义还互斥——
+                      // 一格既排了地点又勾了随机，排的那个根本不起作用
+                      random={form.ai_scheduled}
                     />
                   </div>
                 ))}
               </div>
               <p className="text-xs text-muted-foreground mt-1.5">
-                {form.ai_scheduled && form.random_movement
-                  ? '随机移动已启用，常驻地点和作息表都可以留空。填写的地点仅用于初始位置和未调度时的回退。'
-                  : '填了就在这个时段待在填的地方，玩家要找他得去那儿；留空就一直在常驻地点。没有固定落脚点的人（学生、行商）把每一格都填上就行，常驻地点空着没关系。要让某个人某个时段「谁也找不到」，填一个玩家不去的地方就行。'}
+                填了就在这个时段待在填的地方，玩家要找他得去那儿；留空就一直在常驻地点。
+                没有固定落脚点的人（学生、行商）把每一格都填上就行，常驻地点空着没关系。
+                要让某个人某个时段「谁也找不到」，填一个玩家不去的地方就行。
+                {form.ai_scheduled && '选「随机移动」的格子由模型替她挑地方，范围在下面设。'}
               </p>
             </div>
           )}
@@ -2672,46 +2750,12 @@ function NpcSection({
                 下回见面时她会带着这段日子。每回合多一次模型调用，玩的时候能在这张卡上
                 看到记了什么，觉得不对可以划掉。
               </p>
-              {form.ai_scheduled && (
+              {/* 哪几格随机移动在上面那张作息表里选（那一格挑「随机移动」），
+                  这儿只剩范围。原先是「移动方式」下拉 + 一排时段勾选，和作息表
+                  重复索引同一批时段 */}
+              {form.ai_scheduled && randomCells.length > 0 && (
                 <div className="mt-2 ml-6 space-y-1.5">
-                  <label className="text-xs font-medium block">移动方式</label>
-                  <select
-                    value={form.random_movement ? 'random' : 'schedule'}
-                    onChange={e => setForm(f => ({ ...f, random_movement: e.target.value === 'random' }))}
-                    className={INPUT}
-                  >
-                    <option value="schedule">按作息表 / 常驻地点</option>
-                    <option value="random">随机移动</option>
-                  </select>
-                  {form.random_movement && (
-                    <>
-                    {slotNames.length > 0 && (
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium block">随机移动时段</label>
-                        <div className="flex flex-wrap gap-x-3 gap-y-1">
-                          {slotNames.map(name => (
-                            <label key={name} className="flex items-center gap-1 text-xs">
-                              <input
-                                type="checkbox"
-                                checked={form.random_movement_slots.includes(name)}
-                                onChange={event => setForm(f => ({
-                                  ...f,
-                                  random_movement_slots: event.target.checked
-                                    ? [...f.random_movement_slots, name]
-                                    : f.random_movement_slots.filter(slot => slot !== name),
-                                }))}
-                                className="accent-primary"
-                              />
-                              {name}
-                            </label>
-                          ))}
-                        </div>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                          只在勾选的时段随机移动；不勾选表示所有时段都可随机移动，其他时段按作息表或常驻地点。
-                        </p>
-                      </div>
-                    )}
-                    {/* 随机移动的地点范围。语义和上面那排时段勾选框一致：不勾 = 不限制。
+                    {/* 随机移动的地点范围。整个角色一份，不按时段分：不勾 = 不限制。
                         孤儿名字（地点改名/删了）单独显出来，否则作者不知道自己少了一格 */}
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium block">随机移动范围</label>
@@ -2758,12 +2802,25 @@ function NpcSection({
                         只勾一个地点等于把她钉在那儿——她会一直待在那里不动。
                       </p>
                     </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium block">去处怎么挑</label>
+                      <select
+                        value={form.move_mode || ''}
+                        onChange={e => setForm(f => ({ ...f, move_mode: e.target.value as NpcForm['move_mode'] }))}
+                        className={INPUT}
+                      >
+                        <option value="">跟随模组设置</option>
+                        <option value="ai">按人设挑</option>
+                        <option value="random">随机强制</option>
+                      </select>
+                    </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      每轮结束时，闲置角色会从允许的地点中随机选择去处，再由 AI 记录活动。
-                      无需填写常驻地点或作息表，也不需要设置时段；在场、被提到或跟随你的角色不会随机移动。
+                      {randomCells.join('、')} 这几格结束时，
+                      {form.move_mode === 'random' ? '系统会在范围里抽一个地方把她挪过去，模型照着编她在那儿做什么。'
+                        : form.move_mode === 'ai' ? '模型会按她的人设在范围里挑个去处，再记一句在做什么。'
+                        : '按模组「AI 调度怎么挑去处」那一项给她挑去处，再记一句在做什么。'}
+                      在场、被提到或跟着你的人不会被挪走。
                     </p>
-                    </>
-                  )}
                 </div>
               )}
               {placeHint && (
@@ -2855,6 +2912,29 @@ function NpcSection({
 
           <Fold title="对话示例（选填）">
             <div className="space-y-2">
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setStylePickerOpen(true)}
+                  className="text-xs px-2 py-1 border rounded-md hover:bg-muted inline-flex items-center gap-1"
+                >
+                  <Library className="w-3.5 h-3.5" />
+                  从文风库取用
+                </button>
+              </div>
+              {stylePickerOpen && (
+                <StylePickerModal
+                  mode="rpg_npc"
+                  targetName={form.name}
+                  nameOptions={npcs.map(n => n.name)}
+                  onApply={r => {
+                    if (r.examples?.length) {
+                      setForm(f => ({ ...f, dialogue_examples: [...f.dialogue_examples, ...r.examples!] }))
+                    }
+                  }}
+                  onClose={() => setStylePickerOpen(false)}
+                />
+              )}
               {form.dialogue_examples.map((ex, i) => (
                 <div key={i} className="border rounded-lg p-2 space-y-1.5 bg-background/40">
                   <div className="flex items-center gap-2">
@@ -3074,9 +3154,11 @@ function NpcSection({
     >
       <div className="space-y-2">
         {npcs.map(npc => {
+          // 随机那一格不是地名，写成「中午自己走动」而不是「中午在 __random__」
           const schedule = Object.entries(npc.slot_locations || {})
             .filter(([, at]) => (at || '').trim())
-            .map(([slot, at]) => `${slot}在${at}`)
+            .map(([slot, at]) => at.trim() === RANDOM_SLOT ? `${slot}自己走动` : `${slot}在${at}`)
+          const randoms = randomSlots(npc, slotNames)
           return (
           <div key={npc.id} className="space-y-2">
           <div className="border rounded-lg px-3 py-2 flex items-start gap-3">
@@ -3100,7 +3182,7 @@ function NpcSection({
                     title="玩家没提到她时，模型会替她记一句「最近在做什么」。每回合一次模型调用"
                     className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
                   >
-                    {npc.random_movement ? 'AI 调度 · 随机移动' : 'AI 调度'}
+                    {randoms.length > 0 ? 'AI 调度 · 随机移动' : 'AI 调度'}
                   </span>
                 )}
                 {npc.relation_enabled && (

@@ -14,11 +14,12 @@ import asyncio
 import logging
 import random
 import re
+import time
 from dataclasses import replace
 from datetime import datetime
 from typing import AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.database import AsyncSessionLocal
 from app.models.rpg import (
@@ -64,8 +65,8 @@ from app.services.rpg_dice import (
 from app.services.rpg_prompts import render
 from app.services.rpg_operation import retain_task
 from app.services.rpg_state import (
-    OFFSCREEN_CHARS,
-    OFFSCREEN_TAG,
+    AWAY,
+    npc_away,
     advance_slot,
     apply_inventory,
     apply_npc_activity,
@@ -78,21 +79,24 @@ from app.services.rpg_state import (
     check_zero,
     def_map,
     effect_cost_reason,
-    chronicle_lines,
     for_check_stats,
     mark_fired,
     mark_met,
     match_npc,
     match_place,
     norm_name,
-    note_move,
     note_slot_chat,
     note_visited,
     npc_activity,
-    push_chronicle,
+    npc_bonds_of,
+    npc_offscreen_of,
     random_movement_ok,
+    record_offscreen,
+    set_npc_bond,
+    random_place_expired,
     set_cooldown,
     skill_cooldown_left,
+    slots_in_place,
     spend_slot_action,
     tick_cooldowns,
     tier_of,
@@ -117,9 +121,6 @@ LEDGER_LIMIT = 20
 LEDGER_KEY_CHARS = 6
 # 裁决时给模型看的上一段剧情长度。只要够判断语境，不用给全文
 RECENT_CHARS = 400
-# 结算时给模型看的大事记条数。只为防它把同一件事反复写进去，
-# 不是让它接着往下编，所以只看最近几条
-CHRONICLE_PROMPT_LINES = 10
 
 
 # 这里原先有一整段线的东西：find_thread_npc / resolve_thread_id / thread_blocker
@@ -167,6 +168,10 @@ def _state_payload(sess: RpgSession) -> dict:
         # 那句话按时段留的底。跟着一起带回去：档案里「她这几格在忙什么」
         # 和上面那一句是同一次写入的两面，只刷一个会让两处对不上
         "npc_activity_log": sess.npc_activity_log or {},
+        # 调度写下的幕后往事和关系标签。全量带回去，筛「已查明」是前端的事——
+        # 上帝视角那颗开关要的就是没筛过的那份
+        "npc_offscreen": sess.npc_offscreen or [],
+        "npc_bonds": sess.npc_bonds or [],
         # 这一轮记下的经历和关系转折：角色档案的「经历」那一页要当场长出来，
         # 不带的话玩家点进去看到的还是上一轮的样子
         "npc_history": sess.npc_history or {},
@@ -267,8 +272,6 @@ def _move(sess: RpgSession, target: RpgLocation, npcs: list[RpgNpc]) -> list[str
     if not ok:
         return [f"你想进{target.name}，但{why}，被挡在外面"]
     sess.location = target.name
-    # 移动是确定性的、跨线该知道的事，顺手记进大事记（和上一条移动合并）
-    note_move(sess, target.name)
     note_visited(sess, target.name)
     return [f"你离开{from_name}，来到了{target.name}" if from_name else f"你来到了{target.name}"]
 
@@ -426,8 +429,7 @@ async def _resolve_engine(
                 warnings.append(f"模组里没有「{move_to}」这个地点")
             elif norm_name(sess.location or "") == norm_name(target.name):
                 # 已经在的地方不该再走一遍 _move：那会写下「你离开灵药园柴房，
-                # 来到了灵药园柴房」，还顺手把大事记上一条移动覆盖掉（note_move
-                # 是合并写的）。同 move_by_name 里那道闸，从前只有按钮那条路有，
+                # 来到了灵药园柴房」。同 move_by_name 里那道闸，从前只有按钮那条路有，
                 # 自由输入这条路（尤其认出简称之后，「人在柴房说回柴房」）没有
                 pass
             else:
@@ -530,7 +532,15 @@ def move_by_name(
     return facts[0] if facts else ""
 
 
-_MOVE_VERBS = "前往|前去|去往|走到|走向|走进|进入|回到|返回|回|移动到|赶往|来到|去"
+# 裸「到」排在最后：走到 / 回到 / 来到 / 移动到 都在它前面，正则的最左最先匹配
+# 保证「走到天台」认的还是「走到」，不会被裸「到」抢掉半个动词。
+# 「到天台看看」从前整句认不出来——表里有走到/回到/来到，偏偏没有裸「到」，于是
+# 玩家留在原地，GM 照着写了一段已经上了天台的剧情，结算再报「顶楼天台不是你这
+# 一轮待过的地方」，那儿的近况一条都记不下。
+# 单字这么常见却敢收，靠的是动词**后面**那道白名单（_place_hits + _MOVE_TAIL）：
+# 「说到公司的事」「我想到家里还有事」的续字都不在 _MOVE_TAIL 里，一律不认。
+# 「等她到家」这种说别人的归 _MOVE_DENY（窗口里有「她」「等」）
+_MOVE_VERBS = "前往|前去|去往|走到|走向|走进|进入|回到|返回|回|移动到|赶往|来到|去|到"
 _MOVE_VERB_RE = re.compile(_MOVE_VERBS)
 # 动词**前面**出现这些字，这句就不是「我现在就动身」：否定、推迟、主语不是玩家。
 # **只看动词紧邻的那几个字**（_DENY_WINDOW），不是整句前缀——从前拿整句前缀按
@@ -543,8 +553,11 @@ _MOVE_VERB_RE = re.compile(_MOVE_VERBS)
 # 不在上面那串代词里，不拦这句就会被认成玩家要去客栈——人被平白挪走。
 # 表里最长的词两个字，_DENY_WINDOW 的 4 个字够把它们整个包进来。
 # **刻意不收裸「说」**：单字太常见，「跟掌柜说一声再去酒馆」这种真移动会被误杀
+# 「时候」进表是为了裸「到」：「问她什么时候到家」里的主语「她」被「什么时候」
+# 这四个字挤出了窗口，不收这个词就会把**玩家**送回家。它同时管住「到时候去公司」
+# 那种推迟。代价是「这个时候去公司」也不认——照这张表一贯的偏向，宁可不认
 _MOVE_DENY = re.compile(
-    r"[不别莫没未他她它你并等]|懒得|然后|"
+    r"[不别莫没未他她它你并等]|懒得|然后|时候|"
     r"看见|看到|瞧见|听说|听见|得知|知道|告诉|提到|以为|觉得"
 )
 _DENY_WINDOW = 4
@@ -584,6 +597,8 @@ _MOVE_TAIL = re.compile(
 # 地点简称至少要有两个字才敢认。同 rpg_state.match_npc 的 _MIN_PARTIAL：
 # 一个字的「园」「房」能撞上一堆地方
 _MIN_PLACE_PART = 2
+# 人名同理：一个字的「李」在任何句子里都撞得到（_moves_by_someone_else 用）
+_MIN_NAME_PART = 2
 
 
 def _place_hits(head: str, names: dict[str, str]) -> set[str]:
@@ -668,6 +683,20 @@ def movement_target(content: str, locations: list[RpgLocation]) -> str:
         # 光打一个地名：唯一点名才算数，两个「柴房」交回 AI（同下面那条）
         return direct.pop() if len(direct) == 1 else ""
     hits = set()
+    for _clause, rest in _move_heads(text):
+        hits |= _place_hits(norm_name(rest), names)
+    # 一句话指了两个地方就别替玩家挑，交给 AI 去读
+    return hits.pop() if len(hits) == 1 else ""
+
+
+def _move_heads(text: str):
+    """这句话里每个「敢当成玩家动身」的移动动词后面那一截。
+
+    从 movement_target 里原样抽出来的，为的是 movement_candidate 能复用
+    **同一套前置守卫**（第二个目的地、_SUGGEST、_MOVE_DENY）。各写一份的话
+    迟早漂成「移动那边拦、建地点这边不拦」——而那一侧漂错的代价是往作者的
+    地点表里插一条「他去客栈」。
+    """
     for match in re.finditer(_MOVE_VERB_RE, text):
         head_text = text[:match.start()]
         # 前面已经有一个移动动词 = 这是第二个目的地（「先回客栈，再去酒馆」「前往
@@ -679,9 +708,88 @@ def movement_target(content: str, locations: list[RpgLocation]) -> str:
         window = _SUGGEST.sub("", head_text)[-_DENY_WINDOW:]
         if _MOVE_DENY.search(window):
             continue
-        rest = text[match.end():].strip().lstrip("了向到往").strip().strip('「」『』“”"')
-        hits |= _place_hits(norm_name(rest), names)
-    # 一句话指了两个地方就别替玩家挑，交给 AI 去读
+        yield head_text, text[match.end():].strip().lstrip("了向到往").strip().strip('「」『』“”"')
+
+
+# 自动建出来的地名长度。上限同 _ENGINE_MOVE 里那个 {1,12}；下限借
+# _MIN_PLACE_PART——一个字的「园」建出来谁都对得上，等于给地点表下毒
+_NEW_PLACE_MAX = 12
+# 地名里不该出现的字。命中一个就整条弃掉：这些字说明切下来的这截是**半句话**
+# 而不是一个地名（代词、否定、数量、以及「的」这种一看就是从句子中间切开的）
+# 指示代词（这/那）单独列一句：「去那儿看看」切出来的是「那儿」，长度和字符都
+# 合法，可它不是个地名——而作者的地点表里一旦长出「那儿」，往后每个「去那边」
+# 都会对上它
+_NOT_A_PLACE = re.compile(r"[我你他她它们不别没未很都也就还又把被和跟给让请谁什么哪这那]")
+
+# 地名得像个地名：末尾必须是这些字之一。**这是这条路上唯一的锚**，不是又一道
+# 过滤器——没有它，`_MOVE_TAIL` 就从「边界确认」退化成「地名切割」：
+# 「我去宗主说得对」里 _MOVE_TAIL 认得「说」，于是前面那截「宗主」被当成地名建进库
+# （「回去修炼了」→「去修炼」、「去问问宗主说得对不对」→「问问宗主」，同一个病）。
+# 原来那条路上不出这种事，因为它有 `_place_hits` 拿**登记地名**当锚，尾巴只负责
+# 确认「地名到这儿为止」；这条路上没有登记名可比，锚只能由地名自己的形状来当。
+#
+# 同 _MOVE_TAIL：**白名单，不是黑名单**，所以漏的错法是「不建」（整句交给 AI，
+# 原地不动），不是「建错」。作者想要「太玄」这种没有通名后缀的地名，手动加一条。
+# 刻意不收的几个：「门」（「去开门」）、「观」（「去参观」）、「界/境/层」
+# （「去下一层」）——它们太容易撞上日常说法
+_PLACE_TAIL = re.compile(
+    r"(?:阁|殿|室|房|园|苑|山|林|谷|峰|崖|洞|窟|城|村|镇|庄|店|铺|楼|院|寺|庙|塔|"
+    r"桥|巷|街|港|湾|河|湖|海|岛|井|田|场|厅|堂|台|关|营|寨|府|宫|宅|舍|屋|窖|"
+    r"仓|库|馆|所|站|坊|亭|廊|家|码头|客栈)$"
+)
+
+
+def movement_candidate(content: str, locations: list[RpgLocation], npcs: list[RpgNpc]) -> str:
+    """这句话里那个**还没登记过**的去处。空串 = 没有，或者不敢当地名。
+
+    `movement_target` 对不上登记名就返回空串，而那一截候选它其实已经算出来了
+    ——这里把它捞出来，交给路由去建。判据全是「宁可不建」：建错一条地点会
+    永久长在作者的地点表里，而且每轮都拼进 prompt。
+
+    **「和已有地点重合」这件事不用另写判据**：`_place_hits` 的匹配方向是单向的
+    ——它只认「玩家说的那截是登记名的后缀」（`head.startswith(key[cut:])`）。
+    所以已有「织云阁地下密室」时：
+      - 玩家说「密室」→ 命中 → movement_target 就返回那个地点，走移动，这里根本
+        不会被调到；
+      - 玩家说「太玄大殿密室」→ 不命中（head 的头是「太」，对不上任何后缀）→
+        当成新地方。
+    这正是需求要的口径：话说得**更短**是同一个地方，话说得**更长**是另一个地方。
+    千万别顺手放宽成双向子串或者「共享后缀」——「太玄大殿密室」和「织云阁地下
+    密室」共享「密室」，那两种写法都会把它判成重合，需求里第二个例子当场就错。
+    """
+    text = content.strip().rstrip("。！!").strip()
+    # 问句是在打听，不是在动身（同 movement_target 第一道闸）
+    if re.search(r"[?？]|吗$", text):
+        return ""
+    names = {norm_name(l.name): l.name for l in locations if l.name}
+    hits = set()
+    # **必须先按分句切**，同 movement_target：不切的话「先回客栈，再去太玄大殿
+    # 密室」里第一个动词后面那截是「客栈，再去太玄大殿密室」，整条被当成地名
+    # 建进库。下面那道标点闸是第二层保险，别拿掉任何一层
+    clauses = re.split(r"[，,。；;！!\n]+", text)
+    for clause in clauses:
+        for _head, rest in _move_heads(clause.strip()):
+            # 对得上登记地点的归 movement_target，这儿只收它认不出来的
+            if _place_hits(norm_name(rest), names):
+                return ""
+            # 「去后山竹林看看」的 rest 是「后山竹林看看」，地名只到「竹林」为止。
+            # **切的位置由 _PLACE_TAIL 定，不由 _MOVE_TAIL 定**：拿 _MOVE_TAIL 找
+            # 切口的话，「我去宗主说得对」会在「说」那儿切出一个叫「宗主」的地名
+            # ——那张表是用来确认「地名到这儿为止」的，它认得的字里一半是日常动词。
+            # 所以反过来：从长到短试，第一个**自己就长得像个地名**的前缀才算。
+            name = ""
+            for cut in range(min(len(rest), _NEW_PLACE_MAX), _MIN_PLACE_PART - 1, -1):
+                head = rest[:cut].strip().strip("的了呢吧啊嘛")
+                if _PLACE_TAIL.search(head) and not _NOT_A_PLACE.search(head):
+                    name = head
+                    break
+            if not (_MIN_PLACE_PART <= len(name) <= _NEW_PLACE_MAX):
+                continue
+            # 「去赫敏那儿」不能建出一个叫「赫敏那儿」的地点
+            if match_npc(name, npcs):
+                continue
+            hits.add(name)
+    # 同 movement_target：一句话指了两个地方就别替玩家挑
     return hits.pop() if len(hits) == 1 else ""
 
 
@@ -712,6 +820,9 @@ _CARRY_VERB_TAKE = (
 _CARRY_VERB_TOUCH = "拉着|牵着|扶着|拽着|拉|牵|扶"
 _CARRY_VERB = _CARRY_VERB_TAKE + "|" + _CARRY_VERB_TOUCH
 _TOUCH_VERBS = frozenset(_CARRY_VERB_TOUCH.split("|"))
+# 单用判据：「动词前面这一段里有没有携带动词」。_moves_by_someone_else 靠它
+# 把「带赫敏去客栈」放回玩家自己动身那条路上（见那个函数的例外清单）
+_CARRY_VERB_RE = re.compile(_CARRY_VERB)
 _CARRY_TAIL_TEXT = "一起|一同|一块|一齐|俩|两个|两人"
 _CARRY_TAIL = re.compile(r"(?:" + _CARRY_TAIL_TEXT + r")")
 # 「谁」那一段最多认这么多字，和下面正则里的 {1,10} 同一口径
@@ -740,6 +851,9 @@ _CARRY_WITH = re.compile(
 # **不吃「我俩 / 咱俩」**——跟前站着三个人时它指的是哪两个无从判断，
 # 宁可整句交回 AI
 _GROUP = re.compile(r"我们|咱们")
+# 第一人称。_moves_by_someone_else 用它把「我跟赫敏去客栈」「我和赫敏一起去后山」
+# 放回玩家自己动身那条路上——这两句里名字确实在动词前面，但动身的是玩家
+_FIRST_PERSON = re.compile(r"[我咱]")
 # 不点名去哪儿的「动身」说法。它是「这句在不在动身」的第二个判据，第一个是
 # movement_target 认得出地名。两个都不中的「我们」是在说话不是在走路——
 # 「我们聊聊」「我们之间的事还没完」从前会把在场所有人登记成跟随
@@ -754,9 +868,21 @@ _SET_OFF = re.compile(r"走吧|该走|出发|动身|启程|上路")
 _FOLLOW_ME = re.compile(
     r"(?P<who>" + _WHO + r"{0,10}?)(?:，|,)?(?:跟着我|跟着我们|跟我走|跟我来)"
 )
-_MOVE_OR_BACK = _MOVE_VERBS
+# 派遣专用的动词表，比 _MOVE_VERBS 多两个**光身的**「到 / 来」：「让她到卧室
+# 等我」「喊她来公司」是最自然的支使说法，而 _MOVE_VERBS 里只有「回到 / 来到」
+# 这类双字词，于是这两句一个字都不动、整句交给 AI，位置改动最后被结算那道
+# 「缺少赶来的原文依据」打回——玩家下了指令，三道关一道都没执行。
+#
+# 光身的字只敢加在这条**派遣专用**的表里，不能加进 _MOVE_VERBS：那张表还管
+# 玩家自己的去向，「我到家了」会被读成一次移动。放心的另一半是去处那头由
+# _registered_place 兜着：「让她把东西放到桌上」的「桌上」不是登记地名，不认
+_MOVE_OR_BACK = _MOVE_VERBS + "|到|来"
 _SEND_TAIL = "等我|等着我|等我回来|候着|待着|呆着|别乱跑|去|来|吧|了"
-_SEND_VERB = "派|打发|使唤|吩咐|安排|命令|让|叫"
+_SEND_VERB = "派|打发|使唤|吩咐|安排|命令|让|叫|喊"
+# 名字和使役动词之间夹的语气副词。「让韩曼宁**先**回家吧」里 who 会把「先」
+# 一起吃进去，于是 _named_exactly 要求的全等对不上，这句就此作废
+_SEND_ADVERB = re.compile(r"^(?:就|先|快|赶紧|马上|立刻|现在|这就|自己|亲自)+|"
+                          r"(?:就|先|快|赶紧|马上|立刻|现在|这就|自己|亲自)+$")
 # 「这句是不是在支使别人」的单用判据。_SEND 那条整句正则够不着的时候
 # （被支使的人不在跟前），_moves_by_someone_else 要问的是同一批词
 _SEND_WORDS = re.compile(_SEND_VERB)
@@ -766,6 +892,23 @@ _SEND = re.compile(
     r"(?:" + _SEND_VERB + r")(?P<who>" + _WHO + r"{0,10}?)"
     r"(?:" + _MOVE_OR_BACK + r")(?P<where>" + _WHO + r"{1,12}?)"
     r"(?:" + _SEND_TAIL + r")?$"
+)
+# 使役动词**前面**那几个字：有否定或条件，这句就不是在支使人。「别让韩曼宁回家」
+# 「如果让她回家」——_SEND 是从「让」开始匹配的，前面那个「别」整个落在匹配之外，
+# 不在这里拦一道，引擎反倒替玩家把人派走了。
+# 口径同 movement_target：先剥提议前缀（_SUGGEST），再只看紧邻的几个字
+# （_DENY_WINDOW）。拿整句前缀按单字拦会误伤「我不累，让她回家」。
+# _SEND_SUBJ 那条不需要这道门：它 ^ 锚定，否定词会落进 who 里，而具名主语走
+# _named_exactly（要求正好是这个名字），「如果韩曼宁回家」自己就对不上
+_SEND_DENY = re.compile(r"[不别莫甭没未]|如果|要是|万一|假如|倘若|只要|除非")
+# 「把韩曼宁叫到卧室来」。宾语提前是最常见的支使句式之一，而 _SEND 要求
+# 使役动词紧挨着人名（「叫韩曼宁…」），提前之后就对不上了。
+#
+# **只收招呼类的动词**：「把她带到卧室」的「带」是携带（玩家自己也过去），
+# 归 _CARRY 那条线，收进来就会把一次携带记成一次派遣，她被挪走而玩家留在原地
+_SEND_BA = re.compile(
+    r"把(?P<who>" + _WHO + r"{1,10}?)(?:叫|喊|请|派|支)(?:" + _MOVE_OR_BACK + r")"
+    r"(?P<where>" + _WHO + r"{1,12}?)(?:" + _SEND_TAIL + r")?$"
 )
 # 没有使役动词，主语就是她：「赫敏去客栈」「赫敏，你回宿舍去」。
 # **只认句首**——不然「我看见赫敏去客栈」里那句陈述也会被当成命令
@@ -1039,8 +1182,35 @@ def _named_exactly(span: str, candidates: list[RpgNpc]) -> RpgNpc | None:
 _IMPERATIVE_TAIL = ("等我", "等着我", "等我回来", "候着", "待着", "呆着", "别乱跑", "吧", "去")
 
 
+def _send_who(
+    span: str, here: list[RpgNpc], npcs: list[RpgNpc],
+) -> tuple[list[RpgNpc], bool]:
+    """派遣的对象，以及「这是不是点了名的一个人」。
+
+    **名字认全世界，不只认跟前**：玩家说「让韩曼宁回家」，她此刻在内衣店——
+    派她去别处不是携带那条线忌讳的「凭空挪到你跟前」，指令的落点本来就在别处。
+    从前这里只认跟前的人，于是这句一个字都不动，交给 AI 去写，正文里她用代词
+    出场，结算再因为「缺少该角色赶来的原文依据」把位置改动打回——玩家明明下了
+    指令，三道关一道都没执行。
+
+    先试全等的名字，再落回原来那条（代词、多人、match_npc 的放宽）：她就在
+    跟前时两条路给出同一个人，所以这个顺序只新增「不在跟前」那一种情况。
+
+    点没点名要往外说：句末带「了」的陈述句只对点了名的人算指令，见 _parse_send。
+    """
+    # 语气副词先削掉：「让韩曼宁先回家吧」里 who 是「韩曼宁先」，全等对不上，
+    # 这句就此作废。削在这里而不是放进正则：who 是贪婪吃到动词为止的一段，
+    # 在正则里再加一层可选前后缀会让那条本来就长的式子更难看懂（见 _SEND_ADVERB）
+    bare = _SEND_ADVERB.sub("", span.strip())
+    got = _named_exactly(bare, world_npcs(npcs)) or _named_exactly(span, world_npcs(npcs))
+    if got:
+        return [got], True
+    return _resolve_who(bare, here) or _resolve_who(span, here), False
+
+
 def _parse_send(
-    text: str, here: list[RpgNpc], locations: list[RpgLocation], private: bool = False,
+    text: str, here: list[RpgNpc], npcs: list[RpgNpc],
+    locations: list[RpgLocation], private: bool = False,
 ) -> list[tuple[int, str]]:
     """返回 [(npc_id, 地名)]。认不出就是空列表。
 
@@ -1048,18 +1218,25 @@ def _parse_send(
     谁不明——不出手（同 movement_target 的 len(hits) == 1）。宁可漏认：派遣猜错
     的代价也是把人挪到错的地方，和移动同级。
     """
-    # 句末的「了」是完成态：「他去后山了」说的是已经发生的事，不是支使人。
-    # _SEND_TAIL 里有「了」，不拦的话这句会把跟前那个人**派到后山去**——
-    # 玩家在讲别人的事，引擎却动了手
-    if text.endswith("了"):
-        return []
-    for pattern in (_SEND, _SEND_SUBJ):
+    # 句末的「了」是完成态。代词主语一律不认：「他去后山了」是在讲别人的事，
+    # 而「他」会被解析成跟前那个人，不拦就把她**派到后山去**。
+    #
+    # **点了名的是例外**：「韩曼宁回到家了」这种陈述语气，说的就是让她回家——
+    # 玩家的输入本身就是指令，不是「供模型理解意图」的参考。两道守卫替它兜底：
+    # 名字必须全等（「我看见韩曼宁回家了」的主语整段对不上），地点必须登记过。
+    # 「昨天 / 刚才 / 曾经」那种真·回顾更早就被 parse_company 的 _PAST 拦掉了
+    done = text.endswith("了")
+    # _SEND_BA 和 _SEND 走同一套守卫（否定/条件前缀、名字、登记地名），
+    # 所以放在一组里：下面那个 else 分支对两者都成立
+    for pattern in (_SEND, _SEND_BA, _SEND_SUBJ):
         match = pattern.search(text)
         if not match:
             continue
         if pattern is _SEND_SUBJ:
             subject = match.group("who").strip()
             if subject in _PRONOUNS:
+                if done:
+                    continue
                 # 私聊里不要那个尾巴：玩家刚亲手点开和她的对话，「你」指的是谁
                 # 是这套识别里唯一零猜测的场合，不必再拿「等我」证明是命令。
                 #
@@ -1072,10 +1249,16 @@ def _parse_send(
                     continue
                 who = _resolve_who(subject, here)
             else:
-                got = _named_exactly(subject, here)
+                got = _named_exactly(subject, world_npcs(npcs))
                 who = [got] if got else []
         else:
-            who = _resolve_who(match.group("who"), here)
+            # 使役动词前面有否定或条件，这句不是在支使人（见 _SEND_DENY）
+            window = _SUGGEST.sub("", text[:match.start()])[-_DENY_WINDOW:]
+            if _SEND_DENY.search(window):
+                continue
+            who, named = _send_who(match.group("who"), here, npcs)
+            if done and not named:
+                continue
         if not who:
             continue
         place = _registered_place(match.group("where"), locations)
@@ -1085,7 +1268,9 @@ def _parse_send(
     return []
 
 
-def _fallback(raw: str, locations: list[RpgLocation]) -> Company:
+def _fallback(
+    raw: str, locations: list[RpgLocation], npcs: list[RpgNpc], sess: RpgSession,
+) -> Company:
     """认不出任何命令时的退路：去向照旧交给 movement_target 单独跑一遍。
 
     这不是「顺手也试一下移动」——路由那边是 `move_target = company.move_to`
@@ -1096,11 +1281,56 @@ def _fallback(raw: str, locations: list[RpgLocation]) -> Company:
     收的是**原文**不是清洗过的那份：这一支要和改动之前路由里那一行
     `movement_target(content, locations)` 逐字一致，`_prep_company` 剥掉的
     礼貌前缀和尾部标点不该顺手改掉移动识别的口径。
+
+    地名认不出时再试一次「去找赫敏 / 去往赫敏处」：去处是个人，落点是她此刻在哪儿。
     """
-    return Company(move_to=movement_target(raw, locations))
+    return Company(move_to=movement_target(raw, locations)
+                   or _npc_destination(raw, locations, npcs, sess))
 
 
-def _moves_by_someone_else(text: str, npcs: list[RpgNpc]) -> bool:
+# 人名后面允许跟的「那个人所在的地方」说法。「去赫敏家」的「家」不在这里——
+# 那是另一个地方，不是她此刻站的地方
+_NPC_SPOT = re.compile(r"^(?:所在的地方|在的地方|那里|那儿|那边|那|身边|旁边|跟前|处)")
+
+
+def _npc_destination(
+    raw: str, locations: list[RpgLocation], npcs: list[RpgNpc], sess: RpgSession,
+) -> str:
+    """「去往赫敏处」「去找赫敏」「到赫敏那儿去」→ 赫敏此刻所在的登记地点。空串 = 不认。
+
+    前置守卫和 movement_target 共用 _move_heads（否定、他人主语、第二个目的地）。
+    动词前面点了别人的名、或者有使役词的一律不认：「让赫敏去找韩曼宁」动身的是赫敏。
+    人名可以只说一半（同 match_npc 的方向：说得比登记名短），但不能说得更长——
+    「去赫敏家」不是去赫敏那儿。对上两个人不认。她已离开、或者在一个没登记的
+    地方，也不认，交回 AI。
+    """
+    text = raw.strip().rstrip("。！!").strip()
+    if re.search(r"[?？]|吗$", text):
+        return ""
+    people = world_npcs(npcs)
+    hits = set()
+    for clause in re.split(r"[，,。；;！!\n]+", text):
+        for head, rest in _move_heads(clause.strip()):
+            if _SEND_WORDS.search(head) or named_npcs(people, head):
+                continue
+            rest = norm_name(re.sub(r"^(?:找|见)", "", rest))
+            for cut in range(_MIN_NAME_PART, len(rest) + 1):
+                who, tail = rest[:cut], rest[cut:]
+                if tail and not (_NPC_SPOT.match(tail) or _MOVE_TAIL.search(tail)):
+                    continue
+                hits |= {n.id for n in people
+                         if (name := norm_name(n.name)) and (name.startswith(who) or name.endswith(who))}
+    if len(hits) != 1:
+        return ""
+    npc = next(n for n in people if n.id in hits)
+    if npc_away(sess, npc.id):
+        return ""
+    place = npc_place(npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location)
+    names = {norm_name(l.name): l.name for l in locations if l.name}
+    return names.get(norm_name(place), "")
+
+
+def _moves_by_someone_else(text: str, npcs: list[RpgNpc], locations: list[RpgLocation]) -> bool:
     """这句里要动身的是不是**别人**。
 
     两种形状都是错认的重灾区，落到 movement_target 上被挪走的会是**玩家**：
@@ -1109,17 +1339,43 @@ def _moves_by_someone_else(text: str, npcs: list[RpgNpc]) -> bool:
 
     ① 派遣动词 + 具名对象（「派赫敏去客栈」）。跟前有她的时候归 _parse_send，
        这一条管的正是她不在跟前、那边够不着的情况。
-    ② 移动动词前面**整个就是**一个登记角色的名字（「赫敏去客栈」）。要全等而
-       不是「结尾对上就算」：「带赫敏去客栈」那种前面挂着携带动词的，说的还是
-       玩家自己要走，吞掉就成了该走的时候留在原地。
+    ② 移动动词前面**出现**一个登记角色的名字（「赫敏去客栈」「赫敏得去客栈一趟」）。
+
+    ② 从前要求那一段**整个等于**一个名字，于是名字后面多挂一个字就漏：
+    「赫敏这个点该回宿舍了」「嘱咐赫敏回宿舍」「赫敏得去客栈一趟」全都落到
+    movement_target 上，被挪走的是**玩家**——该走的是她。代词那一侧从来不要求
+    全等（「她这个点该回宿舍了」被 _MOVE_DENY 的字符窗口拦着，「她」在那张字表里），
+    两把尺子松紧不一样，名字这把松得多，这就是那个洞。
+
+    放宽之后靠两个例外把原先全等护住的东西接回来，缺一个都会造出新 bug：
+
+    - **携带动词**护「带赫敏去客栈」。她不在跟前时 _parse_carry 够不着（那条只
+      支使得动跟前的人），落到这儿来；不排掉就成了该走的时候玩家留在原地，而
+      GM 照着写一段已经到了的剧情。
+    - **第一人称**护「我跟赫敏去客栈」「我和赫敏一起去后山」——这两句动身的
+      确实是玩家。
+
+    名字要两个字以上（同 _MIN_NAME_PART 的理由）：一个字的名字在任何句子里都撞得到。
+
+    代价是会多漏一些玩家自己的移动（「赫敏在的话就去客栈」整句交回 AI）。按这份
+    识别一贯的纪律——错认把人凭空挪走比漏认贵得多——这个方向是对的。
+
+    **只是不再挪错人，不等于把她挪对了**：这几句现在一个字都不动、整句交给 AI。
+    要让「嘱咐赫敏回宿舍」真的挪她，得另外给 _SEND_VERB 补词或让裁决那一步回
+    一个派遣字段，是另一件事。
 
     **按分句判，不按整句前缀判**：「我让赫敏先走，我去客栈」里那个派遣短语在
     前一句，拿整句前缀去搜会把后一句玩家自己的移动一起拦掉。
+
+    **只拦自己认得出去向的分句**：这道闸防的是「她的去向被安到玩家头上」，
+    而 movement_target 的去向只可能出自某个能单独认出登记地点的分句。认不出
+    地点的那句（「晏昭华表示刚刚送到门口就回去了」——转述她做过的事）挪不动
+    任何人，从前却照样把整句拦下，连同前面那句「你移动到客厅」一起吞掉。
     """
     previous = ""
     for clause in re.split(r"[，,。；;！!？?\n]+", text):
         match = _MOVE_VERB_RE.search(clause)
-        if not match:
+        if not match or not movement_target(clause, locations):
             previous = clause
             continue
         lead = clause[:match.start()]
@@ -1128,10 +1384,34 @@ def _moves_by_someone_else(text: str, npcs: list[RpgNpc]) -> bool:
         # 动词打头的分句（「赫敏，去客栈」），主语在上一句里——_SEND_SUBJ 那条
         # 正则本来就认这个形式（who 后面跟一个可选的逗号），这里的口径得和它一致
         head = norm_name((lead or previous).strip())
-        if head and any(head == norm_name(npc.name) for npc in world_npcs(npcs)):
+        if head and not _CARRY_VERB_RE.search(head) and not _FIRST_PERSON.search(head) \
+                and any(
+                    len(norm_name(npc.name)) >= _MIN_NAME_PART
+                    and norm_name(npc.name) in head
+                    for npc in world_npcs(npcs)
+                ):
             return True
         previous = clause
     return False
+
+
+def missed_dispatch(
+    content: str, locations: list[RpgLocation], npcs: list[RpgNpc],
+) -> tuple[str, str]:
+    """疑似漏认的派遣：这句话里同时有一个登记角色和一个登记地名。返回 (人, 地)。
+
+    **只用来记日志，不改任何行为**。词表那套识别是穷举句式的，漏认时玩家下的
+    指令三道关全落空（引擎不动、正文用代词、结算报「缺少赶来的原文依据」），
+    而漏了多少没人知道。先量几天真实频次，再决定要不要让裁决那一步顺手回一个
+    派遣字段——裁决本来就在读这句话、本来就在调模型。
+
+    判据故意宽松（不看动词、不看语序），所以**假阳性是预期的**：「她从药店回来
+    以后」也会被记下。它量的是上限，不是准确数。
+    """
+    who = next((npc.name for npc in named_npcs(npcs, content)), "")
+    if not who:
+        return "", ""
+    return who, _registered_place(_prep_company(content), locations)
 
 
 def parse_company(
@@ -1163,18 +1443,25 @@ def parse_company(
         return EMPTY_COMPANY
     # 问句、回顾、被动：这三个字段一个都不许动，但**去向照旧要给**
     if re.search(r"[?？]|吗$", text):
-        return _fallback(content, locations)
+        return _fallback(content, locations, npcs, sess)
     if _PAST.search(text) or re.search(r"^" + _WHO + r"{0,4}被", text):
-        return _fallback(content, locations)
+        return _fallback(content, locations, npcs, sess)
 
     here = _here_candidates(npcs, sess, private_with, mode)
     if not here:
-        # 跟前一个人都没有，「带谁走 / 派谁去」本来无从谈起——但「派赫敏去客栈」
-        # 这类替**不在场**的人动身的句子照样不能落到 movement_target 上：
-        # 那个「去」的主语是她，落下去就是把玩家平白挪走
-        if _moves_by_someone_else(text, npcs):
+        # 跟前一个人都没有。「带谁走 / 打发谁」无从谈起，但**派遣照认**——
+        # 点了名的指令（「让韩曼宁回家」）落点本来就在别处，跟她此刻在不在你
+        # 跟前没关系。真实存档里玩家独自在家说「韩曼宁回到家了」，从前走的是
+        # 下面那条 _moves_by_someone_else：一个字不动、交给 AI 写，正文用代词
+        # 出场，结算再以「缺少赶来的原文依据」打回——玩家下的指令三道关全落空
+        sent = _parse_send(text, here, npcs, locations, mode == PRIVATE_MODE)
+        if sent:
+            return Company(dispatch=sent)
+        # 「派赫敏去客栈」这类替**不在场**的人动身的句子不能落到 movement_target
+        # 上：那个「去」的主语是她，落下去就是把玩家平白挪走
+        if _moves_by_someone_else(text, npcs, locations):
             return EMPTY_COMPANY
-        return _fallback(content, locations)
+        return _fallback(content, locations, npcs, sess)
 
     gone = _parse_unfollow(text, here)
     if gone:
@@ -1219,7 +1506,7 @@ def parse_company(
     if ids:
         return Company(move_to=dest, follow=ids)
 
-    sent = _parse_send(text, here, locations, mode == PRIVATE_MODE)
+    sent = _parse_send(text, here, npcs, locations, mode == PRIVATE_MODE)
     if sent:
         return Company(dispatch=sent)
 
@@ -1227,10 +1514,10 @@ def parse_company(
     # 「派赫敏去客栈」而赫敏不在跟前时 _parse_send 够不着（它只支使得动跟前的人），
     # 这句里的「去客栈」再落到 movement_target 上，被挪走的就成了玩家——而被支使
     # 的是她。错认的代价比漏认大得多，宁可整句交回 AI
-    if _moves_by_someone_else(text, npcs):
+    if _moves_by_someone_else(text, npcs, locations):
         return EMPTY_COMPANY
 
-    return _fallback(content, locations)
+    return _fallback(content, locations, npcs, sess)
 
 
 def _apply_company(
@@ -1469,26 +1756,58 @@ def _place_block(movable: list[RpgNpc], locations: list[str], sess: RpgSession) 
     造一个「教室」而模组里没有这个地点时，侧栏看得见、地点总览里找不到，
     玩家照提示「去她所在的地方」就走不过去。给一份真名单让它优先用。模组
     一个地点都没建时是空表，这一句不拼，行为和加它之前逐字一致。
+
+    时间和地名单**不止给 npc_places 用，更是给 suggestions 那三条用的**，所以
+    即使没人可挪也照样拼。模板里压根没有时间（叙事那一侧早就有，见
+    `_compose_state` 里那句「看不见它就会自己编」），于是记录员编出来的建议会
+    写「明天早上再去找她」而现在就是早上、「等天黑了动手」而当前时段已经是夜。
+    地名同理：它只能从这一段正文里认地名，模组里那地方叫「悦来居」它照样写
+    「回镇上的客栈」——而**建议里的地名一个字都不过校验**（结算这条路只出
+    free 和 item，free 文本不查白名单，见 rpg_suggestions.clean_suggestions），
+    编错了原样递到玩家眼前。
     """
+    out = ""
+    # 只在模组设了时段时才写，同 _compose_state / has_clock 那道判据：
+    # 没时钟的模组说「第 1 天」只会让模型以为有个它看不见的日程表
+    slot = str(getattr(sess, "slot", "") or "").strip()
+    if slot:
+        day = max(1, int(getattr(sess, "day", 1) or 1))
+        out += (
+            "\n\n=== 现在是什么时候 ===\n"
+            f"第 {day} 天 · {slot}\n"
+            "suggestions 里别和它拧着来：这一刻已经是上面这个时段了，"
+            "不要写「明天早上再去」「等天黑了动手」这种把眼下当成别的时候的话。\n"
+        )
+    if locations:
+        out += (
+            "\n\n=== 这一带有哪些地方 ===\n"
+            + "、".join(locations) + "\n"
+            "**只有这些地方存在。** 提到地名时照抄上面的原名，一个字都不要改，"
+            "也不要自己造一个——玩家照一个不存在的地名走不过去。\n"
+            # 模板里那句「地点的清单你看不到」现在不成立了，但它说的是 kind 的事：
+            # 这份名单是拿来把地名**写对**的，不是拿来出 move 那一档的。
+            # 改模板对覆写用户是静默失效，所以在这儿把话说全
+            "这份名单是让你把地名写对用的，suggestions 的 kind 仍然只有"
+            " free 和 item 两种——想让玩家去某个地方，就写成 free。\n"
+        )
     if not movable:
-        return ""
+        return out
     rows = "".join(
         f"{n.name} 现在在 "
-        f"{npc_place(n, sess.slot, sess.npc_places, sess.npc_followers, sess.location) or '行踪不明'}\n"
+        f"{'已离开（不在任何地方）' if npc_away(sess, n.id) else npc_place(n, sess.slot, sess.npc_places, sess.npc_followers, sess.location) or '行踪不明'}\n"
         for n in movable
     )
-    # 放在示例那行之前：名单紧挨着要填的值，模型挑一个照抄就是了
-    known = (
-        "只能填这些已有的地名：" + "、".join(locations) + "\n" if locations else ""
-    )
-    return (
+    return out + (
         "\n\n=== 人物位置 ===\n"
         "这段剧情里**真的换了地方**的人（被叫来、跟着走、被带走、回自己屋），"
         "在输出里加一个 npc_places：\n"
         + rows
-        + known
+        # 地名单只在上面那一段列一次：同一份白名单在提示词里出现两遍，改起来
+        # 迟早只改一处，两份说法打架时模型听哪一份没人说得清
+        + ("地名只能从上面「这一带有哪些地方」里挑。\n" if locations else "")
         + '{"npc_places": {"赫敏": "校长办公室"}}\n'
         '她只是回到自己平时待的地方，就写空串 ""，系统会按作息表替她算。\n'
+        f'正文写她离开了、又没说去哪，就写 "{AWAY}"：她从此不在任何地方，直到剧情写她回来（那时照常写地名）。\n'
         "没换地方的人不要写。这个字段里只准出现上面这几位，别人一律不要写。\n"
         "它只影响「她在不在你跟前」，不改任何数值。\n"
     )
@@ -1533,6 +1852,40 @@ def _clip_summary(text: str) -> str:
         return body
     head = max(body.rfind(mark) for mark in "。！？\n")
     return body[:head + 1] if head >= SUMMARY_CHARS // 2 else body + "…"
+
+
+# 一个格子留几条历史。24 条约等于 6 个游戏日（4 格制），够回看一阵。
+# 这个数不是凭手感定的，是被存档体积逼出来的：AUTO_SAVE_KEEP 是 30，而每个
+# 快照都带一份完整的 summary_log，十来个格子 × 24 条 × 500 字 × 30 个档已经
+# 是几 MB 一局。要再往上加，先想清楚快照那头
+SUMMARY_LOG_KEEP = 24
+
+
+def _log_summary(rows, sess: RpgSession, text: str, last_id: int) -> list[dict]:
+    """把这一次压出来的概要记进历史。**按 (day, slot) 覆盖，不是一次折叠一条。**
+
+    一格里会折好几次（第 12 局玩家那格 225 条消息折了近 200 次），每次都留一份
+    500 字的全文重写，存档表立刻就撑不住。按格覆盖之后它跟着**游戏内格数**长，
+    不跟着消息数长——第 9 天满打满算也才几十条。
+
+    覆盖而不是追加，等于「这一格的记忆最后长成什么样」。同一格里中间那几个
+    版本丢掉不可惜：它们说的是同一段剧情，只是压到的原文一次比一次多。
+
+    满了按**保新弃旧**（同 chronicle 的口径）：旧的那几格早就被当前那份概要
+    吸收进去了，而最近几格才是玩家想核对的。
+    """
+    row = {
+        "day": int(sess.day or 1),
+        "slot": (sess.slot or "").strip(),
+        "upto": int(last_id),
+        "text": text,
+    }
+    kept = [
+        r for r in (rows or [])
+        if isinstance(r, dict)
+        and (r.get("day"), r.get("slot")) != (row["day"], row["slot"])
+    ]
+    return (kept + [row])[-SUMMARY_LOG_KEEP:]
 
 
 async def _maybe_summarize(session_id: int) -> bool:
@@ -1640,6 +1993,10 @@ async def _maybe_summarize(session_id: int) -> bool:
             return False
         summaries = dict(sess.thread_summaries or {})
         pointers = dict(sess.thread_upto or {})
+        log = dict(sess.summary_log or {})
+        # 玩家那格也记在局部变量里，不往 sess 上写：ORM 对象一脏，下面那次
+        # execute 前的 autoflush 就会带着 onupdate 把 updated_at 顶掉
+        player_summary, player_upto = sess.summary, sess.summarized_upto_id
         wrote = False
         for job, text in zip(jobs, texts):
             if isinstance(text, BaseException):
@@ -1651,149 +2008,58 @@ async def _maybe_summarize(session_id: int) -> bool:
             if not text:
                 continue
             if job["slot"] == PLAYER_SLOT:
-                sess.summary = text
-                sess.summarized_upto_id = job["last_id"]
+                player_summary, player_upto = text, job["last_id"]
             else:
                 summaries[job["slot"]] = text
                 pointers[job["slot"]] = job["last_id"]
+            log[job["slot"]] = _log_summary(
+                log.get(job["slot"]), sess, text, job["last_id"],
+            )
             wrote = True
         if not wrote:
             return False
-        # JSON 列要整份换掉才算脏数据，原地改 key 不会落库
-        sess.thread_summaries = summaries
-        sess.thread_upto = pointers
+        # 不走 ORM 提交，手写 UPDATE 并把 updated_at 原样写回：它和结算并排跑
+        # （见 run_turn），而结算拿 updated_at 当「这期间没人动过这局」的凭据，
+        # 被 onupdate 顶一下就会误报冲突、整轮结算作废。概要不在 STATE_FIELDS 里，
+        # 本来就不该算「改过这局的状态」
+        await store.execute(
+            update(RpgSession).where(RpgSession.id == session_id).values(
+                summary=player_summary,
+                summarized_upto_id=player_upto,
+                thread_summaries=summaries,
+                thread_upto=pointers,
+                summary_log=log,
+                updated_at=RpgSession.updated_at,
+            ).execution_options(synchronize_session=False)
+        )
         await store.commit()
     return True
 
 
-# ── ⑨ 外场简报：推时段时给大事记补一句「别处在发生什么」──────────────────
+# ── ⑨ AI 调度：没被提到的角色自己过日子 ───────────────────────────────────
 
-# 外场简报和 AI 调度这两次调用各自的上限。**必须有**：底层 httpx 客户端没设
-# 超时，于是 OpenAI SDK 退回它自己的默认值（read 600s × 最多 3 次尝试），
-# 单次调用能合法占住半小时。这两次都跑在 exclusive_session 的租约里、心跳会
-# 一直替它续期，卡住的不只是这一下，而是整局——玩家再点什么都是 409。
+# 调度那次调用的上限。**必须有**：底层 httpx 客户端没设超时，于是 OpenAI SDK
+# 退回它自己的默认值（read 600s × 最多 3 次尝试），单次调用能合法占住半小时。
+# 它跑在 exclusive_session 的租约里、心跳会一直替它续期，卡住的不只是这一下，
+# 而是整局——玩家再点什么都是 409。
 #
-# 写死 60 秒不做成配置项：它们都是「一两句背景描写」的快模型调用，实测个位数
-# 秒级。真超了 60 秒，等下去也不会更好，宁可这一格没有简报
+# 写死 60 秒不做成配置项：它是「一两句背景描写」的快模型调用，实测个位数秒级。
+# 真超了 60 秒，等下去也不会更好，宁可这一格没人动
 AUX_CALL_TIMEOUT = 60
 
-# 模型的输出上限。一两句话而已，给多了它就会开始编长篇
-OFFSCREEN_MAX_TOKENS = 200
-OFFSCREEN_LINES = 2
-
 # 模型被要求「没什么可写就输出无」时可能给出的各种写法
-_OFFSCREEN_NONE = {"无", "無", "none", "无。", "（无）", "(无)", "没有", "-"}
+_NONE_WORDS = {"无", "無", "none", "无。", "（无）", "(无)", "没有", "-"}
 
-
-async def offscreen_brief(session_id: int, from_slot: str = "") -> list[str]:
-    """推时段时补一条外场简报进大事记。返回写进去的那几行（已经带标签）。
-
-    **这是整个 RPG 玩法里唯一一次「玩家没说话却调模型」**，所以它由模组上的
-    offscreen_brief 开关管着，默认关：老模组按一下时钟仍然是零模型调用，
-    文档和界面上那句承诺不会因为加了这个功能变成假话。
-
-    只写玩家已经见过、此刻不在他身边的那些人——没见过的人进了大事记，等于
-    让所有对话线都能随口提起一个玩家还不该知道的名字。名单为空时直接返回，
-    连模型都不叫。
-
-    整个函数不抛：简报没生成只是少一条传闻，时钟该走还是走。
-    """
-    async with AsyncSessionLocal() as store:
-        sess = await store.get(RpgSession, session_id)
-        if sess is None:
-            return []
-        module = await store.get(RpgModule, sess.module_id)
-        if module is None or not module.offscreen_brief:
-            return []
-        npcs = list((await store.execute(
-            select(RpgNpc).where(RpgNpc.module_id == module.id)
-        )).scalars().all())
-        met = {
-            int(key) for key, state in (sess.npc_states or {}).items()
-            if isinstance(state, dict) and state.get("met") and str(key).isdigit()
-        }
-        here = (sess.location or "").strip()
-        others = [
-            n for n in world_npcs(npcs)
-            if n.id in met and npc_place(
-                n, sess.slot, sess.npc_places, sess.npc_followers, here,
-            ) != here
-        ]
-        if not others:
-            return []
-        prompt = render(
-            "rpg_offscreen.jinja2",
-            day=max(1, sess.day or 1),
-            from_slot=(from_slot or "").strip(),
-            slot=(sess.slot or "").strip(),
-            location=here,
-            others=[
-                {
-                    "name": n.name,
-                    "place": npc_place(
-                        n, sess.slot, sess.npc_places, sess.npc_followers, here,
-                    ) or "行踪不明",
-                    "persona": (n.persona or n.description or "").strip()[:60],
-                    "notes": "；".join(
-                        f"{k} {v}" for k, v in ((sess.npc_notes or {}).get(str(n.id)) or {}).items()
-                    )[:60],
-                }
-                for n in others
-            ],
-            chronicle=chronicle_lines(sess)[-CHRONICLE_PROMPT_LINES:],
-        )
-        model, api_format = llm_client.get_agent_client("memory", module.offscreen_model_ref or module.fast_model_ref)
-        stamp = f"第 {max(1, sess.day or 1)} 天" + (
-            f"·{sess.slot}" if (sess.slot or "").strip() else ""
-        )
-
-    try:
-        text = await asyncio.wait_for(
-            llm_client.dispatch_chat_complete(
-                messages=[{"role": "user", "content": prompt}],
-                model=model,
-                api_format=api_format,
-                temperature=0.8,
-                max_tokens=OFFSCREEN_MAX_TOKENS,
-            ),
-            timeout=AUX_CALL_TIMEOUT,
-        )
-    except TimeoutError:
-        # 单独一条、而且只是 warning：超时不是缺陷，是这一格不值得再等下去。
-        # 混在下面的 exception 里只会看到一段没有信息量的 CancelledError 栈
-        logger.warning("RPG 局 %s 外场简报超时（%s 秒）", session_id, AUX_CALL_TIMEOUT)
-        return []
-    except Exception:
-        logger.exception("RPG 局 %s 外场简报生成失败", session_id)
-        return []
-
-    lines: list[str] = []
-    for raw in (text or "").splitlines():
-        # 去掉模型爱加的编号、项目符号和引号，同 suggest_actions
-        line = re.sub(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw)
-        line = line.strip().strip('"“”「」『』')
-        if not line or line.lower() in _OFFSCREEN_NONE:
-            continue
-        # 单行硬夹一下：大事记是一行一条的硬事实，一条长文会常驻吃掉外场预算
-        lines.append(f"{OFFSCREEN_TAG}{stamp} {line[:OFFSCREEN_CHARS]}")
-        if len(lines) >= OFFSCREEN_LINES:
-            break
-    if not lines:
-        return []
-
-    async with AsyncSessionLocal() as store:
-        sess = await store.get(RpgSession, session_id)
-        if sess is None:
-            return []
-        push_chronicle(sess, lines)
-        await store.commit()
-    return lines
-
-
-# ── ⑩ AI 调度：没被提到的角色自己过日子 ───────────────────────────────────
-
-# 一次调用写完所有闲着的角色，所以上限比外场简报宽
+# 一次调用写完所有闲着的角色，所以给得比单人一句宽
 ACTIVITY_MAX_TOKENS = 500
+# 模组开了幕后往事时多给的那一截：一条相遇行比一句近况长两三倍
+ENCOUNTER_EXTRA_TOKENS = 300
+# 一次调度最多认几条相遇。整局人少的时候两条就够一屋子人配对；不封顶的话
+# 模型会把每个同处一地的人两两配一遍，一格里冒出五六件幕后事
+ENCOUNTER_MAX = 2
+# 给调度看的「这几个人之间此前发生过的事」，每对人取最近几条。续写要有上文，
+# 但它看的是便宜档，全量喂进去是浪费
+ENCOUNTER_HISTORY = 3
 # 给模型看的「最近一段剧情」长度。只为对齐时间轴，不给它全文
 ACTIVITY_RECENT_CHARS = 300
 
@@ -1806,14 +2072,22 @@ ACTIVITY_RECENT_CHARS = 300
 # 到什么时候失效」可言。真要做成字段，得让模型判「这句话算不算一个约、管几个
 # 时段」——那是一次新的语义判断，判错的代价是把人锁死在原地不动。
 #
-# ponytail: 关键词匹配，天花板是换个说法就漏（「说好了」以外的各种讲法）。
-# 漏了的后果只是回到今天这个样子（她照旧被挪走），不会锁死谁。真觉得不够用
-# 就给 npc_notes 的键名约定一个前缀，比在这儿堆同义词表靠谱
-_PROMISE_HINTS = ("答应", "说好", "约好", "等你", "等着", "在等", "承诺", "保证")
+# **只认「在原地等你」这一种约，不认所有承诺。** 从前「答应」「说好」「承诺」
+# 「保证」也在表里，可这几个词底下的约大半和位置无关：「答应过下周陪你去看房」
+# 「保证不再喝酒」「答应帮你带包烟」——近况是结算长期写进去的一张表，这类句子
+# 一挂就是几十格，于是她从此再也不动，而且侧栏上没有任何说明。
+# 这道闸门防的本来就是「刚答应等你回来就跑了」，判据该是「她这会儿该待着不动」，
+# 不是「她欠着你一件事」。
+#
+# ponytail: 关键词匹配，天花板是两头都不准——换个说法会漏（漏了只是回到她照旧
+# 被挪走，不锁死谁），而一句「答应了等你毕业」这种长期的约仍旧会一直拦着她，
+# 直到结算把那条近况写成 null（提示词里有这条规矩）。真要更准就得让模型判
+# 「这个约管几个时段」，那是一次新的语义判断，判错的代价正是锁死
+_PROMISE_HINTS = ("等你", "等着", "在等", "等我")
 
 
 def _has_promise(sess, npc_id: int) -> bool:
-    """她近况里有没有「等你 / 答应了」这类还没了结的约。"""
+    """她近况里有没有「在原地等你」这类还没了结的约。"""
     notes = (sess.npc_notes or {}).get(str(npc_id)) or {}
     if not isinstance(notes, dict):
         return False
@@ -1821,8 +2095,111 @@ def _has_promise(sess, npc_id: int) -> bool:
     return any(hint in text for hint in _PROMISE_HINTS)
 
 
+# 两个闲人碰到一处之后，先一起待满几格再各自照常挪。不设的话随机抽签会在
+# 他们碰上的下一格就把两人拆开，「幕后往事」里写的那场相遇根本来不及发生
+NPC_TOGETHER_SLOTS = 2
+
+
+def _together_hold(sess, idle: list) -> set[int]:
+    """记下这一格谁和谁在同一处，返回因为「刚碰上」这一格不挪的人。
+
+    账本是 sess.npc_together：{"3-7": {"count": 已一起过的格数, "last": "天|时段"}}。
+    同一格只记一次（last 去重），分开了就删，所以 count 数的是「连着在一处」。
+    按对记而不是按地点记：第三个人走进来，他和原先两人都是新的一对，三人一起再待满。
+
+    跟着玩家的人不算：他们的位置就是玩家的位置，那是「和你在一起」。
+    这一格有一头不在 idle 里（在你跟前、已离开）的那对判不了，原样留着——
+    删掉的话你跟她说完话，她回去又得重新陪那个人待两格。
+    random 和 ai 两种模式都走这里：被拦下的人 destinations 为空，模型那边就是「不准动」。
+    """
+    followers = set(sess.npc_followers or [])
+    here = (sess.location or "").strip()
+    groups: dict[str, list[int]] = {}
+    for n in idle:
+        if n.id in followers:
+            continue
+        place = norm_name(npc_place(n, sess.slot, sess.npc_places, sess.npc_followers, here) or "")
+        if place:
+            groups.setdefault(place, []).append(n.id)
+    mark = f"{max(1, sess.day or 1)}|{(sess.slot or '').strip()}"
+    old = dict(getattr(sess, "npc_together", None) or {})
+    idle_ids = {n.id for n in idle}
+    ledger = {
+        key: row for key, row in old.items()
+        if not {int(part) for part in key.split("-")} <= idle_ids
+    }
+    held: set[int] = set()
+    for ids in groups.values():
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                key = f"{min(a, b)}-{max(a, b)}"
+                row = old.get(key) or {"count": 0, "last": ""}
+                if row.get("last") != mark:
+                    row = {"count": int(row.get("count") or 0) + 1, "last": mark}
+                ledger[key] = row
+                if row["count"] < NPC_TOGETHER_SLOTS:
+                    held |= {a, b}
+    sess.npc_together = ledger
+    return held
+
+
+def _meetings(met: list[str], idle: list, npcs: list, moves: dict[int, str],
+              where_now: dict[int, str], sess: RpgSession) -> list[tuple]:
+    """把调度写的相遇行核一遍，返回 (甲, 乙, 地点, 发生了什么, 关系标签, 撞见的人)。
+
+    一行是「甲＋乙｜地点｜发生了什么｜关系标签」，标签可以不写。**碰没碰上由引擎
+    说了算**：两人这一格挪完之后（moves 优先，没挪的看 where_now）必须落在同一处，
+    而且那一处不是玩家所在的地方——玩家就站在那儿的话，这件事该由正文来写，
+    不是幕后。对不上的整行丢，理由同近况那几条：不报 warning。
+
+    撞见的人不问模型：同一格落在同一处的第三个人，引擎自己就知道。
+    """
+    here = norm_name(sess.location or "")
+    final = {n.id: moves.get(n.id) or where_now.get(n.id) or "" for n in idle}
+    # 没被调度的人也会在场撞见。跟着玩家的、在玩家跟前的，落在 here，下面那道就排掉了
+    for n in world_npcs(npcs):
+        if n.id not in final:
+            final[n.id] = npc_place(n, sess.slot, sess.npc_places, sess.npc_followers,
+                                    (sess.location or "").strip()) or ""
+    people = {n.id: n for n in world_npcs(npcs)}
+    out: list[tuple] = []
+    seen: set[tuple[int, int]] = set()
+    for body in met:
+        segs = [s.strip() for s in body.replace("|", "｜").split("｜")]
+        if len(segs) < 3:
+            continue
+        pair = [s.strip('"“”「」『』*_#>【】[]（）() 　') for s in re.split(r"[＋+]", segs[0])]
+        if len(pair) != 2:
+            continue
+        a, b = match_npc(pair[0], idle), match_npc(pair[1], idle)
+        what = segs[2].strip('"“”「」『』')
+        if a is None or b is None or a.id == b.id or not what or what.lower() in _NONE_WORDS:
+            continue
+        key = tuple(sorted((a.id, b.id)))
+        spot = norm_name(final[a.id])
+        # 模型写的地名只用来对账，存的是引擎算出来的那个——两边写法（全称/简称）
+        # 可能不一样，而侧栏和地点表认的是登记名
+        if (key in seen or not spot or spot == here or norm_name(final[b.id]) != spot
+                or not (norm_name(segs[1]) and norm_name(segs[1]) in spot)):
+            continue
+        label = re.sub(r"^关系\s*[：:]\s*", "", segs[3]).strip() if len(segs) > 3 else ""
+        witnesses = [people[i] for i, place in final.items()
+                     if i not in key and i in people and norm_name(place) == spot]
+        seen.add(key)
+        out.append((a, b, final[a.id], what, label, witnesses))
+        if len(out) >= ENCOUNTER_MAX:
+            break
+    return out
+
+
+def _move_mode(npc, module) -> str:
+    """这个人的去处怎么挑。角色自己选过就听角色的，没选（""）跟随模组。"""
+    return (getattr(npc, "move_mode", "") or "") or module.npc_move_mode
+
+
 async def idle_npc_activities(
     session_id: int, engaged_ids: set[int], *, from_clock: bool = False,
+    same_slot: bool = False,
 ) -> dict[str, str]:
     """给这一轮没被提到的、勾了「AI 调度」的角色各记一句「最近在做什么」。
 
@@ -1832,6 +2209,10 @@ async def idle_npc_activities(
 
     from_clock = 这一次是玩家按「结束时段」推来的，不是一个回合。两条路上
     「最后一条正文」的含义不一样，见下面 protected_ids 那一段。
+
+    same_slot = 这一轮时段没翻篇，玩家在这一格里接着说话/行动，不在跟前的人
+    也接着过这一格：**只续写，不挪人、不写相遇**。换地方和相遇仍然一格最多一次，
+    只在翻篇时发生——每轮都能挪的话一个时段里她能来回跑好几处。
 
     **一次调用写完所有人**，不是一人一次：勾了调度的角色可能有一屋子，
     一人一次的话玩家每轮要为 N 次调用付钱、等 N 次往返。
@@ -1863,12 +2244,35 @@ async def idle_npc_activities(
             select(RpgNpc).where(RpgNpc.module_id == module.id)
         )).scalars().all())
         # 主角模板不登场，没有「她最近在做什么」这回事
-        idle = [n for n in world_npcs(npcs) if n.ai_scheduled and n.id not in engaged_ids]
+        # 已离开的人不归调度管：她不在任何地方，挪她、给她写近况都等于替剧情把她带回来。
+        # **例外是「随机强制」的人**：作者选那个模式就是要引擎替她抽去处，抽中了就
+        # 等于引擎把她带回来了。抽不中的（时段不对、许过约、白名单一个地方都对不上）
+        # 仍然不在——下面挑完去处之后再把这些人筛出去
+        idle = [
+            n for n in world_npcs(npcs)
+            if n.ai_scheduled and n.id not in engaged_ids
+            and (not npc_away(sess, n.id) or _move_mode(n, module) == "random")
+        ]
         if not idle:
             return {}
         last = (await store.execute(
             select(RpgMessage)
             .where(RpgMessage.session_id == session_id, RpgMessage.role == "assistant")
+            .order_by(RpgMessage.id.desc())
+            .limit(1)
+        )).scalars().first()
+        # 玩家上一格发的那句。**和上面那条正文是两件事**：`last` 是模型写的一段
+        # 叙事，而这一条是玩家自己的意图（「我去公司」「在家等她回来」），正文
+        # 常常只把它演成一句环境描写。按「结束时段」不产生新消息，于是连按几格
+        # 时 recent 一直是同一段、调度每次拿到的输入几乎一样——它当然每次都写
+        # 出差不多的东西。玩家那句是这里唯一还带着新信息的东西。
+        #
+        # 没有 day/slot 列可以按格子查（rpg_messages 只有 location/present），
+        # 拿的是「最后一条 user」。两条推格子的路上它都正好落在刚结束那一格里：
+        # 时钟那条路不写消息，回合那条路里刚处理完的这一条属于将要结束的这格
+        said = (await store.execute(
+            select(RpgMessage)
+            .where(RpgMessage.session_id == session_id, RpgMessage.role == "user")
             .order_by(RpgMessage.id.desc())
             .limit(1)
         )).scalars().first()
@@ -1898,23 +2302,41 @@ async def idle_npc_activities(
                 random_places.pop(key, None)
                 location_changed = True
                 continue
-            # 连白名单一起判，同 rpg_state._clear_expired_random_places：
-            # 作者把这个地点移出白名单之后，这条覆盖当场过期
-            if not random_movement_ok(npc, slot, marked):
+            # 同 rpg_state._clear_expired_random_places，共用一个判据：连白名单
+            # 一起判（地点被划掉就当场过期），但一格作息表都没排过的人出了可移动
+            # 时段不清——她没有排期可落回，清掉只会让她瞬移回常驻地
+            if random_place_expired(npc, slot, marked):
                 places.pop(key, None)
                 random_places.pop(key, None)
                 location_changed = True
         sess.npc_places = places
         sess.npc_random_places = random_places
+        # 刚和别人碰上的先不挪，一起待满 NPC_TOGETHER_SLOTS 格再说。
+        # 排在上面那段清理之后：过期的随机位置已经撤掉，算出来的才是她此刻真正在哪儿
+        together_before = dict(getattr(sess, "npc_together", None) or {})
+        held = _together_hold(sess, idle)
         movable = [
             npc for npc in idle
             # 这一步只问「准不准动」，去哪儿下面挑，所以不传 place
-            if random_movement_ok(npc, slot) and npc.id not in protected_ids
+            if not same_slot
+            and random_movement_ok(npc, slot) and npc.id not in protected_ids
+            and npc.id not in held
             # 许过约的人不挪。她答应等你回来吃午饭、你一按结束时段她就被扔到
             # 公园去，那个约当场作废，而玩家看到的是她莫名其妙毁诺
             and not _has_promise(sess, npc.id)
+            # 站在玩家跟前的人不挪——挪走等于当着他的面凭空消失。
+            #
+            # **只在回合那条路上判**。时钟这条路上 sess.location 是「按下按钮的
+            # 那一刻玩家在哪儿」，而玩家紧接着就会走动：真实存档里他和妻子都在
+            # 家，按一下结束时段，调度当场判同场、跳过她，然后他去了公司——
+            # 她就此留在家，而下次推时段他要是又在家，同一件事再来一遍。
+            # 这一格结束之后玩家人都走了，「当着他的面消失」那个理由不成立。
+            #
+            # 跟着走的人仍然护着：他们在 protected_ids 里（npc_followers），
+            # 那一层判的是「她这一格还跟着你」，不是一个马上要失效的位置相等
             and (
-                not norm_name(sess.location or "")
+                from_clock
+                or not norm_name(sess.location or "")
                 or norm_name(npc_place(npc, sess.slot, sess.npc_places))
                 != norm_name(sess.location)
             )
@@ -1923,20 +2345,35 @@ async def idle_npc_activities(
         # 白名单整张对不上（地点改名/删了）时这个人的名单为空，等于不准动，
         # 比「退回全量地点表」安全（那是个不报错的静默破功）
         destinations: dict[int, list[str]] = {}
+        # 模组选了「随机强制」时引擎替她抽中的地方。在这里面的人这一格**一定**
+        # 换地方，模型只编她在那儿干什么（见 RpgModule.npc_move_mode）
+        forced: dict[int, str] = {}
+        # 整张地点表。**不再只在有人准动时才查**：下面解析那一步也要用它来认出
+        # 「句子里提到的是一个真地方」——她在物业办公室、近况却写她在内衣店挑料子，
+        # 靠的就是这张表把「内衣店」认成地名而不是一句闲话
+        locations = list((await store.execute(
+            select(RpgLocation).where(RpgLocation.module_id == module.id)
+        )).scalars().all())
+        all_names = list(dict.fromkeys(
+            place.name.strip() for place in locations if (place.name or "").strip()
+        ))
         if movable:
-            locations = list((await store.execute(
-                select(RpgLocation).where(RpgLocation.module_id == module.id)
-            )).scalars().all())
-            names = list(dict.fromkeys(
-                place.name.strip() for place in locations if (place.name or "").strip()
-            ))
+            names = all_names
             for npc in movable:
                 current = npc_place(npc, sess.slot, sess.npc_places)
                 pool = [name for name in names if random_movement_ok(npc, slot, name)]
                 # 排掉她此刻所在的地方：留着的话「原地不动」和「挑中了这里」
                 # 在落库那一步没有区别，而前者本来就该零写入
                 spots = [name for name in pool if norm_name(name) != norm_name(current)]
-                if spots:
+                if spots and _move_mode(npc, module) == "random":
+                    # 抽签没有是非判断（本函数开头那段），这是作者明知这一点
+                    # 选的：顺着人设挑，她永远只在那几个地方转。白名单照旧是
+                    # 她自己那份，不合适的地方由作者从可去地点里划掉。
+                    # destinations 只留抽中的那一个，下面解析那一步照常认地名
+                    pick = random.choice(spots)
+                    destinations[npc.id] = [pick]
+                    forced[npc.id] = pick
+                elif spots:
                     # **候选顺序每次都洗一遍。** 白名单是按模组的地点表排的，
                     # 每一格给模型的是同一份、同一个顺序的名单，而它手上另外
                     # 那几样（人设、位置、上次那句）也几乎不变——于是它每次都挑
@@ -1948,23 +2385,91 @@ async def idle_npc_activities(
                     # 洗完仍然是它按人设挑，只是不再有个天生排第一的。
                     random.shuffle(spots)
                     destinations[npc.id] = spots
-        if location_changed:
+        if location_changed or sess.npc_together != together_before:
             await store.commit()
+        # 已离开的人只有真被抽中去处时才算回来（见上面 idle 那一段）。没抽中的这一格
+        # 还是不在任何地方：留在名单里模型会照常给她写一句近况，那就是在「她不在任何
+        # 地方」的同时又说她在某处干什么
+        idle = [n for n in idle if n.id in forced or not npc_away(sess, n.id)]
+        if not idle:
+            return {}
+        # 每个人此刻在哪儿。算一次给三处用：名单里的 place、下面「蹲了几格」
+        # 的计数、以及落库时给流水记的那个位置——各算一遍必然漂移
+        where_now = {
+            n.id: npc_place(
+                n, sess.slot, sess.npc_places, sess.npc_followers,
+                (sess.location or "").strip(),
+            ) or ""
+            for n in idle
+        }
+        # 幕后往事那一段要的上文：这几个闲人之间此前的关系和发生过的事。
+        # 只挑两头都在这批人里的——一头在玩家跟前的那对，这一格根本碰不上
+        encounters = bool(module.npc_encounters) and len(idle) >= 2 and not same_slot
+        idle_ids = {n.id for n in idle}
+        by_id = {n.id: n for n in idle}
+        bonds, past, together = [], [], []
+        if encounters:
+            bonds = [
+                f"{by_id[r['a']].name}和{by_id[r['b']].name}：{r.get('label')}"
+                for r in (sess.npc_bonds or [])
+                if isinstance(r, dict) and r.get("a") in idle_ids and r.get("b") in idle_ids
+            ]
+            past = [
+                f"第{r.get('day')}天{r.get('slot') or ''}，{by_id[r['a']].name}和{by_id[r['b']].name}"
+                f"在{r.get('place') or '某处'}：{r.get('content')}"
+                for r in (sess.npc_offscreen or [])
+                if isinstance(r, dict) and r.get("a") in idle_ids and r.get("b") in idle_ids
+            ][-ENCOUNTER_HISTORY * 2:]
+            groups: dict[str, list[str]] = {}
+            for n in idle:
+                # 被强制挪的人按抽中的地方分组：她这一格就在那儿，
+                # 碰不碰得上要按挪完之后算（_meetings 也是这么核的）
+                place = forced.get(n.id) or where_now.get(n.id) or ""
+                if place:
+                    groups.setdefault(place, []).append(n.name)
+            together = [f"{place}：{'、'.join(names)}" for place, names in groups.items() if len(names) > 1]
         prompt = render(
             "rpg_activity.jinja2",
+            continuing=same_slot,
+            encounters=encounters,
+            bonds=bonds,
+            past=past,
+            together=together,
             day=max(1, sess.day or 1),
             slot=(sess.slot or "").strip(),
             location=(sess.location or "").strip(),
             recent=((last.content or "")[-ACTIVITY_RECENT_CHARS:] if last else "") or "（故事刚开始）",
+            # 玩家那句取头不取尾：他的输入是「我去公司待一天」这样一句意图，
+            # 重点在开头，长的那种后面跟的是细节。正文相反（尾巴才是刚发生的），
+            # 所以上面那条切的是尾
+            said=(said.content or "").strip()[:ACTIVITY_RECENT_CHARS] if said else "",
             npcs=[
                 {
                     "name": n.name,
-                    "place": npc_place(
-                        n, sess.slot, sess.npc_places, sess.npc_followers,
-                        (sess.location or "").strip(),
-                    ) or "行踪不明",
-                    "persona": (n.persona or n.description or "").strip()[:60],
+                    "place": where_now.get(n.id) or "行踪不明",
+                    # 她在那个地方连着待了几格。**这是名单里唯一一个量化的
+                    # 「该换地方了」**：模板里「默认让他挪」是个形容词，而模型
+                    # 顺着人设推，最说得通的永远是留在原地（见下面 last_place）。
+                    # 真实存档里韩曼宁早晨禁动 → 整个早晨在家 → 中午那次调度
+                    # 看到的是「在家 + 在家擦灶台」，于是它接着写在家，下午再来
+                    # 一遍：一条自我延续的链，起点是配置，后面几节是模型接的。
+                    # 1 不给（刚换过地方，没有压力可言），模板据此条件渲染
+                    "stuck": slots_in_place(sess, n.id, where_now.get(n.id, "")),
+                    # 人设整份给，**不再夹 60 字**：模板要它「写出来必须像他的
+                    # 性格」，可真实模组里人设 135~331 字，夹到 60 只剩开头那半句
+                    # 身份介绍，性格、习惯、忌讳全在后面被切掉——它凭那半句写出来
+                    # 的东西谁都像。整份给的代价是这份名单变长，而这次调用的
+                    # 上限是 500 token 的**输出**，输入这边本来就宽（整个 prompt
+                    # 原先才 1900 字上下）
+                    "persona": (n.persona or n.description or "").strip(),
                     "activity": npc_activity(sess, n.id),
+                    # 她跟玩家待过时结算记下的最后一条经历（正文里真发生过的）。
+                    # 不给的话调度只看得见她上次离开时那句，写出来像那件事没发生过
+                    "lived": next((
+                        str(row.get("content") or "").strip()
+                        for row in reversed((sess.npc_history or {}).get(str(n.id)) or [])
+                        if isinstance(row, dict) and str(row.get("content") or "").strip()
+                    ), ""),
                     # 引擎上次替她挑的那个地方（`npc_random_places` 本来就记着，
                     # 不用新存一份）。**给了它模型才有理由换地方**：洗牌只是
                     # 去掉「天生排第一」，可她此刻就在上次那个地方，模型照着
@@ -1974,13 +2479,15 @@ async def idle_npc_activities(
                     # 她眼下的近况。**必须给**：结算把「答应了等你回来吃午饭」
                     # 这类承诺记在这儿，而调度不读正文——不给的话它只知道她的
                     # 性格和位置，于是理直气壮地写一句和刚许的诺冲突的话。
-                    # 同 offscreen_brief 的名单，长度也照它 60 字
+                    # 夹 60 字：整张近况表能长到几百字，它会把这份名单撑爆
                     "notes": "；".join(
                         f"{k} {v}" for k, v in ((sess.npc_notes or {}).get(str(n.id)) or {}).items()
                     )[:60],
                     # 她这一格准去的地方。空 = 不准动（没勾随机移动、时段不对、
                     # 跟着你、许过约、就站在你跟前），模板据此换一套写法
                     "destinations": destinations.get(n.id, []),
+                    # 引擎替她抽中的去处，非空时模板不给「可去」，只告诉模型她已经去了那儿
+                    "forced": forced.get(n.id, ""),
                 }
                 for n in idle
             ],
@@ -1995,14 +2502,16 @@ async def idle_npc_activities(
                 model=model,
                 api_format=api_format,
                 temperature=0.9,
-                max_tokens=ACTIVITY_MAX_TOKENS,
+                max_tokens=ACTIVITY_MAX_TOKENS + (ENCOUNTER_EXTRA_TOKENS if encounters else 0),
             ),
             timeout=AUX_CALL_TIMEOUT,
         )
     except TimeoutError:
-        # 理由同 offscreen_brief。**去处也跟着一起丢**：它和活动是同一次调用的
-        # 两半，模型没开口就等于这一格没人动——过期清理那一步已经提交了，
-        # 那部分不受影响（test_..._survives_..._failure 钉的）
+        # 单独一条、而且只是 warning：超时不是缺陷，是这一格不值得再等下去。
+        # 混在下面的 exception 里只会看到一段没有信息量的 CancelledError 栈。
+        # **去处也跟着一起丢**：它和活动是同一次调用的两半，模型没开口就等于
+        # 这一格没人动——过期清理那一步已经提交了，那部分不受影响
+        # （test_..._survives_..._failure 钉的）
         logger.warning("RPG 局 %s 角色调度超时（%s 秒）", session_id, AUX_CALL_TIMEOUT)
         return {}
     except Exception:
@@ -2013,37 +2522,151 @@ async def idle_npc_activities(
     # 这是玩家没要求过的后台动作，为它的瑕疵打断他一轮剧情不划算
     updates: dict[str, str] = {}
     moves: dict[int, str] = {}
+    met: list[str] = []
     for raw in (text or "").splitlines():
         line = re.sub(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.、)）]\s*)?", "", raw).strip()
         if not line:
+            continue
+        # 相遇行先摘出来，等所有人的去处都定了再核（见下面 _meetings）。
+        # 必须拦在按冒号拆之前：它的名字段是「甲＋乙」，落进下面那条路只会被丢掉
+        found = re.match(r"^[*【\[]*相遇[*】\]]*\s*[：:]\s*(.+)$", line)
+        if found:
+            if encounters:
+                met.append(found.group(1))
             continue
         # 全角冒号是模板要求的写法，半角是模型自己换的，两种都收
         parts = re.split(r"[：:]", line, maxsplit=1)
         if len(parts) != 2:
             continue
-        who = match_npc(parts[0].strip().strip('"“”「」『』'), idle)
+        # 名字两头的装饰一律削掉。**星号和方括号必须在内**：模型写
+        # 「**韩曼宁**：…」「【韩曼宁】：…」是常态（Markdown 强调、剧本体），
+        # 而从前只削引号，于是名字段成了「*韩曼宁**」，match_npc 认不出来，
+        # 整行丢掉——她这一格既没换地方也没有近况，界面上一句解释都没有
+        who = match_npc(parts[0].strip().strip('"“”「」『』*_#>【】[]（）() 　'), idle)
         says = parts[1].strip().strip('"“”「」『』')
         if who is None or not says:
             continue
         # 准动的人那一行是「名字：地点｜做什么」。竖线两侧都要有东西，
         # 缺一半就当它只写了活动——半句话不该换来一次位置改动
         spots = destinations.get(who.id) or []
-        if spots and ("｜" in says or "|" in says):
+        # **不准动的人写了竖线也要拆。** 从前这一问连 spots 一起判（没地方可去
+        # 就不拆），于是「小区物业办公室｜溜进值班室翻看监控」整串连地名一起存进
+        # 了近况。拆开之后那半句地名怎么处理见下面 hit is None 那一支——**不是
+        # 削掉留句子**：削掉的话一句内衣店的话会落在物业办公室名下，那正是
+        # 「一句话走两个地方」那条规矩禁的事
+        bar = "｜" in says or "|" in says
+        where = ""
+        if bar:
             where, _, says = (says.replace("|", "｜")).partition("｜")
             where, says = where.strip(), says.strip()
+            # 两头写反了也收：「在柜台前排队｜药店」。模板写的是「地点｜活动」，
+            # 可模型时不时颠倒过来，而颠倒过来的行**两头都废**——地名那一侧
+            # 对不上白名单于是不挪，活动那一侧存进去的是一个光秃秃的地名
+            # （真实探针里近况就写着「药店」两个字）。判据是「哪一侧整个等于
+            # 一个候选地名」：活动是一句话，不会恰好等于某个地名
+            if not any(norm_name(name) == norm_name(where) for name in spots) \
+                    and any(norm_name(name) == norm_name(says) for name in spots):
+                where, says = says, where
+        # 「赫敏：无」也算没写。不挡住的话角色卡上会挂一行「最近：无」，
+        # 而且它会一直留在那儿，模型下一轮还照着它编。
+        # **必须拦在下面挪人之前**：「赫敏：药店｜无」这一行位置改了、近况没写，
+        # 于是她换了地方却没有一句话解释她在那儿干什么——半句话不该换来一次
+        # 位置改动，这里和上面那条竖线是同一个道理
+        if not says or says.lower() in _NONE_WORDS:
+            continue
+        if bar:
             # 地名只认白名单里的那几个。模型现编一个的话侧栏会显示它、
             # 地点总览里却找不到，玩家照提示走不过去
             hit = next((name for name in spots if norm_name(name) == norm_name(where)), None)
-            if hit and says:
+            if hit is None:
+                # 模型爱把地名写短：模组里叫「情趣内衣店」，它写「内衣店」。
+                # 只认全等的话这一行整个作废，她这一格就停在原处——真实白名单里
+                # 一半地名都是三四个字的复合词，撞上这条的概率不低。
+                #
+                # 敢放宽是因为**候选池就是她自己那份白名单**（几个地名），不是
+                # 全量地点表：短名只对上一个才算，对上两个就当没写。match_place
+                # 不肯放这个方向（「藏经阁」→「藏经阁顶层」是凭空编造），那边的
+                # 池子是整张地点表，这里不一样
+                short = [
+                    name for name in spots
+                    if len(norm_name(where)) >= 2 and norm_name(where) in norm_name(name)
+                ]
+                hit = short[0] if len(short) == 1 else None
+            if hit:
                 moves[who.id] = hit
-        if not says:
-            continue
-        # 「赫敏：无」也算没写。不挡住的话角色卡上会挂一行「最近：无」，
-        # 而且它会一直留在那儿，模型下一轮还照着它编
-        if says.lower() in _OFFSCREEN_NONE:
+            elif norm_name(where) != norm_name(where_now.get(who.id, "")):
+                # 拆出来的地名既不是一次合法移动、又不是她此刻所在的地方 → **整行丢掉**。
+                # 真实存档第 12 局：结算把韩曼宁挪进了范建明的暗间（剧情写的位置，
+                # 不是调度挪的），于是这一格她 spots 是空的，模型仍旧写了
+                # 「情趣内衣店｜捏着蕾丝边料反复比量」。只削地名留句子的话，一句
+                # 内衣店的话就落在物业办公室名下——侧栏和近况对不上，正是下面
+                # 「一句话走两个地方」那条规矩禁的事。丢了这一格沿用上一句，
+                # 陈旧但不自相矛盾。
+                #
+                # 地名**等于**她此刻所在地的不丢：那是「她决定留在原地」的另一种
+                # 写法（模板让她这时别写地点，可它有时照写），句子和位置本来就对得上
+                continue
+        elif spots:
+            # 竖线漏了、地名写进了句子里：「韩曼宁：在小区物业办公室翻看监控回放」。
+            # 模板准她提自己「可去」里的地名，于是这种行看着完全合法，只是位置没跟着
+            # 改——真实存档里侧栏写「在家」、近况写「在小区物业办公室翻看监控回放」。
+            # 按字面处理（只记近况）就是那个 bug，所以照句子里的地名把她挪过去。
+            #
+            # 不会把「留在原地」误判成移动：`spots` 上面已经排掉了她此刻所在的地方，
+            # 所以一句「在药店柜台后面抓药」对在药店的人来说匹配不到任何候选。
+            # 两个以上候选地名同时出现，整行作废（见下面那个 elif）。
+            #
+            # **单字地名不参与**：这是纯字面包含，而「家」这种一个字的地名在
+            # 「在管家房里整理」「回娘家路上」里随处命中，能把她挪到一个句子根本
+            # 没提的地方去。竖线那条路不受影响（那是整名相等），漏了竖线又只有
+            # 单字候选的话就退回「只记近况」——那正是修这个洞之前的样子
+            named = [
+                name for name in spots
+                if len(norm_name(name)) >= 2 and norm_name(name) in norm_name(says)
+            ]
+            if len(named) == 1:
+                moves[who.id] = named[0]
+            elif named:
+                # 两个以上候选地名同时出现 = 她这一句在赶路（「在商场中心逛了逛，
+                # 又转到情趣内衣店门口看了几眼才回家」）。模板明令一句话只准写
+                # 她所在那个地方能发生的事，所以这一行本来就不合规。
+                # **整行丢掉，不是只丢位置**：留着近况的话侧栏写「在家」、近况写
+                # 她逛商场，玩家看到的是两处对不上（真实存档第 12 局韩曼宁）。
+                # 丢了她这一格沿用上一句，陈旧但不自相矛盾——同上面「无」那条
+                continue
+        # 句子里点着一个**登记过的地名**，而她既没往那儿挪、此刻也不在那儿 → 整行丢掉。
+        # 上面那两支只拿她自己那份白名单比，于是白名单**外**的登记地名一路漏到这里：
+        # 真实存档第 12 局「11 中午｜place=家｜在菜市场挑拣中午的青菜」——菜市场是
+        # 登记地点，但她的白名单里只有菜市场厕所，于是位置不动、近况照存，侧栏写
+        # 「在家」。判据用整张地点表（`all_names`），不是白名单。
+        #
+        # ponytail: 只认**全名**出现（两字以上），天花板是简称漏掉——上面那条真实
+        # 记录写的是「菜市场」，而登记名是「菜市场摊位区」，这一条抓不住它。放宽到
+        # 「登记名的任意子串」会连正当的句子一起误杀（她在家给公司打电话 → 撞上
+        # 「公司」），而这里丢的是玩家看得见的一句近况。要更准就得判这个地名是不是
+        # 她这句话的所在地，那是一次句法分析
+        if who.id in forced:
+            # 抽中的地方是定死的：句子里点着别的登记地名（还写她在家擦灶台、
+            # 或者跑去了第三个地方），就是模型没照着写 → 整行丢掉，这一格不挪。
+            # 不挪而不是照挪：挪过去配一句别处的话，侧栏和近况又对不上
+            if any(
+                len(norm_name(name)) >= 2
+                and norm_name(name) in norm_name(says)
+                and norm_name(name) != norm_name(forced[who.id])
+                for name in all_names
+            ):
+                continue
+            moves[who.id] = forced[who.id]
+        if who.id not in moves and any(
+            len(norm_name(name)) >= 2
+            and norm_name(name) in norm_name(says)
+            and norm_name(name) != norm_name(where_now.get(who.id, ""))
+            for name in all_names
+        ):
             continue
         updates[str(who.id)] = says
-    if not updates and not moves:
+    meetings = _meetings(met, idle, npcs, moves, where_now, sess)
+    if not updates and not moves and not meetings:
         return {}
 
     async with AsyncSessionLocal() as store:
@@ -2052,8 +2675,15 @@ async def idle_npc_activities(
             return {}
         for npc_id, place in moves.items():
             apply_npc_place(sess, npc_id, place, source="random")
+        for a, b, place, what, label, witnesses in meetings:
+            record_offscreen(sess, a, b, place, what, witnesses)
+            set_npc_bond(sess, a, b, label)
         for npc_id, says in updates.items():
-            apply_npc_activity(sess, int(npc_id), says)
+            # 这一格她落在哪儿，跟着流水一起记：原地不动是零写入，不记的话
+            # 「她在这儿蹲了几格」谁也数不出来（见 rpg_state.slots_in_place）。
+            # 取 moves 里刚挑的那个，没挪的人取 where_now 算出来的现位置
+            apply_npc_activity(sess, int(npc_id), says,
+                               place=moves.get(int(npc_id)) or where_now.get(int(npc_id), ""))
         await store.commit()
     return updates
 
@@ -2204,6 +2834,15 @@ async def run_turn(
     mode / private_with 是玩家选的对话模式，原样转给 build_rpg_messages。路由
     那边已经用同一个 turn_present 把 present 算过一遍了，两处必须同源。
     """
+    # 每段耗时（秒），done 之前打一行日志。要改哪一段先看这一行，别凭感觉
+    timings: dict[str, float] = {}
+    mark = [time.monotonic()]
+
+    def _lap() -> float:
+        now = time.monotonic()
+        spent, mark[0] = round(now - mark[0], 2), now
+        return spent
+
     facts: list[str] = []
     engine_note = ""
     action_time = None
@@ -2287,6 +2926,16 @@ async def run_turn(
         )).scalars().first()
         recent = (last.content or "")[-RECENT_CHARS:] if last else ""
 
+    # 向量召回只吃玩家这句原话，不等裁决结果，所以在裁决之前就发出去，两次网络
+    # 并排等。嵌入端点慢的时候（超时 20 秒）这一段原先整段压在首字之前。
+    # 自己开一个会话：它只读模型库那一行，不碰本轮的写
+    async def _vector_prefetch() -> list[str]:
+        async with AsyncSessionLocal() as db:
+            return await rpg_vectors.search(sess, module, content, db)
+
+    vector_task = retain_task(asyncio.create_task(_vector_prefetch()))
+    timings["prep"] = _lap()
+
     # 先发一次 meta 把 user_message_id 送出去：模型没配好时也得让前端拿到它，
     # 否则那条消息已经落库却编辑不了。诊断信息等上下文拼完再补发一次
     yield "meta", {"user_message_id": user_message_id}
@@ -2363,6 +3012,11 @@ async def run_turn(
         except Exception:
             # 判定没存下不该拦住叙事：玩家已经看到结果了，这一轮照常写完
             logger.exception("RPG 局 %s 判定落库失败", session_id)
+    timings["adjudicate"] = _lap()
+    # 在开会话之前等：向量那一路慢的时候不白占一个数据库连接。
+    # 这一段只记「比裁决多等了多久」，并排之后正常是 0
+    vector_keys = await vector_task
+    timings["vector_wait"] = _lap()
 
     async with AsyncSessionLocal() as store:
         fresh_sess = await store.get(RpgSession, session_id)
@@ -2381,7 +3035,7 @@ async def run_turn(
         # 和你刚才做过什么，§30 又得把场面线借回去。线拆了之后这一段没有分支
         messages, diag = await build_rpg_messages(
             store, fresh_module, fresh_sess, history, content, judgement, facts,
-            mode, private_with, action_time=action_time,
+            mode, private_with, action_time=action_time, vector_keys=vector_keys,
         )
         # 外貌已经随这次上下文发出去了，就地记一笔，下一轮不再重复发。
         # 放在开流之前而不是之后：叙事失败也算见过，模型确实已经拿到过那段描写。
@@ -2410,6 +3064,7 @@ async def run_turn(
     # 上下文已经拼好，正要调叙述模型。这一条发出去之后到第一个 token 之间
     # 就是最后一段静默期，前端据此显示「组织线索中…」
     yield "stage", "building"
+    timings["context"] = _lap()
 
     # 模型解析放这里：模型配错时 resolve_model_ref 抛 ValueError，
     # 在生成器内抛才能变成一条 error 事件，放外面会变成 500 白屏
@@ -2440,6 +3095,8 @@ async def run_turn(
                 if "warning" in chunk:
                     yield "warning", chunk["warning"]
             else:
+                if not buf:
+                    timings["first_token"] = _lap()
                 buf.append(chunk)
                 yield "token", chunk
     except (asyncio.CancelledError, GeneratorExit, Exception):
@@ -2459,6 +3116,20 @@ async def run_turn(
     message_id = await _store_reply(
         session_id, reply, in_tok, out_tok, present, place, settlement_seed
     )
+    timings["writer"] = _lap()
+
+    # 概要只读消息原文、不读结算结果，所以不必排在结算后面——跟结算并排跑，
+    # 长局里几乎每轮都要压一次，原先这一次调用整段串在结算之后。
+    # 能并排的前提是它落库时不碰 updated_at（见 _maybe_summarize 末尾）：
+    # 结算靠 updated_at 判断「这期间有没有别人改过这局」，被它顶一下就会误判冲突。
+    # 失败不吭声——玩家没要求过这件事，报错只会让他以为这一轮出了问题
+    async def _summarize_quietly() -> None:
+        try:
+            await _maybe_summarize(session_id)
+        except Exception:
+            logger.exception("RPG 局 %s 概要生成失败，上下文退化为纯截断", session_id)
+
+    summary_task = retain_task(asyncio.create_task(_summarize_quietly()))
 
     if reply:
         # 字已经吐完了，接下来是一次静默的结算调用。不发这条的话，前端会在
@@ -2546,40 +3217,37 @@ async def run_turn(
                 failed_row = await store.get(RpgMessage, message_id)
                 failed_report = rpg_settlement.public_report(failed_row.settlement) if failed_row else None
             yield "settlement", {"message_id": message_id, "report": failed_report}
+    timings["settle"] = _lap()
 
-    # 压缩排在结算之后：这一轮的消息已经落库，它也该参与计数。
-    # 失败不吭声——玩家没要求过这件事，报错只会让他以为这一轮出了问题
-    try:
-        await _maybe_summarize(session_id)
-    except Exception:
-        logger.exception("RPG 局 %s 概要生成失败，上下文退化为纯截断", session_id)
-
-    # 向量补写跟着压缩走，排在它后面：这一轮的结算已经落库，事实才嵌得全。
+    # 结算之后剩下的三件事彼此不读对方的产物，并排跑，玩家只等最慢的那一个：
+    # 概要（上面已经开跑）、向量补写、AI 调度。它们落库的列互不相交
+    # （概要那几列 / vector_upto_id / npc_places·npc_activities），
+    # 每个都是「重新读一遍 → 只改自己那几列 → 提交」，SQLite 的写锁由 busy_timeout 排队。
+    #
+    # 向量补写要排在结算之后：这一轮的结算已经落库，事实才嵌得全。
     # 模组没配嵌入模型时这一句一次网络都不发；失败也不吭声（函数自己吞），
     # 召回退回 BM25 + 词面两路，玩家看不出区别
-    await rpg_vectors.sync_session(session_id)
-
-    # AI 调度排在最后：它要知道这一轮提到了谁，那是 build_rpg_messages 算的。
+    #
+    # AI 调度要知道这一轮提到了谁，那是 build_rpg_messages 算的。
     # **这是唯一一次「玩家说完话了还在调模型」**，所以它必须排在 done 之前——
     # done 之后前端就不再收了，玩家的侧栏会一直停在旧状态。
     # 没勾任何角色、或者勾了的都在场，这一次调用根本不发生。
     #
-    # **只有这一轮时段真的翻篇了才调。** 从前是每轮都调，而调度器问的是「不在
-    # 跟前的那个人最近在做什么」——时段没动，答案和上一轮不会有区别，那次调用
-    # 是白花的。跳过时她那句话保持原样：apply_npc_activity 只在有内容时才写，
-    # 不调它天然不会清空。按「结束这个时段」按钮那条路不经过这里，
-    # 调度补在 routes/rpg.py 的 advance_time 里。
+    # **每轮都调**，时段没翻篇也调：玩家在这一格里说话、行动，不在跟前的人也在
+    # 接着过这一格。没翻篇时 same_slot=True，只续写一句「接下来在做什么」，
+    # 不挪人、不写相遇——换地方和相遇一格最多一次，只在翻篇时发生。
+    # 按「结束这个时段」按钮那条路不经过这里，调度补在 routes/rpg.py 的 advance_time 里。
     #
     # 时钟只可能被引擎那条路（吃格子的动作、行动预算攒满）和上面 scene_wrapped
     # 那条路推动，两处都落在下面这次比对里，所以推时段的地方不必各自回传标记
-    try:
-        async with AsyncSessionLocal() as store:
-            scheduled_session = await store.get(RpgSession, session_id)
-            clock_now = clock_before if scheduled_session is None else (
-                (scheduled_session.day or 1), (scheduled_session.slot or "")
-            )
-            payload = None if scheduled_session is None else _state_payload(scheduled_session)
-        if clock_now != clock_before:
+    async def _schedule() -> dict | None:
+        try:
+            async with AsyncSessionLocal() as store:
+                scheduled_session = await store.get(RpgSession, session_id)
+                clock_now = clock_before if scheduled_session is None else (
+                    (scheduled_session.day or 1), (scheduled_session.slot or "")
+                )
+                payload = None if scheduled_session is None else _state_payload(scheduled_session)
             # diag 是这一轮注入过设定的人（在场 + 被提到的）。他们归叙事模型管，
             # 调度器另写一份会和玩家刚经历的剧情对不上
             # npcs_onstage 是「在场 + 被提到」，比 npcs_here 宽：被提到的人这一轮
@@ -2587,20 +3255,31 @@ async def run_turn(
             # 原先这里还要单独补一个 thread_id（线主），线没了——线主的定义本来就是
             # 「你正在跟她说话的那个」，而她已经在这份名单里了
             engaged = {int(n["id"]) for n in diag.get("npcs_onstage") or []}
-            await idle_npc_activities(session_id, engaged)
+            await idle_npc_activities(session_id, engaged, same_slot=clock_now == clock_before)
             async with AsyncSessionLocal() as store:
                 scheduled_session = await store.get(RpgSession, session_id)
                 if scheduled_session is not None:
                     payload = _state_payload(scheduled_session)
-        # 这条 state 就算上面整段都跳过了也照发：它不只带「谁最近在做什么」。
-        # tick_cooldowns 每轮都在减冷却、note_slot_chat 每轮都在加聊天数，而
-        # skills / slot_chats 不在 STATE_FIELDS 里，结算那条 state 带不上它们——
-        # 吞掉这一条，玩家会看到一颗明明已经能点的技能还灰着
-        if payload is not None:
-            yield "state", payload
-    except Exception:
-        logger.exception("RPG 局 %s 角色调度失败", session_id)
+            return payload
+        except Exception:
+            logger.exception("RPG 局 %s 角色调度失败", session_id)
+            return None
 
+    # 概要那个 task 套 shield：玩家这时断开的话另外两件跟着取消（同原先），
+    # 概要照样压完——它在租约的 retain 名单里，下一轮本来就要等它
+    _, _, payload = await asyncio.gather(
+        asyncio.shield(summary_task), rpg_vectors.sync_session(session_id), _schedule(),
+    )
+    timings["tail"] = _lap()
+    # 这条 state 就算上面整段都跳过了也照发：它不只带「谁最近在做什么」。
+    # tick_cooldowns 每轮都在减冷却、note_slot_chat 每轮都在加聊天数，而
+    # skills / slot_chats 不在 STATE_FIELDS 里，结算那条 state 带不上它们——
+    # 吞掉这一条，玩家会看到一颗明明已经能点的技能还灰着
+    if payload is not None:
+        yield "state", payload
+
+    logger.info("RPG 局 %s 回合耗时 %s 合计 %.2fs",
+                session_id, timings, sum(timings.values()))
     yield "done", {
         "message_id": message_id,
         "input_tokens": in_tok,

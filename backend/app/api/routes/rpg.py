@@ -43,6 +43,7 @@ from app.schemas.rpg import (
     RpgStatPresetCreate, RpgStatPresetOut, RpgStatPresetUpdate,
     RpgSuggestOut,
     RpgTaskCreate, RpgTaskOut, RpgTaskResolveIn, RpgTaskStateIn, RpgTaskUpdate,
+    RpgTiersIn, RpgTiersOut,
     RpgTurnRequest, RpgTweakOut,
     RpgWizardChatIn, RpgWizardExtractIn, RpgWizardExtractOut, RpgWizardFullIn,
     RpgWorldEntryCreate, RpgWorldEntryOut, RpgWorldEntryUpdate,
@@ -55,7 +56,6 @@ from app.services.rpg_context import (
     present_ids, turn_present,
 )
 from app.services.rpg_state import (
-    OPENING_CHARS, OPENING_TAG,
     TASK_DONE, TASK_FAILED, TASK_OPEN,
     advance_slot, apply_npc_activity, apply_npc_appearance, apply_npc_followers,
     apply_npc_notes,
@@ -64,7 +64,7 @@ from app.services.rpg_state import (
     apply_inventory,
     learn_skill, norm_name, open_task,
     protagonist_identity,
-    push_chronicle, slot_table, spend_slot_action,
+    slot_table, spend_slot_action,
     starting_inventory, starting_skills, starting_tasks,
 )
 from app.services.sse import sse_event, stream_chat
@@ -605,6 +605,30 @@ async def generate_batch(
     return RpgWizardExtractOut(**result)
 
 
+@router.post("/modules/{module_id}/tiers", response_model=RpgTiersOut)
+async def generate_stat_tiers(
+    module_id: int, data: RpgTiersIn, user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """给一项数值划整张档表。不落库——前端预览后写回表单，作者再存。
+
+    数值定义整条由前端传，不按名字回查库：作者常常是新加一项、名字和上下限刚
+    敲进去还没存，库里查不到那一项（同 assist 那条路的理由）。
+    """
+    module = await _get_owned_module(db, module_id, user)
+    try:
+        result = await rpg_wizard.generate_tiers(
+            data.spec, data.instruction, data.count,
+            rpg_wizard.pick_model(data.model, module.model_ref),
+            data.temperature,
+        )
+    except llm_json.JsonCallError as e:
+        raise HTTPException(status_code=502, detail=f"分档失败：{e}") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RpgTiersOut(**result)
+
+
 @router.post("/modules/{module_id}/cover", response_model=RpgModuleOut)
 async def upload_cover(
     module_id: int, user: CurrentUser,
@@ -1037,11 +1061,6 @@ async def create_session(
                 npcs, sess.location, sess.slot, sess.npc_places, sess.npc_followers,
             ),
         ))
-        # 所以顺手压一条进外场。开场那一幕是这一局最公共的事实（「你在校长
-        # 办公室、赫敏就在跟前」），而大事记本来就是跨线共享的那条通道，抬头
-        # 还写着「传闻不等于亲眼见过」，正好合用。**不复制全文到每条线**：
-        # 那样每条线都会各自演化、各自被总结，同一段话在不同线里会变成不同的事
-        push_chronicle(sess, f"{OPENING_TAG}{opening[:OPENING_CHARS]}")
         await db.commit()
     return sess
 
@@ -1236,6 +1255,9 @@ SNAPSHOT_FIELDS = (
     # 那条流水跟着一起回滚，同理：读档回到第 2 天，档案里不该还留着第 4 天
     # 她在忙什么——而那两天已经被退回去了
     "npc_activities", "npc_activity_log",
+    # 幕后往事和 NPC 之间的关系。同理：读档回到那一晚之前，她的卡上不该还
+    # 挂着那一晚在暗间发生的事
+    "npc_offscreen", "npc_bonds",
     # 每个人的经历和整局的关系转折。这两样只追加、从不改写，所以不回滚的后果
     # 比别的字段更难看：读档回到表白之前，经历里还写着那天她说了什么——
     # 而那一晚已经被你退回去重来了
@@ -1244,6 +1266,8 @@ SNAPSHOT_FIELDS = (
     # 而那个"办公室"是三天后你才叫她去的
     "npc_places",
     "npc_random_places",
+    # 谁和谁正待在一处。跟着位置一起回滚，否则读档后的人位置是旧的、「已经一起待了几格」却是新的
+    "npc_together",
     # 地点近况。同理：读档回到踹门之前，地窖那扇门不该还是坏的
     "place_notes",
     # 跟着玩家走的人。不回滚的话读档回到「你把她打发走之前」，侧栏还挂着
@@ -1265,6 +1289,10 @@ SNAPSHOT_FIELDS = (
     # 已经放过的一次性词条。**这就是「重新武装」的唯一入口**——读档回到那段
     # 剧情发生之前，它就该能再放一次；不回滚的话那一段永远回不来了
     "fired_entries",
+    # 摘要的历史留档。只给人看、不进 prompt，但仍然要回滚：读档回到第 3 天，
+    # 查看器里不该还列着第 9 天那几格——那几天已经被退回去了。同 npc_history
+    # 那条（只追加、从不改写的字段漏了回滚，后果比别的更难看）
+    "summary_log",
 )
 AUTO_SAVE_KEEP = 30
 
@@ -1275,7 +1303,8 @@ SNAPSHOT_DEFAULTS = {
     "time_slots": [], "slot": "", "day": 1, "chronicle": [], "visited": [],
     "npc_notes": {}, "npc_appearance": {}, "thread_summaries": {}, "thread_upto": {},
     "npc_activities": {}, "npc_activity_log": {},
-    "npc_places": {}, "npc_random_places": {}, "place_notes": {},
+    "npc_offscreen": [], "npc_bonds": [],
+    "npc_places": {}, "npc_random_places": {}, "npc_together": {}, "place_notes": {},
     # 加这两列之前存的档：补空 = 那时候一条经历、一条转折都没有，和没有这两列时一致
     "npc_history": {}, "npc_milestones": [],
     # 老快照里没有跟随名单。补空 = 谁都没跟着，和加这一列之前逐字一致
@@ -1297,6 +1326,9 @@ SNAPSHOT_DEFAULTS = {
     "time_jump_from": "",
     # 老快照里没有这个断场点。补空串 = 没有待说的断场，理由同上
     "scene_break_from": "",
+    # 老快照里没有摘要历史。补空字典 = 那时候一格都还没攒过，查看器显示空，
+    # 和加这一列之前一致（当前那份摘要仍旧由 summary / thread_summaries 回滚）
+    "summary_log": {},
 }
 
 
@@ -1492,10 +1524,6 @@ async def update_message(
         row.content = content
         if opening:
             row.settlement = None
-            sess.chronicle = [
-                f"{OPENING_TAG}{content[:OPENING_CHARS]}" if entry.startswith(OPENING_TAG) else entry
-                for entry in (sess.chronicle or [])
-            ]
         elif row.role == "assistant":
             report.update({"status": "stale", "retryable": bool(report.get("baseline")),
                            "facts": [], "warnings": ["正文已修改，状态需要重新结算"]})
@@ -1922,10 +1950,11 @@ async def tweak_session(
     ensure_relation_states(module, sess, npcs)
     locations = (await db.execute(
         select(RpgLocation).where(RpgLocation.module_id == sess.module_id)
-    )).scalars().all() if data.npc_places else []
+    )).scalars().all() if data.npc_places or data.location is not None else []
     notes = apply_tweak(
         module, sess, data.stats, data.relations, data.inventory, data.flags,
         npc_places=data.npc_places, npcs=npcs, locations=locations,
+        time_slots=data.time_slots, location=data.location,
     )
     sess.updated_at = datetime.utcnow()
     # 不拍自动存档：这是玩家自己动手改状态，不是剧情事件，和 delete_npc_note /
@@ -2023,14 +2052,12 @@ async def advance_time(
     """结束当前时段。碰最后一格就翻篇：新的一天、跨天恢复。
 
     默认**纯引擎，不调模型**——按一下时钟不该产生任何叙事，也不该花玩家的钱。
-    要花钱的只有两处加料，都得先勾上：模组勾了「外场简报」会写一两句别处的事，
-    角色勾了「AI 调度」会重记一句「她最近在做什么」。那时的花费和等待都写在
-    按钮的提示里。
+    唯一会花钱的加料得先勾上：角色勾了「AI 调度」才会重记一句「她最近在做
+    什么」，那时的花费和等待都写在按钮的提示里。
 
-    **两样都勾上时这个接口会串行调两次模型**，不再是毫秒级的。所以：前端那边
-    给它单独写了超时（默认 30 秒盖不住），这边两次调用各自有 AUX_CALL_TIMEOUT
-    夹着——不夹的话卡住的是整局，租约心跳会替那次调用一直续期，玩家再点什么
-    都是 409。
+    **勾了的时候这个接口会调一次模型**，不再是毫秒级的。所以：前端那边给它
+    单独写了超时（默认 30 秒盖不住），这边有 AUX_CALL_TIMEOUT 夹着——不夹的话
+    卡住的是整局，租约心跳会替那次调用一直续期，玩家再点什么都是 409。
 
     角色调度补在这里，是因为它只该在**时段翻篇时**跑一次，而这颗按钮是玩家
     推时段最主要的入口——回合里那一处只管「这一轮把格子用完了」的情况。
@@ -2045,7 +2072,6 @@ async def advance_time(
     await _prune_auto_saves(db, session_id)
 
     module = await db.get(RpgModule, sess.module_id)
-    was = str(sess.slot or "").strip()
     npcs = (await db.execute(
         select(RpgNpc).where(RpgNpc.module_id == sess.module_id)
     )).scalars().all()
@@ -2056,12 +2082,8 @@ async def advance_time(
     sess.updated_at = datetime.utcnow()
     await db.commit()
 
-    # 两次调用都在写事务提交之后才发生：这个项目的铁律是写锁绝不跨 LLM 调用。
-    # 各自另开一条连接写自己那几列，写完最后把这个 sess 刷回来看新值。
-    #
-    # **调度必须排在简报前面**，顺序是有后果的：随机移动是调度那一步写的，
-    # 简报的名单里要带上每个人此刻在哪。反过来的话简报读到的是移动前的位置，
-    # 同一格里大事记写着「韩曼宁在家洗衬衫」、侧栏却显示她在楼道
+    # 这次调用在写事务提交之后才发生：这个项目的铁律是写锁绝不跨 LLM 调用。
+    # 它另开一条连接写自己那几列，写完把这个 sess 刷回来看新值。
     #
     # 时段翻篇了，不在跟前的人该换一句「最近在做什么」。engaged 传空集：按按钮
     # 时没有「这一轮提到了谁」可言，勾了调度的闲人都该被重记一次。
@@ -2072,9 +2094,6 @@ async def advance_time(
         await rpg_turn.idle_npc_activities(session_id, set(), from_clock=True)
     except Exception:
         logger.exception("RPG 局 %s 推时段后的角色调度失败", session_id)
-
-    if module is not None and module.offscreen_brief:
-        facts = facts + await rpg_turn.offscreen_brief(session_id, was)
 
     await db.refresh(sess)
     return RpgAdvanceOut(session=sess, facts=facts)
@@ -2228,6 +2247,52 @@ async def suggest_actions(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+# 一局里自动建出来的地点上限。**不是防滥用，是防上下文膨胀**：地点表每轮整张
+# 拼进 prompt（suggest_places_block），无上限的话一局聊到后面光地名就吃掉几百
+# token，而且没人看得见是怎么涨起来的。满了就照旧不建、整句交给 AI
+AUTO_PLACE_LIMIT = 20
+# 自动建的地点在 description 上留的记号。作者在地点表里一眼能看出哪些不是他画的，
+# 也是上面数上限的依据——按前缀认而不是另加一列，省一次迁移
+_AUTO_PLACE_MARK = "玩家途中提到的地方"
+
+
+async def _auto_place(
+    db: AsyncSession, sess: RpgSession, module: RpgModule | None,
+    content: str, locations: list[RpgLocation], npcs: list[RpgNpc],
+) -> str:
+    """玩家说了个没登记过的地方就建一条，返回那个地名（没建就是空串）。
+
+    判据全在 `rpg_turn.movement_candidate` 里（尤其是「说得更短是同一个地方、
+    说得更长是另一个地方」那条方向性判据，见它的 docstring）。这儿只管落库。
+
+    **建完必须 commit**：`_resolve_engine` 是自己回查 RpgLocation 表拿 move_to 的，
+    没提交它就查不到这一条，于是掉一条「模组里没有这个地点」的警告、人留在原地。
+    """
+    if module is None:
+        return ""
+    name = rpg_turn.movement_candidate(content, locations, npcs)
+    if not name:
+        return ""
+    # 只数自动建的那些：作者自己画的一百个地点不该把这个功能顶掉
+    auto_count = sum(1 for l in locations if (l.description or "").startswith(_AUTO_PLACE_MARK))
+    if auto_count >= AUTO_PLACE_LIMIT:
+        logger.info("RPG 局 %s 自动建地点已达上限，跳过「%s」", sess.id, name)
+        return ""
+    # 同一个写事务里再查一遍：并发两轮（或者重发）不该建出两条同名地点
+    exists = (await db.execute(
+        select(RpgLocation).where(RpgLocation.module_id == module.id)
+    )).scalars().all()
+    if any(norm_name(l.name) == norm_name(name) for l in exists):
+        return name
+    db.add(RpgLocation(
+        module_id=module.id, name=name,
+        description=f"{_AUTO_PLACE_MARK}（玩家在第 {sess.turn_count + 1} 轮提到，作者可以改）",
+    ))
+    await db.commit()
+    logger.info("RPG 局 %s 自动新建地点「%s」｜ %s", sess.id, name, content[:60])
+    return name
+
+
 @router.post("/sessions/{session_id}/stream")
 @exclusive_session
 async def stream_turn(
@@ -2284,6 +2349,23 @@ async def stream_turn(
         # 到了的剧情，结算只能报「剧情抵达 X，与引擎地点 Y 冲突」
         if mode != PRIVATE_MODE or company.move_to:
             move_target = company.move_to
+        # 说了个没登记过的地方 → 当场建一条，这一轮就能走过去。识别在纯函数里，
+        # 建库只能在这儿（要 module_id 和写事务）。**只在 move_target 为空时才试**：
+        # 认出登记地点的走移动，同一个地方不该被建第二遍
+        if not move_target and getattr(session_module, "auto_location", True):
+            move_target = await _auto_place(
+                db, sess, session_module, content, locations, npcs,
+            )
+        # 词表一条都没认出来，可这句话里既有登记角色又有登记地名——很可能是
+        # 一句漏认的派遣。只记日志不改行为：先量几天真实频次，再决定要不要把
+        # 「派谁去哪儿」加进裁决那一步的返回字段（宽判据，假阳性是预期的）
+        if not company:
+            who, where = rpg_turn.missed_dispatch(content, locations, npcs)
+            if who and where:
+                logger.info(
+                    "RPG 局 %s 疑似漏认派遣：%s → %s ｜ %s",
+                    sess.id, who, where, content[:60],
+                )
     # 人一走，私聊的前提（两个人在同一个地方）就没了：当场散场，这一轮按群聊走
     private_with = req.private_with
     if mode == PRIVATE_MODE and move_target:

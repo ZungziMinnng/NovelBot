@@ -7,7 +7,7 @@ import asyncio
 import json
 import unittest
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -96,6 +96,7 @@ class MemoryPipelineCharacterizationTests(unittest.TestCase):
         return reembed, (
             patch.object(orchestrator, "build_generation_context", AsyncMock(return_value=_ctx())),
             patch.object(memory_pipeline, "AsyncSessionLocal", maker),
+            patch.object(orchestrator, "AsyncSessionLocal", maker),  # 后台记忆任务的会话
             patch.object(writer, "stream_chapter", _fake_writer_stream),
             patch.object(writer, "stream_chapter_revision", _fake_revision_stream),
             patch.object(critic, "review_chapter", fake_review_chapter),
@@ -141,6 +142,7 @@ class MemoryPipelineCharacterizationTests(unittest.TestCase):
                     "llm_call",         # writer
                     "agent_done",       # writer
                     "stage",            # saving
+                    "chapter_saved",    # 正文已存，前端先解锁，记忆在后台继续
                     "stage",            # updating_memory
                     "stage",            # updating_memory_summary
                     "agent_start",      # summarizer
@@ -204,6 +206,7 @@ class MemoryPipelineCharacterizationTests(unittest.TestCase):
                 self.assertEqual(chapter.content, "正文第一段。正文第二段。")
                 self.assertEqual(chapter.model_used, "writer-x")
                 self.assertEqual(by_event["done"], str(chapter.id))
+                self.assertEqual(by_event["chapter_saved"], str(chapter.id))
 
                 # 生成前快照已创建
                 snap = (await session.execute(
@@ -217,9 +220,44 @@ class MemoryPipelineCharacterizationTests(unittest.TestCase):
                 )).scalars().all()
                 self.assertEqual(usage_agents, ["writer", "summarizer", "char_update", "entity_update"])
 
+                # 后台任务用自己的会话
                 reembed.assert_awaited_once_with(
-                    session, novel.id, char_ids=[1], entity_ids=[2], location_ids=[],
+                    ANY, novel.id, char_ids=[1], entity_ids=[2], location_ids=[],
                 )
+            finally:
+                await session.close()
+                await engine.dispose()
+
+        self._run(scenario())
+
+    def test_memory_survives_client_disconnect_after_chapter_saved(self):
+        async def scenario():
+            engine, maker = await self._make_session()
+            session = maker()
+            try:
+                novel = await self._seed(session)
+                _, patches = self._patches(maker)
+                with ExitStack() as stack:
+                    for p in patches:
+                        stack.enter_context(p)
+                    agen = orchestrator.run_chapter_generation(
+                        session, novel, chapter_number=3, volume=1,
+                        instruction="测试指令", target_words=1000,
+                    )
+                    async for evt in agen:
+                        if '"chapter_saved"' in evt:
+                            break
+                    await agen.aclose()  # 模拟前端拿到正文后断开
+
+                    pending = orchestrator._pending_memory(novel.id)
+                    self.assertIsNotNone(pending)
+                    await asyncio.wait({pending})
+
+                usage_agents = (await session.execute(
+                    select(LlmUsage.agent).order_by(LlmUsage.id)
+                )).scalars().all()
+                self.assertEqual(usage_agents, ["writer", "summarizer", "char_update", "entity_update"])
+                self.assertIsNone(orchestrator._pending_memory(novel.id))
             finally:
                 await session.close()
                 await engine.dispose()

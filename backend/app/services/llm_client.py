@@ -1,3 +1,4 @@
+import json
 import logging
 import httpx
 from openai import AsyncOpenAI
@@ -1100,6 +1101,36 @@ def _first_choice(response, model: str):
     raise RuntimeError(f"上游返回异常响应（model={model}）：{detail}")
 
 
+def _parse_sse_text(text: str, model: str) -> tuple[str, str | None, int, int]:
+    """个别中转站（如 DZMM）无视 stream=false 一律回 SSE，SDK 拿不到 JSON 就把
+    原文当 str 交回来。把 data: 行的 delta 拼回完整正文 →
+    (content, finish_reason, input_tokens, output_tokens)。"""
+    parts: list[str] = []
+    finish_reason: str | None = None
+    in_tok = out_tok = 0
+    saw_event = False
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            continue
+        saw_event = True
+        for choice in event.get("choices") or []:
+            parts.append((choice.get("delta") or {}).get("content") or "")
+            finish_reason = choice.get("finish_reason") or finish_reason
+        usage = event.get("usage") or {}
+        in_tok = usage.get("prompt_tokens") or in_tok
+        out_tok = usage.get("completion_tokens") or out_tok
+    if not saw_event:
+        raise RuntimeError(f"上游返回了无法解析的响应（model={model}）：{text[:200]}")
+    return "".join(parts), finish_reason, in_tok, out_tok
+
+
 async def chat_complete(
     messages: list[dict],
     model: str,
@@ -1119,6 +1150,8 @@ async def chat_complete(
     if _is_deepseek_model(model):
         _apply_deepseek_fast_thinking(kwargs)
     response = await client.chat.completions.create(**kwargs)
+    if isinstance(response, str):
+        return _parse_sse_text(response, model)[0]
     return _first_choice(response, model).message.content or ""
 
 
@@ -1140,21 +1173,26 @@ async def chat_complete_with_usage(
     if _is_deepseek_model(model):
         _apply_deepseek_fast_thinking(kwargs)
     response = await client.chat.completions.create(**kwargs)
-    choice = _first_choice(response, model)
-    content = choice.message.content or ""
-    if choice.finish_reason and choice.finish_reason != "stop":
+    if isinstance(response, str):
+        content, finish_reason, in_tok, out_tok = _parse_sse_text(response, model)
+        usage = None
+    else:
+        choice = _first_choice(response, model)
+        content = choice.message.content or ""
+        finish_reason = choice.finish_reason
+        usage = response.usage
+        in_tok = usage.prompt_tokens if usage else 0
+        out_tok = usage.completion_tokens if usage else 0
+    if finish_reason and finish_reason != "stop":
         logging.getLogger(__name__).warning(
             "OpenAI 非流式调用异常结束: finish_reason=%s, model=%s",
-            choice.finish_reason, model,
+            finish_reason, model,
         )
-    usage = response.usage
-    in_tok = usage.prompt_tokens if usage else 0
-    out_tok = usage.completion_tokens if usage else 0
     if not content:
         # 中转站常以 200 + 空正文表示内容过滤或上游故障；此处不抛错（摘要路径依赖空串走脱敏重试），只留诊断日志
         logging.getLogger(__name__).warning(
             "OpenAI 非流式空响应: model=%s, finish_reason=%s, input_tokens=%d",
-            model, choice.finish_reason, in_tok,
+            model, finish_reason, in_tok,
         )
     _log_cached_tokens(usage, model)
     return content, in_tok, out_tok

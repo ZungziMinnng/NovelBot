@@ -9,6 +9,10 @@ from app.models.rpg import normalize_profile_sections
 # 玩法规则没注入）；但**读出去的是裸 str**——老库里可能留着空串，
 # 用 Literal 校验响应会让一个正常的模组直接打不开
 PlayStyle = Literal["sim", "rpg", "slg"]
+# AI 调度挑去处的办法，见 models.RpgModule.npc_move_mode。读出去同样是裸 str
+NpcMoveMode = Literal["ai", "random"]
+# 角色那一级多一个 "" = 跟随模组
+NpcOwnMoveMode = Literal["", "ai", "random"]
 
 
 # ── 模组 ──────────────────────────────────────────────────────────────────
@@ -23,6 +27,7 @@ class RpgModuleCreate(BaseModel):
     system_instruction: str = ""
     enabled_rule_ids: list[int] = []
     narration_sample: str = ""
+    narration_examples: list = []
     cover_url: str = ""
     stat_defs: list = []
     relation_stat_defs: list = []
@@ -32,6 +37,8 @@ class RpgModuleCreate(BaseModel):
     opening_npc_locations: dict[str, str] = {}
     time_slots: list = []
     lock_protagonist: bool = False
+    # 玩家提到没登记的地方就自动建一条。默认开，见 models/rpg.py 上的注释
+    auto_location: bool = True
     rate_table: dict = {"trivial": 90, "easy": 75, "medium": 55, "hard": 35, "extreme": 15}
     difficulty_bias: int = 0
     check_mode: str = "never"
@@ -53,19 +60,20 @@ class RpgModuleCreate(BaseModel):
     adjudication_model_ref: str = ""
     suggestion_model_ref: str = ""
     activity_model_ref: str = ""
-    offscreen_model_ref: str = ""
     discovery_model_ref: str = ""
     summary_model_ref: str = ""
     image_model_ref: str = ""
     # 空 = 向量召回整条关着，一次嵌入接口都不调
     embedding_model_ref: str = ""
-    offscreen_brief: bool = False
     # 时段推进的两个阈值，0 = 关，形状见 models.RpgModule
     # slot_budget 默认 3：建模组这条路会把这份默认值原样传给 RpgModule(**dump)，
     # 所以列上的默认管不到新建的模组，真正生效的是这一行
     slot_budget: int = 3
     chat_nudge: int = 0
     free_costs_slot: bool = False
+    # 调度顺带写幕后往事，见 models.RpgModule.npc_encounters
+    npc_encounters: bool = False
+    npc_move_mode: NpcMoveMode = "ai"
     # NPC 立绘出图设置，形状见 models.RpgModule.image_config
     image_config: dict = {}
 
@@ -80,6 +88,7 @@ class RpgModuleUpdate(BaseModel):
     system_instruction: Optional[str] = None
     enabled_rule_ids: Optional[list[int]] = None
     narration_sample: Optional[str] = None
+    narration_examples: Optional[list] = None
     cover_url: Optional[str] = None
     stat_defs: Optional[list] = None
     relation_stat_defs: Optional[list] = None
@@ -91,6 +100,7 @@ class RpgModuleUpdate(BaseModel):
     wizard_state: Optional[dict] = None
     time_slots: Optional[list] = None
     lock_protagonist: Optional[bool] = None
+    auto_location: Optional[bool] = None
     rate_table: Optional[dict] = None
     difficulty_bias: Optional[int] = None
     check_mode: Optional[str] = None
@@ -110,15 +120,15 @@ class RpgModuleUpdate(BaseModel):
     adjudication_model_ref: Optional[str] = None
     suggestion_model_ref: Optional[str] = None
     activity_model_ref: Optional[str] = None
-    offscreen_model_ref: Optional[str] = None
     discovery_model_ref: Optional[str] = None
     summary_model_ref: Optional[str] = None
     image_model_ref: Optional[str] = None
     embedding_model_ref: Optional[str] = None
-    offscreen_brief: Optional[bool] = None
     slot_budget: Optional[int] = None
     chat_nudge: Optional[int] = None
     free_costs_slot: Optional[bool] = None
+    npc_encounters: Optional[bool] = None
+    npc_move_mode: Optional[NpcMoveMode] = None
     image_config: Optional[dict] = None
 
 
@@ -134,6 +144,7 @@ class RpgModuleOut(BaseModel):
     system_instruction: str
     enabled_rule_ids: list[int] = []
     narration_sample: str
+    narration_examples: list = []
     cover_url: str
     stat_defs: list
     relation_stat_defs: list
@@ -146,6 +157,8 @@ class RpgModuleOut(BaseModel):
     wizard_state: dict = {}
     # 给默认值：老模组的行读出来没有这一项，理由同下面 slot_budget
     lock_protagonist: bool = False
+    # 给默认值同上：老模组的行读出来没有这一项
+    auto_location: bool = True
     rate_table: dict
     difficulty_bias: int
     check_mode: str
@@ -166,16 +179,16 @@ class RpgModuleOut(BaseModel):
     adjudication_model_ref: str = ""
     suggestion_model_ref: str = ""
     activity_model_ref: str = ""
-    offscreen_model_ref: str = ""
     discovery_model_ref: str = ""
     summary_model_ref: str
     image_model_ref: str
     embedding_model_ref: str = ""
-    offscreen_brief: bool
     # 给默认值：老模组的行读出来没有这两项，不给就整份校验失败
     slot_budget: int = 0
     chat_nudge: int = 0
     free_costs_slot: bool = False
+    npc_encounters: bool = False
+    npc_move_mode: str = "ai"
     image_config: dict = {}
     session_count: int = 0
     npc_count: int = 0
@@ -363,6 +376,23 @@ class RpgGenerateIn(BaseModel):
     temperature: Optional[float] = None  # 同 RpgWizardExtractIn
 
 
+class RpgTiersIn(BaseModel):
+    """给一项数值点「AI 分档」。不落库——生成完前端预览，作者确认后才写回表单。"""
+    # 这一项数值定义的整条（name/min/max/effect/tiers）。**由前端传而不是后端按
+    # 名字回查**：作者常常是刚加一项、名字和上下限还没存，库里查不到
+    spec: dict = {}
+    instruction: str = ""
+    count: int = 4
+    model: str = ""
+    temperature: Optional[float] = None  # 同 RpgWizardExtractIn
+
+
+class RpgTiersOut(BaseModel):
+    tiers: list = []
+    # 落在范围外、下界撞车的档，说明要显示出来——静默丢弃等于骗作者
+    dropped: list[str] = []
+
+
 class RpgWizardExtractOut(BaseModel):
     """各步字段全 Optional：一次只返回当前这一步那一摊。dropped 是被白名单
     过滤掉的东西的说明，前端要显示出来——静默丢弃等于骗作者。"""
@@ -449,6 +479,7 @@ class RpgNpcCreate(BaseModel):
     keywords: str = ""
     ai_scheduled: bool = False
     random_movement: bool = False
+    move_mode: NpcOwnMoveMode = ""
     profile_sections: dict = {}
     dialogue_examples: list = []
     initial_state: dict = {}
@@ -478,6 +509,7 @@ class RpgNpcUpdate(BaseModel):
     keywords: Optional[str] = None
     ai_scheduled: Optional[bool] = None
     random_movement: Optional[bool] = None
+    move_mode: Optional[NpcOwnMoveMode] = None
     profile_sections: Optional[dict] = None
     dialogue_examples: Optional[list] = None
     initial_state: Optional[dict] = None
@@ -535,6 +567,7 @@ class RpgNpcOut(BaseModel):
     keywords: str
     ai_scheduled: bool
     random_movement: bool = False
+    move_mode: str = ""
     profile_sections: dict
     dialogue_examples: list
     initial_state: dict
@@ -828,6 +861,10 @@ class RpgSessionTweakIn(BaseModel):
     inventory: list[dict] = []                        # [{"name": 名字, "qty": 想要几件}]，0 就是丢掉
     flags: dict = {}                                  # 值给 true/false 是置位，给 null 是删掉这一条
     npc_places: dict[str, str | None] = {}
+    location: Optional[str] = None                    # 主角挪到哪儿（登记地名），None = 没碰
+    # 这一局自己那份时段表。**None = 没碰这一项，空列表 = 退回「跟模组走」**，
+    # 两者不能合并（同 RpgSessionCreate.time_slots 那条注释的口径）
+    time_slots: Optional[list] = None
 
 
 class RpgNoteDeleteIn(BaseModel):
@@ -911,6 +948,10 @@ class RpgSessionOut(BaseModel):
     # 上面那句话按时段留的短流水。给默认值：老局的行里没有这一列。
     # 形状见 models/rpg.py 的 npc_activity_log
     npc_activity_log: dict = {}
+    # 幕后往事和 NPC 之间的关系标签。给默认值：老局的行里没有这两列。
+    # 形状见 models/rpg.py 的 npc_offscreen / npc_bonds
+    npc_offscreen: list = []
+    npc_bonds: list = []
     npc_places: dict
     # 跟着玩家走的人，npc id 列表。见 RpgSession.npc_followers
     npc_followers: list = []
@@ -931,6 +972,9 @@ class RpgSessionOut(BaseModel):
     # 是空 dict 没问题，但存档快照读回来的旧局可能整个键都没有。
     # 上面那个 summary 是玩家自己那格（场面线），两者是并列的格子不是总分关系
     thread_summaries: dict = {}
+    # 上面那两份摘要的历史留档，只给顶栏那个查看器读。键的口径同
+    # thread_summaries，值是按 (day, slot) 去重的那几条，见 RpgSession.summary_log
+    summary_log: dict = {}
     turn_count: int
     created_at: datetime
     updated_at: datetime

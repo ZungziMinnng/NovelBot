@@ -17,8 +17,9 @@ from app.models import llm_usage, sensitive_word, text_replace_backup
 from app.models.rpg import RpgLocation, RpgMessage, RpgModule, RpgNpc, RpgSession
 from app.schemas.rpg import RpgMessageOut, RpgMessageUpdate
 from app.services.rpg_context import build_rpg_messages, npc_place
+from app.services import rpg_memory
 from app.services.rpg_memory import event_memory, text_revision
-from app.services.rpg_settlement import DOMAINS, SettlementConflict, _event_groups, _filter_milestones, _with_cap, capture, inspect_proposal, normalize_proposal, seed_settlement, state_changes
+from app.services.rpg_settlement import DOMAINS, SettlementConflict, _event_groups, _evidence_events, _filter_milestones, _with_cap, apply_proposal, capture, inspect_proposal, normalize_proposal, seed_settlement, state_changes
 
 
 def proposal(narration, **delta):
@@ -83,6 +84,25 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         await self.store.refresh(row)
         return result
 
+    async def test_a_new_history_line_clears_her_stale_activity(self):
+        # 「最近」是调度在她不在时写的；她刚跟你经历了事，那句就过时了，
+        # 留着会和经历、正文对不上。流水不动，别人的「最近」也不动
+        gardener, other = self.npcs
+        self.sess.npc_activities = {str(gardener.id): "在柴房劈柴", str(other.id): "在灵药园浇水"}
+        self.sess.npc_activity_log = {str(gardener.id): [
+            {"day": 1, "slot": "清晨", "content": "在柴房劈柴", "place": "柴房"}]}
+        await self.store.commit()
+        narration = "园丁甲蹲在药畦边，半晌才说他家里出了事。"
+        row = await self.make_reply(narration)
+        data = proposal(narration)
+        data["checks"]["characters"] = "changed"
+        data["npc_history"] = {gardener.name: {
+            "content": "他家里出了事", "quote": "园丁甲蹲在药畦边"}}
+        await self.settle(row, data)
+        self.assertEqual(len(self.sess.npc_history[str(gardener.id)]), 1)
+        self.assertEqual(self.sess.npc_activities, {str(other.id): "在灵药园浇水"})
+        self.assertEqual(len(self.sess.npc_activity_log[str(gardener.id)]), 1)
+
     async def test_narrative_movement_updates_location_roster_and_next_context(self):
         narration = "你抵达灵药园，园丁甲和园丁乙向你招手。"
         row = await self.make_reply(narration)
@@ -111,6 +131,18 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sess.npc_places, {str(actor.id): "灵药园", str(background.id): "灵药园"})
         self.assertEqual(self.sess.place_notes["灵药园"], "园门关上了")
         self.assertNotIn("人工修改", "；".join(result["warnings"]))
+
+    async def test_npc_can_leave_to_nowhere(self):
+        # 园丁甲常驻的就是灵药园：写空串她原地不动，只有「已离开」才真的让她走
+        actor = self.npcs[0]
+        self.sess.location = "灵药园"
+        await self.store.commit()
+        narration = "园丁甲放下锄头，头也不回地走了。"
+        row = await self.make_reply(narration, present=[actor.id])
+        result = await self.settle(row, proposal(narration, npc_places={actor.name: "__away__"}))
+        self.assertEqual(result["settlement"]["domains"]["scene"]["status"], "updated")
+        self.assertEqual(self.sess.npc_places[str(actor.id)], "__away__")
+        self.assertEqual(npc_place(actor, self.sess.slot, self.sess.npc_places), "")
 
     async def test_same_npc_later_position_is_still_protected(self):
         actor = self.npcs[0]
@@ -706,6 +738,22 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("药园失火", event_memory([row], {7}, "回忆药园失火"))
         self.assertIn("药园失火", event_memory([row], set(), "回忆药园失火"))
 
+    async def test_line_caps_scale_with_the_budget(self):
+        """行数上限跟着额度缩放，额度等于基准值时一行不多一行不少。
+
+        以前 8 行和 3 行是写死的：模组把 context_budget 翻倍，memories 的 token
+        额度跟着翻但行数不变，多出来的额度没人用得上。
+        """
+        rows = [RpgMessage(id=n, role="assistant", content=f"药园失火那晚第{n}次有人提起。")
+                for n in range(1, 10)]
+        query = "回忆药园失火"
+        self.assertEqual(event_memory(rows, set(), query).count("原文摘录"),
+                         rpg_memory.EXCERPT_LINE_CAP)
+        self.assertEqual(
+            event_memory(rows, set(), query, rpg_memory.BASE_BUDGET * 2).count("原文摘录"),
+            rpg_memory.EXCERPT_LINE_CAP * 2,
+        )
+
     async def test_window_message_is_not_excerpted_again(self):
         """窗口内那几条的整段正文已经原样进 prompt，再摘一次就是重复占额度。"""
         in_window = RpgMessage(id=9, role="assistant", content="药园失火那晚我们都在场。")
@@ -839,7 +887,6 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
         data = proposal(row.content)
         data["events"] = [{"kind": "public", "quote": row.content, "summary": "药园失火的消息传遍全镇", "visibility": "public"}]
         await self.settle(row, data)
-        self.assertEqual(self.sess.chronicle, ["药园失火的消息传遍全镇"])
         self.assertIn(row.content, event_memory([row], {self.npcs[1].id}, "回忆药园失火"))
 
     async def test_engine_relation_cost_is_not_applied_twice(self):
@@ -1108,6 +1155,136 @@ class StatCapTests(unittest.TestCase):
         )
         self.assertIn("精力 20/100", prompt)
         self.assertIn("斜杠后面是上限", prompt)
+
+
+class EvidenceParticipantTests(unittest.TestCase):
+    """事件 quote 里认不认得出这个人。**口径要和 rpg_context.named_npcs 一致。**
+
+    认不出的后果不是少一条事件，是 participants 被清空，于是「她赶来了」那道
+    闸门（inspect_proposal 里 came 那一段）判定没有依据，把一条写对了的证据
+    打回「缺少该角色赶来的原文依据」。真实存档里撞上的正是这个：正文写的是
+    「她推门进来」「妻子抱着被褥回来了」，模型的 quote 照抄了这一句。
+    """
+
+    def _npc(self, **kwargs):
+        return RpgNpc(id=7, module_id=1, name="韩曼宁", location="顶楼天台", **kwargs)
+
+    def _participants(self, npc, quote, narration, mode="group"):
+        events, _errors = _evidence_events(
+            {"events": [{"kind": "move", "quote": quote, "participants": [npc.id], "domains": ["scene"]}]},
+            narration, [npc], {"origin_present": [], "mode": mode},
+        )
+        return events[0]["participants"] if events else None
+
+    def test_her_real_name_in_the_quote_counts(self):
+        npc = self._npc()
+        self.assertEqual(self._participants(npc, "韩曼宁抱着被褥回来了", "韩曼宁抱着被褥回来了"), [7])
+
+    def test_a_keyword_in_the_quote_counts_too(self):
+        # 这一条就是那个 bug：从前只认真名，「妻子」认不出来
+        npc = self._npc(keywords="妻子,娘子")
+        self.assertEqual(self._participants(npc, "妻子抱着被褥回来了", "妻子抱着被褥回来了"), [7])
+
+    def test_a_stranger_in_the_quote_is_still_dropped(self):
+        # 放宽的只有「同一个人的别称」，没有放宽「没提到的人也算」
+        npc = self._npc(keywords="妻子,娘子")
+        self.assertEqual(self._participants(npc, "灶上的水开了", "灶上的水开了"), [])
+
+    def test_private_mode_is_untouched(self):
+        # 私聊仍然只认出发时在场的那份名单，keywords 不给它开后门
+        npc = self._npc(keywords="妻子,娘子")
+        self.assertEqual(self._participants(npc, "妻子抱着被褥回来了", "妻子抱着被褥回来了", mode="private"), [])
+
+
+class ArrivalEvidenceTests(unittest.TestCase):
+    """她凭什么出现在玩家跟前（apply_proposal 里 came 那道闸）。
+
+    两头都不能错：放行凭空瞬移，玩家看着她从别的区县瞬间进屋；拦下写对了的
+    到场，玩家看着她在自己客厅里说话，而侧栏写她还在商场。
+    """
+
+    def _run(self, narration, quote):
+        npc = RpgNpc(id=46, module_id=1, name="韩曼宁", location="家")
+        places = [RpgLocation(id=1, module_id=1, name="家"),
+                  RpgLocation(id=2, module_id=1, name="情趣内衣店")]
+        working = SimpleNamespace(
+            stats={}, inventory=[], skills=[], location="家", flags={}, flag_days={},
+            npc_states={}, npc_notes={}, npc_appearance={}, npc_places={"46": "情趣内衣店"},
+            npc_followers=[], npc_history={}, npc_milestones=[], npc_activities={},
+            npc_activity_log={}, place_notes={}, status="alive", visited=["家"],
+            chronicle=[], day=8, slot="深夜", turn_count=1, time_slots=[],
+            summary="", thread_summaries={}, thread_upto={}, dc_ledger={},
+            summarized_upto_id=0, slot_actions=0, slot_chats=0, tasks=[],
+        )
+        report = {
+            "narration": narration, "origin_present": [], "mode": "group",
+            "fixed_location": "家", "warnings": [], "engine_facts": [],
+            "baseline": capture(working), "engine_before": capture(working),
+        }
+        data = {"npc_places": {"韩曼宁": "家"},
+                "checks": {domain: "unchanged" for domain in DOMAINS}}
+        data["checks"]["scene"] = "changed"
+        events = [{"kind": "move", "quote": quote, "participants": [46],
+                   "domains": ["scene"], "witnesses": [], "visibility": "witnessed"}]
+        issues = {domain: [] for domain in DOMAINS}
+        module = SimpleNamespace(
+            stat_defs=[], relation_stat_defs=[], step_caps={}, item_defs=[],
+        )
+        apply_proposal(module, working, data, [npc], places, report, issues, {}, events)
+        return working.npc_places, issues["scene"]
+
+    def test_an_arrival_written_one_sentence_away_from_the_quote_counts(self):
+        """真实存档第 12 局：她真的进屋了，可模型给的 quote 是门响那一句。
+
+        「防盗门那边终于响了」一个到场动作词都没有，于是这条写对了的证据被打回，
+        她留在情趣内衣店——玩家在自己客厅里跟她说话，侧栏写她在商场
+        """
+        places, issues = self._run(
+            "防盗门那边终于响了。锁舌转了两圈。韩曼宁侧身挤进来，带进来一股干燥气味。",
+            "防盗门那边终于响了。",
+        )
+        self.assertEqual(places, {"46": "家"})
+        self.assertEqual(issues, [])
+
+    def test_a_forged_transit_note_is_still_turned_away(self):
+        """通篇没有她走这一趟的话，只有一张事后补的过路条——照旧拦下。
+
+        这是加上正文兜底之前那道闸防的东西，放宽不能把它一起放掉
+        """
+        places, issues = self._run(
+            "韩曼宁侧躺在床上，蜷着身子，呼吸很轻。",
+            "韩曼宁侧躺在床上，蜷着身子",
+        )
+        self.assertEqual(places, {"46": "情趣内衣店"})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("赶来的原文依据", issues[0])
+
+    def test_an_arrival_verb_next_to_someone_else_does_not_count(self):
+        """到场动作词得和她在同一句里，不是整段里有就算。
+
+        「你回到家，客厅黑着灯」有「回」也有「到」，可写的是玩家自己走这一趟；
+        她只是被提了一句挎包。按整段搜的话这两句话就能把任何人放进屋。
+        quote 用没有动作词的那半句，好让判断落到正文那道兜底上
+        """
+        places, issues = self._run(
+            "你回到家，客厅黑着灯。茶几上搁着韩曼宁的挎包。",
+            "茶几上搁着韩曼宁的挎包。",
+        )
+        self.assertEqual(places, {"46": "情趣内衣店"})
+        self.assertEqual(len(issues), 1)
+
+    def test_a_player_arrival_in_the_same_sentence_as_her_name_does_not_count(self):
+        """「你回到家，韩曼宁正从厨房走出来」——「回」是玩家走的，不是她。
+
+        她的名字只是同句出现。不排掉提到玩家的句子，这一句就能把任何人放进屋，
+        正是这道闸最初拦的那种瞬移
+        """
+        places, issues = self._run(
+            "你回到家，韩曼宁正从厨房走出来。客厅黑着灯。",
+            "客厅黑着灯。",
+        )
+        self.assertEqual(places, {"46": "情趣内衣店"})
+        self.assertEqual(len(issues), 1)
 
 
 if __name__ == "__main__":

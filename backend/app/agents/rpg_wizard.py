@@ -16,7 +16,8 @@ from app.services import llm_client, llm_json
 from app.services.rpg_prompts import render
 from app.services.rpg_state import (
     DISPLAY_BAR, DISPLAY_CELLS, DISPLAY_NUMBER, DISPLAY_HIDDEN,
-    ON_ZERO_NONE, ON_ZERO_DEAD, ON_ZERO_FLAG,
+    EFFECT_CHARS, ON_ZERO_NONE, ON_ZERO_DEAD, ON_ZERO_FLAG,
+    TIER_LABEL_CHARS, TIER_NOTE_CHARS, tier_list,
 )
 
 # 向导的步骤顺序。id 与 rpg_wizard.jinja2 / rpg_wizard_extract.jinja2 的 stage
@@ -395,6 +396,76 @@ async def generate_batch(
 
     result["dropped"] = dropped
     return result
+
+
+async def generate_tiers(
+    spec: dict, instruction: str, count: int, model_ref: str,
+    temperature: float | None = None,
+) -> dict:
+    """给**一项**数值划整张档表，清洗后返回 {"tiers": [...], "dropped": [...]}。
+
+    不落库，前端预览后才写回表单——同这一摊其他几个生成入口。
+
+    按单项来而不是整张表一次补齐：档表属于某一个数值，作者要的是「这一项还没
+    分档，帮我划」，而一次盖好几项容易把已经调好的那几项一起冲掉。
+
+    清洗直接过 tier_list：排序、字数上限、`at` 填歪了那一行跳过，全是它本来就
+    在做的事（手填那条路径也走它），这里再写一遍必然和它漂移。
+    """
+    name = _text(spec.get("name"))
+    if not name:
+        raise ValueError("这一项数值还没有名字，先填上名字再分档")
+    lo = _num(spec.get("min"), 0)
+    raw_max = spec.get("max")
+    hi = None if raw_max is None else _num(raw_max, None)
+    existing = "；".join(
+        f"{t['at']} 起 {t['label'] or t['note']}"
+        for t in tier_list(spec) if t["label"] or t["note"]
+    )
+    prompt = render(
+        "rpg_stat_tiers.jinja2",
+        name=name,
+        effect=_text(spec.get("effect"), EFFECT_CHARS),
+        range_text=f"{lo} 到 {hi}" if hi is not None else f"{lo} 起，没有上限",
+        instruction=_text(instruction),
+        existing=existing,
+        count=max(2, min(count, 8)),
+        label_max=TIER_LABEL_CHARS,
+        note_max=TIER_NOTE_CHARS,
+    )
+    model, api_format = llm_client.get_fast_client(model_ref)
+    parsed, _, _ = await llm_json.call_json(
+        [{"role": "system", "content": prompt},
+         {"role": "user", "content": _text(instruction) or f"给「{name}」分档"}],
+        model,
+        api_format,
+        max_tokens=_STAGE_MAX_TOKENS_DEFAULT,
+        temperatures=_ladder(temperature),
+    )
+
+    dropped: list[str] = []
+    tiers = tier_list(parsed if isinstance(parsed, dict) else {})
+    # 落在范围外的档一律丢掉：下界比上限还高的那一档永远匹配不上，而**比 min
+    # 还低的那一档会顶掉真正的最低档**（tier_of 取「够得上的最后一档」，值永远
+    # 够得上它）——两种都不报错，只是那一档白填
+    kept = []
+    for tier in tiers:
+        if tier["at"] < lo or (hi is not None and tier["at"] > hi):
+            dropped.append(f"档位「{tier['label'] or tier['at']}」的下界 {tier['at']} 不在 {lo}–{hi if hi is not None else '∞'} 里，已去掉")
+            continue
+        kept.append(tier)
+    # 同一个下界出现两次 = 后一档永远取不到（tier_of 取最后一个够得上的）
+    seen: set = set()
+    unique = []
+    for tier in kept:
+        if tier["at"] in seen:
+            dropped.append(f"档位「{tier['label'] or tier['at']}」和前一档的下界都是 {tier['at']}，已去掉")
+            continue
+        seen.add(tier["at"])
+        unique.append(tier)
+    if not unique:
+        raise ValueError("这次没划出能用的档位，把要求写具体点再试")
+    return {"tiers": unique, "dropped": dropped}
 
 
 def _clean_world(parsed: dict, dropped: list) -> dict:

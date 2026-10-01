@@ -22,7 +22,6 @@ class BaselineTests(unittest.TestCase):
             "state": rpg_context.STATE_TOKEN_BUDGET,
             "npc": rpg_context.NPC_TOKEN_BUDGET,
             "roster": rpg_context.ROSTER_TOKEN_BUDGET,
-            "chronicle": rpg_context.CHRONICLE_TOKEN_BUDGET,
             "meaning": rpg_context.MEANING_TOKEN_BUDGET,
             "scene": rpg_context.SCENE_TOKEN_BUDGET,
             "catalog": rpg_context.CATALOG_TOKEN_BUDGET,
@@ -66,7 +65,6 @@ class FitSectionsTests(unittest.TestCase):
             ("roster", "总表" + big),
             ("state", "【你】血 30"),
             ("sample", "样例" + big),
-            ("chronicle", "外场" + big),
             ("memories", "【长期事实】她答应过你"),
             ("summary", "【此前剧情】你们在药园见过"),
             ("rules", "不要写心理活动"),
@@ -85,8 +83,8 @@ class FitSectionsTests(unittest.TestCase):
                      "【此前剧情】你们在药园见过", "不要写心理活动"):
             with self.subTest(keep=keep):
                 self.assertIn(keep, text)
-        # 四块可丢的全丢光了，而且是按 DROP_ORDER 的顺序丢的
-        self.assertEqual(dropped, ["sample", "roster", "chronicle", "catalog"])
+        # 三块可丢的全丢光了，而且是按 DROP_ORDER 的顺序丢的
+        self.assertEqual(dropped, ["sample", "roster", "catalog"])
 
     def test_the_least_important_block_goes_first(self):
         """只超一点点时只丢一块，而且是叙事样例——不是排在最后的写作规则。"""

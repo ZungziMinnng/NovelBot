@@ -3,7 +3,8 @@ import toast from 'react-hot-toast'
 import { Minus, Plus, X } from 'lucide-react'
 import { rpgApi } from '@/api/client'
 import type { RpgLocation, RpgModule, RpgNpc, RpgSession } from '@/api/client'
-import { npcPlace } from './condition'
+import { AWAY, npcAway, npcPlace } from './condition'
+import { splitList } from './rpgUi'
 
 /** 背包里的一行。fresh = 玩家刚在「加一件」里敲出来、还没提交的那几行——
  *  它们和已经躺在背包里的东西长得一样，只有提交时拿什么当「原来有几件」不同 */
@@ -38,6 +39,8 @@ function bump(raw: string | undefined, fallback: number, delta: number): string 
 const INPUT = 'w-16 px-1.5 py-0.5 text-xs rounded border bg-background'
 const FREE_INPUT = 'flex-1 min-w-0 px-1.5 py-0.5 text-xs rounded border bg-background'
 const BTN = 'px-2 py-0.5 text-xs rounded border hover:bg-muted'
+/** 人物位置下拉里「主角」那一项的值。NPC 的值是 id 字符串，撞不上 */
+const PLAYER = '__player__'
 
 /** 修改器。宽度由外面那个浮层给，这里只管内部布局 */
 export default function TweakPanel({
@@ -86,15 +89,36 @@ export default function TweakPanel({
   const [busy, setBusy] = useState(false)
   const [placeNpcId, setPlaceNpcId] = useState('')
   const [placeInputs, setPlaceInputs] = useState<Record<string, string | null>>({})
+  const [slotText, setSlotText] = useState('')
+  // 主角位置单独一份：null = 没动过，提交时不发
+  const [playerPlace, setPlayerPlace] = useState<string | null>(null)
+  const isPlayer = placeNpcId === PLAYER
   const movableNpcs = npcs.filter(npc => npc.role !== 'protagonist')
-  const selectedNpc = movableNpcs.find(npc => String(npc.id) === placeNpcId) || movableNpcs[0]
+  const selectedNpc = isPlayer ? undefined
+    : movableNpcs.find(npc => String(npc.id) === placeNpcId) || movableNpcs[0]
   const selectedId = selectedNpc ? String(selectedNpc.id) : ''
-  const currentPlace = selectedNpc
-    ? npcPlace(selectedNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location)
-    : ''
+  // 已离开时下拉框要停在「已离开」那一项上，所以这里取原值而不是解析出来的空
+  const currentPlace = !selectedNpc ? ''
+    : npcAway(selectedNpc, sess) ? AWAY
+    : npcPlace(selectedNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location)
   const hasPlaceEdit = Object.prototype.hasOwnProperty.call(placeInputs, selectedId)
   const selectedPlace = hasPlaceEdit ? placeInputs[selectedId] ?? '' : currentPlace
   const placeNames = Array.from(new Set(locations.map(place => place.name).filter(Boolean)))
+  const playerMoved = !!playerPlace && playerPlace !== sess.location
+  const pendingPlaces = Object.keys(placeInputs).length + (playerMoved ? 1 : 0)
+
+  // 时段表：这一局自己那份为空 = 跟模组走（活的）。框里铺的是**实际在用的**
+  // 那份，玩家改完提交，敲成和模组一字不差就退回跟模组走（同建局那个表单）
+  const moduleSlots = module?.time_slots || []
+  const ownSlots = sess.time_slots || []
+  const activeSlots = ownSlots.length ? ownSlots : moduleSlots
+  const slotList = splitList(slotText)
+  // 这一局冻着自己一份、而模组后来改过：老 bug 的残留就长这个样子（建局表单
+  // 从前无条件把预填那份发回来，于是每局开出来就冻住）。指出来，否则玩家看到
+  // 的是「模组里明明填了，游戏里没有」
+  const frozenDiff = ownSlots.length > 0 && ownSlots.join('，') !== moduleSlots.join('，')
+    ? moduleSlots.filter(name => !ownSlots.includes(name))
+    : []
 
   /** 把面板整个铺回当前的真实数值。「还原」按钮跑的就是这个，不是第二套逻辑 */
   const reset = () => {
@@ -123,6 +147,8 @@ export default function TweakPanel({
     setFlagRows(Object.entries(sess.flags || {}).map(([key, val]) => ({ key, val: !!val })))
     setFlagName('')
     setPlaceInputs({})
+    setPlayerPlace(null)
+    setSlotText((sess.time_slots?.length ? sess.time_slots : module?.time_slots || []).join('，'))
   }
 
   // sess 换了（应用完、或者刚打完一轮）就重铺，免得面板上停着一份过期的数字
@@ -232,8 +258,15 @@ export default function TweakPanel({
         }
       }
 
+      // 和实际在用的那份一字不差 = 没动过，不发（发了会把「跟模组走」的局
+      // 当场冻住，正是那条老 bug 干的事）。敲成和模组一样就发空数组，退回跟着走
+      const slotsChanged = slotList.join('，') !== activeSlots.join('，')
       const res = await rpgApi.sessions.tweak(sessionId, {
         stats, relations, inventory, flags, npc_places: placeInputs,
+        ...(playerPlace && playerPlace !== sess.location ? { location: playerPlace } : {}),
+        ...(slotsChanged
+          ? { time_slots: slotList.join('，') === moduleSlots.join('，') ? [] : slotList }
+          : {}),
       })
       onApplied(res.session)
       // notes 是后端那几句「哪一项被夹到了 X」，逐条说出来；
@@ -253,20 +286,40 @@ export default function TweakPanel({
         修改器：改完立刻生效，GM 不会知道你动过手。
       </p>
 
-      {selectedNpc && (
+      {(selectedNpc || isPlayer || placeNames.length > 0) && (
         <div className="space-y-1.5">
           <p className="text-xs font-medium">人物位置</p>
           <select
             aria-label="选择位置修改对象"
-            value={selectedId}
+            value={isPlayer || !selectedNpc ? PLAYER : selectedId}
             onChange={event => setPlaceNpcId(event.target.value)}
             className={`${FREE_INPUT} w-full`}
           >
+            <option value={PLAYER}>{sess.char_name || '主角'}（主角）</option>
             {movableNpcs.map(npc => (
               <option key={npc.id} value={String(npc.id)}>{npc.name}</option>
             ))}
           </select>
-          <p className="text-[11px] text-muted-foreground">当前位置：{currentPlace || '未安排'}</p>
+          {isPlayer || !selectedNpc ? (
+            <>
+              <p className="text-[11px] text-muted-foreground">当前位置：{sess.location || '未安排'}</p>
+              <select
+                aria-label="主角目标地点"
+                value={playerPlace ?? sess.location ?? ''}
+                onChange={event => setPlayerPlace(event.target.value)}
+                className={`${FREE_INPUT} w-full`}
+              >
+                {!placeNames.includes(sess.location) && (
+                  <option value={sess.location || ''} disabled>{sess.location || '未安排'}（未登记地点）</option>
+                )}
+                {placeNames.map(name => <option key={name} value={name}>{name}</option>)}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                直接瞬移，不花时段、不看进入条件；跟着你的人一起过去。
+              </p>
+            </>
+          ) : (<>
+          <p className="text-[11px] text-muted-foreground">当前位置：{currentPlace === AWAY ? '已离开' : currentPlace || '未安排'}</p>
           <select
             aria-label="人物目标地点"
             value={selectedPlace}
@@ -276,7 +329,8 @@ export default function TweakPanel({
             className={`${FREE_INPUT} w-full`}
           >
             <option value="">恢复作息 / 常驻地点（解除跟随）</option>
-            {selectedPlace && !placeNames.includes(selectedPlace) && (
+            <option value={AWAY}>已离开（不在任何地方，等剧情带回来）</option>
+            {selectedPlace && selectedPlace !== AWAY && !placeNames.includes(selectedPlace) && (
               <option value={selectedPlace} disabled>{selectedPlace}（未登记地点）</option>
             )}
             {placeNames.map(name => <option key={name} value={name}>{name}</option>)}
@@ -295,8 +349,42 @@ export default function TweakPanel({
           <p className="text-[11px] text-muted-foreground">
             包含未出场人物。应用后改变本局当前位置；移到别处会解除跟随，后续仍按剧情、作息或随机移动活动。
           </p>
-          {Object.keys(placeInputs).length > 0 && (
-            <p className="text-[11px] text-primary">待应用：{Object.keys(placeInputs).length} 人的位置</p>
+          </>)}
+          {pendingPlaces > 0 && (
+            <p className="text-[11px] text-primary">待应用：{pendingPlaces} 人的位置</p>
+          )}
+        </div>
+      )}
+
+      {moduleSlots.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium">这一局的时段表</p>
+          <input
+            aria-label="这一局的时段表"
+            value={slotText}
+            onChange={event => setSlotText(event.target.value)}
+            placeholder={moduleSlots.join('，')}
+            className={`${FREE_INPUT} w-full`}
+          />
+          {frozenDiff.length > 0 && (
+            <p className="text-[11px] text-amber-600 dark:text-amber-500">
+              模组里的「{frozenDiff.join('、')}」这一局没有：开局时这份表被冻住了。
+              按「跟模组走」再按下面的「应用」才算改完。
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button
+              className={BTN}
+              disabled={!ownSlots.length}
+              onClick={() => setSlotText(moduleSlots.join('，'))}
+            >跟模组走</button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            逗号隔开。改成和模组一样就跟着模组走，以后作者加一格这一局也跟着变。
+            当前时段不在新表里会挪到第一格。
+          </p>
+          {slotList.join('，') !== activeSlots.join('，') && (
+            <p className="text-[11px] text-primary">待应用：时段表</p>
           )}
         </div>
       )}

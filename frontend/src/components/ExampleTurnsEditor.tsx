@@ -5,8 +5,8 @@ import AutoTextarea from '@/components/AutoTextarea'
 interface Props {
   value: ExampleTurn[]
   onChange: (v: ExampleTurn[]) => void
-  /** dialogue = 酒馆角色卡的对话示例，措辞按"玩家说 / 角色回"来 */
-  variant?: 'novel' | 'dialogue'
+  /** dialogue = 酒馆角色卡的对话示例，措辞按"玩家说 / 角色回"来；narration = 游戏的叙事示例 */
+  variant?: 'novel' | 'dialogue' | 'narration'
 }
 
 const COPY = {
@@ -36,6 +36,20 @@ const COPY = {
     template: {
       user: '你叫什么名字？',
       assistant: '（在此写下角色会怎么回答，连带神态和小动作。模型会照这段的语气、句长和描写密度来演。上面那句换成对应的玩家台词。）',
+    },
+  },
+  narration: {
+    title: '叙事示例（可空）',
+    hint: '写几组「玩家输入 → GM 怎么写」，作为真实对话轮插在最前面，只用前 3 组。主角的决定和台词都写进玩家输入，叙事只负责把它演出来，模型就不会学着替玩家做决定。留空则不注入。',
+    userLabel: '玩家输入',
+    assistantLabel: 'GM 叙事',
+    userPlaceholder: '阿隼拔刀，冲向挡路的守卫',
+    assistantPlaceholder: '你想要的旁白：句长、节奏、描写密度都按这段来...',
+    userRows: 2,
+    assistantRows: 5,
+    template: {
+      user: '阿隼拔刀，冲向挡路的守卫',
+      assistant: '（在此写下 GM 会怎么接这句：只把玩家输入里的动作演出来、铺开，别替主角多做决定。模型会照这段的腔调写。上面那句换成对应的玩家输入。）',
     },
   },
 } as const

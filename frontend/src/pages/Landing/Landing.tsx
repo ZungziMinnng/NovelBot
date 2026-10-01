@@ -1,10 +1,11 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { BookOpen, Beer, Dices, ChevronRight, LogOut, Settings } from 'lucide-react'
+import { BookOpen, Beer, Dices, ChevronRight, LogOut, Settings, Library } from 'lucide-react'
 import { authApi } from '@/api/client'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
 import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
+import StyleLibraryModal from '@/components/StyleLibrary/StyleLibraryModal'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useAuthStore } from '@/store/authStore'
 
@@ -59,6 +60,7 @@ export default function Landing() {
   const navigate = useNavigate()
   const nsfwMode = useSettingsStore((s) => s.nsfwMode)
   const authUser = useAuthStore((s) => s.user)
+  const [libraryOpen, setLibraryOpen] = useState(false)
 
   const handleLogout = useCallback(async () => {
     try {
@@ -163,7 +165,25 @@ export default function Landing() {
             )
           })}
         </div>
+
+        {/* 文风库三种模式共用，所以入口放首页，各模式里只有「从文风库取用」 */}
+        <button
+          onClick={() => setLibraryOpen(true)}
+          className="mt-5 w-full rounded-xl border bg-card/60 backdrop-blur-sm px-6 py-4 flex items-center gap-4 text-left hover:border-primary/60 transition-colors"
+        >
+          <div className="p-2.5 rounded-xl bg-primary/15 text-primary">
+            <Library className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold">文风库</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              导入一本 txt，提炼文风和原文片段，小说、酒馆、游戏都能取来当示例
+            </p>
+          </div>
+          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+        </button>
       </main>
+      {libraryOpen && <StyleLibraryModal onClose={() => setLibraryOpen(false)} />}
     </div>
   )
 }

@@ -143,6 +143,47 @@ class MovementTargetLooseningTests(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertEqual(rpg_turn.movement_target(content, places), "")
 
+    def test_a_bare_dao_is_a_movement_verb_too(self):
+        """裸「到」：表里有走到/回到/来到，偏偏没有它。
+
+        真实存档里撞上的是「跟上去，到天台看看她到底在干什么」——玩家留在原地，
+        GM 照着写了一段已经上了天台的剧情，结算再报「顶楼天台不是你这一轮待过
+        的地方」，那儿的近况一条都没记下。
+
+        单字这么常见还敢收，靠的是动词**后面**那道白名单：续字不在 _MOVE_TAIL
+        里就当成「这其实是个更长的地名」，一律不认
+        """
+        places = [RpgLocation(name=n) for n in ("顶楼天台", "家", "公司", "药店")]
+        for content, expect in (
+            ("到天台看看", "顶楼天台"),
+            ("跟上去，到天台看看她到底在干什么", "顶楼天台"),
+            ("到家", "家"),
+            ("到家了", "家"),
+            ("到药店买药", "药店"),
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(rpg_turn.movement_target(content, places), expect)
+
+    def test_a_bare_dao_still_refuses_what_it_should(self):
+        """裸「到」最怕的是把**别人**的到达、或者一句闲话认成玩家动身。
+
+        「问她什么时候到家」是这一批唯一需要新拦一道的：主语「她」被「什么时候」
+        四个字挤出了 _DENY_WINDOW，所以「时候」进了 _MOVE_DENY
+        """
+        places = [RpgLocation(name=n) for n in ("顶楼天台", "家", "公司", "药店")]
+        for content in (
+            # 「到」在这里是补语/介词的一部分，不是动身
+            "说到公司的事", "我想到家里还有事", "提到药店那个店员",
+            # 到达的是别人
+            "等她到家", "她到天台了", "看见她到天台", "她到公司了吗",
+            # 主语被「什么时候」挤出窗口，靠「时候」这个词拦住
+            "问她什么时候到家", "到时候去公司",
+            # 问句和否定照旧
+            "到家吗？", "别到天台去", "我没到过天台",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(rpg_turn.movement_target(content, places), "")
+
 
 class PerceptionWordingTests(unittest.TestCase):
     """「我看见赫敏去客栈」这类句子不是玩家在动身。
@@ -246,6 +287,93 @@ class PlaceShortNameTests(unittest.TestCase):
         # 「灵药园」是「灵药园柴房」的头三个字，但前缀那头不认；「后院」也不在
         # _MOVE_TAIL 里，所以这句照旧原地不动——认成「灵药园」就是送错地方
         self.assertEqual(rpg_turn.movement_target("去灵药园后院", self.places), "")
+
+
+class NewPlaceCandidateTests(unittest.TestCase):
+    """玩家说了个没登记过的地方，`movement_candidate` 把那个名字捞出来给路由去建。
+
+    两头都要测：**该建的建**（说得更长 = 另一个地方），**不该建的一个都别建**。
+    误建一条会永久长在作者的地点表里，而且每轮都拼进 prompt，所以「不该建」
+    那一组才是这个类的重点。
+    """
+
+    def setUp(self):
+        self.places = [RpgLocation(name=n) for n in ("织云阁", "织云阁地下密室")]
+        self.npcs = [RpgNpc(id=1, name="韩曼宁")]
+
+    def _at(self, content, places=None):
+        return rpg_turn.movement_candidate(content, places or self.places, self.npcs)
+
+    def test_a_longer_name_is_a_different_place(self):
+        # 需求里那个例子：已有「织云阁地下密室」，「太玄大殿密室」是另一个地方
+        self.assertEqual(self._at("去太玄大殿密室"), "太玄大殿密室")
+        self.assertEqual(self._at("我们去太玄大殿密室看看"), "太玄大殿密室")
+
+    def test_a_shorter_name_is_the_same_place_and_never_creates(self):
+        # 「密室」已经被 movement_target 认成「织云阁地下密室」了，这儿必须闭嘴，
+        # 否则同一个地方会被建第二遍
+        for content in ("去密室", "走吧，去密室，让她们俩陪着", "回织云阁"):
+            with self.subTest(content=content):
+                self.assertEqual(self._at(content), "")
+                self.assertTrue(rpg_turn.movement_target(content, self.places))
+
+    def test_the_action_tail_is_not_part_of_the_name(self):
+        self.assertEqual(self._at("去后山竹林看看"), "后山竹林")
+        self.assertEqual(self._at("去城南码头喝酒"), "城南码头")
+
+    def test_half_a_sentence_is_not_a_place_name(self):
+        for content in (
+            "去把那个箱子搬过来",   # 整句都不是地名
+            "去那儿看看",            # 指示代词
+            "去她房间",              # 代词
+            "去韩曼宁那儿",          # 具名角色
+            "去哪儿好呢",            # 疑问
+            "要去太玄大殿密室吗",     # 在打听，不是动身
+            "他去太玄大殿密室了",     # 说的是别人
+            "别去太玄大殿密室",       # 否定
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._at(content), "")
+
+    def test_two_destinations_create_nothing(self):
+        # 同 movement_target：一句话指了两个地方就别替玩家挑。**这一条尤其要紧**
+        # ——不按分句切的话，切出来的「客栈，再去太玄大殿密室」会整条建进库
+        self.assertEqual(self._at("先回旧城客栈，再去太玄大殿密室"), "")
+
+    def test_a_one_character_name_is_refused(self):
+        # 建出一个叫「园」的地点，往后每个「去后园」都会对上它
+        self.assertEqual(self._at("去园"), "")
+
+    def test_a_place_name_must_look_like_a_place(self):
+        """日常句子里的移动动词 + 一个人/一件事，不许切出地名来。
+
+        这一组全是真实回归：第一版拿 `_MOVE_TAIL` 当地名切割器，而那张表认得
+        「说」「问」「找」「洗」这些日常动词，于是「我去宗主说得对」在「说」那儿
+        切出一个叫「宗主」的地点建进了库。`_MOVE_TAIL` 本来只是边界确认器——
+        原来那条路有登记地名当锚，这条路没有，锚只能由地名自己的形状来当。
+        """
+        for content in (
+            "宗主说得对，修为定生死，我没什么好说的",
+            "我去宗主说得对，修为定生死",
+            "我去宗主说得对",
+            "回去修炼了，宗主说得对",
+            "去问问宗主说得对不对",
+            "去见宗主",
+            "去找她",
+            "去修炼",
+            "我要去洗澡",
+            "去睡觉",
+            "去吃饭",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self._at(content), "")
+
+    def test_a_longer_name_under_an_existing_one_is_still_a_new_place(self):
+        # 「灵药园后院」：在册的只有「灵药园柴房」，后缀规则认不出它（那正是
+        # _place_hits 要防的前缀方向），于是照这个功能的口径它是个新地方
+        places = [RpgLocation(name=n) for n in ("灵药园柴房", "灵药园")]
+        self.assertEqual(rpg_turn.movement_target("去灵药园后院", places), "")
+        self.assertEqual(self._at("去灵药园后院", places), "灵药园后院")
 
 
 class MovementTurnTests(unittest.IsolatedAsyncioTestCase):
@@ -426,6 +554,39 @@ class MovementTurnTests(unittest.IsolatedAsyncioTestCase):
         await self._turn("出发", move_to="灵药园")
         rows = list((await self.db.execute(select(RpgMessage))).scalars())
         self.assertTrue(all(row.location == "灵药园" for row in rows))
+
+    async def test_an_unregistered_place_is_created_and_walked_into(self):
+        # 玩家说了个地点表里没有的地方：当场建一条，这一轮就走过去。
+        # 「走过去」这半边尤其要紧——只建不走的话，GM 照着写一段已经到了的剧情，
+        # 而引擎地点还在原地，结算只能报「剧情地点与引擎地点冲突」
+        await self._turn("去后山竹林看看")
+        made = (await self.db.execute(
+            select(RpgLocation).where(RpgLocation.name == "后山竹林")
+        )).scalars().first()
+        self.assertIsNotNone(made)
+        self.assertEqual(self.sess.location, "后山竹林")
+        rows = list((await self.db.execute(select(RpgMessage))).scalars())
+        self.assertTrue(all(row.location == "后山竹林" for row in rows))
+
+    async def test_a_short_name_moves_to_the_existing_place_instead_of_creating(self):
+        # 用户那个例子的反面：已有「灵药园柴房」，玩家说「柴房」→ 走过去，不新建
+        self.sess.location = "灵药园"
+        await self.db.commit()
+        await self._turn("回柴房")
+        self.assertEqual(self.sess.location, "灵药园柴房")
+        names = [l.name for l in (await self.db.execute(select(RpgLocation))).scalars()]
+        self.assertEqual(names.count("柴房"), 0)
+        self.assertEqual(len(names), 2)
+
+    async def test_the_module_switch_turns_it_off(self):
+        module = await self.db.get(RpgModule, self.sess.module_id)
+        module.auto_location = False
+        await self.db.commit()
+        await self._turn("去后山竹林看看")
+        self.assertEqual(self.sess.location, "灵药园柴房")
+        self.assertEqual(
+            len(list((await self.db.execute(select(RpgLocation))).scalars())), 2,
+        )
 
 
 class SceneBreakMarkerTests(unittest.TestCase):
