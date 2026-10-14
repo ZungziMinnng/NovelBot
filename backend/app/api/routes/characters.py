@@ -1,17 +1,21 @@
+import logging
 import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
+from app.models.chapter import Chapter
 from app.models.character import Character
 from app.models.novel import Novel
 from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterOut, EnhanceRequest, ImagePromptRequest
 from app.agents import character_agent
 from app.services.entity_embeddings import embed_character, remove_entity_embedding
-from app.services import state_snapshot
+from app.services import state_snapshot, summarizer
 from app.services.relevance_selector import select_character_appearance_context
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -71,20 +75,43 @@ async def get_character(character_id: int, user: CurrentUser, db: AsyncSession =
 @router.post("/", response_model=CharacterOut)
 async def create_character(data: CharacterCreate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     await get_owned_novel(db, data.novel_id, user)
-    char = Character(**data.model_dump())
+    char = Character(**data.model_dump(exclude={"source_chapter"}))
     db.add(char)
     await db.flush()
 
-    if not char.full_sheet:
-        novel = await db.get(Novel, char.novel_id)
-        if novel:
-            sheet = await character_agent.generate_character_sheet(novel, char)
-            char.full_sheet = sheet
+    novel = await db.get(Novel, char.novel_id)
+    # 从正文发现的角色：带上来源章，角色卡和状态都以那一章正文为准
+    source = None
+    if data.source_chapter:
+        source = (await db.execute(
+            select(Chapter).where(
+                Chapter.novel_id == char.novel_id,
+                Chapter.number == data.source_chapter,
+            )
+        )).scalars().first()
+        if source is not None and not (source.content or "").strip():
+            source = None
+
+    if not char.full_sheet and novel:
+        source_text = character_agent.mention_paragraphs(source.content, char.name) if source else ""
+        sheet = await character_agent.generate_character_sheet(novel, char, source_text=source_text)
+        char.full_sheet = sheet
 
     if not char.current_state:
         char.current_state = character_agent.init_character_state(char)
 
     await db.commit()
+
+    # 来源章已经确认过、状态更新跑在角色入库之前，这个角色在那一章的经历和关系就丢了；
+    # 这里只给新角色补算一次。失败不影响建角色，状态会在后续章节确认时继续累积
+    if source is not None and novel:
+        try:
+            await summarizer.update_character_states(db, source, novel, only_ids={char.id})
+            await db.commit()
+        except Exception:
+            logger.warning("新角色 %s 补算来源章 %s 状态失败", char.name, source.number, exc_info=True)
+            await db.rollback()
+
     await db.refresh(char)
     await embed_character(char.novel_id, char)
     return char

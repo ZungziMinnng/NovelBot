@@ -13,6 +13,7 @@ PROMPT_META: dict[str, dict[str, str]] = {
     "writer.jinja2": {"category": "创作", "label": "Writer 写作", "description": "章节生成系统提示词"},
     "writer_opening.jinja2": {"category": "创作", "label": "Writer 开篇（黄金三章）", "description": "仅第 1-3 章追加的开篇要求，按章号分三段；与护栏同样不被自定义写手提示词覆盖"},
     "rewriter.jinja2": {"category": "创作", "label": "Rewriter 重写", "description": "章节重写系统提示词"},
+    "passage_rewrite.jinja2": {"category": "创作", "label": "选段改写/扩写/缩写", "description": "编辑器里选中一段让 AI 改写、扩写或缩写的系统提示词。按 mode 分三段要求；只输出选中段的替换文字，前后文只作衔接参考"},
     "outline.jinja2": {"category": "世界与大纲", "label": "Outline 大纲", "description": "章节大纲生成提示词"},
     "initializer.jinja2": {"category": "世界与大纲", "label": "World 初始化", "description": "世界观初始化提示词"},
     "world_optimizer.jinja2": {"category": "世界与大纲", "label": "World 优化", "description": "世界观优化提示词"},

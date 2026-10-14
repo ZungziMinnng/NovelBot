@@ -34,6 +34,7 @@ def _to_out(p: ApiProvider) -> ApiProviderOut:
         api_key_masked=_mask_key(p.api_key),
         api_format=p.api_format,
         use_proxy=p.use_proxy,
+        gemini_base_url=p.gemini_base_url or "",
         created_at=p.created_at,
     )
 
@@ -54,6 +55,7 @@ async def create_provider(data: ApiProviderCreate, user: CurrentUser, db: AsyncS
         api_key=data.api_key,
         api_format=data.api_format,
         use_proxy=data.use_proxy,
+        gemini_base_url=data.gemini_base_url.strip(),
         user_id=user.id,
     )
     db.add(provider)
@@ -76,6 +78,8 @@ async def update_provider(provider_id: int, data: ApiProviderUpdate, user: Curre
         provider.api_format = data.api_format
     if data.use_proxy is not None:
         provider.use_proxy = data.use_proxy
+    if data.gemini_base_url is not None:
+        provider.gemini_base_url = data.gemini_base_url.strip()
     await db.commit()
     await db.refresh(provider)
     # 同步更新引用该供应商的模型的反规范化字段

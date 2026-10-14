@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,7 +15,9 @@ from app.models.faction import Faction
 from app.models.memory import Memory
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterConfirmRequest
 from app.agents import character_agent
+from app.models.chapter_version import ChapterVersion
 from app.services import summarizer, vector_store, entity_embeddings, prose_lint, state_snapshot
+from app.services import chapter_versions, chapter_order, word_stats
 from app.api.deps import CurrentUser, get_owned_novel, get_owned_child
 
 router = APIRouter()
@@ -71,6 +74,8 @@ async def create_chapter(data: ChapterCreate, user: CurrentUser, db: AsyncSessio
     chapter = Chapter(**data.model_dump())
     chapter.word_count = len(chapter.content)
     db.add(chapter)
+    await db.flush()
+    await word_stats.record(db, chapter.novel_id, chapter.word_count)
     await db.commit()
     await db.refresh(chapter)
     return chapter
@@ -79,10 +84,15 @@ async def create_chapter(data: ChapterCreate, user: CurrentUser, db: AsyncSessio
 @router.patch("/{chapter_id}", response_model=ChapterOut)
 async def update_chapter(chapter_id: int, data: ChapterUpdate, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
+    old_words = chapter.word_count or 0
+    if data.content is not None and data.content != chapter.content:
+        # 手动编辑走自动保存，每停手 2 秒一次；snapshot 内部按时间间隔节流
+        await chapter_versions.snapshot(db, chapter, "edit")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(chapter, k, v)
     if data.content is not None:
         chapter.word_count = len(data.content)
+        await word_stats.record(db, chapter.novel_id, chapter.word_count - old_words)
     await db.commit()
     await db.refresh(chapter)
     return chapter
@@ -326,6 +336,8 @@ async def discover_entities(chapter_id: int, user: CurrentUser, db: AsyncSession
         existing_char_names, existing_entity_names, existing_locations,
         existing_tech_names, existing_faction_names,
     )
+    for c in characters:
+        c["source_chapter"] = chapter.number
 
     return {
         "characters": characters,
@@ -363,6 +375,9 @@ async def batch_update_volume(body: BatchVolumeRequest, user: CurrentUser, db: A
 @router.delete("/{chapter_id}")
 async def delete_chapter(chapter_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
     chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
+    await _wait_memory(chapter.novel_id)
+    # 删的是最新章就把状态卡恢复到它生成之前，否则重写时还带着被删内容的结论
+    rolled_back = await state_snapshot.rewind_deleted(db, chapter.novel_id, [chapter])
     # 删除该章节的所有 Memory 行，防止污染后续章节的滚动摘要窗口
     await db.execute(
         sql_delete(Memory).where(
@@ -386,9 +401,26 @@ async def delete_chapter(chapter_id: int, user: CurrentUser, db: AsyncSession = 
     novel = await db.get(Novel, chapter.novel_id)
     if novel and chapter.number == novel.current_chapter:
         novel.current_chapter = chapter.number - 1
+    await _forget_chapters(db, [chapter.id])
+    removed_words = chapter.word_count or 0
+    novel_id = chapter.novel_id
     await db.delete(chapter)
+    await word_stats.record(db, novel_id, -removed_words)
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "state_rolled_back": rolled_back}
+
+
+async def _wait_memory(novel_id: int) -> None:
+    """刚生成完记忆管线还在后台写状态，不等它跑完，回滚之后又会被写回去。"""
+    from app.agents.orchestrator import _pending_memory
+    pending = _pending_memory(novel_id)
+    if pending:
+        await asyncio.wait({pending})
+
+
+async def _forget_chapters(db: AsyncSession, chapter_ids: list[int]) -> None:
+    """删章时一并清掉它的历史版本。挂在章号上的便签不动：那一章重写时还要提醒。"""
+    await chapter_versions.delete_for_chapters(db, chapter_ids)
 
 
 class BatchDeleteRequest(BaseModel):
@@ -406,6 +438,9 @@ async def batch_delete_chapters(body: BatchDeleteRequest, user: CurrentUser, db:
 
     novel_id = chapters[0].novel_id
     ids = [c.id for c in chapters]
+
+    await _wait_memory(novel_id)
+    rolled_back = await state_snapshot.rewind_deleted(db, novel_id, chapters)
 
     # 删除这些章节的所有 Memory 行，防止污染后续章节的滚动摘要窗口
     await db.execute(sql_delete(Memory).where(Memory.chapter_id.in_(ids)))
@@ -425,9 +460,12 @@ async def batch_delete_chapters(body: BatchDeleteRequest, user: CurrentUser, db:
         doc_ids.extend(f"chapter_{cid}_chunk_{i}" for i in range(50))
     await vector_store.adelete_docs(novel_id, doc_ids)
 
+    await _forget_chapters(db, ids)
+    removed_words = sum(ch.word_count or 0 for ch in chapters)
     for ch in chapters:
         await db.delete(ch)
     await db.flush()
+    await word_stats.record(db, novel_id, -removed_words)
 
     # 按剩余章节回退小说进度
     novel = await db.get(Novel, novel_id)
@@ -438,4 +476,102 @@ async def batch_delete_chapters(body: BatchDeleteRequest, user: CurrentUser, db:
         novel.current_chapter = max_remaining or 0
 
     await db.commit()
-    return {"ok": True, "deleted": len(chapters)}
+    return {"ok": True, "deleted": len(chapters), "state_rolled_back": rolled_back}
+
+
+# ── 调整顺序 / 插入新章 ─────────────────────────────────────────────────────
+
+class ReorderRequest(BaseModel):
+    novel_id: int
+    chapter_ids: list[int]
+
+
+@router.post("/reorder")
+async def reorder_chapters(body: ReorderRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """调整最后一章已确认章节之后那一段未确认章节的顺序。规则见 services/chapter_order.py。"""
+    await get_owned_novel(db, body.novel_id, user)
+    try:
+        moved = await chapter_order.reorder(db, body.novel_id, body.chapter_ids)
+    except chapter_order.OrderError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await db.commit()
+    await chapter_order.sync_vectors(body.novel_id, moved)
+    return {"ok": True, "moved": len(moved)}
+
+
+class InsertChapterRequest(BaseModel):
+    novel_id: int
+    before_chapter_id: int
+    title: str = ""
+
+
+@router.post("/insert", response_model=ChapterOut)
+async def insert_chapter(body: InsertChapterRequest, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """在某个未确认章节前面插一个空章，后面的章节号依次 +1。"""
+    await get_owned_novel(db, body.novel_id, user)
+    try:
+        chapter, moved = await chapter_order.insert_before(db, body.novel_id, body.before_chapter_id, body.title)
+    except chapter_order.OrderError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await db.commit()
+    await db.refresh(chapter)
+    await chapter_order.sync_vectors(body.novel_id, moved)
+    return chapter
+
+
+# ── 历史版本 ────────────────────────────────────────────────────────────────
+
+@router.get("/{chapter_id}/versions")
+async def list_versions(chapter_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """该章的历史版本，新的在前。不带正文，点开某一版再取。"""
+    await get_owned_child(db, Chapter, chapter_id, user, "章节")
+    rows = (await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter_id)
+        .order_by(ChapterVersion.created_at.desc(), ChapterVersion.id.desc())
+    )).scalars().all()
+    return [
+        {"id": v.id, "reason": v.reason, "word_count": v.word_count, "created_at": v.created_at}
+        for v in rows
+    ]
+
+
+async def _owned_version(db: AsyncSession, chapter_id: int, version_id: int, user) -> tuple[Chapter, ChapterVersion]:
+    chapter = await get_owned_child(db, Chapter, chapter_id, user, "章节")
+    version = await db.get(ChapterVersion, version_id)
+    if version is None or version.chapter_id != chapter_id:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return chapter, version
+
+
+@router.get("/{chapter_id}/versions/{version_id}")
+async def get_version(chapter_id: int, version_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    _, version = await _owned_version(db, chapter_id, version_id, user)
+    return {
+        "id": version.id, "reason": version.reason, "word_count": version.word_count,
+        "created_at": version.created_at, "content": version.content,
+    }
+
+
+@router.post("/{chapter_id}/versions/{version_id}/restore", response_model=ChapterOut)
+async def restore_version(chapter_id: int, version_id: int, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """把正文换回这一版。换之前当前正文也存一版，恢复错了还能再换回来。
+    和手动编辑一样只换正文，不动确认状态和记忆。"""
+    chapter, version = await _owned_version(db, chapter_id, version_id, user)
+    await chapter_versions.snapshot(db, chapter, "restore")
+    old_words = chapter.word_count or 0
+    chapter.content = version.content
+    chapter.word_count = len(version.content)
+    await word_stats.record(db, chapter.novel_id, chapter.word_count - old_words)
+    await db.commit()
+    await db.refresh(chapter)
+    return chapter
+
+
+# ── 日更统计 ────────────────────────────────────────────────────────────────
+
+@router.get("/novel/{novel_id}/word-stats")
+async def get_word_stats(novel_id: int, user: CurrentUser, days: int = 30, db: AsyncSession = Depends(get_db)):
+    """最近 days 天每天的全书净增字数。"""
+    await get_owned_novel(db, novel_id, user)
+    return await word_stats.recent(db, novel_id, days)

@@ -18,6 +18,28 @@ export interface StyleStats {
   dialogue_ratio?: number
   avg_para_len?: number
   person?: string
+  // 以下几项新版导入才有
+  short_sentence_ratio?: number
+  single_sentence_para_ratio?: number
+  exclaim_per_k?: number
+  question_per_k?: number
+  dialogue_tags?: { tag?: number; beat?: number; bare?: number }
+  top_phrases?: string[]
+}
+
+export interface StyleGap {
+  key: string
+  label: string
+  source: number | string
+  trial: number | string
+  diff: number | null
+}
+
+export interface StyleTrialResult {
+  text: string
+  source_stats: StyleStats
+  trial_stats: StyleStats
+  gaps: StyleGap[]
 }
 
 export interface StyleProfilePreview {
@@ -56,7 +78,7 @@ export interface StyleAdaptParams {
 }
 
 // 名字要和后端 style_extract.PRESET_CATEGORIES 一致，对不上的会被当成自定义类别
-export const PRESET_CATEGORIES = ['对话', '外貌描写', '打斗', '环境描写', '心理描写', '日常']
+export const PRESET_CATEGORIES = ['对话', '外貌描写', '打斗', '环境描写', '心理描写', '日常', '整场景']
 export const DEFAULT_CATEGORIES = ['对话', '外貌描写', '打斗']
 
 export const styleProfilesApi = {
@@ -77,6 +99,24 @@ export const styleProfilesApi = {
       })
       .then(r => r.data)
   },
+
+  importNovel: (novelId: number, categories: string[], model = '') =>
+    api
+      .post<StyleProfilePreview>(
+        '/style-profiles/import-novel',
+        { novel_id: novelId, categories, model },
+        { timeout: 600000 },
+      )
+      .then(r => r.data),
+
+  trial: (id: number, sceneIndexes: number[], model = '') =>
+    api
+      .post<StyleTrialResult>(
+        `/style-profiles/${id}/trial`,
+        { scene_indexes: sceneIndexes, model },
+        { timeout: 180000 },
+      )
+      .then(r => r.data),
 
   create: (data: StyleProfilePreview) =>
     api.post<StyleProfile>('/style-profiles/', data).then(r => r.data),

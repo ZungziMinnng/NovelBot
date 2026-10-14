@@ -7,7 +7,7 @@ import {
   ChevronRight, ChevronLeft, Loader2, PanelRightOpen, PanelRightClose,
   Settings2, AlertTriangle, Radio, RadioTower, MessageSquare,
   Terminal, BookOpen, ClipboardCheck, Gauge, Search, GitCompare, ScrollText, Send,
-  LayoutDashboard,
+  LayoutDashboard, Database, History, Maximize2, Minimize2,
 } from 'lucide-react'
 import {
   novelsApi, chaptersApi, modelLibraryApi, charactersApi, worldEntitiesApi,
@@ -34,7 +34,15 @@ import ChapterContentArea from './ChapterContentArea'
 import GenerationBar, { type BarMode } from './GenerationBar'
 import DiscoveryPanel from './DiscoveryPanel'
 import ChapterDashboard from './ChapterDashboard'
+import ChapterVersionsModal from './ChapterVersionsModal'
+import PassageRewriteBar, { type TextRange } from './PassageRewriteBar'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
+import HeaderMenu from '@/components/HeaderMenu/HeaderMenu'
+import ReadingFontButton from '@/components/ReadingFont/ReadingFontButton'
+
+// 顶栏常驻入口：一个样式，悬停统一走主题色，不再一键一个颜色
+const EDITOR_NAV =
+  'flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-foreground/[0.06] transition-colors'
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>()
@@ -142,6 +150,12 @@ export default function Editor() {
   const [fontFamily, setFontFamily] = useState(() => localStorage.getItem('novel_font_family') || '')
   const [fontWeight, setFontWeight] = useState(() => localStorage.getItem('novel_font_weight') || '')
   const [fontColor, setFontColor] = useState(() => localStorage.getItem('novel_font_color') || '')
+  const [indent, setIndent] = useState(() => localStorage.getItem('novel_indent') === '1')
+  // 专注模式：只留正文和本章工具栏，其余面板全收起
+  const [focusMode, setFocusMode] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [selection, setSelection] = useState<TextRange>({ start: 0, end: 0 })
   const [rewriteModel, setRewriteModel] = useState('')
   const [pov, setPov] = useState('')
 
@@ -227,6 +241,19 @@ export default function Editor() {
       setEditContentChapterId(currentChapter.id)
     }
   }, [currentChapter?.id])
+
+  // 换章或退出编辑，上一次的选区就不作数了
+  useEffect(() => { setSelection({ start: 0, end: 0 }) }, [currentChapter?.id, isEditing])
+
+  useEffect(() => {
+    if (!focusMode) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      // 弹窗开着时 Esc 留给弹窗
+      if (e.key === 'Escape' && !showVersions) setFocusMode(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [focusMode, showVersions])
 
   // ── Generation Stream ─────────────────────────────────────────────────────
   const resetRewriteModel = useCallback(() => setRewriteModel(''), [])
@@ -454,113 +481,163 @@ export default function Editor() {
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
       {/* Header */}
-      <header className="border-b px-4 py-3 flex items-center gap-3 shrink-0">
-        <button onClick={() => navigate('/novels')} className="p-1.5 rounded-md hover:bg-muted">
+      {/* 顶栏分三组：写作时天天点的（大纲/总览/数据/本章）在外面；
+          偶尔用的（审查/投稿/Token/设置/规则/Dev）收进「更多」；显示类开关在最右 */}
+      <header className={`border-b px-4 py-2.5 flex items-center gap-2 shrink-0 ${focusMode ? 'hidden' : ''}`}>
+        <button onClick={() => navigate('/novels')} className="p-2 rounded-full hover:bg-muted" title="返回小说列表" aria-label="返回小说列表">
           <ArrowLeft className="w-4 h-4" />
         </button>
-        <h1 className="font-semibold text-sm truncate max-w-48">{novel?.title}</h1>
-        <button onClick={() => navigate('/rules')}
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors"
-          title="规则广场">
-          <ScrollText className="w-3.5 h-3.5" /> 规则广场
-        </button>
-        <div className="flex items-center gap-1 ml-auto">
-          {novel && !novel.core_setting && (
-            <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-800 mr-1">
-              <AlertTriangle className="w-3 h-3" />
-              未设置世界观
-            </span>
-          )}
-          <button onClick={() => navigate(`/novel/${novelId}/outline`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors">
-            <List className="w-3.5 h-3.5" /> 总览
-          </button>
-          <button onClick={() => navigate(`/novel/${novelId}/data`)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/30 transition-colors">
-            <Terminal className="w-3.5 h-3.5" /> 数据
-          </button>
-          <button onClick={() => setShowOutlineModal(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors">
+        <h1 className="font-display font-bold text-base truncate max-w-48">{novel?.title}</h1>
+        {novel && !novel.core_setting && (
+          <span className="hidden md:flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300 bg-amber-500/10 px-2.5 py-1 rounded-full ring-1 ring-inset ring-amber-500/30">
+            <AlertTriangle className="w-3 h-3" />
+            未设置世界观
+          </span>
+        )}
+        <div className="flex items-center gap-0.5 ml-auto">
+          <button onClick={() => setShowOutlineModal(true)} className={EDITOR_NAV}>
             <BookOpen className="w-3.5 h-3.5" /> 大纲
           </button>
-          <button onClick={() => setShowReviewModal(true)}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-colors">
-            <ClipboardCheck className="w-3.5 h-3.5" /> 审查
+          <button onClick={() => navigate(`/novel/${novelId}/outline`)} className={EDITOR_NAV}>
+            <List className="w-3.5 h-3.5" /> 总览
           </button>
-          <button onClick={() => setShowSubmissionModal(true)}
-            title="书名简介、导出稿件、过审预检"
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30 transition-colors">
-            <Send className="w-3.5 h-3.5" /> 投稿
-          </button>
-          <div className="w-px h-4 bg-border mx-0.5" />
-          <button onClick={() => { setSettingsDrawerTab('context'); setShowSettingsDrawer(true) }}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground">
-            <Gauge className="w-3.5 h-3.5" /> Token
-          </button>
-          <button
-            onClick={() => { setSettingsDrawerTab('content'); setShowSettingsDrawer(true) }}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-muted-foreground"
-          >
-            <Settings2 className="w-3.5 h-3.5" /> 设置
-          </button>
-          <button
-            onClick={() => setShowDevPanel(v => !v)}
-            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDevPanel ? 'text-primary bg-primary/10' : 'text-muted-foreground'}`}
-            title="开发者视图"
-          >
-            <Terminal className="w-3.5 h-3.5" /> Dev
-          </button>
-          <button
-            onClick={toggleStreamingMode}
-            className={`p-1.5 rounded-md hover:bg-muted transition-colors ${streamingMode ? 'text-primary' : 'text-muted-foreground'}`}
-            title={streamingMode ? '流式显示已开启（点击关闭）' : '流式显示已关闭（点击开启）'}
-          >
-            {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
+          <button onClick={() => navigate(`/novel/${novelId}/data`)} className={EDITOR_NAV}>
+            <Database className="w-3.5 h-3.5" /> 数据
           </button>
           <button
             onClick={() => setShowDashboard(v => !v)}
-            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors ${showDashboard ? 'text-primary bg-primary/10' : 'text-muted-foreground'}`}
+            className={`${EDITOR_NAV} ${showDashboard ? '!text-primary !bg-primary/10' : ''}`}
             title="本章仪表盘"
+            aria-pressed={showDashboard}
           >
             <LayoutDashboard className="w-3.5 h-3.5" /> 本章
           </button>
+          <button
+            onClick={() => { setSettingsDrawerTab('content'); setShowSettingsDrawer(true) }}
+            className={EDITOR_NAV}
+          >
+            <Settings2 className="w-3.5 h-3.5" /> 本书设置
+          </button>
+          <button onClick={() => navigate('/rules')} className={EDITOR_NAV}>
+            <ScrollText className="w-3.5 h-3.5" /> 规则广场
+          </button>
+          <HeaderMenu
+            items={[
+              { key: 'review', label: '审查', icon: ClipboardCheck, onClick: () => setShowReviewModal(true) },
+              { key: 'submit', label: '投稿', icon: Send, onClick: () => setShowSubmissionModal(true), title: '书名简介、导出稿件、过审预检' },
+              { key: 'token', label: 'Token 用量', icon: Gauge, onClick: () => { setSettingsDrawerTab('context'); setShowSettingsDrawer(true) } },
+              { key: 'dev', label: '开发者视图', icon: Terminal, onClick: () => setShowDevPanel(v => !v), active: showDevPanel },
+            ]}
+          />
+          <div className="w-px h-4 bg-border mx-1.5" />
+          <ReadingFontButton
+            size="sm"
+            fontSize={fontSize}
+            lineHeight={lineHeight}
+            fontWeight={fontWeight}
+            setFontSize={v => { setFontSize(v); localStorage.setItem('novel_font_size', String(v)) }}
+            setLineHeight={v => { setLineHeight(v); localStorage.setItem('novel_line_height', String(v)) }}
+            setFontWeight={v => { setFontWeight(v); if (v) localStorage.setItem('novel_font_weight', v); else localStorage.removeItem('novel_font_weight') }}
+            fontFamily={fontFamily}
+            setFontFamily={v => { setFontFamily(v); localStorage.setItem('novel_font_family', v) }}
+            fontColor={fontColor}
+            setFontColor={v => { setFontColor(v); if (v) localStorage.setItem('novel_font_color', v); else localStorage.removeItem('novel_font_color') }}
+            indent={indent}
+            setIndent={v => { setIndent(v); localStorage.setItem('novel_indent', v ? '1' : '0') }}
+          />
+          <button
+            onClick={() => setFocusMode(true)}
+            className="p-1.5 rounded-full hover:bg-muted transition-colors text-muted-foreground"
+            title="专注模式：只留正文（Esc 退出）"
+            aria-label="专注模式"
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={toggleStreamingMode}
+            className={`p-1.5 rounded-full hover:bg-muted transition-colors ${streamingMode ? 'text-primary' : 'text-muted-foreground'}`}
+            title={streamingMode ? '流式显示已开启（点击关闭）' : '流式显示已关闭（点击开启）'}
+            aria-label="流式显示"
+            aria-pressed={streamingMode}
+          >
+            {streamingMode ? <RadioTower className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
+          </button>
           <ThemePicker size="sm" />
           <button onClick={() => setShowContext(!showContext)}
-            className="p-1.5 rounded-md hover:bg-muted transition-colors">
+            className="p-1.5 rounded-full hover:bg-muted transition-colors"
+            title={showContext ? '收起右侧面板' : '展开右侧面板'}
+            aria-label={showContext ? '收起右侧面板' : '展开右侧面板'}
+            aria-pressed={showContext}>
             {showContext ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
           </button>
         </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <EditorSidebar
-          novelId={novelId}
-          novel={novel}
-          chapters={chapters}
-          selectedChapterNum={selectedChapterNum}
-          isGenerating={genStore.isGenerating}
-          generatingNovelId={genStore.novelId}
-          generatingChapterNum={genStore.chapterNum}
-          onSelectChapter={setSelectedChapterNum}
-          onNewChapter={handleNewChapter}
-          onOpenSettings={() => setShowSettingsDrawer(true)}
-        />
+        {/* Sidebar：专注模式只是藏起来，不卸载，退出后标签页和展开状态都还在 */}
+        <div className={focusMode ? 'hidden' : 'contents'}>
+          <EditorSidebar
+            novelId={novelId}
+            novel={novel}
+            chapters={chapters}
+            selectedChapterNum={selectedChapterNum}
+            isGenerating={genStore.isGenerating}
+            generatingNovelId={genStore.novelId}
+            generatingChapterNum={genStore.chapterNum}
+            onSelectChapter={setSelectedChapterNum}
+            onNewChapter={handleNewChapter}
+            onOpenSettings={() => setShowSettingsDrawer(true)}
+          />
+        </div>
 
         {/* Main Editor */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Toolbar */}
           <div className="border-b px-4 py-2.5 flex items-center gap-3 shrink-0">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <ChevronLeft
-                className="w-4 h-4 cursor-pointer hover:text-foreground"
+            <div className="flex items-center gap-1 text-sm text-muted-foreground">
+              <button
                 onClick={() => setSelectedChapterNum(Math.max(1, selectedChapterNum - 1))}
-              />
-              <span className="font-medium text-foreground">第{selectedChapterNum}章</span>
-              <ChevronRight
-                className="w-4 h-4 cursor-pointer hover:text-foreground"
+                className="p-1 rounded-full hover:text-foreground hover:bg-muted transition-colors"
+                title="上一章"
+                aria-label="上一章"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="font-display font-bold text-foreground tabular-nums">第{selectedChapterNum}章</span>
+              {currentChapter && (
+                // 标题由确认时的摘要顺带生成（只填空位），这里随手改；失焦或回车保存。
+                // key 带上标题，确认后后端写入新标题时输入框跟着刷新
+                <input
+                  key={`${currentChapter.id}-${currentChapter.title}`}
+                  defaultValue={currentChapter.title === `第${currentChapter.number}章` ? '' : currentChapter.title}
+                  placeholder="确认后自动取标题"
+                  aria-label="章节标题"
+                  maxLength={200}
+                  className="w-44 bg-transparent text-sm text-foreground px-1.5 py-0.5 rounded border border-transparent hover:border-border focus:border-border focus:outline-none placeholder:text-muted-foreground/60"
+                  onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                  onBlur={async e => {
+                    const title = e.target.value.trim()
+                    const old = currentChapter.title === `第${currentChapter.number}章` ? '' : currentChapter.title
+                    if (title === old) return
+                    try {
+                      const updated = await chaptersApi.update(currentChapter.id, { title })
+                      qc.setQueryData<Chapter[]>(['chapters', novelId], (prev = []) =>
+                        prev.map(ch => ch.id === updated.id ? updated : ch),
+                      )
+                    } catch {
+                      toast.error('标题保存失败')
+                    }
+                  }}
+                />
+              )}
+              <button
                 onClick={() => setSelectedChapterNum(selectedChapterNum + 1)}
-              />
+                className="p-1 rounded-full hover:text-foreground hover:bg-muted transition-colors"
+                title="下一章"
+                aria-label="下一章"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
             </div>
 
             {currentChapter?.word_count ? (
@@ -570,86 +647,8 @@ export default function Editor() {
               <span className="text-xs text-muted-foreground" title="本章生成模型">· {currentChapter.model_used}</span>
             ) : null}
 
+            {/* 字号/行距/字体/粗细/颜色挪进顶栏的「Aa」，这一行只留针对本章的操作 */}
             <div className="flex items-center gap-1.5 ml-auto">
-              <select
-                value={fontSize}
-                onChange={e => { const v = Number(e.target.value); setFontSize(v); localStorage.setItem('novel_font_size', String(v)) }}
-                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                title="字体大小"
-              >
-                <option value={12}>12px</option>
-                <option value={13}>13px</option>
-                <option value={14}>14px</option>
-                <option value={15}>15px</option>
-                <option value={16}>16px</option>
-                <option value={17}>17px</option>
-                <option value={18}>18px</option>
-                <option value={19}>19px</option>
-                <option value={20}>20px</option>
-                <option value={22}>22px</option>
-                <option value={24}>24px</option>
-                <option value={26}>26px</option>
-                <option value={28}>28px</option>
-                <option value={32}>32px</option>
-              </select>
-              <select
-                value={lineHeight}
-                onChange={e => { const v = Number(e.target.value); setLineHeight(v); localStorage.setItem('novel_line_height', String(v)) }}
-                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                title="行间距"
-              >
-                <option value={1.2}>1.2&#215;</option>
-                <option value={1.5}>1.5&#215;</option>
-                <option value={1.8}>1.8&#215;</option>
-                <option value={2.0}>2.0&#215;</option>
-                <option value={2.5}>2.5&#215;</option>
-                <option value={3.0}>3.0&#215;</option>
-              </select>
-              <select
-                value={fontFamily}
-                onChange={e => { setFontFamily(e.target.value); localStorage.setItem('novel_font_family', e.target.value) }}
-                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring max-w-[90px]"
-                title="字体"
-              >
-                <option value="">默认</option>
-                <option value="SimSun, serif">宋体</option>
-                <option value="KaiTi, serif">楷体</option>
-                <option value="FangSong, serif">仿宋</option>
-                <option value="Microsoft YaHei, sans-serif">微软雅黑</option>
-                <option value="SimHei, sans-serif">黑体</option>
-                <option value="Source Han Serif SC, serif">思源宋体</option>
-                <option value="Noto Sans SC, sans-serif">Noto Sans</option>
-              </select>
-              <select
-                value={fontWeight}
-                onChange={e => { setFontWeight(e.target.value); if (e.target.value) localStorage.setItem('novel_font_weight', e.target.value); else localStorage.removeItem('novel_font_weight') }}
-                className="border rounded px-1.5 py-1 bg-background text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                title="字体粗细"
-              >
-                <option value="">常规</option>
-                <option value="300">细体</option>
-                <option value="500">中等</option>
-                <option value="600">半粗</option>
-                <option value="700">加粗</option>
-              </select>
-              <div className="flex items-center gap-0.5" title="字体颜色">
-                <input
-                  type="color"
-                  value={fontColor || '#000000'}
-                  onChange={e => { setFontColor(e.target.value); localStorage.setItem('novel_font_color', e.target.value) }}
-                  className="w-6 h-6 border rounded cursor-pointer bg-transparent p-0"
-                />
-                {fontColor && (
-                  <button
-                    onClick={() => { setFontColor(''); localStorage.removeItem('novel_font_color') }}
-                    className="text-[0.625rem] text-muted-foreground hover:text-foreground px-0.5"
-                    title="重置为默认颜色"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-
               <div className="flex items-center gap-2">
                 {currentChapter && !gen.isCurrentlyGenerating && (
                   <button
@@ -671,6 +670,19 @@ export default function Editor() {
                     <GitCompare className="w-3 h-3" /> 修订对比
                   </button>
                 )}
+                {currentChapter && !gen.isCurrentlyGenerating && (
+                  <button
+                    onClick={async () => {
+                      // 先把编辑框里没存的落盘，恢复旧版时这份也会被留成一个版本
+                      if (isEditing) await autosave.saveNow()
+                      setShowVersions(true)
+                    }}
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors"
+                    title="重新生成、批注重写、手动编辑之前自动存的旧版本"
+                  >
+                    <History className="w-3 h-3" /> 历史版本
+                  </button>
+                )}
                 {currentChapter?.content && !gen.isCurrentlyGenerating && (
                   <>
                     {!isEditing ? (
@@ -688,7 +700,7 @@ export default function Editor() {
                         </span>
                         <button onClick={handleSaveEdit}
                           title="保存并退出编辑（Ctrl+S）"
-                          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors">
+                          className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 bg-primary text-primary-foreground rounded-full hover:opacity-95">
                           <Check className="w-3 h-3" /> 保存编辑
                         </button>
                       </>
@@ -709,12 +721,21 @@ export default function Editor() {
                     </button>
                   </>
                 )}
+                {focusMode && (
+                  <button
+                    onClick={() => setFocusMode(false)}
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-md hover:bg-muted transition-colors"
+                    title="退出专注模式（Esc）"
+                  >
+                    <Minimize2 className="w-3 h-3" /> 退出专注
+                  </button>
+                )}
               </div>
             </div>
           </div>
 
           {/* Mode Tabs */}
-          <div className="border-b px-4 flex items-center gap-1 shrink-0">
+          <div className={`border-b px-4 flex items-center gap-1 shrink-0 ${focusMode ? 'hidden' : ''}`}>
             <button
               onClick={() => setEditorMode('generate')}
               className={`flex items-center gap-1.5 text-xs px-3 py-2 border-b-2 transition-colors ${
@@ -746,6 +767,23 @@ export default function Editor() {
 
           {/* Generate Mode */}
           {editorMode === 'generate' && <>
+            {/* 手动编辑时选中一段：改写/扩写/缩写，只动这一段 */}
+            {isEditing && !gen.isCurrentlyGenerating && (
+              <PassageRewriteBar
+                key={currentChapter?.id}
+                novelId={novelId}
+                editContent={editContent}
+                selection={selection}
+                onApply={(next, range) => {
+                  setEditContent(next)
+                  setSelection(range)
+                  requestAnimationFrame(() => {
+                    textareaRef.current?.focus()
+                    textareaRef.current?.setSelectionRange(range.start, range.end)
+                  })
+                }}
+              />
+            )}
             {/* Content Area */}
             <ChapterContentArea
               displayText={displayText}
@@ -769,6 +807,9 @@ export default function Editor() {
               onEditContentChange={setEditContent}
               onCloseDiff={() => setShowDiff(false)}
               rewriteMode={barMode === 'rewrite'}
+              indent={indent}
+              textareaRef={textareaRef}
+              onSelectionChange={setSelection}
               onAddParagraphAnnotation={(paragraph) => {
                 const text = prompt(`段落${paragraph}的批注内容：`)
                 if (text?.trim()) {
@@ -782,7 +823,7 @@ export default function Editor() {
             />
 
             {/* Generation Controls */}
-            <GenerationBar
+            {!focusMode && <GenerationBar
               barMode={barMode}
               onBarModeChange={setBarMode}
               hasChapterContent={!!currentChapter?.content}
@@ -825,12 +866,12 @@ export default function Editor() {
               deepseekThinkingLevel={novel?.deepseek_thinking_level || 'high'}
               onQuickParamsChange={handleQuickParamsChange}
               entities={entityList}
-            />
+            />}
           </>}
         </div>
 
         {/* 本章仪表盘：写这一章时要盯的东西，排在上下文状态左边 */}
-        {showDashboard && (
+        {showDashboard && !focusMode && (
           <div className="relative border-l flex flex-col shrink-0" style={{ width: dashboardWidth }}>
             <div
               onMouseDown={handleDashboardResize}
@@ -849,7 +890,7 @@ export default function Editor() {
         )}
 
         {/* Right Sidebar: top half = Context + Agent Log tabs, bottom half = entity discovery */}
-        {showContext && (
+        {showContext && !focusMode && (
           <div className="w-72 border-l flex flex-col shrink-0">
             <div className="basis-1/2 min-h-0 flex flex-col">
               <div className="flex border-b shrink-0">
@@ -975,6 +1016,20 @@ export default function Editor() {
           novelId={novelId}
           currentChapter={selectedChapterNum}
           onClose={() => setShowOutlineModal(false)}
+        />
+      )}
+
+      {showVersions && currentChapter && (
+        <ChapterVersionsModal
+          chapter={currentChapter}
+          currentText={isEditing ? editContent : currentChapter.content}
+          onRestored={(updated) => {
+            qc.setQueryData<Chapter[]>(['chapters', novelId], (old = []) =>
+              old.map(ch => ch.id === updated.id ? updated : ch),
+            )
+            if (isEditing) setEditContent(updated.content)
+          }}
+          onClose={() => setShowVersions(false)}
         />
       )}
 

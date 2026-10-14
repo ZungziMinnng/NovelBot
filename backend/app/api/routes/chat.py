@@ -61,7 +61,7 @@ def _build_chat_system_prompt(
     if chars_block:
         parts.append(chars_block)
     if ctx.get("recent_text"):
-        parts.append(f"=== 上一章原文 ===\n{ctx['recent_text']}")
+        parts.append(f"=== 近章原文（按章节顺序，最后一章即上一章）===\n{ctx['recent_text']}")
     return "\n\n".join(p for p in parts if p)
 
 

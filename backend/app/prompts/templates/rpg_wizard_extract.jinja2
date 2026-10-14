@@ -44,10 +44,14 @@
 {
   "default_location": "起始地点名，必须是下面 locations 里某个地点的名字",
   "locations": [
-    {"name": "地点名", "description": "走进来看到闻到听到什么", "connections": ["相通的地点名", "……"]}
+    {"name": "地点名", "description": "走进来看到闻到听到什么", "parent_name": "所属父地点名，大地图上的地点留空字符串", "connections": ["同层相通的地点名", "……"]}
   ]
 }
 
+- 地点分两层：parent_name 为空的是大地图上的地点（城市、区域、宗门这一级）；parent_name 有值的是该地点内部的子地图节点（某栋楼、某个房间、某处洞府），进入父地点后才看得到。
+- 代表一片区域或一个集合的地点（某州、某郡、某座城、某个宗门）只是容器：必须在它下面写出玩家实际能去的子地点（街区、建筑、山门、洞府……），并且 default_location 要填具体的子地点，不要填容器本身。没有内部可去之处的地点才是可直接落脚的具体地点。
+- parent_name 只能写这次 locations 列表里出现过的地点名，且父地点自己必须是大地图地点（不要套三层）。
+- connections 只连同一层的地点：大地图地点连大地图地点，同一父地点下的子地点之间互连。子地点想出到外面，靠它的父地点，不用写进 connections。
 - connections 里只能写这次 locations 列表里出现过的地点名，写别的一律去掉。
 {% elif stage == 'slots' %}
 本次只整理「时段」这一摊：
@@ -90,7 +94,7 @@
 
 {
   "items": [
-    {"name": "道具名", "description": "是什么、什么手感或长什么样、有什么用或怎么用，写到能直接当背包里那行说明", "category": "消耗品/装备/关键物品等一个短词", "consumable": 用完就没了true/false, "start_with": 开局就带着true/false, "effects": {"数值名": 增减数字}}
+    {"name": "道具名", "description": "是什么、什么手感或长什么样、有什么用或怎么用，写到能直接当背包里那行说明", "category": "消耗品/武器/装备/关键道具/资料 五选一（资料 = 书、功法、图纸、笔记、手册这类记载知识的东西，古今题材通用）", "consumable": 用完就没了true/false, "start_with": 开局就带着true/false, "effects": {"数值名": 增减数字}}
   ],
   "skills": [
     {"name": "技能名", "description": "是什么、用出来什么样、有什么用", "category": "主动/被动，一个短词", "cooldown": 用完要歇几个回合的数字，0是随便用, "start_with": 开局就会true/false, "effects": {"数值名": 增减数字}, "requires": {"stats": {"数值名": {"op": ">=", "value": 数字}}, "items": ["道具名"]}}

@@ -78,11 +78,13 @@ async def dashboard(user: CurrentUser, db: AsyncSession = Depends(get_db)):
     novel_ids = [n.id for n in novels]
 
     word_rows = (await db.execute(
-        select(Chapter.novel_id, func.coalesce(func.sum(Chapter.word_count), 0))
+        select(Chapter.novel_id, func.coalesce(func.sum(Chapter.word_count), 0), func.count(Chapter.id))
         .where(Chapter.novel_id.in_(novel_ids))
         .group_by(Chapter.novel_id)
     )).all() if novel_ids else []
     novel_words = {row[0]: row[1] for row in word_rows}
+    # 章数和字数同一个范围（全部章节）。current_chapter 是确认进度，只在确认时前进，拿来当章数会和字数对不上
+    novel_chapters = {row[0]: row[2] for row in word_rows}
     total_words = sum(novel_words.values())
 
     if novel_ids:
@@ -101,6 +103,7 @@ async def dashboard(user: CurrentUser, db: AsyncSession = Depends(get_db)):
         "total_words": total_words,
         "total_entities": total_entities,
         "novel_words": novel_words,
+        "novel_chapters": novel_chapters,
     }
 
 

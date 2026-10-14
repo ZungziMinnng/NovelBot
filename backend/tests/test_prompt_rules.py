@@ -207,9 +207,8 @@ class PromptRulesTests(unittest.TestCase):
         self.assertEqual(source, "template+rules")
         # 护栏块整段落在末尾，且与模板渲染结果逐字节一致
         self.assertTrue(content.endswith(render("writer_guardrails.jinja2").strip()))
-        # 模板正文（去掉护栏）仍以字数要求收尾，中间不该被规则块插队
+        # 模板正文（去掉护栏）完整保留，中间不该被规则块插队；字数要求只在写作任务里出现一次
         body = content[: -len(render("writer_guardrails.jinja2").strip())]
-        self.assertIn("目标字数 5000 字", body)
         self.assertIn("章节结尾必须留下", body)
 
     def test_writer_prompt_marks_missing_rules(self):
@@ -240,6 +239,39 @@ class PromptRulesTests(unittest.TestCase):
                 await session.close()  # 关掉 session，制造查询异常
                 block = await resolve_rules_block(session, novel)
                 self.assertEqual(block, GUARDRAILS)
+            finally:
+                await engine.dispose()
+        self._run(scenario)
+
+    def test_seed_upgrades_untouched_old_version_only(self):
+        """模板改版：库里逐字节等于旧版的内置规则跟到新版，用户改过的一字不动。"""
+        import hashlib
+        from unittest.mock import patch
+        from app import database
+
+        old = "旧版护栏正文"
+        async def scenario():
+            engine, session, user, _ = await self._setup()
+            other = User(username="bob", password_hash="x")
+            session.add(other)
+            await session.flush()
+            session.add(self._builtin(user.id, content=old))
+            session.add(self._builtin(other.id, content=old + "（我改过）"))
+            await session.commit()
+            await session.close()
+            maker = async_sessionmaker(engine, expire_on_commit=False)
+            hashes = {"writer_guardrails": {hashlib.sha256(old.encode()).hexdigest()}}
+            try:
+                with patch.object(database, "AsyncSessionLocal", maker), \
+                        patch.object(database, "_BUILTIN_RULE_OLD_HASHES", hashes):
+                    await database.seed_builtin_rules([user.id, other.id])
+                async with maker() as s:
+                    from sqlalchemy import select
+                    got = dict((await s.execute(
+                        select(PromptRule.user_id, PromptRule.content)
+                    )).all())
+                self.assertEqual(got[user.id], GUARDRAILS)
+                self.assertEqual(got[other.id], old + "（我改过）")
             finally:
                 await engine.dispose()
         self._run(scenario)

@@ -1287,6 +1287,32 @@ class HistoryTests(_Base):
             "（以下发生在「地窖」）\n第四句", "第五句",
         ])
 
+    async def test_a_window_spanning_days_is_dated_relative_to_today(self):
+        # 第 3 天的事到了第 8 天还在窗口里，不标的话会被当成昨天
+        self.sess.day = 8
+        history = [
+            RpgMessage(id=1, session_id=self.sess.id, role="user", content="第一句", day=None),
+            RpgMessage(id=2, session_id=self.sess.id, role="user", content="第二句", day=3),
+            RpgMessage(id=3, session_id=self.sess.id, role="assistant", content="第三句", day=3),
+            RpgMessage(id=4, session_id=self.sess.id, role="user", content="第四句", day=7),
+            RpgMessage(id=5, session_id=self.sess.id, role="assistant", content="第五句", day=8),
+        ]
+        messages, _ = await self._build("第六句", history=history)
+        self.assertEqual([m["content"] for m in messages[1:]], [
+            "第一句", "（以下是第 3 天（5 天前）的事）\n第二句", "第三句",
+            "（以下是第 7 天（昨天）的事）\n第四句",
+            "（以下是第 8 天（今天）的事）\n第五句", "第六句",
+        ])
+
+    async def test_a_same_day_window_is_left_alone(self):
+        self.sess.day = 2
+        history = [
+            RpgMessage(id=1, session_id=self.sess.id, role="user", content="第一句", day=2),
+            RpgMessage(id=2, session_id=self.sess.id, role="assistant", content="第二句", day=None),
+        ]
+        messages, _ = await self._build("第三句", history=history)
+        self.assertEqual([m["content"] for m in messages[1:]], ["第一句", "第二句", "第三句"])
+
     async def test_summarized_messages_are_not_sent_again(self):
         history = [
             RpgMessage(id=1, session_id=self.sess.id, role="user", content="第一句"),

@@ -42,15 +42,36 @@ def _normalize_character_sheet(sheet: dict, character: Character) -> dict:
     return normalized
 
 
+def mention_paragraphs(content: str, name: str, limit: int = 3000) -> str:
+    """取正文里点到该角色的段落，连带紧随其后的一段（多是对话/反应，常不带名字）。"""
+    paragraphs = [p.strip() for p in strip_plot_suggestions(content or "").split("\n") if p.strip()]
+    picked: list[int] = []
+    for i, p in enumerate(paragraphs):
+        if name and name in p:
+            for j in (i, i + 1):
+                if j < len(paragraphs) and j not in picked:
+                    picked.append(j)
+    out: list[str] = []
+    used = 0
+    for i in picked:
+        if used + len(paragraphs[i]) > limit:
+            break
+        out.append(paragraphs[i])
+        used += len(paragraphs[i])
+    return "\n".join(out)
+
+
 async def generate_character_sheet(
     novel: Novel,
     character: Character,
     given: dict[str, str] | None = None,
+    source_text: str = "",
 ) -> dict:
     """使用 LLM 生成完整角色卡。
 
     given 是作者已经填好的栏位（personality/appearance/speech_style），当硬要求传进
     提示词让 AI 据此扩写，而不是另起一套。
+    source_text 是角色来源章节里提到他的正文段落，有则角色卡以正文为准。
     """
     prompt = render(
         "character.jinja2",
@@ -63,6 +84,7 @@ async def generate_character_sheet(
         genre=novel.genre,
         writing_style=novel.writing_style,
         given=given or {},
+        source_text=source_text,
     )
 
     model, api_format = llm_client.get_agent_client("character", novel.fast_model)

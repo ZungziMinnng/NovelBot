@@ -65,6 +65,29 @@ class StyleProfileRouteTests(unittest.IsolatedAsyncioTestCase):
         rows = (await self.db.execute(select(StyleProfile))).scalars().all()
         self.assertEqual(rows, [])
 
+    async def test_import_novel_uses_own_chapters(self):
+        from app.models.chapter import Chapter
+        from app.schemas.style_profile import StyleImportNovelIn
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Chapter.__table__.create)
+        body = "\n".join("他走过长街，风从巷口灌进来。“你来了。”她说。" * 3 for _ in range(10))
+        self.db.add_all([
+            Chapter(novel_id=1, number=2, content=body + "\n第二章尾"),
+            Chapter(novel_id=1, number=1, content=body + "\n第一章尾"),
+            Chapter(novel_id=1, number=3, content=""),
+        ])
+        await self.db.commit()
+        fake = AsyncMock(return_value={"style_desc": "", "characters": [], "scenes": []})
+        owned = AsyncMock(return_value=types.SimpleNamespace(id=1, title="我的书"))
+        with patch("app.agents.style_agent.analyze", new=fake), patch.object(routes, "get_owned_novel", new=owned):
+            preview = await routes.import_from_novel(
+                StyleImportNovelIn(novel_id=1, categories=["整场景"]), self.alice, self.db
+            )
+        self.assertEqual(preview.name, "我的书")
+        chapters = fake.await_args.args[5]
+        self.assertEqual(len(chapters), 2)  # 空章跳过
+        self.assertTrue(chapters[0].endswith("第一章尾"))  # 按章号排
+
     async def test_import_cleans_categories(self):
         fake = AsyncMock(return_value={"style_desc": "", "characters": [], "scenes": []})
         with patch("app.agents.style_agent.analyze", new=fake):

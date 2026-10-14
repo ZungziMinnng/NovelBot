@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.rpg import normalize_profile_sections
 
@@ -54,6 +54,7 @@ class RpgModuleCreate(BaseModel):
     temperature: float = 0.9
     max_tokens: int = 2048
     reply_length: int = 300
+    reply_length_tiers: list = []
     model_ref: str = ""
     fast_model_ref: str = ""
     settlement_model_ref: str = ""
@@ -114,6 +115,7 @@ class RpgModuleUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     reply_length: Optional[int] = None
+    reply_length_tiers: Optional[list] = None
     model_ref: Optional[str] = None
     fast_model_ref: Optional[str] = None
     settlement_model_ref: Optional[str] = None
@@ -173,6 +175,7 @@ class RpgModuleOut(BaseModel):
     temperature: float
     max_tokens: int
     reply_length: int
+    reply_length_tiers: list = []
     model_ref: str
     fast_model_ref: str
     settlement_model_ref: str = ""
@@ -212,6 +215,28 @@ class RpgAssistIn(BaseModel):
 
 class RpgAssistOut(BaseModel):
     text: str
+
+
+class RpgNpcRefineIn(BaseModel):
+    """批量 AI 优化角色：挑几个人、挑几栏、一句额外要求。不落库，作者勾完才走 PATCH。"""
+    npc_ids: list[int]
+    # RpgNpc 的列名，白名单在 agents/rpg_assist.py 的 REFINE_FIELDS
+    fields: list[str]
+    instruction: str = ""
+
+
+class RpgNpcRefineItem(BaseModel):
+    """一条 (角色, 栏位) 的结果。error 非空时 text 为空，前端不给勾选。"""
+    npc_id: int
+    name: str
+    field: str
+    original: str
+    text: str = ""
+    error: str = ""
+
+
+class RpgNpcRefineOut(BaseModel):
+    items: list[RpgNpcRefineItem]
 
 
 # ── 写作规则 ──────────────────────────────────────────────────────────────
@@ -355,6 +380,8 @@ class RpgWizardExtractIn(BaseModel):
     # 抽取的**起始**温度。None = 按 call_json 的默认 0.3 走（老前端不传就是这条路）；
     # 0.1 那一档兜底始终保留，调这个只影响第一次尝试
     temperature: Optional[float] = None
+    # 给了就从这部小说的初始设定里抽，不看 messages
+    novel_id: Optional[int] = None
 
 
 class RpgWizardFullIn(BaseModel):
@@ -723,6 +750,11 @@ class RpgTaskResolveIn(BaseModel):
     accepts: list[dict] = []  # [{"id": "...", "accept": true}]
 
 
+class RpgSecretResolveIn(BaseModel):
+    """同 RpgTaskResolveIn：只传 id，提议内容以库里存的为准。"""
+    accepts: list[dict] = []  # [{"id": "...", "accept": true}]
+
+
 class RpgItemClaimConfirmIn(BaseModel):
     """认下一件新道具。consumable 只在模组道具表里**还没有**同名定义时才用得上
     ——已经有定义的按那一行走，这个值会被忽略。"""
@@ -742,6 +774,7 @@ class RpgLocationCreate(BaseModel):
     name: str
     description: str = ""
     parent_id: Optional[int] = None
+    is_region: bool = False
     connections: list = []
     enter_requires: dict = {}
     sort_order: int = 0
@@ -755,6 +788,7 @@ class RpgLocationUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     parent_id: Optional[int] = None
+    is_region: Optional[bool] = None
     connections: Optional[list] = None
     enter_requires: Optional[dict] = None
     sort_order: Optional[int] = None
@@ -768,6 +802,7 @@ class RpgLocationOut(BaseModel):
     name: str
     description: str
     parent_id: Optional[int]
+    is_region: bool = False
     connections: list
     enter_requires: dict
     sort_order: int
@@ -872,6 +907,21 @@ class RpgNoteDeleteIn(BaseModel):
     key: str
 
 
+class RpgSecretIn(BaseModel):
+    """登记一件秘密。owner=0 是玩家的；known_by 是除 owner 以外还知道的 NPC id。"""
+    content: str
+    owner: int = 0
+    known_by: list[int] = []
+    player_knows: bool = False
+
+
+class RpgSecretPatchIn(BaseModel):
+    """改一条秘密，只动传了的字段。player_knows=true 就是「玩家查明了」。"""
+    content: str | None = None
+    known_by: list[int] | None = None
+    player_knows: bool | None = None
+
+
 class RpgSummaryEditIn(BaseModel):
     """改写某一格的长期记忆。slot 用 rpg_context 那套：`player` 是你亲身经历的
     那条场面线，别的是角色 id 的字符串。
@@ -884,12 +934,21 @@ class RpgSummaryEditIn(BaseModel):
     text: str
 
 
+class RpgManualPick(BaseModel):
+    """玩家在剧情里框选的一个名字。message_id 指出是哪段剧情，后端回那段原文里
+    核对名字确实在、并把前后文当依据——不收前端传来的上下文，理由同 ids。"""
+    name: str = Field(min_length=2, max_length=100)
+    message_id: int
+
+
 class RpgDiscoveryApplyIn(BaseModel):
     """把勾中的发现项建成模组资产。ids 是 RpgSession.discoveries 里那些条目的 id——
     只传 id 不传内容，免得前端把名字改了、后端却按改过的名字去正文里找不到依据。"""
     ids: list[str]
     model: str = ""
     temperature: Optional[float] = None  # 同 RpgWizardExtractIn
+    # 结算没认出来、玩家自己框选的地点。和勾选的发现项走同一条补全+建档的路
+    manual_place: Optional[RpgManualPick] = None
 
 
 class RpgDiscoveryApplyOut(BaseModel):
@@ -952,6 +1011,9 @@ class RpgSessionOut(BaseModel):
     # 形状见 models/rpg.py 的 npc_offscreen / npc_bonds
     npc_offscreen: list = []
     npc_bonds: list = []
+    # 知情账。给默认值：老局的行里没有这一列。形状见 models/rpg.py 的 secrets
+    secrets: list = []
+    secret_proposals: list = []
     npc_places: dict
     # 跟着玩家走的人，npc id 列表。见 RpgSession.npc_followers
     npc_followers: list = []
@@ -1063,6 +1125,12 @@ class RpgTurnRequest(BaseModel):
     # 和 target_npc 是两件事：它管「这段叙事归哪条历史」，target_npc 管
     # 「这个动作用在谁身上」。在老兵线里对老板娘用动作是合法的
     thread_id: Optional[int] = None
+
+
+class RpgJumpIn(BaseModel):
+    """时间跳转：N 天后的哪个时段。0 天只能选比现在更晚的时段。"""
+    days: int = Field(ge=0, le=30)
+    slot: str
 
 
 class RpgMoveIn(BaseModel):

@@ -26,7 +26,7 @@ from app.services import rpg_vectors
 from app.services.rpg_suggestions import SuggestSources
 from app.services.rpg_state import (
     AWAY, EFFECT_CHARS, RANDOM_SLOT, TIER_LABEL_CHARS, check_condition, def_map,
-    match_npc, norm_name, npc_activity, npc_away, npc_bonds_of, npc_offscreen_of, place_note, rank_stat_of, tier_list, tier_of,
+    match_npc, norm_name, npc_activity, npc_away, npc_bonds_of, npc_offscreen_of, secret_stances, place_note, rank_stat_of, tier_list, tier_of,
 )
 
 # 跟着 NPC_TOKEN_BUDGET 一起从 8000 抬到 9800、12000、20000，这次到 21500
@@ -715,6 +715,28 @@ def _compose_state(
             for s in skills
         ))
 
+    # 玩家自己的秘密和谁知情。GM 知道谁蒙在鼓里，才不会让不知情的人张口就问
+    mine = [
+        r for r in (getattr(sess, "secrets", None) or [])
+        if isinstance(r, dict) and not r.get("owner") and str(r.get("content") or "").strip()
+    ]
+    if mine:
+        rows = []
+        for r in mine[-SECRET_LINES:]:
+            def named(ids) -> str:
+                return "、".join(str((r.get("names") or {}).get(str(i)) or "某人") for i in ids)
+            parts = []
+            if r.get("known_by"):
+                parts.append(f"知情：{named(r['known_by'])}")
+            if r.get("suspects"):
+                parts.append(f"隐约起疑：{named(r['suspects'])}")
+            if r.get("misled"):
+                parts.append(f"被骗、信的是假的：{named(r['misled'])}")
+            rows.append(
+                f"- {r['content']}（" + (f"{'；'.join(parts)}；其余人不知道" if parts else "没有任何人知道") + "）"
+            )
+        lines.append("你的秘密：\n" + "\n".join(rows))
+
     # 手上还挂着的事。GM 知道这些，才会让剧情往这几条上靠，而不是每一轮
     # 都开一摊新的。状态块统共只有 800 token，列多了会把别的挤掉，所以封顶 8 条
     todo = [
@@ -834,6 +856,14 @@ def _when(entry: dict) -> str:
     return f"第 {day} 天 · {slot}" if slot else f"第 {day} 天"
 
 
+def _ago(day: int, today: int) -> str:
+    """「第 3 天（5 天前）」。相对天数一并给出：模型自己做减法常错，
+    而「昨天」还是「好几天前」正是它要据此改口的地方。"""
+    gap = today - day
+    rel = "今天" if gap <= 0 else "昨天" if gap == 1 else f"{gap} 天前"
+    return f"第 {day} 天（{rel}）"
+
+
 def _npc_history_lines(sess: RpgSession, npc_id: int,
                        budget: int = NPC_HISTORY_TOKEN_BUDGET) -> list[str]:
     """这个人最近几条经历，一行一条。从尾部取——新的比旧的更可能用得上。
@@ -891,6 +921,60 @@ def _offscreen_lines(sess: RpgSession, npc: RpgNpc) -> list[str]:
             "被问起时按她的性格遮掩、搪塞或撒谎，除非玩家拿出实据、当场撞破，"
             "或者有知情的人说漏。旁白也不许替她说破，只能写她藏不住的痕迹"
             "（神色、衣着、手机、说辞前后对不上）。"
+        )
+    return lines
+
+
+# 知情账每张卡最多列几条（每类）。一条最长 120 字，列多了会把别人的卡挤掉
+SECRET_LINES = 6
+
+
+def _secret_lines(sess: RpgSession, npc: RpgNpc) -> list[str]:
+    """知情账里这个人知道的和不知道的（见 models.RpgSession.secrets）。
+
+    **「不知道」那一半是主角**：写正文的模型什么都看得见，不明说的话它会让她
+    顺嘴提起不该知道的事。一条都没登记时一个字都不出来，和加这一块之前逐字一致。
+    """
+    stance = secret_stances(sess, npc.id)
+    knows, suspects, misled, unaware = (
+        stance["knows"], stance["suspects"], stance["misled"], stance["unaware"],
+    )
+    if not (knows or suspects or misled or unaware):
+        return []
+
+    def owner(row: dict) -> str:
+        who = row.get("owner") or 0
+        if who == npc.id:
+            return "她自己的"
+        if not who:
+            return "玩家的"
+        return f"{(row.get('names') or {}).get(str(who)) or '某人'}的"
+
+    lines = []
+    if knows:
+        rows = []
+        for r in knows[-SECRET_LINES:]:
+            hide = (r.get("owner") == npc.id and not r.get("player_knows"))
+            rows.append(f"- {owner(r)}：{r['content']}" + ("（玩家还不知道，她被问起会遮掩）" if hide else ""))
+        lines.append("她知道的秘密：\n" + "\n".join(rows))
+    if suspects:
+        rows = [f"- {owner(r)}：{r['content']}" for r in suspects[-SECRET_LINES:]]
+        lines.append(
+            "她隐约察觉、但没有证据的事（只能旁敲侧击、试探、起疑，不能当成已知的事实说出口；"
+            "除非剧情里有人证实）：\n" + "\n".join(rows)
+        )
+    if misled:
+        rows = [f"- {owner(r)}真相：{r['content']}　她深信的是：{belief}"
+                for r, belief in misled[-SECRET_LINES:]]
+        lines.append(
+            "她被蒙在鼓里、深信一个假版本的事（台词和反应都照她信的那个版本来，"
+            "旁白不许替她点破；除非剧情里有人当面拆穿）：\n" + "\n".join(rows)
+        )
+    if unaware:
+        rows = [f"- {owner(r)}：{r['content']}" for r in unaware[-SECRET_LINES:]]
+        lines.append(
+            "她不知道的事（她看不出、猜不到：台词和反应都不许沾边，旁白也不许替她点破；"
+            "除非剧情里有人当着她的面说破）：\n" + "\n".join(rows)
         )
     return lines
 
@@ -981,6 +1065,7 @@ def _one_npc(
     if activity:
         lines.append(f"最近：{activity}")
     lines.extend(_offscreen_lines(sess, npc))
+    lines.extend(_secret_lines(sess, npc))
     # 这个人身上过了什么事（只追加的流水，见 models.RpgSession.npc_history）。
     # 排在「眼下」「最近」之后：那两行说「现在什么样」，这一段说「发生过什么」，
     # 越靠后越像背景；但仍排在对话示例之前，理由同 notes——
@@ -1512,8 +1597,67 @@ def history_window(
     return [picked[i] for i in sorted(picked)]
 
 
+def place_path(name: str, locations: list[RpgLocation]) -> str:
+    """当前地点的上级链，由近到远：「太渊灵衍宫 › 观水州」。没有上级 / 查不到 = 空串。"""
+    by_id = {loc.id: loc for loc in locations}
+    here = norm_name(name or "")
+    node = next((loc for loc in locations if norm_name(loc.name) == here), None)
+    chain: list[str] = []
+    seen: set[int] = set()
+    while node is not None and node.parent_id in by_id and node.parent_id not in seen:
+        seen.add(node.parent_id)
+        node = by_id[node.parent_id]
+        chain.append(node.name.strip())
+    return " › ".join(chain)
+
+
+def map_block(locations: list[RpgLocation], budget: int) -> str:
+    """【地图】：模组登记的全部地点 + 「别在地图外开新场景」的规则；有层级时
+    再附上隶属关系，括号内的地方属于括号前的地方。
+
+    规则必须跟着名单走：GM 模板里没有任何一句管地点，只给名单它会当成「这是我
+    能去的一部分」，不是「只有这些」。规则写在代码里而不是 rpg_gm.jinja2：那个
+    模板用户可以覆写，往里加话对覆写过的人是静默失效（同 _place_block 的理由）。
+    一个地点都没建的模组返回空串，行为和加这一段之前逐字一致。
+
+    只有地点名，一个模组几十个地点也就几百字。截断从尾部切，所以规则排在名单
+    前、层级排最后——预算紧时先丢层级。"""
+    ordered = sorted(locations, key=lambda x: (x.sort_order or 0, x.id))
+    names = [loc.name.strip() for loc in ordered if loc.name.strip()]
+    if not names:
+        return ""
+    text = (
+        "【地图】\n"
+        "本局已登记的地点（只有这些是玩家走得到的地方）：" + "、".join(names) + "。\n"
+        "地图之外的地方只能当谈资——传闻、回忆、远处望见、别人口中提到——"
+        "不要把场景切过去，也不要在那里写出正在发生的剧情。"
+        "剧情走到非去不可的新地方时，停在路上，把去不去交给玩家。"
+        "不要自己造一个新地名当场景；写到地图里的地方时照抄原名。"
+    )
+
+    kids: dict[int | None, list[RpgLocation]] = {}
+    ids = {loc.id for loc in ordered}
+    for loc in ordered:
+        parent = loc.parent_id if loc.parent_id in ids else None
+        kids.setdefault(parent, []).append(loc)
+    if any(key is not None for key in kids):
+        def render_node(loc: RpgLocation, depth: int = 0) -> str:
+            name = loc.name.strip()
+            sub = kids.get(loc.id) if depth < 6 else None
+            if not sub:
+                return name
+            return f"{name}（{'、'.join(render_node(c, depth + 1) for c in sub)}）"
+
+        lines = [render_node(root) for root in kids.get(None, [])]
+        text += (
+            "\n\n【地图层级】\n括号内的地方属于括号前的地方。写到某处属于哪里、离哪里远近时以此为准；"
+            "这里没写明的东南西北方位不要自己编。\n" + "\n".join(lines)
+        )
+    return truncate_to_token_budget(text, budget)
+
+
 def scene_block(sess: RpgSession, description: str, here: list[RpgNpc],
-                budget: int = SCENE_TOKEN_BUDGET) -> str:
+                budget: int = SCENE_TOKEN_BUDGET, path: str = "") -> str:
     """【场面】：当前这一幕不在消息里的那些信息。空串 = 这一轮不拼。
 
     历史统一成一条之后，这一块**不再是「借历史」**——原先它干的是把场面线的
@@ -1547,6 +1691,7 @@ def scene_block(sess: RpgSession, description: str, here: list[RpgNpc],
         note = place_note(sess, name)
         parts.append(
             f"地点：{name}"
+            + (f"（属于 {path}）" if path else "")
             + (f"\n{text}" if text else "")
             + (f"\n现在：{note}" if note else "")
         )
@@ -2065,16 +2210,17 @@ async def build_rpg_messages(
         .order_by(RpgSkill.sort_order, RpgSkill.id)
     )).scalars().all()
 
+    module_locations = list((await session.execute(
+        select(RpgLocation)
+        .where(RpgLocation.module_id == module.id)
+        .order_by(RpgLocation.sort_order, RpgLocation.id)
+    )).scalars().all())
     place_description = ""
-    if (sess.location or "").strip():
-        place_description = (await session.execute(
-            select(RpgLocation.description)
-            .where(
-                RpgLocation.module_id == module.id,
-                RpgLocation.name == (sess.location or "").strip(),
-            )
-            .limit(1)
-        )).scalars().first() or ""
+    current_name = (sess.location or "").strip()
+    if current_name:
+        place_description = next(
+            (loc.description for loc in module_locations if loc.name == current_name), "",
+        ) or ""
 
     # 各块额度按模组填的那个总闸摊开。模组没填 = BASELINE_TOTAL，摊出来的每一项
     # 都精确等于从前写死的常量，老局的 prompt 一个字不变（见 rpg_budget）
@@ -2166,9 +2312,15 @@ async def build_rpg_messages(
     # **必须在扫完 scan_text 之后**才拼：地点描述扫进关键词的话，写地窖的模组
     # 每进一次地窖就命中那条词条；而模型自己写的旁白又会让它下一轮再命中，
     # 自己喂自己。旧的 scene_background 有同一条规矩，理由照旧
-    scene = scene_block(sess, place_description or "", here, budget["scene"])
+    scene = scene_block(
+        sess, place_description or "", here, budget["scene"],
+        path=place_path(current_name, module_locations),
+    )
     if scene:
         sections.append(("scene", scene))
+    map_text = map_block(module_locations, budget["map"])
+    if map_text:
+        sections.append(("map", map_text))
 
     # depth=0 拼进 system，depth>0 留到下面按深度插进对话流
     system_hits = [e for e in hits if (e.depth or 0) <= 0]
@@ -2249,13 +2401,20 @@ async def build_rpg_messages(
     #    Anthropic 和 Gemini 那两条格式都过不去。
     window_places = [(m.location or "").strip() for m in window]
     multi_place = len({p for p in window_places if p}) > 1
-    previous = ""
+    # 日期同理：第 3 天的对话到了第 8 天还在窗口里，不标的话模型一律读成「刚才 / 昨天」。
+    # 只在窗口里有不是今天的消息时才标；day 为 None 的老消息不标、不推进
+    today = max(1, int(getattr(sess, "day", 1) or 1))
+    multi_day = any(m.day is not None and m.day != today for m in window)
+    previous, previous_day = "", None
     for m, place in zip(window, window_places):
         content = m.content
         if multi_place and place and place != previous:
             content = f"（以下发生在「{place}」）\n{content}"
         if place:
             previous = place
+        if multi_day and m.day is not None and m.day != previous_day:
+            content = f"（以下是{_ago(m.day, today)}的事）\n{content}"
+            previous_day = m.day
         messages.append({"role": m.role, "content": content})
     messages.append({"role": "user", "content": new_input})
 

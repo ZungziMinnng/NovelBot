@@ -2,11 +2,14 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText, Settings2, Library, X } from 'lucide-react'
+import { ArrowLeft, Plus, Pencil, Trash2, Loader2, Dices, Users, BookMarked, Swords, ScrollText, Settings2, Library, X, ArrowUpRight } from 'lucide-react'
 import { rpgApi, type RpgModule, type RpgPlayStyle } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
+import MemoBoard from '@/components/MemoBoard/MemoBoard'
+import SpotlightCard, {
+  LIST_CARD, LIST_CARD_BAR, LIST_CARD_HIT, CARD_ICON_BTN, CARD_ICON_BTN_DANGER, HEADER_PILL,
+} from '@/components/SpotlightCard/SpotlightCard'
 import { INPUT, PANEL } from './rpgUi'
 import { PLAY_STYLES, STYLE_DEFAULTS, styleLabel } from './stylePresets'
 
@@ -53,32 +56,32 @@ export default function Rpg() {
 
   return (
     <div className="mode-game min-h-screen bg-background relative">
+      <div aria-hidden className="page-glow" />
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
-        <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择">
+        <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择" aria-label="返回模式选择">
           <ArrowLeft className="w-4 h-4" />
         </button>
-        <Dices className="w-5 h-5 text-violet-500" />
+        <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary/10 text-primary ring-1 ring-inset ring-primary/20">
+          <Dices className="w-4 h-4" />
+        </span>
         <h1 className="font-bold text-lg">游戏</h1>
         <button
           onClick={() => navigate('/game/prompts')}
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
-            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className={HEADER_PILL}
           title="改写给模型的指令：主持人、裁决、结算、帮我想想"
         >
           <ScrollText className="w-3.5 h-3.5" /> 提示词
         </button>
         <button
           onClick={() => navigate('/game/settings')}
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
-            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className={HEADER_PILL}
           title="写作规则：管住叙事的用词用语"
         >
           <Settings2 className="w-3.5 h-3.5" /> 设定
         </button>
         <button
           onClick={() => navigate('/game/presets')}
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
-            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className={HEADER_PILL}
           title="通用的数值和动作，攒一套下次直接套"
         >
           <Library className="w-3.5 h-3.5" /> 套装
@@ -88,24 +91,26 @@ export default function Rpg() {
         </div>
       </header>
 
-      <main className="relative z-10 max-w-5xl mx-auto px-6 py-12 space-y-8">
-        <div className="flex items-end justify-between gap-4">
+      <main className="relative z-10 max-w-5xl mx-auto px-5 sm:px-6 pt-12 pb-16 sm:pt-16 space-y-10">
+        <div className="reveal flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h2 className="text-2xl font-bold mb-1.5">想去哪个世界？</h2>
-            <p className="text-sm text-muted-foreground">
+            <p className="mb-3 text-xs font-medium tracking-[0.2em] text-primary">GAME</p>
+            <h2 className="font-display text-4xl sm:text-5xl font-bold leading-tight tracking-tight">想去哪个世界？</h2>
+            <p className="mt-3 text-sm sm:text-base text-muted-foreground">
               {modules.length === 0
                 ? '还没有模组。模组是一份可以反复开局的剧本：世界观、开场、NPC 和难度都写在里面。'
-                : `${modules.length} 个模组`}
+                : <><span className="font-semibold tabular-nums text-foreground">{modules.length}</span> 个模组</>}
             </p>
           </div>
           <button
             onClick={() => setCreating(true)}
-            className="flex items-center gap-1.5 text-sm rounded-lg px-4 py-2 shrink-0
-              bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
+            className="self-start sm:self-auto flex items-center gap-1.5 text-sm font-medium rounded-full px-5 py-2.5 shrink-0 bg-primary text-primary-foreground hover:opacity-95"
           >
             <Plus className="w-4 h-4" /> 新建模组
           </button>
         </div>
+
+        <MemoBoard scope="game" />
 
         {isLoading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
@@ -114,21 +119,24 @@ export default function Rpg() {
         ) : modules.length === 0 ? (
           <button
             onClick={() => setCreating(true)}
-            className="w-full rounded-xl border border-dashed border-violet-500/30 py-20 text-center
-              hover:bg-violet-500/5 transition-colors group"
+            className="reveal w-full rounded-2xl border border-dashed border-primary/30 py-20 text-center
+              hover:bg-primary/5 hover:border-primary/50 transition-colors group"
           >
-            <Dices className="w-10 h-10 mx-auto mb-3 text-violet-500/40 group-hover:text-violet-500/70 transition-colors" />
+            <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-primary/10 text-primary transition-transform duration-500 ease-out-expo group-hover:scale-110 group-hover:-rotate-6">
+              <Dices className="w-7 h-7" />
+            </span>
             <p className="text-sm text-muted-foreground">点这里写第一个模组</p>
           </button>
         ) : (
-          <div className="grid gap-5 sm:grid-cols-2">
-            {modules.map(module => (
+          <div className="grid gap-4 sm:grid-cols-2 lg:gap-5">
+            {modules.map((module, i) => (
               <SpotlightCard
                 key={module.id}
-                spotlightColor="rgba(167, 139, 250, 0.14)"
-                className={`${PANEL} backdrop-blur-sm hover:border-primary/50 transition-colors`}
+                spotlightColor="hsl(var(--primary) / 0.12)"
+                className={LIST_CARD}
+                style={{ '--i': i + 1 } as React.CSSProperties}
               >
-                <div className="absolute left-0 top-0 bottom-0 w-1 bg-violet-500/70" />
+                <span aria-hidden className={LIST_CARD_BAR} />
                 <div
                   role="button"
                   tabIndex={0}
@@ -138,13 +146,13 @@ export default function Rpg() {
                       e.preventDefault(); navigate(`/game/module/${module.id}`)
                     }
                   }}
-                  className="pl-7 pr-5 py-5 flex flex-col gap-4 h-full cursor-pointer focus:outline-none"
+                  className={`relative p-5 sm:p-6 flex flex-col gap-4 h-full cursor-pointer rounded-2xl ${LIST_CARD_HIT}`}
                 >
                   <div className="flex items-start gap-3.5">
                     <ModuleCover name={module.name} url={module.cover_url} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <p className="font-semibold truncate">{module.name}</p>
+                        <p className="font-display text-xl font-bold truncate">{module.name}</p>
                         <span className="text-[11px] px-2 py-0.5 rounded-full shrink-0 bg-primary/10 text-primary">
                           {styleLabel(module.play_style)}
                         </span>
@@ -163,18 +171,20 @@ export default function Rpg() {
                         )}
                       </p>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         onClick={e => { e.stopPropagation(); navigate(`/game/module/${module.id}`) }}
-                        className="p-1.5 rounded hover:bg-muted"
+                        className={CARD_ICON_BTN}
                         title="编辑模组"
+                        aria-label="编辑模组"
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={e => { e.stopPropagation(); handleDelete(module) }}
-                        className="p-1.5 rounded hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+                        className={CARD_ICON_BTN_DANGER}
                         title="删除"
+                        aria-label="删除模组"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -182,9 +192,14 @@ export default function Rpg() {
                   </div>
 
                   {/* creator_note 的用处就在这里：给人看的备注，后端永不发给模型 */}
-                  <p className="text-xs text-muted-foreground/80 leading-relaxed line-clamp-2 min-h-[2rem]">
+                  <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2 min-h-[2.75rem]">
                     {module.creator_note || '（没有写介绍）'}
                   </p>
+
+                  <div className="mt-auto flex items-center justify-between gap-2 border-t border-foreground/[0.06] pt-3 text-sm font-medium text-muted-foreground transition-colors group-hover:text-primary">
+                    <span>进入模组</span>
+                    <ArrowUpRight className="w-4 h-4 transition-transform duration-500 ease-out-expo group-hover:rotate-45" />
+                  </div>
                 </div>
               </SpotlightCard>
             ))}

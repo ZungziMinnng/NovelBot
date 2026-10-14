@@ -655,14 +655,6 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <label className="text-sm font-medium">自定义 Writer 提示词</label>
-                      <button
-                        type="button"
-                        onClick={() => setStylePickerOpen(true)}
-                        className="text-xs px-2 py-1 border rounded-md hover:bg-muted inline-flex items-center gap-1"
-                      >
-                        <Library className="w-3.5 h-3.5" />
-                        从文风库取用
-                      </button>
                     </div>
                     {stylePickerOpen && (
                       <StylePickerModal
@@ -736,7 +728,19 @@ export default function NovelSettingsDrawer({ novel, initialTab, onClose }: Prop
                       )}
                     </div>
 
-                    <ExampleTurnsEditor value={writerExamples} onChange={setWriterExamples} />
+                    <ExampleTurnsEditor
+                      value={writerExamples}
+                      onChange={setWriterExamples}
+                      actions={
+                        <button
+                          type="button"
+                          onClick={() => setStylePickerOpen(true)}
+                          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors"
+                        >
+                          <Library className="w-3.5 h-3.5" /> 从文风库取用
+                        </button>
+                      }
+                    />
                   </div>
                 </>
               )}

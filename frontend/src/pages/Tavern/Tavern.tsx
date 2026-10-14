@@ -9,7 +9,9 @@ import { tavernApi, type TavernCard } from '@/api/client'
 import AutoTextarea from '@/components/AutoTextarea'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ThemePicker from '@/components/ThemePicker/ThemePicker'
-import SpotlightCard from '@/components/SpotlightCard/SpotlightCard'
+import SpotlightCard, {
+  LIST_CARD, LIST_CARD_BAR, LIST_CARD_HIT, CARD_ICON_BTN, CARD_ICON_BTN_DANGER, HEADER_PILL,
+} from '@/components/SpotlightCard/SpotlightCard'
 import CardAvatar from './CardAvatar'
 import CardMultiSelect from './CardMultiSelect'
 
@@ -41,16 +43,18 @@ export default function Tavern() {
 
   return (
     <div className="mode-tavern min-h-screen bg-background relative">
+      <div aria-hidden className="page-glow" />
       <header className="relative z-10 border-b border-border/50 backdrop-blur-sm px-6 py-4 flex items-center gap-3">
-        <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择">
+        <button onClick={() => navigate('/')} className="p-2 rounded-md hover:bg-muted" title="返回模式选择" aria-label="返回模式选择">
           <ArrowLeft className="w-4 h-4" />
         </button>
-        <Beer className="w-5 h-5 text-pink-500" />
+        <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary/10 text-primary ring-1 ring-inset ring-primary/20">
+          <Beer className="w-4 h-4" />
+        </span>
         <h1 className="font-bold text-lg">酒馆</h1>
         <button
           onClick={() => navigate('/tavern/settings')}
-          className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border
-            text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className={HEADER_PILL}
           title="管理酒馆的写作规则与常用系统指令"
         >
           <Settings2 className="w-3.5 h-3.5" /> 规则与指令
@@ -60,20 +64,20 @@ export default function Tavern() {
         </div>
       </header>
 
-      <main className="relative z-10 max-w-5xl mx-auto px-6 py-12 space-y-8">
-        <div className="flex items-end justify-between gap-4">
+      <main className="relative z-10 max-w-5xl mx-auto px-5 sm:px-6 pt-12 pb-16 sm:pt-16 space-y-10">
+        <div className="reveal flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h2 className="text-2xl font-bold mb-1.5">今晚想见谁？</h2>
-            <p className="text-sm text-muted-foreground">
+            <p className="mb-3 text-xs font-medium tracking-[0.2em] text-primary">TAVERN</p>
+            <h2 className="font-display text-4xl sm:text-5xl font-bold leading-tight tracking-tight">今晚想见谁？</h2>
+            <p className="mt-3 text-sm sm:text-base text-muted-foreground">
               {cards.length === 0
                 ? '还没有角色卡。先捏一个人出来，再决定要跟他走哪条故事线。'
-                : `${cards.length} 张角色卡 · ${totalSessions} 条故事线`}
+                : <><span className="font-semibold tabular-nums text-foreground">{cards.length}</span> 张角色卡 · <span className="font-semibold tabular-nums text-foreground">{totalSessions}</span> 条故事线</>}
             </p>
           </div>
           <button
             onClick={() => navigate('/tavern/card/new')}
-            className="flex items-center gap-1.5 text-sm rounded-lg px-4 py-2 shrink-0
-              bg-primary/10 text-primary ring-1 ring-primary/30 hover:bg-primary/20 transition-colors"
+            className="self-start sm:self-auto flex items-center gap-1.5 text-sm font-medium rounded-full px-5 py-2.5 shrink-0 bg-primary text-primary-foreground hover:opacity-95"
           >
             <Plus className="w-4 h-4" /> 新建角色卡
           </button>
@@ -86,50 +90,55 @@ export default function Tavern() {
         ) : cards.length === 0 ? (
           <button
             onClick={() => navigate('/tavern/card/new')}
-            className="w-full rounded-xl border border-dashed border-pink-500/30 py-20 text-center
-              hover:bg-pink-500/5 transition-colors group"
+            className="reveal w-full rounded-2xl border border-dashed border-primary/30 py-20 text-center
+              hover:bg-primary/5 hover:border-primary/50 transition-colors group"
           >
-            <Beer className="w-10 h-10 mx-auto mb-3 text-pink-500/40 group-hover:text-pink-500/70 transition-colors" />
+            <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-primary/10 text-primary transition-transform duration-500 ease-out-expo group-hover:scale-110 group-hover:-rotate-6">
+              <Beer className="w-7 h-7" />
+            </span>
             <p className="text-sm text-muted-foreground">点这里捏第一个角色</p>
           </button>
         ) : (
-          <div className="grid gap-5 sm:grid-cols-2">
-            {cards.map(card => (
+          <div className="grid gap-4 sm:grid-cols-2 lg:gap-5">
+            {cards.map((card, i) => (
               <SpotlightCard
                 key={card.id}
-                spotlightColor="rgba(236, 72, 153, 0.14)"
-                className="rounded-xl border bg-card/60 backdrop-blur-sm hover:border-pink-500/50 transition-colors"
+                spotlightColor="hsl(var(--primary) / 0.12)"
+                className={LIST_CARD}
+                style={{ '--i': i + 1 } as React.CSSProperties}
               >
-                <div className="absolute left-0 top-0 bottom-0 w-1 bg-pink-500/70" />
+                <span aria-hidden className={LIST_CARD_BAR} />
                 {/* 卡面整体就是"开始聊"，编辑收到铅笔里——点开角色不该先看到表单 */}
                 <div
                   role="button"
                   tabIndex={0}
                   onClick={() => setStarting(card)}
                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setStarting(card) } }}
-                  className="pl-7 pr-5 py-5 flex flex-col gap-4 h-full cursor-pointer focus:outline-none"
+                  className={`relative p-5 sm:p-6 flex flex-col gap-4 h-full cursor-pointer rounded-2xl ${LIST_CARD_HIT}`}
                 >
                   <div className="flex items-start gap-3.5">
                     <CardAvatar name={card.name} url={card.avatar_url} />
                     <div className="min-w-0 flex-1">
-                      <p className="font-semibold truncate">{card.name}</p>
+                      <p className="font-display text-xl font-bold truncate">{card.name}</p>
                       <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
                         <MessagesSquare className="w-3 h-3" />
                         {card.session_count > 0 ? `${card.session_count} 条故事线` : '还没开始'}
                       </p>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         onClick={e => { e.stopPropagation(); navigate(`/tavern/card/${card.id}`) }}
-                        className="p-1.5 rounded hover:bg-muted"
+                        className={CARD_ICON_BTN}
                         title="编辑角色卡"
+                        aria-label="编辑角色卡"
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={e => { e.stopPropagation(); handleDelete(card) }}
-                        className="p-1.5 rounded hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+                        className={CARD_ICON_BTN_DANGER}
                         title="删除"
+                        aria-label="删除角色卡"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -137,15 +146,16 @@ export default function Tavern() {
                   </div>
 
                   {/* creator_note 的用处就在这里：给人看的备注，后端永不发给模型 */}
-                  <p className="text-xs text-muted-foreground/80 leading-relaxed line-clamp-2 min-h-[2rem]">
+                  <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2 min-h-[2.75rem]">
                     {card.creator_note || '（没有写介绍）'}
                   </p>
 
                   <div
-                    className="mt-auto text-sm px-3 py-2 rounded-lg text-center
-                      bg-primary/10 text-primary ring-1 ring-primary/25 transition-colors"
+                    className="mt-auto flex items-center justify-center gap-1.5 text-sm font-medium px-3 py-2.5 rounded-xl
+                      bg-primary/10 text-primary ring-1 ring-inset ring-primary/20 transition-colors duration-300
+                      group-hover:bg-primary group-hover:text-primary-foreground group-hover:ring-transparent"
                   >
-                    开始对话
+                    <Play className="w-3.5 h-3.5" /> 开始对话
                   </div>
                 </div>
               </SpotlightCard>
@@ -196,13 +206,13 @@ function StartDialog({ card, onClose }: { card: TavernCard; onClose: () => void 
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-xl border border-pink-500/20 bg-card shadow-xl max-h-[85vh] overflow-y-auto"
+        className="w-full max-w-md rounded-xl border border-primary/20 bg-card shadow-xl max-h-[85vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="px-5 py-4 border-b flex items-center gap-3">
           <CardAvatar name={card.name} url={card.avatar_url} size="sm" />
           <p className="font-semibold text-sm flex-1 truncate">{card.name}</p>
-          <button onClick={onClose} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-muted" aria-label="关闭"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="p-5 space-y-5">
@@ -218,7 +228,7 @@ function StartDialog({ card, onClose }: { card: TavernCard; onClose: () => void 
                   <button
                     key={s.id}
                     onClick={() => navigate(`/tavern/chat/${s.id}`)}
-                    className="w-full text-left border rounded-lg px-3 py-2 hover:border-pink-500/40 hover:bg-pink-500/5 transition-colors"
+                    className="w-full text-left border rounded-lg px-3 py-2 hover:border-primary/40 hover:bg-primary/5 transition-colors"
                   >
                     <p className="text-sm truncate">{s.title || new Date(s.created_at).toLocaleString()}</p>
                     <p className="text-xs text-muted-foreground mt-0.5">
@@ -255,14 +265,14 @@ function StartDialog({ card, onClose }: { card: TavernCard; onClose: () => void 
               value={personaName}
               onChange={e => setPersonaName(e.target.value)}
               placeholder="你的名字（选填）"
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60 focus:outline-none focus:ring-1 focus:ring-pink-500/50"
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
             />
             <AutoTextarea
               minRows={2}
               value={personaDesc}
               onChange={e => setPersonaDesc(e.target.value)}
               placeholder="你扮演的人是谁（选填）：身份、外貌、与角色的关系……"
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60 focus:outline-none focus:ring-1 focus:ring-pink-500/50"
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-background/60"
             />
             <p className="text-xs text-muted-foreground">
               都留空也能开始，{'{{user}}'} 会替换成 user。

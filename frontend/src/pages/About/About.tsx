@@ -87,8 +87,8 @@ export default function About() {
             <Item icon={StickyNote} label="补充设定 (notes)">
               用户在笔记页面添加的补充设定条目。通过向量检索筛选与本章相关的笔记，作为额外的世界观补充。
             </Item>
-            <Item icon={Zap} label="上章原文 (recent_text)">
-              上一章全文（去除末尾剧情建议），提供场景级衔接细节。仅当原文为空时回退到摘要。
+            <Item icon={Zap} label="近章原文 (recent_text)">
+              最近 3 章全文（去除末尾剧情建议，跨卷也能接上），提供场景级衔接细节。原文为空的章回退到摘要。
             </Item>
           </div>
           <div className="mt-4 p-3 bg-muted/50 rounded-lg">

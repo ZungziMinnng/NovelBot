@@ -454,7 +454,7 @@ export default function GenerationBar({
                 title={`Critic 审查（${enableCritic ? '已开启' : '已关闭'}）\n\n开启后，章节生成完毕将自动调用审查模型检查以下内容：\n• 角色性格、能力、关系、状态是否与角色卡一致\n• 势力立场、目标、阵营、行动边界是否与势力设定冲突\n• 系统/道具/功法是否前后矛盾或擅自变更\n• 本章是否偏离大纲目标\n• 是否出现逻辑漏洞、人名替换、无根据新增设定\n\n审查不通过将自动进入修订循环（最多重试 2 次）。\n点击切换开关状态。`}
                 className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-50 ${
                   enableCritic
-                    ? 'text-amber-600 bg-amber-50 hover:bg-amber-100 border border-amber-200'
+                    ? 'text-amber-700 dark:text-amber-300 bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/30'
                     : 'text-muted-foreground hover:bg-muted border border-transparent'
                 }`}
               >
@@ -467,7 +467,7 @@ export default function GenerationBar({
                 title={`剧情细节审查（${enableDetailReview ? '已开启' : '已关闭'}）\n\n专注章节正文文字层面，检查以下问题：\n• 前后章节之间的连续性断裂\n• 场景、动作、对话的文字重复\n• 人物位置、持有物品的事实矛盾\n• 时间线标注与实际剧情顺序的冲突\n\n基于前 20 章内容进行扫描，发现问题后自动进入修订循环。\n点击切换开关状态。`}
                 className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-50 ${
                   enableDetailReview
-                    ? 'text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200'
+                    ? 'text-blue-700 dark:text-blue-300 bg-blue-500/10 hover:bg-blue-500/15 border border-blue-500/30'
                     : 'text-muted-foreground hover:bg-muted border border-transparent'
                 }`}
               >
@@ -532,7 +532,7 @@ export default function GenerationBar({
               placeholder="添加全局批注：语气再沉稳些..."
               className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
             />
-            <button onClick={handleAddGlobal} disabled={!globalInput.trim()}
+            <button onClick={handleAddGlobal} disabled={!globalInput.trim()} aria-label="添加全局批注" title="添加全局批注"
               className="text-xs px-3 py-2 border rounded-lg hover:bg-muted disabled:opacity-40 transition-colors">
               <Plus className="w-3.5 h-3.5" />
             </button>

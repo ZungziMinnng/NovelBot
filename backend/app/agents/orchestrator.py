@@ -15,7 +15,7 @@ from app.models.novel import Novel
 from app.models.chapter import Chapter
 from app.services.context_builder import build_generation_context
 from app.services.sse import sse_event
-from app.services import summarizer, llm_client, entity_embeddings, state_snapshot
+from app.services import summarizer, llm_client, entity_embeddings, state_snapshot, chapter_versions, word_stats
 from app.agents import writer
 from app.agents.draft_loop import run_draft_loop
 from app.agents.memory_pipeline import (
@@ -42,6 +42,7 @@ class NovelState(TypedDict):
     writer_truncated: bool
     total_input_tokens: int
     total_output_tokens: int
+    first_token_s: float
 
 
 _sse = sse_event
@@ -135,16 +136,27 @@ async def run_chapter_generation(
         "writer_truncated": False,
         "total_input_tokens": 0,
         "total_output_tokens": 0,
+        "first_token_s": 0.0,
     }
 
     writer_system_prompt = getattr(novel, "writer_system_prompt", "") or ""
     writer_examples = getattr(novel, "writer_examples", []) or []
+
+    # 每段耗时（秒），done 之前打一行日志。要改哪一段先看这一行，别凭感觉
+    timings: dict[str, float] = {}
+    mark = [time.monotonic()]
+
+    def _lap() -> float:
+        now = time.monotonic()
+        spent, mark[0] = round(now - mark[0], 2), now
+        return spent
 
     try:
         pending = _pending_memory(novel.id)
         if pending:
             yield _sse("stage", "waiting_memory")
             await asyncio.wait({pending})  # 用 wait 而非直接 await：本请求取消时不连带取消记忆任务
+        timings["wait_memory"] = _lap()
 
         # ── 预清理：删除旧摘要 + 回滚状态快照（current_state）──
         await _prepare_regen_rollback(
@@ -198,6 +210,7 @@ async def run_chapter_generation(
                 "output_tokens": bf_out,
                 "passed": True,
             })
+        timings["prep"] = _lap()
 
         # ── Node 1: Build Context ──────────────────────────────────────────
         yield _sse("stage", "building_context")
@@ -221,12 +234,14 @@ async def run_chapter_generation(
             "output_tokens": 0,
             "passed": True,
         })
+        timings["context"] = _lap()
 
         # ── Node 2/3/3b: 写作-审稿-修订循环（已拆至 draft_loop）──────────────
         async for event in run_draft_loop(
             session, novel, state, writer_system_prompt, writer_examples,
         ):
             yield event
+        timings["draft"] = _lap()
 
         # ── Node 4: Save Chapter ───────────────────────────────────────────
         if not state["generated_text"].strip():
@@ -236,6 +251,7 @@ async def run_chapter_generation(
         yield _sse("stage", "saving")
         chapter = await _save_chapter(session, state, novel)
         await session.commit()
+        timings["save"] = _lap()
 
         # ── Node 5/6: 记忆更新 + 周期性刷新 + 新设定候选（已拆至 memory_pipeline，后台跑）─
         # 先起任务再发 chapter_saved：前端拿到正文立刻断开也不会漏跑记忆
@@ -243,6 +259,10 @@ async def run_chapter_generation(
         yield _sse("chapter_saved", str(chapter.id))
         while (event := await memory_events.get()) is not None:
             yield event
+        timings["memory"] = _lap()
+        # draft 含写作+审稿+修订；首字是 writer 发出请求到第一个字的时间，单列不计入合计
+        logger.info("小说 %s 第%s章 生成耗时 %s 合计 %.2fs（写作首字 %.2fs）",
+                    novel.id, chapter_number, timings, sum(timings.values()), state["first_token_s"])
 
         # ── Emit total usage ───────────────────────────────────────────────
         yield _sse_json("total_usage", {
@@ -371,8 +391,11 @@ async def run_chapter_rewrite(
         if not generated_text.strip():
             raise ValueError("重写未生成任何内容")
         yield _sse("stage", "saving")
+        await chapter_versions.snapshot(session, chapter, "rewrite")
+        old_words = chapter.word_count or 0
         chapter.content = generated_text
         chapter.word_count = len(generated_text)
+        await word_stats.record(session, novel.id, chapter.word_count - old_words)
         chapter.status = "draft"
         if model:
             chapter.model_used = model
@@ -462,7 +485,9 @@ async def _save_chapter(
     chapter = result.scalar_one_or_none()
 
     model_used = state.get("model_used") or ""
+    old_words = (chapter.word_count or 0) if chapter else 0
     if chapter:
+        await chapter_versions.snapshot(session, chapter, "regenerate")
         chapter.content = state["generated_text"]
         chapter.instruction = state.get("instruction") or None
         chapter.status = "draft"
@@ -484,4 +509,5 @@ async def _save_chapter(
         session.add(chapter)
 
     await session.flush()
+    await word_stats.record(session, novel.id, chapter.word_count - old_words)
     return chapter

@@ -4,7 +4,7 @@ import { Loader2, Plus, Sparkles, Trash2, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { rpgApi, type RpgAssistField } from '@/api/client'
 
-export const INPUT = 'w-full border rounded-lg px-3 py-2 text-sm bg-background/60 focus:outline-none focus:ring-1 focus:ring-primary/50'
+export const INPUT = 'input-fill border rounded-lg px-3 py-2 text-sm bg-background/60 focus:outline-none focus:ring-1 focus:ring-primary/50'
 
 /** 逗号分隔的一行文本 ↔ 字符串数组。中英文逗号、顿号、分号都认 */
 export const splitList = (text: string) =>
@@ -150,6 +150,10 @@ export function NumInput({
 
 /** 面板的公共壳。侧栏那四张重复的 rounded-xl border bg-card/70 p-3 也用它 */
 export const PANEL = 'rpg-panel rounded-xl border bg-card/70'
+
+/** 道具类别。编辑端的下拉和背包的分组共用这一份顺序。
+ *  名字刻意选古今都通的：资料 = 书、功法、图纸、笔记、手册这类记载知识的东西 */
+export const ITEM_CATEGORIES = ['消耗品', '武器', '装备', '关键道具', '资料'] as const
 
 /** 要等的事情正在跑时的那条进度条。样式和动画在 index.css 的 .rpg-wait-bar。
  *

@@ -6,9 +6,12 @@
 
 按类别提取另走一路：随机抽样覆盖不到「打斗」这种局部内容，所以全书每一块都切出来，
 按类别的特征词打分，挑出候选块再交给模型摘原句。
+
+去文件头、切整场景连续原文、试写对比统计也在这里。
 """
 import random
 import re
+from collections import Counter
 
 from app.services.relevance_selector import APPEARANCE_KEYWORDS
 
@@ -17,6 +20,17 @@ _CHAPTER_RE = re.compile(
 )
 # 没有「第X章」的书按这个字数切伪章节，抽样照样能铺满全书
 _FALLBACK_CHAPTER_CHARS = 5000
+
+# 网上下的 txt 开头常有书名/作者/简介/下载站广告，切块前去掉
+_FRONT_RE = re.compile(
+    r"^[ \t　]*(书名|作者|简介|内容简介|内容介绍|标签|字数|来源|状态|类型|更新时间|首发|出处)[ \t　]*[:：]"
+)
+# 只收不会出现在正文里的词：「整理」「下载」这类正文也常用，会误删
+_AD_MARKERS = ("http", "www.", ".com", ".net", "txt", "TXT", "手有余香", "仅供试阅", "仅供交流", "本站", "最新章节")
+# 行首一串括号引号分号（");(' 这种）是转码残渣。不收 . 和 -：「"...」「——」是正文
+_JUNK_PREFIX_RE = re.compile(r"^[ \t　]*[\"'();\[\]{}<>=]{3,}")
+# 只在前 30 个非空行里认文件头，正文里出现「作者」二字不能误删
+_FRONT_LINES = 30
 
 # 抽样：全书均分成这么多份、每份抽一章；每章最多取这么多块
 _SAMPLE_BUCKETS = 12
@@ -28,9 +42,15 @@ _CHUNK_MAX = 900
 
 _QUOTE_RE = re.compile(r"[“「『\"][^”」』\"]*[”」』\"]")
 _SENTENCE_END_RE = re.compile(r"[。！？!?…]+[”」』\"]?")
+_TAG_RE = re.compile(r"(说|道|问|喊|叫|答|骂|嘀咕)")
+_CJK_RE = re.compile(r"[一-鿿]")
+_CJK_RUN_RE = re.compile(r"[一-鿿]+")
 
 # 「对话」不靠特征词，按引号占比判
 DIALOGUE = "对话"
+# 整场景不靠特征词也不让模型摘句，代码直接切连续原文，学的是一场戏怎么推进
+WHOLE_SCENE = "整场景"
+
 PRESET_KEYWORDS: dict[str, tuple[str, ...]] = {
     "外貌描写": tuple(APPEARANCE_KEYWORDS),
     "打斗": ("拳", "掌", "剑", "刀", "砍", "劈", "刺", "斩", "挡", "闪身", "躲", "击",
@@ -42,11 +62,40 @@ PRESET_KEYWORDS: dict[str, tuple[str, ...]] = {
     "日常": ("吃", "饭", "茶", "睡", "洗", "买", "聊", "早上", "晚上", "家里", "屋里",
              "桌", "碗", "菜", "厨房"),
 }
-PRESET_CATEGORIES = (DIALOGUE, *PRESET_KEYWORDS)
+PRESET_CATEGORIES = (DIALOGUE, *PRESET_KEYWORDS, WHOLE_SCENE)
+
+# 粗筛后给本地重排模型用的类别描述（自定义类别直接用类别名）
+RERANK_QUERIES: dict[str, str] = {
+    "对话": "人物之间你来我往的对白交锋",
+    "外貌描写": "描写人物的长相、身材、衣着和神态",
+    "打斗": "人物交手、出招、闪避、受伤的打斗场面",
+    "环境描写": "描写天气、景物、街道、屋内陈设等环境",
+    "心理描写": "人物内心的想法、犹豫和情绪起伏",
+    "日常": "吃饭、睡觉、聊天、做家务等日常生活场景",
+}
+
+# 通用称谓，模型常把它们当别名报上来，换成人名后正文就读不通（「林晓是个贤惠的林晓」）
+GENERIC_TITLES: frozenset[str] = frozenset((
+    "妻子 老婆 老公 丈夫 媳妇 娘子 相公 夫君 夫人 太太 女友 男友 女朋友 男朋友 爱人 "
+    "母亲 父亲 妈妈 爸爸 娘亲 爹爹 娘 爹 妈 爸 儿子 女儿 哥哥 姐姐 弟弟 妹妹 哥 姐 "
+    "师父 师傅 师尊 师娘 师兄 师姐 师弟 师妹 徒弟 弟子 少爷 小姐 公子 姑娘 大人 主人 "
+    "前辈 老爷 掌门 宗主 阿姨 叔叔 老师 同学 老板 我 你 他 她 主角"
+).split())
 
 _CANDIDATES_PER_CATEGORY = 12
 # 同章最多两块：全挤在一章里，模型看到的就只有一种写法
 _CANDIDATES_PER_CHAPTER = 2
+
+# 整场景：等距取几章、每章拼连续原文的字数上下限
+_WHOLE_SCENES = 5
+_WHOLE_LO = 800
+_WHOLE_HI = 1500
+
+# 试写对比：差这么多才列出来
+_GAP_THRESHOLD = 0.3
+
+# 高频词组首尾的虚字：挡掉「的时候」「他的」这类
+_STOP_EDGE = set("的了着是在一个这那我他她你和就也都把被不")
 
 
 def decode_text(raw: bytes) -> str:
@@ -62,11 +111,29 @@ def decode_text(raw: bytes) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def strip_front_matter(text: str) -> str:
+    """去掉开头的书名/作者/简介/下载站广告行，以及开头几行的转码残渣。"""
+    out: list[str] = []
+    seen = 0
+    for line in text.split("\n"):
+        if not line.strip():
+            out.append(line)
+            continue
+        if seen < _FRONT_LINES:
+            seen += 1
+            line = _JUNK_PREFIX_RE.sub("", line)
+            if _FRONT_RE.match(line) or any(m in line for m in _AD_MARKERS):
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def split_chapters(text: str) -> list[str]:
     """按「第X章/回/节」切。标题行本身丢掉，第一章之前的序言/简介也丢掉。
 
     切出来不到两章就当作没有章节标记，按字数在段落边界上切。
     """
+    text = strip_front_matter(text)
     heads = list(_CHAPTER_RE.finditer(text))
     if len(heads) >= 2:
         chapters = []
@@ -146,6 +213,38 @@ def all_chunks(chapters: list[str]) -> list[tuple[int, str]]:
     return [(i, c) for i, chapter in enumerate(chapters) for c in _chunks(chapter)]
 
 
+def whole_scenes(
+    chapters: list[str], n: int = _WHOLE_SCENES, lo: int = _WHOLE_LO, hi: int = _WHOLE_HI
+) -> list[str]:
+    """全书等距取 n 章，每章从三分之一处的自然段起往后拼连续原文。
+
+    攒够 lo 字就停、超过 hi 字前就停；整章不到 lo 字的跳过。确定性，不随机。
+    """
+    eligible = [c for c in chapters if sum(len(p) for p in _paragraphs(c)) >= lo]
+    k = min(n, len(eligible))
+    out: list[str] = []
+    seen: set[str] = set()
+    for i in range(k):
+        paras = _paragraphs(eligible[i * len(eligible) // k])
+        # 从三分之一处起；后半章不够 lo 字再从头来一遍
+        for start in (len(paras) // 3, 0):
+            buf, size = [], 0
+            for para in paras[start:]:
+                if buf and size + len(para) > hi:
+                    break
+                buf.append(para)
+                size += len(para)
+                if size >= lo:
+                    break
+            if size >= lo:
+                text = "\n".join(buf)
+                if text not in seen:
+                    seen.add(text)
+                    out.append(text)
+                break
+    return out
+
+
 def keyword_score(text: str, keywords) -> float:
     """每百字命中几次。按字数归一，不然长块天然命中多，候选全是长块。"""
     total = len(re.sub(r"\s", "", text))
@@ -206,20 +305,68 @@ def apply_replacements(text: str, mapping: dict[str, str]) -> str:
     return pattern.sub(lambda m: pairs[m.group()], text)
 
 
+def _top_phrases(paras: list[str], limit: int = 10) -> list[str]:
+    # ponytail: 没有背景语料，常用词组会混进来，用首尾虚字挡掉一部分；要准得拿通用语料算 TF-IDF
+    counts: Counter = Counter()
+    for p in paras:
+        for run in _CJK_RUN_RE.findall(p):
+            for size in (3, 4):
+                for i in range(len(run) - size + 1):
+                    counts[run[i:i + size]] += 1
+    phrases: list[str] = []
+    for gram, count in sorted(counts.items(), key=lambda kv: (kv[1], len(kv[0])), reverse=True):
+        if count < 4:
+            break
+        if gram[0] in _STOP_EDGE or gram[-1] in _STOP_EDGE:
+            continue
+        if any(gram in picked or picked in gram for picked in phrases):
+            continue
+        phrases.append(gram)
+        if len(phrases) >= limit:
+            break
+    return phrases
+
+
+def _dialogue_tags(paras: list[str]) -> dict:
+    """台词怎么起头：tag = 引号前后带「说/道/问」；beat = 同段有动作叙述带出；bare = 光秃秃一句台词。"""
+    tags = beats = bares = 0
+    for p in paras:
+        has_beat = len(_CJK_RE.findall(_QUOTE_RE.sub("", p))) >= 4
+        for m in _QUOTE_RE.finditer(p):
+            before = p[max(0, m.start() - 8):m.start()]
+            after = p[m.end():m.end() + 8]
+            if _TAG_RE.search(before) or _TAG_RE.search(after):
+                tags += 1
+            elif has_beat:
+                beats += 1
+            else:
+                bares += 1
+    quotes = tags + beats + bares
+    if not quotes:
+        return {}
+    return {"tag": round(tags / quotes, 2), "beat": round(beats / quotes, 2), "bare": round(bares / quotes, 2)}
+
+
 def compute_stats(chunks: list[str]) -> dict:
     """在抽样块上算，不在全书上算：给模型看的统计要和它看到的原文对得上。
 
     person 只是粗判：引号外叙述层「我」多于「他/她」就算第一人称。
+    后面几项（短句/单句成段/标点密度/台词起头/高频词组）同时给试写对比用。
     """
     text = "\n".join(chunks)
     total = len(re.sub(r"\s", "", text))
     if not total:
-        return {"avg_sentence_len": 0, "dialogue_ratio": 0, "avg_para_len": 0, "person": ""}
+        return {
+            "avg_sentence_len": 0, "dialogue_ratio": 0, "avg_para_len": 0, "person": "",
+            "short_sentence_ratio": 0, "single_sentence_para_ratio": 0,
+            "exclaim_per_k": 0, "question_per_k": 0, "dialogue_tags": {}, "top_phrases": [],
+        }
 
     quoted = sum(len(m.group()) for m in _QUOTE_RE.finditer(text))
     narration = _QUOTE_RE.sub("", text)
     sentences = [s for s in _SENTENCE_END_RE.split(re.sub(r"\s", "", text)) if s]
     paras = [p for c in chunks for p in _paragraphs(c)]
+    single = [p for p in paras if len([s for s in _SENTENCE_END_RE.split(p) if s.strip()]) <= 1]
 
     first = narration.count("我")
     third = narration.count("他") + narration.count("她")
@@ -228,4 +375,40 @@ def compute_stats(chunks: list[str]) -> dict:
         "dialogue_ratio": round(quoted / total, 2),
         "avg_para_len": round(total / max(len(paras), 1)),
         "person": "第一人称" if first > third else "第三人称",
+        "short_sentence_ratio": round(sum(1 for s in sentences if len(s) <= 10) / max(len(sentences), 1), 2),
+        "single_sentence_para_ratio": round(len(single) / max(len(paras), 1), 2),
+        "exclaim_per_k": round((text.count("！") + text.count("!")) * 1000 / total, 1),
+        "question_per_k": round((text.count("？") + text.count("?")) * 1000 / total, 1),
+        "dialogue_tags": _dialogue_tags(paras),
+        "top_phrases": _top_phrases(paras),
     }
+
+
+_COMPARE_FIELDS = (
+    ("avg_sentence_len", "平均句长"),
+    ("short_sentence_ratio", "短句占比"),
+    ("dialogue_ratio", "对话占比"),
+    ("avg_para_len", "平均段长"),
+    ("single_sentence_para_ratio", "单句成段"),
+    ("exclaim_per_k", "感叹号密度"),
+    ("question_per_k", "问号密度"),
+)
+
+
+def compare_stats(source: dict, trial: dict) -> list[dict]:
+    """试写对比：原文统计和试写统计逐项比，差 30% 以上的列出来。代码算，不让模型自评。"""
+    gaps: list[dict] = []
+    for key, label in _COMPARE_FIELDS:
+        a, b = source.get(key), trial.get(key)
+        # 老文风没有新统计，跳过
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or a == 0:
+            continue
+        diff = (b - a) / a
+        if abs(diff) >= _GAP_THRESHOLD:
+            gaps.append({"key": key, "label": label, "source": a, "trial": b, "diff": round(diff, 2)})
+    if source.get("person") and trial.get("person") and source["person"] != trial["person"]:
+        gaps.append({
+            "key": "person", "label": "叙述人称",
+            "source": source["person"], "trial": trial["person"], "diff": None,
+        })
+    return gaps

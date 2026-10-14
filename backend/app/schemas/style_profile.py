@@ -49,3 +49,14 @@ class StyleAdaptIn(BaseModel):
     character: str = ""
     name_map: dict[str, str] = {}  # 示例里的中性名 → 用户这边的真名，取用时手填
     model: str = ""  # 空 = 默认快速模型
+
+
+class StyleTrialIn(BaseModel):
+    scene_indexes: list[int] = []  # 参考哪几段；空 = 取前两段
+    model: str = ""
+
+
+class StyleImportNovelIn(BaseModel):
+    novel_id: int
+    categories: list[str] = []
+    model: str = ""

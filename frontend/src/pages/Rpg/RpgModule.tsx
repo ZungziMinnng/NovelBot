@@ -13,7 +13,7 @@ import {
   rpgApi, modelLibraryApi, modelSelectValue, groupModelsByProvider,
   type RpgModule as Module, type RpgWorldEntry, type RpgNpc,
   type RpgInvItem, type RpgBand, type RpgCondition, type RpgSession, type RpgStatDef,
-  type RpgPlayStyle, type RpgImageConfig,
+  type RpgPlayStyle, type RpgImageConfig, type RpgLocation,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
@@ -23,6 +23,7 @@ import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
 import { useFormAutosave } from '@/lib/useFormAutosave'
 import CharacterForm from './CharacterForm'
 import { protagonistCard } from './protagonist'
+import { DEFAULT_TIERS, replyTiers, TIER_LABELS } from './replyLength'
 import WizardPanel from './WizardPanel'
 import type { WizardPicked } from './WizardApplyModal'
 import { applyWizardEntities, mergeWizardFields } from './wizardApply'
@@ -33,10 +34,12 @@ import ItemSection from './ItemSection'
 import SkillSection from './SkillSection'
 import TaskSection from './TaskSection'
 import LocationSection from './LocationSection'
+import { placeGroups } from './mapLayout'
 import NpcAvatarField from './NpcAvatarField'
 import ImageSettingsDrawer from './ImageSettingsDrawer'
 import TriggerGuide from './TriggerGuide'
 import BatchGenerate from './BatchGenerate'
+import NpcBatchRefine from './NpcBatchRefine'
 import ConditionEditor from './ConditionEditor'
 import { norm, npcPlace, randomSlots, RANDOM_SLOT } from './condition'
 import { GENRE_PRESETS, type GenrePreset } from './genrePresets'
@@ -1150,6 +1153,8 @@ function ProtagonistSection({
 
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
+  const [persona, setPersona] = useState('')
+  const [looks, setLooks] = useState('')
   // 换卡（或第一次读出来）时灌一次。不能每次 npcs 变了就灌：自动保存成功后
   // 会 invalidate 这份查询，那一灌会把作者正在敲的字盖回上一次存下来的值
   const hydrated = useRef<number | null>(null)
@@ -1158,11 +1163,13 @@ function ProtagonistSection({
       hydrated.current = card.id
       setName(card.name)
       setDesc(card.description)
+      setPersona(card.persona || '')
+      setLooks(card.appearance || '')
     }
   }, [card])
 
   const autosave = useFormAutosave(
-    card && name.trim() ? { id: card.id, body: { name: name.trim(), description: desc } } : null,
+    card && name.trim() ? { id: card.id, body: { name: name.trim(), description: desc, persona, appearance: looks } } : null,
     !!card,
     async ({ id, body }) => { await rpgApi.npcs.update(id, body); refresh() },
   )
@@ -1221,18 +1228,32 @@ function ProtagonistSection({
                 onApply={setDesc}
               />
               <p className="text-xs text-muted-foreground mt-1.5">
-                GM 每轮都看得到这段。开局时它会填进弹窗那一栏，玩家还能自己改（除非下面锁上）。
+                开局时会和下面的性格、外貌一起填进弹窗那一栏，玩家还能自己改（除非下面锁上）。
               </p>
             </div>
-            {/* 拼进 char_desc 的是「简介 + 性格」两栏（后端 protagonist_identity
-                是同一个拼法）。性格那栏只在角色卡编辑器里，这儿不重复摆一遍，
-                但写了东西就得说一句——不然作者会以为上面这一格就是全部 */}
-            {!!card.persona.trim() && (
-              <p className="text-xs text-muted-foreground">
-                这张卡的「性格」栏还写着一段，开局时会跟在上面这段后面一起给 GM。
-                要改去「角色卡」里那张主角模板。
+            <div>
+              <label className="text-sm font-medium mb-2 block">性格</label>
+              <textarea
+                value={persona}
+                onChange={e => setPersona(e.target.value)}
+                placeholder="脾气、习惯、在意什么、怕什么……"
+                className={`${INPUT} resize-y min-h-[5rem] leading-relaxed`}
+              />
+              <Assist moduleId={moduleId} field="npc_persona" context={assistContext} value={persona} onApply={setPersona} />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">外貌</label>
+              <textarea
+                value={looks}
+                onChange={e => setLooks(e.target.value)}
+                placeholder="长相、身形、穿着、显眼的特征……"
+                className={`${INPUT} resize-y min-h-[5rem] leading-relaxed`}
+              />
+              <Assist moduleId={moduleId} field="npc_appearance" context={assistContext} value={looks} onApply={setLooks} />
+              <p className="text-xs text-muted-foreground mt-1.5">
+                出身、性格、外貌三栏会拼成一段，开局时填进弹窗那一栏，GM 每轮都看得到。
               </p>
-            )}
+            </div>
             <div className="flex items-center gap-3">
               <SaveBadge
                 state={autosave.state}
@@ -1276,7 +1297,7 @@ function ProtagonistSection({
           <div className="flex items-center gap-2 text-sm font-medium mb-3">
             <Backpack className="w-4 h-4 text-primary" />开局时的背包
           </div>
-          <StartingInventory form={form} set={set} />
+          <StartingInventory moduleId={moduleId} form={form} set={set} />
         </div>
 
         <div className="border-t border-border/60 pt-5">
@@ -1306,50 +1327,55 @@ function ProtagonistSection({
 // ── 开局背包 ──────────────────────────────────────────────────────────────
 
 function StartingInventory({
-  form, set,
+  moduleId, form, set,
 }: {
+  moduleId: number
   form: Module
   set: <K extends keyof Module>(key: K, value: Module[K]) => void
 }) {
-  const items = form.default_inventory || []
-
-  const setItem = (i: number, patch: Partial<RpgInvItem>) =>
-    set('default_inventory', items.map((it, n) => (n === i ? { ...it, ...patch } : it)))
+  // 开局背包不再单独填：道具里勾了「开局就带在身上」的就是背包内容，这里只读展示。
+  // 与道具页共用同一个 query key，那边改了这里跟着刷新
+  const { data: allItems = [] } = useQuery({
+    queryKey: ['rpg-items', moduleId],
+    queryFn: () => rpgApi.items.list(moduleId),
+  })
+  const carried = allItems.filter(it => it.start_with)
+  // 老模组手填过的条目后端仍然会带进开局，不能让它们在界面上凭空消失；只给删除
+  const legacy = (form.default_inventory || []).filter(it => (it.name || '').trim())
+  const dropLegacy = (target: RpgInvItem) =>
+    set('default_inventory', (form.default_inventory || []).filter(it => it !== target))
 
   return (
     <div>
-      <div className="space-y-2">
-        {items.map((item, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <input
-              value={item.name}
-              onChange={e => setItem(i, { name: e.target.value })}
-              placeholder="物品名"
-              className={`${INPUT} flex-1`}
-            />
-            <input
-              type="number" min={1}
-              value={item.qty}
-              onChange={e => setItem(i, { qty: Math.max(1, Number(e.target.value) || 1) })}
-              className={`${INPUT} w-20`}
-            />
-            <input
-              value={item.note || ''}
-              onChange={e => setItem(i, { note: e.target.value })}
-              placeholder="备注（选填）"
-              className={`${INPUT} flex-1`}
-            />
-            <DeleteButton onClick={() => set('default_inventory', items.filter((_, n) => n !== i))} />
-          </div>
-        ))}
-        <AddRow onClick={() => set('default_inventory', [...items, { name: '', qty: 1, note: '' }])}>
-          添加物品
-        </AddRow>
-      </div>
+      {carried.length === 0 && legacy.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          现在是空手开局。
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {carried.map(it => (
+            <div key={`i${it.id}`} className="flex items-center gap-2 rounded-lg border bg-background/40 px-3 py-1.5 text-sm">
+              <span className="font-medium">{it.name}</span>
+              <span className="text-xs text-muted-foreground">{it.category}</span>
+              {!!it.description && (
+                <span className="flex-1 truncate text-xs text-muted-foreground">{it.description}</span>
+              )}
+            </div>
+          ))}
+          {legacy.map((it, i) => (
+            <div key={`l${i}`} className="flex items-center gap-2 rounded-lg border border-dashed bg-background/40 px-3 py-1.5 text-sm">
+              <span className="font-medium">{it.name}</span>
+              <span className="text-xs text-muted-foreground">× {it.qty}</span>
+              <span className="flex-1 truncate text-xs text-muted-foreground">
+                {it.note ? `${it.note} · ` : ''}旧版手填，可删除
+              </span>
+              <DeleteButton onClick={() => dropLegacy(it)} />
+            </div>
+          ))}
+        </div>
+      )}
       <p className="text-xs text-muted-foreground mt-1.5">
-        这一栏是「这一局开场凭空多一件」，比如剧本指定的信物。想让某件道具本身开局就在身上
-        （每一局都有），去上面「道具」里勾「开局就带在身上」——那样它还带着定义里的说明。
-        两边的名字和「道具」里的定义对上，玩家才点得出精确效果；对不上也能带着走，只是没有数值变化。
+        这里列的是上面「道具」里勾了「开局就带在身上」的东西，想增减就去那边勾或取消。
       </p>
     </div>
   )
@@ -1691,7 +1717,27 @@ function GenerationParams({
             />
             <span className="text-xs text-muted-foreground">字，0 = 不作要求</span>
           </div>
-          <p className="text-xs text-muted-foreground mt-1.5">软要求，不是硬截断。</p>
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <span className="text-xs text-muted-foreground">游玩页的挡位</span>
+            {TIER_LABELS.map((label, i) => (
+              <label key={label} className="flex items-center gap-1 text-xs text-muted-foreground">
+                {label}
+                <input
+                  type="number" min={1} max={2000} step={50}
+                  value={replyTiers(form.reply_length_tiers)[i]}
+                  onChange={e => {
+                    const next = replyTiers(form.reply_length_tiers)
+                    next[i] = Math.max(1, Number(e.target.value) || DEFAULT_TIERS[i])
+                    set('reply_length_tiers', next)
+                  }}
+                  className={`${INPUT} w-20`}
+                />
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground mt-1.5">
+            软要求，不是硬截断。游玩时输入框旁的下拉里「不限」之外的三档，字数在这里改。
+          </p>
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">上下文轮数</label>
@@ -2429,21 +2475,31 @@ const PROFILE_KEYS: Array<[string, string]> = [
  * option 时渲染成一个空白行（presetLib 里已经踩过一次），作者看着像「没填」，
  * 随手改一下就把原来那个名字覆盖没了——而这一栏是自动保存的，没有撤销。
  */
-function PlaceSelect({ value, onChange, names, empty, random }: {
+function PlaceSelect({ value, onChange, locations, empty, random }: {
   value: string
   onChange: (v: string) => void
-  names: string[]
+  locations: RpgLocation[]
   empty: string
   /** 多给一档「这一格她自己走动」。只有作息表那一栏要，常驻地点不要 */
   random?: boolean
 }) {
+  const groups = placeGroups(locations)
+  const listed = groups.some(g => g.names.some(n => n.name === value))
+  const isRegion = locations.some(l => l.is_region && l.name === value)
   return (
     <select value={value} onChange={e => onChange(e.target.value)} className={INPUT}>
       <option value="">{empty}</option>
       {random && <option value={RANDOM_SLOT}>随机移动（她自己挑地方）</option>}
-      {names.map(n => <option key={n} value={n}>{n}</option>)}
-      {!!value && value !== RANDOM_SLOT && !names.includes(value) && (
-        <option value={value}>{value}（地点表里没有这个地方）</option>
+      {groups.map(g => {
+        const options = g.names.map(n => <option key={n.name} value={n.name}>{n.text}</option>)
+        return g.label
+          ? <optgroup key={g.label} label={g.label}>{options}</optgroup>
+          : options
+      })}
+      {!!value && value !== RANDOM_SLOT && !listed && (
+        <option value={value}>
+          {value}（{isRegion ? '这是区域，不能落脚，请改选里面的具体地点' : '地点表里没有这个地方'}）
+        </option>
       )}
     </select>
   )
@@ -2690,7 +2746,7 @@ function NpcSection({
               <PlaceSelect
                 value={form.location}
                 onChange={v => setForm(f => ({ ...f, location: v }))}
-                names={placeNames}
+                locations={locations}
                 empty="不设常驻地点"
               />
               {placeNames.length === 0 && (
@@ -2715,7 +2771,7 @@ function NpcSection({
                       onChange={v => setForm(f => ({
                         ...f, slot_locations: { ...f.slot_locations, [name]: v },
                       }))}
-                      names={placeNames}
+                      locations={locations}
                       empty="留空 = 用常驻地点"
                       // 「随机移动」也是这一格的一个取值，不是另一张表：原先排班和
                       // 随机移动时段是两处勾选，两处都按时段索引、语义还互斥——
@@ -2759,25 +2815,34 @@ function NpcSection({
                         孤儿名字（地点改名/删了）单独显出来，否则作者不知道自己少了一格 */}
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium block">随机移动范围</label>
-                      <div className="flex flex-wrap gap-x-3 gap-y-1">
-                        {placeNames.map(name => (
-                          <label key={name} className="flex items-center gap-1 text-xs">
-                            <input
-                              type="checkbox"
-                              checked={form.random_movement_places.includes(name)}
-                              onChange={event => setForm(f => ({
-                                ...f,
-                                random_movement_places: event.target.checked
-                                  ? [...f.random_movement_places, name]
-                                  : f.random_movement_places.filter(place => place !== name),
-                              }))}
-                              className="accent-primary"
-                            />
-                            {name}
-                          </label>
+                      <div className="space-y-1.5">
+                        {placeGroups(locations).map(group => (
+                          <div key={group.label || '_top'} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                            {group.label && (
+                              <span className="text-[11px] text-muted-foreground w-full">{group.label}</span>
+                            )}
+                            {group.names.map(({ name, text }) => (
+                              <label key={name} className="flex items-center gap-1 text-xs">
+                                <input
+                                  type="checkbox"
+                                  checked={form.random_movement_places.includes(name)}
+                                  onChange={event => setForm(f => ({
+                                    ...f,
+                                    random_movement_places: event.target.checked
+                                      ? [...f.random_movement_places, name]
+                                      : f.random_movement_places.filter(place => place !== name),
+                                  }))}
+                                  className="accent-primary"
+                                />
+                                {text}
+                              </label>
+                            ))}
+                          </div>
                         ))}
+                      </div>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
                         {form.random_movement_places
-                          .filter(name => !placeNames.includes(name))
+                          .filter(name => !placeGroups(locations).some(g => g.names.some(n => n.name === name)))
                           .map(name => (
                             <label
                               key={name}
@@ -3219,13 +3284,20 @@ function NpcSection({
             <BatchGenerate<{
               name: string; persona: string; appearance: string; description: string
               location: string; initial_state: Record<string, number>
+              profile_sections?: Record<string, string>
+              dialogue_examples?: Array<{ user: string; assistant: string }>
             }>
               moduleId={moduleId}
               kind="npc"
               placeholder="想生成什么角色？比如：生成霍格沃兹里三个教授"
               renderRow={(n) => {
-                const sub = [n.location, ...Object.entries(n.initial_state || {}).map(([k, v]) => `${k} ${v}`)]
-                  .filter(Boolean).join(' · ')
+                const filled = Object.values(n.profile_sections || {}).filter(t => t?.trim()).length
+                const sub = [
+                  n.location,
+                  ...Object.entries(n.initial_state || {}).map(([k, v]) => `${k} ${v}`),
+                  filled ? `档案 ${filled} 栏` : '',
+                  n.dialogue_examples?.length ? `样例 ${n.dialogue_examples.length} 组` : '',
+                ].filter(Boolean).join(' · ')
                 return sub ? <span className="text-xs text-muted-foreground truncate">{sub}</span> : null
               }}
               onApply={async (list) => {
@@ -3233,6 +3305,8 @@ function NpcSection({
                   await rpgApi.npcs.create(moduleId, {
                     name: n.name, persona: n.persona, appearance: n.appearance,
                     description: n.description, location: n.location,
+                    profile_sections: n.profile_sections || {},
+                    dialogue_examples: n.dialogue_examples || [],
                     initial_state: n.initial_state,
                     relation_enabled: Object.keys(n.initial_state || {}).length > 0,
                     sort_order: npcs.length + 1,
@@ -3241,6 +3315,8 @@ function NpcSection({
                 refresh()
               }}
             />
+            {/* 只在编辑表单收起时出现：表单开着时 autosave 会拿表单里的旧值 PATCH 回去，把刚写入的盖掉 */}
+            {npcs.length > 0 && <NpcBatchRefine moduleId={moduleId} npcs={npcs} onDone={refresh} />}
           </div>
         )}
       </div>

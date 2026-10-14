@@ -112,6 +112,7 @@ export default function Settings() {
   const [providerApiKey, setProviderApiKey] = useState('')
   const [providerApiFormat, setProviderApiFormat] = useState('openai')
   const [providerUseProxy, setProviderUseProxy] = useState(true)
+  const [providerGeminiUrl, setProviderGeminiUrl] = useState('')
   const [providerSaving, setProviderSaving] = useState(false)
 
   // ── Model library state ─────────────────────────────────────────────────
@@ -269,6 +270,7 @@ export default function Settings() {
     setProviderApiKey('')
     setProviderApiFormat('openai')
     setProviderUseProxy(true)
+    setProviderGeminiUrl('')
     setEditingProviderId(null)
     setShowProviderForm(false)
   }
@@ -285,6 +287,7 @@ export default function Settings() {
     setProviderBaseUrl(preset.base_url)
     setProviderApiFormat(preset.api_format)
     setProviderUseProxy(preset.use_proxy)
+    setProviderGeminiUrl('')
     setProviderApiKey('')
     setEditingProviderId(null)
     setShowProviderForm(true)
@@ -296,6 +299,7 @@ export default function Settings() {
     setProviderBaseUrl(p.base_url)
     setProviderApiFormat(p.api_format)
     setProviderUseProxy(p.use_proxy)
+    setProviderGeminiUrl(p.gemini_base_url || '')
     setProviderApiKey('')
     setShowProviderForm(true)
   }
@@ -311,6 +315,7 @@ export default function Settings() {
           api_key: providerApiKey || undefined,
           api_format: providerApiFormat,
           use_proxy: providerUseProxy,
+          gemini_base_url: providerApiFormat === 'openai' ? providerGeminiUrl.trim() : '',
         })
       } else {
         await providersApi.create({
@@ -319,6 +324,7 @@ export default function Settings() {
           api_key: providerApiKey,
           api_format: providerApiFormat,
           use_proxy: providerUseProxy,
+          gemini_base_url: providerApiFormat === 'openai' ? providerGeminiUrl.trim() : '',
         })
       }
       qc.invalidateQueries({ queryKey: ['providers'] })
@@ -487,6 +493,21 @@ export default function Settings() {
           className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
         />
       </div>
+      {providerApiFormat === 'openai' && (
+        <div>
+          <label htmlFor="provider-gemini-url" className="text-xs font-medium mb-1 block">Gemini 原生地址（可选）</label>
+          <input
+            id="provider-gemini-url"
+            value={providerGeminiUrl}
+            onChange={e => setProviderGeminiUrl(e.target.value)}
+            placeholder="https://api.example.com/gemini"
+            className="w-full border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+          />
+          <p className="text-[0.6875rem] text-muted-foreground mt-0.5">
+            填了之后，这家供应商下名字带 gemini 的模型改走 Gemini 原生格式，能放宽内容过滤；其他模型不受影响。留空则照旧走 OpenAI 兼容。
+          </p>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium">经代理访问（socket）</p>
@@ -679,9 +700,10 @@ export default function Settings() {
   )
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background relative">
+      <div aria-hidden className="page-glow" />
       <header className="border-b px-6 py-4 flex items-center gap-3">
-        <button onClick={() => navigate(-1)} className="p-2 rounded-md hover:bg-muted">
+        <button onClick={() => navigate(-1)} className="p-2 rounded-md hover:bg-muted" title="返回" aria-label="返回">
           <ArrowLeft className="w-4 h-4" />
         </button>
         <h1 className="font-bold text-lg">设置</h1>
@@ -690,7 +712,15 @@ export default function Settings() {
         </div>
       </header>
 
-      <main className="w-full max-w-[1440px] mx-auto px-5 lg:px-8 py-8 space-y-8">
+      {/* settings-stack：直接子级的每个 <section> 由 index.css 画成卡片 */}
+      <main className="settings-stack relative z-10 w-full max-w-[1440px] mx-auto px-5 lg:px-8 pt-10 pb-8 space-y-5 lg:space-y-6">
+        <div className="reveal pb-3">
+          <p className="mb-3 text-xs font-medium tracking-[0.2em] text-primary">SETTINGS</p>
+          <h2 className="font-display text-4xl sm:text-5xl font-bold leading-tight tracking-tight">模型与连接</h2>
+          <p className="mt-3 text-sm sm:text-base text-muted-foreground">
+            {isAdmin ? '供应商、模型、代理和本地出图，改完记得点底部的「保存配置」。' : '供应商、模型库和你自己的默认模型。'}
+          </p>
+        </div>
 
         {/* ── 1. 供应商配置 ──────────────────────────────────────────── */}
         <section>
@@ -1307,7 +1337,8 @@ export default function Settings() {
         )}
 
         {/* ── 操作按钮 ─────────────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 flex-wrap">
+        {/* 贴底悬浮：页面很长，保存键不该要滚到最底才看得见 */}
+        <div className="sticky bottom-4 z-20 flex items-center gap-3 flex-wrap rounded-2xl border border-foreground/10 bg-card/85 px-4 py-3 shadow-xl backdrop-blur-md backdrop-saturate-150">
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground shrink-0">测试模型：</span>
             <select

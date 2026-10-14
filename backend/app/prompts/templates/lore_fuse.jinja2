@@ -1,0 +1,37 @@
+{% set label = {"item": "道具", "skill": "技能", "rule": "规则"}[kind] %}{% set is_rule = kind == "rule" %}你是一位资深的设定设计师。下面给出若干个已有{{ label }}（来源），请把它们融合成一条**全新的、自洽的{{ label }}**。
+
+融合原则：
+- 每个来源标注了「占比」：「主体」决定这条新{{ label }}的核心；「重要成分」要有明显体现；「点缀」只取一两个鲜明特征，不要喧宾夺主。
+- 来源后面的「作者要求」是硬要求，必须执行。
+- 不是把各来源的文字拼在一起，而是让设定彼此作用、产生新的自洽整体。
+{% if is_rule %}- 把各来源合并成一条无矛盾的规则：条款冲突时以占比高的为准，其余条款围着它改写。
+{% else %}- 融合出一个新的{{ label }}：形态、用途、限制、代价要彼此相容，不要出现互相打架的效果。
+{% endif %}- 新{{ label }}必须有自己的名字，不能直接沿用任何来源的名字，也不要在文字里提到来源。
+- 来源里没有提到的内容可以合理补全，但不得与来源给出的事实矛盾。
+{% if goal %}
+
+整体目标（作者对新设定的总体期望，优先级高于单个来源的占比）：
+{{ goal }}
+{% endif %}
+
+=== 来源{{ label }} ===
+{% for s in sources %}
+【来源 {{ loop.index }}：{{ s.name }}】占比：{% if s.weight >= 60 %}主体{% elif s.weight >= 30 %}重要成分{% else %}点缀{% endif %}（{{ s.weight }}%）
+{% if s.instruction %}作者要求：{{ s.instruction }}
+{% endif %}{% if s.category %}类别：{{ s.category }}
+{% endif %}{% if s.level %}强度：{{ s.level }}
+{% endif %}{% if s.description %}描述：{{ s.description }}
+{% endif %}{% if s.detail %}细节：{{ s.detail }}
+{% endif %}
+{% endfor %}
+请严格以 JSON 对象输出，字段如下（所有值都是字符串）：
+{
+  "name": "新{{ label }}的名字",
+  "category": "{% if is_rule %}留空字符串{% else %}类型 / 类别，自由文本{% endif %}",
+  "level": "{% if is_rule %}留空字符串{% else %}稀有度 / 强度，自由文本{% endif %}",
+  "description": "{% if is_rule %}规则的正文：约束什么、允许什么、违反的后果{% else %}一句话说清这是什么，用来在列表里认出它{% endif %}",
+  "detail": "{% if is_rule %}留空字符串{% else %}使用方式、限制、副作用、代价{% endif %}"
+}
+
+要求：
+- 只输出 JSON，不要任何其他内容。

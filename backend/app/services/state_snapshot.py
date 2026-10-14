@@ -8,10 +8,11 @@
 """
 import json
 import logging
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.models.chapter import Chapter
 from app.models.memory import Memory
 from app.models.character import Character
 from app.models.world_entity import WorldEntity
@@ -91,6 +92,43 @@ async def rollback_or_create(
     if not snapshot:
         await create(session, novel_id, chapter_number, volume)
     return False
+
+
+async def rewind_deleted(session: AsyncSession, novel_id: int, chapters: list[Chapter]) -> bool:
+    """删章前调用，撤掉这些章写进状态卡的东西。返回是否回滚了 current_state。
+
+    被删的是末尾几章（之后没有带正文的章节）时，恢复到其中最早一章生成之前；
+    删的是中间章则不回滚——后面几章是在它之上累积的，全量恢复会一起抹掉。
+    各章写进 character_history 的经历与位置无关，一律删掉。
+    """
+    ids = [c.id for c in chapters]
+    remaining_max = (await session.execute(
+        select(func.max(Chapter.number)).where(
+            Chapter.novel_id == novel_id,
+            Chapter.id.notin_(ids),
+            Chapter.content != "",
+        )
+    )).scalar() or 0
+    tail = [c for c in chapters if c.number > remaining_max]
+    rolled_back = False
+    if tail:
+        first = min(tail, key=lambda c: c.number)
+        snapshot = await find(session, novel_id, first.number, first.volume or 1)
+        rolled_back = bool(snapshot) and await restore(session, snapshot)
+
+    numbers = {c.number for c in chapters}
+    for char in (await session.execute(
+        select(Character).where(Character.novel_id == novel_id)
+    )).scalars():
+        sheet = char.full_sheet or {}
+        history = sheet.get("character_history")
+        if not isinstance(history, list):
+            continue
+        kept = [e for e in history if not (isinstance(e, dict) and e.get("chapter") in numbers)]
+        if len(kept) != len(history):
+            char.full_sheet = {**sheet, "character_history": kept}
+            flag_modified(char, "full_sheet")
+    return rolled_back
 
 
 async def patch_latest(

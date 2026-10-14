@@ -114,5 +114,41 @@ class NonStreamDispatchBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(got, 1200)
 
 
+class MinimalThinkingFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """部分 3.x flash 不认 MINIMAL，上游 400：
+    "Thinking level MINIMAL is not supported for this model"。应降到 LOW 重发并记住。"""
+
+    async def test_rejected_minimal_retries_with_low_and_is_remembered(self):
+        from google.genai import errors, types
+
+        model = "gemini-3.99-flash-test"
+        seen = []
+
+        class _Models:
+            async def generate_content(self, model, contents, config):
+                seen.append(config.thinking_config.thinking_level)
+                if config.thinking_config.thinking_level == types.ThinkingLevel.MINIMAL:
+                    raise errors.ClientError(400, {"error": {
+                        "message": "Thinking level MINIMAL is not supported for this model."}})
+                return "ok"
+
+        class _Client:
+            class aio:
+                models = _Models()
+
+        try:
+            tc = llm_client._resolve_gemini_thinking(model, "off")
+            self.assertEqual(tc.thinking_level, types.ThinkingLevel.MINIMAL)
+            got = await llm_client._gemini_call(model, [], thinking_config=tc, client=_Client())
+            self.assertEqual(got, "ok")
+            self.assertEqual(seen, [types.ThinkingLevel.MINIMAL, types.ThinkingLevel.LOW])
+            self.assertEqual(
+                llm_client._resolve_gemini_thinking(model, "off").thinking_level,
+                types.ThinkingLevel.LOW,
+            )
+        finally:
+            llm_client._GEMINI_NO_MINIMAL.discard(model)
+
+
 if __name__ == "__main__":
     unittest.main()

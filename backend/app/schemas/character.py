@@ -12,6 +12,8 @@ class CharacterCreate(BaseModel):
     avatar_url: str = ""
     full_sheet: dict = {}
     current_state: dict = {}
+    # 从某章正文发现的角色：角色卡按该章正文生成，并用该章补一次状态（不入库）
+    source_chapter: Optional[int] = None
 
 
 class CharacterUpdate(BaseModel):

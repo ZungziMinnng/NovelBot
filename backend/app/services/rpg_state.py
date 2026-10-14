@@ -93,6 +93,9 @@ OFFSCREEN_CHARS = 80
 OFFSCREEN_LIMIT = 40
 # NPC 之间的关系标签是一个短语（「秘密情人」「互相看不顺眼」），不是一句话
 BOND_CHARS = 12
+# 知情账（见 models.secrets）。一条是一句话；整局封顶，满了拒绝新的
+SECRET_CHARS = 120
+SECRET_LIMIT = 30
 # 模型写这些就是「关系没变」，不该盖掉旧的标签
 _BOND_KEEP = {"不变", "没变", "无", "无变化", "同上", "-", "—"}
 
@@ -1023,6 +1026,158 @@ def npc_bonds_of(sess, npc_id) -> list[dict]:
             if isinstance(r, dict) and key in (r.get("a"), r.get("b"))]
 
 
+def _clean_ids(ids, exclude=()) -> list[int]:
+    out: list[int] = []
+    for raw in ids or []:
+        n = _num(raw, -1)
+        if n > 0 and n not in out and n not in exclude:
+            out.append(n)
+    return out
+
+
+def add_secret(sess, content, owner, known_by, npcs: dict, player_knows=None) -> dict | None:
+    """登记一件秘密（写进 sess.secrets）。npcs 是 {npc_id: 名字}，用来快照名字。
+
+    owner=0 是玩家的秘密，玩家当然知道；否则 player_knows 说明玩家查明了没有。
+    满 SECRET_LIMIT 条拒绝新的，不丢旧的：账上的每一条都是人写的，不能悄悄挤掉。
+    """
+    value = " ".join(str(content or "").split())
+    if not value:
+        return None
+    owner = max(0, _num(owner, 0))
+    rows = [r for r in (sess.secrets or []) if isinstance(r, dict)]
+    if len(rows) >= SECRET_LIMIT:
+        return None
+    known = _clean_ids(known_by, exclude=(owner,))
+    row = {
+        "id": uuid.uuid4().hex[:12],
+        "content": value[:SECRET_CHARS],
+        "owner": owner,
+        "known_by": known,
+        "names": {str(i): npcs[i] for i in (owner, *known) if i in npcs},
+        "player_knows": True if owner == 0 else bool(player_knows),
+        "day": _num(getattr(sess, "day", 1), 1),
+    }
+    sess.secrets = rows + [row]
+    return row
+
+
+def edit_secret(sess, sid, npcs: dict, *, content=None, known_by=None, player_knows=None) -> bool:
+    """改一条：只动传了的字段。找不到返回 False。"""
+    rows = [dict(r) for r in (sess.secrets or []) if isinstance(r, dict)]
+    row = next((r for r in rows if str(r.get("id") or "") == str(sid)), None)
+    if row is None:
+        return False
+    if content is not None:
+        value = " ".join(str(content).split())
+        if value:
+            row["content"] = value[:SECRET_CHARS]
+    if known_by is not None:
+        row["known_by"] = _clean_ids(known_by, exclude=(row.get("owner"),))
+    if player_knows is not None and row.get("owner") != 0:
+        row["player_knows"] = bool(player_knows)
+    if known_by is not None:
+        # 已经确知的人不再同时算「怀疑」或「被骗」
+        row["suspects"] = [i for i in row.get("suspects") or [] if i not in row["known_by"]]
+        row["misled"] = {k: v for k, v in (row.get("misled") or {}).items()
+                         if _num(k, -1) not in row["known_by"]}
+    _snapshot_names(row, npcs)
+    sess.secrets = rows
+    return True
+
+
+def _snapshot_names(row: dict, npcs: dict) -> None:
+    ids = [row.get("owner"), *(row.get("known_by") or []), *(row.get("suspects") or []),
+           *(_num(k, -1) for k in (row.get("misled") or {}))]
+    row["names"] = {
+        str(i): npcs.get(i) or (row.get("names") or {}).get(str(i)) or "某人"
+        for i in ids if i
+    }
+
+
+SECRET_STANCES = ("knows", "suspects", "misled")
+
+
+def set_secret_stance(sess, sid, npc_id, stance, npcs: dict, belief="") -> bool:
+    """把某人对某条秘密的态度改成 knows（确知）/ suspects（隐约察觉）/ misled
+    （深信一个假版本，belief 是她以为的样子）。一个人同时只处在一种态度里。
+    找不到这条、或这个人就是秘密的主人，返回 False。"""
+    key = _num(npc_id, -1)
+    if stance not in SECRET_STANCES or key <= 0:
+        return False
+    rows = [dict(r) for r in (sess.secrets or []) if isinstance(r, dict)]
+    row = next((r for r in rows if str(r.get("id") or "") == str(sid)), None)
+    if row is None or row.get("owner") == key:
+        return False
+    belief = " ".join(str(belief or "").split())[:SECRET_CHARS]
+    if stance == "misled" and not belief:
+        return False
+    row["known_by"] = [i for i in row.get("known_by") or [] if i != key]
+    row["suspects"] = [i for i in row.get("suspects") or [] if i != key]
+    misled = {k: v for k, v in (row.get("misled") or {}).items() if _num(k, -1) != key}
+    if stance == "knows":
+        row["known_by"].append(key)
+    elif stance == "suspects":
+        row["suspects"].append(key)
+    else:
+        misled[str(key)] = belief
+    row["misled"] = misled
+    _snapshot_names(row, npcs)
+    sess.secrets = rows
+    return True
+
+
+def drop_secret(sess, sid) -> None:
+    """划掉一条（等于它不再是秘密：要么公开了，要么当初记错了）。"""
+    sess.secrets = [r for r in (sess.secrets or [])
+                    if not (isinstance(r, dict) and str(r.get("id") or "") == str(sid))]
+
+
+def apply_secret_proposal(sess, proposal: dict, npcs: dict) -> bool:
+    """玩家点头了：把结算提的一条改动写进账。形状见 rpg_settlement.filter_secret_updates。"""
+    kind = proposal.get("kind")
+    if kind == "new":
+        return add_secret(
+            sess, proposal.get("content"), proposal.get("owner") or 0,
+            proposal.get("known_by") or [], npcs,
+            player_knows=bool(proposal.get("player_knows")),
+        ) is not None
+    if kind == "retire":
+        if not any(isinstance(r, dict) and str(r.get("id")) == str(proposal.get("secret_id"))
+                   for r in sess.secrets or []):
+            return False
+        drop_secret(sess, proposal.get("secret_id"))
+        return True
+    if kind == "learn":
+        if not _num(proposal.get("npc_id"), 0):
+            return edit_secret(sess, proposal.get("secret_id"), npcs, player_knows=True)
+        return set_secret_stance(
+            sess, proposal.get("secret_id"), proposal.get("npc_id"),
+            proposal.get("stance"), npcs, proposal.get("belief") or "",
+        )
+    return False
+
+
+def secret_stances(sess, npc_id) -> dict[str, list]:
+    """这个人对账上每条秘密的态度。玩家的和别的 NPC 的秘密都算，她自己的算她知道。
+    misled 里放 (行, 她以为的版本)，其余放行本身。"""
+    key = _num(npc_id, -1)
+    out: dict[str, list] = {"knows": [], "suspects": [], "misled": [], "unaware": []}
+    for r in sess.secrets or []:
+        if not isinstance(r, dict) or not str(r.get("content") or "").strip():
+            continue
+        belief = next((v for k, v in (r.get("misled") or {}).items() if _num(k, -1) == key), "")
+        if key == r.get("owner") or key in (r.get("known_by") or []):
+            out["knows"].append(r)
+        elif key in (r.get("suspects") or []):
+            out["suspects"].append(r)
+        elif belief:
+            out["misled"].append((r, belief))
+        else:
+            out["unaware"].append(r)
+    return out
+
+
 def npc_offscreen_of(sess, npc_id) -> list[dict]:
     """这个人知道的幕后往事：自己是当事人的，和自己撞见过的。按发生顺序。"""
     key = _num(npc_id, -1)
@@ -1167,7 +1322,7 @@ def starting_inventory(module, items) -> list[dict]:
 def protagonist_identity(npcs) -> tuple[str, str] | None:
     """主角模板卡上的「名字 + 出身与动机」，没有那张卡就是 None。
 
-    出身与动机是**一句话简介和性格拼起来**的，因为主角卡和 NPC 卡共用一个编辑器，
+    出身与动机是**一句话简介、性格、外貌拼起来**的，因为主角卡和 NPC 卡共用一个编辑器，
     这两栏在卡上是分开的，而这一局的 `char_desc` 只有一栏。前端建局界面预填的是
     同一个拼法（pages/Rpg/protagonist.ts）——两处拼得不一样的话，玩家在弹窗里
     看到的和锁定后真正存进去的就不是一回事。
@@ -1178,10 +1333,12 @@ def protagonist_identity(npcs) -> tuple[str, str] | None:
         name = str(getattr(npc, "name", "") or "").strip()
         if not name:
             continue
+        looks = str(getattr(npc, "appearance", "") or "").strip()
         desc = "\n\n".join(
             part for part in (
                 str(getattr(npc, "description", "") or "").strip(),
                 str(getattr(npc, "persona", "") or "").strip(),
+                f"外貌：{looks}" if looks else "",
             ) if part
         )
         return name, desc
@@ -1529,6 +1686,7 @@ def apply_tweak(
     available_places = {
         norm_name(place.name): place.name for place in (locations or [])
         if place.module_id == module.id and place.name.strip()
+        and not getattr(place, "is_region", False)
     }
     # 主角瞬移。不看 enter_requires：玩家的手，同上面那条 cap_delta 的理由。
     # 跟随者不用另挪，npc_place 按 sess.location 解析，自己就跟过去了
@@ -1979,6 +2137,43 @@ def advance_slot(module, sess, npcs=(), tasks=()) -> list[str]:
     sess.day = _num(sess.day, 1) + 1
     reset_daily_tasks(sess, tasks)
     return [f"第 {sess.day} 天，{names[0]}"] + reset_daily(module, sess)
+
+
+MAX_JUMP_DAYS = 30
+
+
+def jump_time(module, sess, npcs=(), tasks=(), days: int = 0, slot: str = "") -> list[str]:
+    """直接跳到「days 天后的 slot」。只往后；不合法返回空表、什么都不动。
+
+    收尾（起跳点、清作息覆盖、计数器归零）交给 advance_slot 走一格，再把时钟
+    拨到目标。**跨天结算只做一次**，不管跳几天——逐天结算会把每日任务和随机
+    去处重复触发，跳 30 天开销也跟着放大。advance_slot 那一格自己跨了天
+    （当前就在最后一格）时已经结算过，这里不再补第二次。
+    """
+    names = slot_table(module, sess)
+    if not names or slot not in names or not 0 <= days <= MAX_JUMP_DAYS:
+        return []
+    now = str(sess.slot or "").strip()
+    current = names.index(now) if now in names else 0
+    target = names.index(slot)
+    if days == 0 and target <= current:
+        return []
+
+    day0 = max(1, _num(sess.day, 1))
+    facts = advance_slot(module, sess, npcs, tasks)
+    crossed = _num(sess.day, 1) > day0
+    sess.day = day0 + days
+    sess.slot = slot
+    _clear_expired_random_places(sess, npcs)
+    if days > 0 and not crossed:
+        reset_daily_tasks(sess, tasks)
+        facts = reset_daily(module, sess)
+    elif days > 0:
+        facts = [f for f in facts if f.startswith("跨天恢复")]
+    else:
+        facts = []
+    head = f"{days} 天后" if days else "今天"
+    return [f"{head}，第 {sess.day} 天 · {slot}"] + facts
 
 
 def spend_slot_action(module, sess, npcs=()) -> list[str]:

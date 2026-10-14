@@ -9,6 +9,13 @@ const CIRCLED_NUMS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲�
 const normalizeSpacing = (text: string) =>
   text.split(/\n+/).filter(p => p.trim()).join('\n\n')
 
+// 正文栏宽：em 跟着阅读字号走，max-w 含左右内边距，实际每行约 46 字
+const MEASURE = 'w-full max-w-[52em] mx-auto px-6 sm:px-10 py-10'
+// 带段号的批注视图左边多一列序号，放宽一点让正文那列和上面对齐
+const MEASURE_NUMBERED = 'w-full max-w-[54em] mx-auto px-6 sm:px-10 py-10'
+// 构思、警告这类正文外的条子，跟正文同一条中线
+const COLUMN = 'w-full max-w-[52rem] mx-auto px-6 sm:px-10'
+
 interface ChapterContentAreaProps {
   displayText: string
   isEditing: boolean
@@ -28,6 +35,10 @@ interface ChapterContentAreaProps {
   fontColor: string
   instruction: string
   rewriteMode: boolean
+  /** 阅读视图每段首行缩进两字；编辑框是原生 textarea，做不到逐段缩进 */
+  indent: boolean
+  textareaRef?: React.RefObject<HTMLTextAreaElement>
+  onSelectionChange?: (range: { start: number; end: number }) => void
   onEditContentChange: (v: string) => void
   onCloseDiff: () => void
   onAddParagraphAnnotation: (paragraph: number) => void
@@ -52,11 +63,21 @@ export default function ChapterContentArea({
   fontColor,
   instruction,
   rewriteMode,
+  indent,
+  textareaRef,
+  onSelectionChange,
   onEditContentChange,
   onCloseDiff,
   onAddParagraphAnnotation,
 }: ChapterContentAreaProps) {
   const contentEndRef = useRef<HTMLDivElement>(null)
+
+  // 缩进要逐段加，只能拆成一段一个块；段间留一行空白，和不缩进时的观感一致
+  const renderBody = (text: string) => indent
+    ? text.split(/\n+/).filter(p => p.trim()).map((p, i) => (
+        <p key={i} style={{ textIndent: '2em', marginBottom: `${lineHeight}em` }}>{p.trim()}</p>
+      ))
+    : normalizeSpacing(text)
 
   useEffect(() => {
     if (isCurrentlyGenerating && streamingMode) {
@@ -67,7 +88,7 @@ export default function ChapterContentArea({
   const renderParagraphs = (text: string) => {
     const paragraphs = text.split('\n').filter(p => p.trim())
     return (
-      <div className="space-y-0" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
+      <div className={`space-y-0 ${MEASURE_NUMBERED}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
         {paragraphs.map((p, i) => {
           const num = i < CIRCLED_NUMS.length ? CIRCLED_NUMS[i] : `(${i + 1})`
           return (
@@ -75,10 +96,11 @@ export default function ChapterContentArea({
               <span className="shrink-0 w-6 text-muted-foreground/50 text-xs font-mono select-none pt-0.5">
                 {num}
               </span>
-              <span className="flex-1 novel-content whitespace-pre-wrap">{p}</span>
+              <span className="flex-1 novel-content whitespace-pre-wrap" style={indent ? { textIndent: '2em' } : undefined}>{indent ? p.trim() : p}</span>
               <button
                 onClick={() => onAddParagraphAnnotation(i + 1)}
-                className="shrink-0 opacity-0 group-hover:opacity-100 ml-2 mt-0.5 flex items-center gap-0.5 text-[0.625rem] text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-all"
+                className="shrink-0 ml-2 mt-0.5 flex items-center gap-0.5 rounded-full px-1.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100"
+                title={`给第 ${i + 1} 段加批注`}
               >
                 <Plus className="w-3 h-3" />批注
               </button>
@@ -99,31 +121,35 @@ export default function ChapterContentArea({
         />
       ) : isEditing ? (
         <textarea
+          ref={textareaRef}
           value={editContent}
           onChange={e => onEditContentChange(e.target.value)}
-          className="w-full h-full p-8 resize-none bg-background focus:outline-none novel-content font-serif"
+          onSelect={e => onSelectionChange?.({ start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd })}
+          className={`block h-full resize-none bg-background focus:outline-none novel-content font-serif ${MEASURE}`}
           style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}
           placeholder="在此输入内容..."
         />
       ) : warningMessage && !isCurrentlyGenerating ? (
         <div className="flex flex-col h-full overflow-y-auto">
-          <div className="mx-8 mt-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded-lg px-4 py-2.5 flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+          <div className={`${COLUMN} mt-6 shrink-0`}>
+          <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded-xl px-4 py-2.5 flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300">
             <span className="shrink-0 mt-0.5">⚠</span>
             <span>{warningMessage}</span>
           </div>
+          </div>
           {rewriteMode && displayText ? (
-            <div className="p-8 flex-1">
+            <div className="flex-1">
               {renderParagraphs(displayText)}
             </div>
           ) : (
-            <div className="p-8 novel-content whitespace-pre-wrap" style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
-              {normalizeSpacing(displayText)}
+            <div className={`novel-content whitespace-pre-wrap ${MEASURE}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
+              {renderBody(displayText)}
             </div>
           )}
         </div>
       ) : errorMessage ? (
         <div className="p-8 flex flex-col items-center justify-center h-full gap-3">
-          <div className="max-w-lg w-full bg-destructive/10 border border-destructive/30 rounded-lg p-4">
+          <div className="max-w-lg w-full bg-destructive/10 border border-destructive/30 rounded-xl p-4">
             <p className="text-sm font-medium text-destructive mb-1">生成失败</p>
             <p className="text-xs text-destructive/80 whitespace-pre-wrap break-words">{errorMessage}</p>
           </div>
@@ -137,7 +163,7 @@ export default function ChapterContentArea({
       ) : (
         <div className="h-full flex flex-col overflow-y-auto">
           {currentChapter?.instruction && (
-            <div className="px-8 pt-6 pb-1 shrink-0">
+            <div className={`${COLUMN} pt-8 shrink-0`}>
               <details>
                 <summary className="text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors">
                   📝 本章构思
@@ -149,12 +175,12 @@ export default function ChapterContentArea({
             </div>
           )}
           {rewriteMode && displayText && !isCurrentlyGenerating ? (
-            <div className="p-8 flex-1">
+            <div className="flex-1">
               {renderParagraphs(displayText)}
             </div>
           ) : (
-            <div className={`p-8 novel-content whitespace-pre-wrap flex-1 ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
-              {displayText ? normalizeSpacing(displayText) : (
+            <div className={`novel-content whitespace-pre-wrap flex-1 ${MEASURE} ${isStreaming ? 'streaming-cursor' : ''}`} style={{ fontSize: `${fontSize}px`, lineHeight, fontFamily: fontFamily || undefined, fontWeight: fontWeight as any, color: fontColor || undefined }}>
+              {displayText ? renderBody(displayText) : (
                 <span className="text-muted-foreground/50">
                   {isCurrentlyGenerating ? '' : '点击下方「生成章节」开始创作...'}
                 </span>

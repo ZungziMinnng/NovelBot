@@ -10,6 +10,7 @@ call_json: 按温度序列调用 LLM 并解析 JSON，任一轮成功即返回�
 import json
 import logging
 import re
+import time
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,39 @@ def repair_json(raw: str, expect: str = "object") -> str:
     return text
 
 
+def looks_truncated(raw: str, expect: str = "object") -> bool:
+    """raw 是否像被输出额度掐断：从第一个开括号扫到末尾，最外层始终没合上。
+
+    repair_json 会把这种补成合法 JSON，调用方只拿到 parsed 就看不出后半截没了，
+    需要报给用户的地方用这个查。扫描时跳过字符串里的括号。
+    """
+    open_ch = "[" if expect == "array" else "{"
+    start = raw.find(open_ch)
+    if start == -1:
+        return False
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in raw[start:]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return False
+    return True
+
+
 async def call_json(
     messages: list[dict],
     model: str,
@@ -103,12 +137,14 @@ async def call_json(
     max_tokens: int = 2000,
     expect: str = "object",
     dispatch: Callable[..., Awaitable[tuple[str, int, int]]] | None = None,
+    meta: dict | None = None,
 ) -> tuple[Any, int, int]:
     """按温度序列重试调用 LLM 并解析 JSON。
 
     每轮：调用 → repair_json → json.loads → 校验顶层类型（object=dict / array=list）；
     任一环失败（含 LLM 调用异常）换下一档温度重试。
     返回 (parsed, 累计input_tokens, 累计output_tokens)；全败抛 JsonCallError。
+    传了 meta 的话，成功时写入 meta["truncated"]：这次输出是否被掐断后补齐的。
     """
     if dispatch is None:
         from app.services import llm_client
@@ -118,7 +154,8 @@ async def call_json(
     total_in, total_out = 0, 0
     last_raw = ""
     last_error: Exception | None = None
-    for temperature in temperatures:
+    for attempt, temperature in enumerate(temperatures, 1):
+        started = time.monotonic()
         try:
             raw, in_tok, out_tok = await dispatch(
                 messages=messages,
@@ -126,6 +163,12 @@ async def call_json(
                 api_format=api_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
+            )
+            # 每一发都记：耗时慢在哪（输出太长 / 重试翻倍）只有对着这行才看得出来
+            logger.info(
+                "call_json 第 %d/%d 发: %.1fs, in=%d out=%d, max_tokens=%s, model=%s",
+                attempt, len(temperatures), time.monotonic() - started,
+                in_tok, out_tok, max_tokens, model,
             )
             total_in += in_tok
             total_out += out_tok
@@ -136,11 +179,19 @@ async def call_json(
                 continue
             parsed = json.loads(repair_json(raw, expect))
             if isinstance(parsed, expected_type):
+                truncated = looks_truncated(raw, expect)
+                if truncated:
+                    logger.warning("call_json 输出疑似被截断后补齐 (model=%s, max_tokens=%s)", model, max_tokens)
+                if meta is not None:
+                    meta["truncated"] = truncated
                 return parsed, total_in, total_out
             last_error = ValueError(f"顶层类型不是 {expect}")
         except Exception as e:
             last_error = e
-            logger.warning("call_json 尝试失败 (temp=%s): %s", temperature, e)
+            logger.warning(
+                "call_json 尝试失败 (temp=%s, %.1fs): %s",
+                temperature, time.monotonic() - started, e,
+            )
     raise JsonCallError(
         f"LLM JSON 调用失败（已重试 {len(temperatures)} 次）: {last_error}",
         input_tokens=total_in,

@@ -46,9 +46,8 @@ export default function StylePickerModal({ mode, targetName, nameOptions, onAppl
   const isNarration = mode === 'rpg_narration'
   const profile = profiles.find(p => p.id === profileId) || null
   const scenes = profile?.scenes || []
-  // 叙事示例、以及小说模式下已有玩家输入的段，后端直接拼，不调模型
-  const needsModel =
-    !isNarration && !(mode === 'novel' && selected.every(i => (scenes[i]?.input || '').trim()))
+  // 只有叙事示例是后端直接拼；小说每段都要现反推剧情节拍
+  const needsModel = !isNarration
 
   useEffect(() => {
     let alive = true
@@ -398,8 +397,9 @@ export default function StylePickerModal({ mode, targetName, nameOptions, onAppl
   }
 
   // 挂到 body：游戏编辑面板里有 transform 容器，fixed 会被困住
+  // z-[60]：要盖过小说设置的侧滑详情面板（z-[56]），又要在确认框（z-[100]）之下
   return createPortal(
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4">
       <div className="bg-card border rounded-xl shadow-lg w-full max-w-3xl max-h-[85vh] flex flex-col">
         <div className="flex items-center gap-3 px-5 py-3 border-b shrink-0">
           <h3 className="font-semibold text-lg">{TITLES[mode]}</h3>

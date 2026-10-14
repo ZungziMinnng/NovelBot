@@ -9,6 +9,7 @@ class ApiProviderCreate(BaseModel):
     api_key: str = ""
     api_format: str = "openai"
     use_proxy: bool = True
+    gemini_base_url: str = ""
 
 
 class ApiProviderUpdate(BaseModel):
@@ -17,6 +18,7 @@ class ApiProviderUpdate(BaseModel):
     api_key: Optional[str] = None
     api_format: Optional[str] = None
     use_proxy: Optional[bool] = None
+    gemini_base_url: Optional[str] = None
 
 
 class ApiProviderOut(BaseModel):
@@ -27,6 +29,7 @@ class ApiProviderOut(BaseModel):
     api_key_masked: str
     api_format: str
     use_proxy: bool
+    gemini_base_url: str = ""
     created_at: datetime
 
     model_config = {"from_attributes": True}

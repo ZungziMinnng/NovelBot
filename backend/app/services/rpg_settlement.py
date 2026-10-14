@@ -366,6 +366,128 @@ def filter_task_updates(data, narration, open_names, message_id, pending=()):
     return out
 
 
+_SECRET_MAX_PER_TURN = 3
+_PLAYER_WORDS = {"你", "玩家", "我"}
+
+
+def secret_rows_for_prompt(sess, npcs) -> list[dict]:
+    """给记录员看的现有秘密：编号 + 主人 + 谁知道 / 起疑 / 被骗。编号就是它回报时用的。"""
+    names = {str(npc.id): npc.name for npc in npcs}
+
+    def who(ids):
+        return "、".join(names.get(str(i)) or "某人" for i in ids)
+
+    out = []
+    for n, row in enumerate(sess.secrets or [], 1):
+        if not isinstance(row, dict) or not str(row.get("content") or "").strip():
+            continue
+        parts = []
+        if row.get("known_by"):
+            parts.append(f"知情：{who(row['known_by'])}")
+        if row.get("suspects"):
+            parts.append(f"起疑：{who(row['suspects'])}")
+        if row.get("misled"):
+            parts.append(f"被骗：{who(row['misled'])}")
+        if row.get("owner") and not row.get("player_knows"):
+            parts.append("玩家还不知道")
+        owner = "玩家" if not row.get("owner") else names.get(str(row["owner"])) or "某人"
+        out.append({"n": n, "content": row["content"], "owner": owner, "state": "；".join(parts) or "没人知道"})
+    return out
+
+
+def filter_secret_updates(data, narration, secrets, npcs, message_id, pending=()):
+    """从结算 JSON 的 secret_updates 里挑出能当**提议**的几条。
+
+    和 filter_task_updates 一个路子：模型只有提名权，账由玩家点头才改。三道关——
+      1. 每条必须带 quote，且是本回合正文里的原话（不查就会把「我猜她大概知道了」记成事实）
+      2. 点名的人必须是这一轮真在场 / 被提到的角色；secret 编号必须落在现有账内
+      3. 已经是那个状态的、同一回合重复的、已经挂在待确认里的一律不出
+    secrets 是 sess.secrets 原样（编号从 1 起，同 secret_rows_for_prompt）。
+    """
+    raw = data.get("secret_updates")
+    if not isinstance(raw, list):
+        return []
+    rows = list(secrets or [])
+    names = {npc.id: npc.name for npc in npcs}
+
+    def seen_key(p):
+        return (p.get("kind"), p.get("secret_id") or norm_name(p.get("content") or ""), p.get("npc_id"))
+
+    seen = {seen_key(p) for p in (pending or []) if isinstance(p, dict)}
+    held = {norm_name(r.get("content") or "") for r in rows if isinstance(r, dict)}
+    out = []
+
+    def person(value):
+        text = str(value or "").strip()
+        if text in _PLAYER_WORDS:
+            return 0
+        npc = _npc_ref(text, npcs) if text else None
+        return npc.id if npc else None
+
+    for entry in raw:
+        if len(out) >= _SECRET_MAX_PER_TURN:
+            break
+        if not isinstance(entry, dict):
+            continue
+        quote = str(entry.get("quote") or "").strip()[:200]
+        if not _quote_in_narration(quote, narration):
+            continue
+        op = str(entry.get("op") or "").strip().lower()
+        item = {"id": uuid.uuid4().hex[:12], "kind": op, "quote": quote, "message_id": message_id}
+        if op == "new":
+            content = " ".join(str(entry.get("content") or "").split())[:120]
+            if not content or norm_name(content) in held:
+                continue
+            owner = person(entry.get("owner"))
+            if owner is None:
+                continue
+            known = []
+            for name in entry.get("known") or []:
+                pid = person(name)
+                if pid and pid != owner and pid not in known:
+                    known.append(pid)
+            item.update({
+                "content": content, "owner": owner, "known_by": known,
+                "player_knows": owner == 0 or 0 in [person(n) for n in entry.get("known") or []],
+                "owner_name": "玩家" if owner == 0 else names.get(owner, "某人"),
+                "known_names": [names.get(i, "某人") for i in known],
+            })
+            held.add(norm_name(content))
+        elif op in ("learn", "retire"):
+            try:
+                row = rows[int(entry.get("secret")) - 1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            item.update({"secret_id": row["id"], "content": row.get("content") or ""})
+            if op == "learn":
+                stance = str(entry.get("stance") or "").strip().lower()
+                who = person(entry.get("who"))
+                if stance not in ("knows", "suspects", "misled") or who is None or who == row.get("owner"):
+                    continue
+                belief = " ".join(str(entry.get("belief") or "").split())[:120]
+                if stance == "misled" and not belief:
+                    continue
+                if who == 0:
+                    # 玩家自己：只有「查明了 NPC 的秘密」这一种
+                    if row.get("owner") == 0 or row.get("player_knows") or stance != "knows":
+                        continue
+                elif (stance == "knows" and who in (row.get("known_by") or [])) or \
+                        (stance == "suspects" and who in (row.get("suspects") or [])):
+                    continue
+                item.update({"npc_id": who, "npc_name": "玩家" if who == 0 else names.get(who, "某人"),
+                             "stance": stance, "belief": belief})
+        else:
+            continue
+        key = seen_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def _is_new_gain(entry, held) -> bool:
     """这一条背包变化是不是「新拿到一件东西」——要玩家先点头的那种。
 
@@ -1028,6 +1150,9 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
                 if value and canonical != AWAY and canonical not in known_places:
                     issues[domain].append(f"人物「{npc.name}」的目的地未登记")
                     continue
+                if getattr(known_places.get(canonical), "is_region", False):
+                    issues[domain].append(f"人物「{npc.name}」的目的地「{canonical}」是一片区域，要写清去它里面的哪一处")
+                    continue
                 value = canonical
                 fixed = report.get("fixed_location")
                 if fixed:
@@ -1165,6 +1290,13 @@ def apply_proposal(module, working, data, npcs, places, report, issues, soft, ev
             location_warning = (
                 f"目的地「{destination}」未登记，这一轮没有移动你。"
                 "要是这地方该有，到侧栏「新发现」里加进模组，再点「仅重新结算」")
+        elif getattr(known_places.get(canonical), "is_region", False):
+            # 区域只是一个范围，玩家只能站在里面的某一处；站到区域本身上，
+            # 在场的人、地图上的「你在这里」、可去的地方全都对不上
+            delta.pop("location", None)
+            location_warning = (
+                f"「{destination}」是一片区域，不是具体的地方，这一轮没有移动你。"
+                "剧情里要写清楚走到了它里面的哪一处。")
         else:
             delta["location"] = canonical
             destination = canonical
@@ -1277,6 +1409,7 @@ def _working(sess, state):
     return SimpleNamespace(**copy.deepcopy(state), day=sess.day, slot=sess.slot,
                            time_slots=sess.time_slots, turn_count=sess.turn_count,
                            tasks=copy.deepcopy(sess.tasks or []),
+                           secrets=copy.deepcopy(sess.secrets or []),
                            npc_followers=sess.npc_followers or [])
 
 
@@ -1305,11 +1438,16 @@ def _with_cap(specs: dict, name: str, value):
     return f"{value}/{top}" if top is not None else value
 
 
-def _prompt(module, sess, npcs, places, narration, label, report, place_block):
-    participants = [npc for npc in world_npcs(npcs)
-                    if npc.id in report.get("origin_present", []) or (npc.name and _name_mentioned(npc.name, narration))]
+def _participants(report, npcs, narration):
+    found = [npc for npc in world_npcs(npcs)
+             if npc.id in report.get("origin_present", []) or (npc.name and _name_mentioned(npc.name, narration))]
     if report.get("mode") == "private":
-        participants = [npc for npc in participants if npc.id in report.get("origin_present", [])]
+        found = [npc for npc in found if npc.id in report.get("origin_present", [])]
+    return found
+
+
+def _prompt(module, sess, npcs, places, narration, label, report, place_block):
+    participants = _participants(report, npcs, narration)
     stat_specs = def_map(module.stat_defs)
     relation_specs = def_map(module.relation_stat_defs)
     states = sess.npc_states or {}
@@ -1365,6 +1503,8 @@ def _prompt(module, sess, npcs, places, narration, label, report, place_block):
         engine_note=report.get("engine_note", ""),
         # 还开着的待办。模型只能在这份清单里挑「看着像办完了」的，挑不出就别提
         tasks=_open_tasks(sess),
+        # 现有秘密账。带编号让记录员回报「第几条谁新知道了」，而不是复述整句
+        secret_rows=secret_rows_for_prompt(sess, world_npcs(npcs)),
         # 有时段才问「这一幕收尾了吗」。没时钟的模组问了也没处用——
         # 那颗按钮根本不出现。同 outcome_label / tasks 的条件渲染
         has_clock=bool(str(getattr(sess, "slot", "") or "").strip()),
@@ -1648,6 +1788,14 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
                 data, narration, open_task_names(fresh), message_id, kept_tasks
             )
             fresh.task_proposals = kept_tasks + task_proposals
+            # 知情账的改动提议，同上。账本身一个字都不动，等玩家点头
+            kept_secrets = [entry for entry in (fresh.secret_proposals or [])
+                            if not (isinstance(entry, dict) and entry.get("message_id") == message_id)]
+            secret_proposals = filter_secret_updates(
+                data, narration, fresh.secrets, _participants(report, npcs, narration),
+                message_id, kept_secrets,
+            )
+            fresh.secret_proposals = kept_secrets + secret_proposals
             if prior.get("after") and prior.get("after") != after:
                 invalidate_summaries(fresh)
             fresh_row.settlement = report
@@ -1681,6 +1829,7 @@ async def settle_turn(session_id, message_id, narration, label, engine_note, fix
                 "outcome_consistent": data.get("outcome_consistent"), "aux_input_tokens": input_tokens,
                 "aux_output_tokens": output_tokens, "settlement": public_report(report),
                 "discoveries": discoveries, "task_proposals": task_proposals,
+                "secret_proposals": secret_proposals,
                 # 这一轮新挂上的待确认道具。前端拿它刷道具格的角标和「新获取」
                 "item_claims": item_claims,
                 # 纯建议，一个状态字段都不动（同 outcome_consistent）。只有 true

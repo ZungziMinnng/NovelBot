@@ -223,7 +223,7 @@ export default function EditorSidebar({
                 <ExternalLink className="w-3.5 h-3.5" />
               </button>
             )}
-            <button onClick={() => { setDetailView(null); setEntitySelection(null) }} className="p-1 rounded hover:bg-muted">
+            <button onClick={() => { setDetailView(null); setEntitySelection(null) }} className="p-1 rounded-full hover:bg-muted" aria-label="关闭详情" title="关闭">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -306,7 +306,7 @@ export default function EditorSidebar({
                 : entitySelection.id === 0 ? '新建设定'
                 : '设定详情'}
             </span>
-            <button onClick={() => setEntitySelection(null)} className="p-1 rounded hover:bg-muted">
+            <button onClick={() => setEntitySelection(null)} className="p-1 rounded-full hover:bg-muted" aria-label="关闭设定详情" title="关闭">
               <X className="w-4 h-4" />
             </button>
           </div>

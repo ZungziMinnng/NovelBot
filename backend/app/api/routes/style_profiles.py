@@ -2,17 +2,21 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
+from app.models.chapter import Chapter
 from app.models.style_profile import StyleProfile
 from app.schemas.style_profile import (
     StyleAdaptIn,
+    StyleImportNovelIn,
     StyleProfileCreate,
     StyleProfileOut,
     StyleProfilePreview,
     StyleProfileUpdate,
+    StyleTrialIn,
 )
-from app.api.deps import CurrentUser
+from app.api.deps import CurrentUser, get_owned_novel
 from app.agents import style_agent
 from app.services import llm_json
+from app.services.summarizer import strip_plot_suggestions
 from app.services.style_extract import (
     all_chunks,
     compute_stats,
@@ -41,31 +45,53 @@ async def import_profile(
     model: str = Form(""),
 ):
     """只出预览，不入库：用户看过、改过、点了确认才走 POST /。"""
-    # 自定义类别是用户手填的：去空白、去重、截短、限个数（每类都要一次模型调用）
-    cats = list(dict.fromkeys(c.strip()[:20] for c in categories if c.strip()))[:8]
-    if not cats:
-        raise HTTPException(status_code=400, detail="至少选一类要提取的内容")
+    cats = _clean_categories(categories)
 
     raw = await file.read()
     if len(raw) > _MAX_UPLOAD:
         raise HTTPException(status_code=413, detail="文件不能超过 30MB")
 
-    chapters = split_chapters(decode_text(raw))
+    name = (file.filename or "未命名").rsplit(".", 1)[0][:100]
+    return await _extract(split_chapters(decode_text(raw)), cats, model, name)
+
+
+def _clean_categories(categories: list[str]) -> list[str]:
+    # 自定义类别是用户手填的：去空白、去重、截短、限个数（每类都要一次模型调用）
+    cats = list(dict.fromkeys(c.strip()[:20] for c in categories if c.strip()))[:8]
+    if not cats:
+        raise HTTPException(status_code=400, detail="至少选一类要提取的内容")
+    return cats
+
+
+async def _extract(chapters: list[str], cats: list[str], model: str, name: str) -> StyleProfilePreview:
     chunks = sample_chunks(chapters)
     if not chunks:
         raise HTTPException(status_code=400, detail="没有抽到可用的段落，检查文件是不是小说正文")
 
     stats = compute_stats(chunks)
     try:
-        result = await style_agent.analyze(chunks, all_chunks(chapters), cats, stats, model)
+        result = await style_agent.analyze(chunks, all_chunks(chapters), cats, stats, model, chapters)
     except llm_json.JsonCallError as e:
         raise HTTPException(status_code=502, detail=f"文风分析失败：{e}")
     except ValueError as e:
         # 没配默认模型 / 模型不属于当前用户 / 书里没找到所选内容
         raise HTTPException(status_code=400, detail=str(e))
-
-    name = (file.filename or "未命名").rsplit(".", 1)[0][:100]
     return StyleProfilePreview(name=name, stats=stats, **result)
+
+
+@router.post("/import-novel", response_model=StyleProfilePreview)
+async def import_from_novel(data: StyleImportNovelIn, user: CurrentUser, db: AsyncSession = Depends(get_db)):
+    """从自己写的书里提文风：拿已有章节当原文，后面和导入 txt 一样只出预览。"""
+    cats = _clean_categories(data.categories)
+    novel = await get_owned_novel(db, data.novel_id, user)
+    rows = await db.execute(
+        select(Chapter.content).where(Chapter.novel_id == novel.id).order_by(Chapter.number)
+    )
+    # 章末的剧情建议是给作者看的，不是正文
+    chapters = [t for t in (strip_plot_suggestions(c or "").strip() for c in rows.scalars()) if t]
+    if not chapters:
+        raise HTTPException(status_code=400, detail="这本书还没有正文")
+    return await _extract(chapters, cats, data.model, (novel.title or "未命名")[:100])
 
 
 @router.get("/", response_model=list[StyleProfileOut])
@@ -128,5 +154,17 @@ async def adapt_profile(
         return await style_agent.adapt(
             profile, data.mode, data.scene_indexes, data.character, data.name_map, data.model
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{profile_id}/trial")
+async def trial_profile(
+    profile_id: int, data: StyleTrialIn, user: CurrentUser, db: AsyncSession = Depends(get_db)
+):
+    """照这个文风试写一段，回给前端看，不落库。"""
+    profile = await _get_owned(db, profile_id, user)
+    try:
+        return await style_agent.trial(profile, data.scene_indexes, data.model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

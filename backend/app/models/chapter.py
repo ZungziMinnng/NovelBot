@@ -20,6 +20,8 @@ class Chapter(Base):
     instruction: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
     # draft = 草稿, confirmed = 已确认（触发记忆更新）
     status: Mapped[str] = mapped_column(String(20), default="draft")
+    # 作者自己的进度标记，和 status 无关、不触发任何流程：'' / draft 草稿 / revise 待修 / final 定稿
+    author_mark: Mapped[str] = mapped_column(String(10), default="")
     word_count: Mapped[int] = mapped_column(Integer, default=0)
     # 本章生成使用的模型（Writer / 重写模型）
     model_used: Mapped[str] = mapped_column(String(120), default="")

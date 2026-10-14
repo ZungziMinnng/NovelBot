@@ -393,8 +393,9 @@ export default function TavernChat() {
       <header className="relative z-10 border-b border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 flex items-center gap-3 shrink-0">
         <button
           onClick={() => navigate('/tavern')}
-          className="p-2 rounded-md hover:bg-muted"
+          className="p-2 rounded-full hover:bg-muted"
           title="返回角色卡列表"
+          aria-label="返回角色卡列表"
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
@@ -402,7 +403,8 @@ export default function TavernChat() {
         <div className="flex items-center gap-1 mr-1">
           <button
             onClick={() => setPanel(p => (p === 'card' ? null : 'card'))}
-            className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
+            aria-pressed={panel === 'card'}
+            className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-full transition-colors ${
               panel === 'card'
                 ? 'bg-primary/15 text-primary ring-1 ring-primary/40'
                 : 'hover:bg-muted text-muted-foreground'
@@ -412,7 +414,8 @@ export default function TavernChat() {
           </button>
           <button
             onClick={() => setPanel(p => (p === 'sessions' ? null : 'sessions'))}
-            className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
+            aria-pressed={panel === 'sessions'}
+            className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-full transition-colors ${
               panel === 'sessions'
                 ? 'bg-primary/15 text-primary ring-1 ring-primary/40'
                 : 'hover:bg-muted text-muted-foreground'
@@ -430,7 +433,7 @@ export default function TavernChat() {
           ))}
         </div>
         <div className="min-w-0">
-          <p className="font-bold text-sm truncate">
+          <p className="font-display font-bold text-base truncate">
             {members.map(m => m.name).join('、') || '角色卡'}
           </p>
           <input
@@ -438,50 +441,22 @@ export default function TavernChat() {
             onChange={e => setTitle(e.target.value)}
             onBlur={saveTitle}
             placeholder="未命名故事线"
-            className="text-xs text-muted-foreground bg-transparent border-b border-transparent hover:border-border focus:border-border focus:outline-none w-48"
+            aria-label="故事线标题"
+            className="text-xs text-muted-foreground bg-transparent border-b border-transparent hover:border-border focus:border-primary/60 focus:outline-none w-48 max-w-full"
           />
         </div>
-        <div className="ml-auto flex items-center gap-3">
+        {/* 两个模型下拉挪进了输入框旁边的「生成参数」面板：不常改，放顶栏太挤 */}
+        <div className="ml-auto flex items-center gap-1">
           {sess?.persona_name && (
-            <span className="text-xs text-muted-foreground">玩家：{sess.persona_name}</span>
+            <span className="hidden md:inline text-xs text-muted-foreground mr-2">玩家：{sess.persona_name}</span>
           )}
-          <select
-            value={modelSelectValue(modelLibrary, card?.model_ref || '')}
-            onChange={e => changeModel(e.target.value)}
-            disabled={streaming || !card}
-            title={isGroup
-              ? `改的是「${card?.name}」的模型。群聊里每个角色用自己卡上的设置，要改别人去他的角色卡里改`
-              : '本张卡使用的模型（切换即保存）'}
-            className="text-xs border rounded-lg px-2 py-1.5 bg-background/60 focus:outline-none max-w-[150px] truncate disabled:opacity-50"
-          >
-            <option value="">跟随全局默认</option>
-            {groupModelsByProvider(modelLibrary).map(g => (
-              <optgroup key={g.provider} label={g.provider}>
-                {g.items.map(m => (
-                  <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          <select
-            value={modelSelectValue(modelLibrary, card?.summary_model_ref || '')}
-            onChange={e => changeSummaryModel(e.target.value)}
-            disabled={streaming || !card}
-            title="上下文总结模型"
-            className="text-xs border rounded-lg px-2 py-1.5 bg-background/60 focus:outline-none max-w-[150px] truncate disabled:opacity-50"
-          >
-            <option value="">总结跟随对话</option>
-            {groupModelsByProvider(modelLibrary).map(g => <optgroup key={`summary-${g.provider}`} label={g.provider}>
-              {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
-            </optgroup>)}
-          </select>
           <ReadingFontButton {...readingFont} />
           <ThemePicker />
         </div>
       </header>
 
       {meta && (
-        <div className="relative z-10 border-b border-border/50 bg-pink-500/[0.04] px-6 py-1.5 text-xs text-muted-foreground flex items-center gap-2 shrink-0">
+        <div className="relative z-10 border-b border-border/50 bg-primary/[0.04] px-6 py-1.5 text-xs text-muted-foreground flex items-center gap-2 shrink-0">
           <BookMarked className="w-3 h-3 shrink-0" />
           {meta.triggered.length > 0
             ? (
@@ -522,8 +497,7 @@ export default function TavernChat() {
                     onChange={e => setDraft(e.target.value)}
                     minRows={3}
                     autoFocus
-                    className="w-full text-sm border rounded-2xl px-4 py-2.5 bg-background/80 leading-relaxed
-                      focus:outline-none focus:ring-1 focus:ring-pink-500/50"
+                    className="w-full text-sm border rounded-2xl px-4 py-2.5 bg-background/80 leading-relaxed"
                   />
                   <div className="flex gap-2 justify-end">
                     <button
@@ -549,9 +523,11 @@ export default function TavernChat() {
                   {b.role === 'user' && b.id && !streaming && (
                     <button
                       onClick={() => startEdit(b)}
-                      className="self-center p-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity
-                        text-muted-foreground hover:text-foreground"
+                      className="self-center p-1.5 rounded-full transition-opacity
+                        [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100
+                        text-muted-foreground hover:text-foreground hover:bg-foreground/[0.06]"
                       title="改这句并重发（后面的对话会重走）"
+                      aria-label="改这句并重发"
                     >
                       <Pencil className="w-3 h-3" />
                     </button>
@@ -560,7 +536,7 @@ export default function TavernChat() {
                     className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
                       b.role === 'user'
                         ? 'bg-primary text-primary-foreground rounded-tr-sm'
-                        : 'bg-card/80 backdrop-blur-sm border border-pink-500/15 rounded-tl-sm'
+                        : 'bg-card/80 backdrop-blur-sm border border-primary/15 rounded-tl-sm shadow-sm'
                     }`}
                     style={readingStyle}
                   >
@@ -580,9 +556,11 @@ export default function TavernChat() {
                   {b.role === 'assistant' && b.id && !streaming && (
                     <button
                       onClick={() => startEdit(b)}
-                      className="self-center p-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity
-                        text-muted-foreground hover:text-foreground"
+                      className="self-center p-1.5 rounded-full transition-opacity
+                        [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100
+                        text-muted-foreground hover:text-foreground hover:bg-foreground/[0.06]"
                       title="编辑这条消息"
+                      aria-label="编辑这条消息"
                     >
                       <Pencil className="w-3 h-3" />
                     </button>
@@ -613,11 +591,11 @@ export default function TavernChat() {
       <div className="relative z-10 border-t border-border/50 bg-background/70 backdrop-blur-md px-6 py-3 shrink-0">
         <div className="max-w-3xl mx-auto space-y-2">
           {showParams && card && (
-            <div className="rounded-xl border border-pink-500/20 bg-card/95 backdrop-blur-sm p-4">
+            <div className="rounded-2xl border border-primary/20 bg-card/95 backdrop-blur-sm p-4 shadow-lg">
               <div className="flex items-start gap-2 mb-3">
                 <div className="flex-1">
                   <p className="text-sm font-semibold">
-                    生成参数{isGroup && ` · ${card?.name}`}
+                    模型与生成参数{isGroup && ` · ${card?.name}`}
                   </p>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     存在角色卡上，改完下一轮生效，这张卡的其他故事线也跟着变。
@@ -626,10 +604,50 @@ export default function TavernChat() {
                 </div>
                 <button
                   onClick={() => { setShowParams(false); commitParams() }}
-                  className="p-1 rounded hover:bg-muted shrink-0"
+                  className="p-1 rounded-full hover:bg-muted shrink-0"
+                  title="收起"
+                  aria-label="收起生成参数"
                 >
                   <X className="w-4 h-4" />
                 </button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 mb-4 pb-4 border-b border-foreground/[0.06]">
+                <label className="block">
+                  <span className="text-xs text-muted-foreground">对话模型</span>
+                  <select
+                    value={modelSelectValue(modelLibrary, card?.model_ref || '')}
+                    onChange={e => changeModel(e.target.value)}
+                    disabled={streaming || !card}
+                    title={isGroup
+                      ? `改的是「${card?.name}」的模型。群聊里每个角色用自己卡上的设置，要改别人去他的角色卡里改`
+                      : '本张卡使用的模型（切换即保存）'}
+                    className="mt-1 w-full text-sm border rounded-lg px-2 py-1.5 bg-background/60 truncate disabled:opacity-50"
+                  >
+                    <option value="">跟随全局默认</option>
+                    {groupModelsByProvider(modelLibrary).map(g => (
+                      <optgroup key={g.provider} label={g.provider}>
+                        {g.items.map(m => (
+                          <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs text-muted-foreground">上下文总结模型</span>
+                  <select
+                    value={modelSelectValue(modelLibrary, card?.summary_model_ref || '')}
+                    onChange={e => changeSummaryModel(e.target.value)}
+                    disabled={streaming || !card}
+                    title="上下文总结模型"
+                    className="mt-1 w-full text-sm border rounded-lg px-2 py-1.5 bg-background/60 truncate disabled:opacity-50"
+                  >
+                    <option value="">总结跟随对话</option>
+                    {groupModelsByProvider(modelLibrary).map(g => <optgroup key={`summary-${g.provider}`} label={g.provider}>
+                      {g.items.map(m => <option key={m.id} value={String(m.id)}>{m.display_name || m.model_id}</option>)}
+                    </optgroup>)}
+                  </select>
+                </label>
               </div>
               <TavernParamFields
                 value={params}
@@ -645,8 +663,8 @@ export default function TavernChat() {
                   key={i}
                   onClick={() => send(s)}
                   disabled={streaming}
-                  className="text-left text-xs px-3 py-2 rounded-lg border border-pink-500/25 bg-pink-500/[0.06]
-                    hover:bg-pink-500/15 transition-colors disabled:opacity-40"
+                  className="text-left text-xs px-3 py-2 rounded-xl border border-primary/25 bg-primary/[0.06]
+                    hover:bg-primary/15 hover:border-primary/40 transition-colors disabled:opacity-40"
                 >
                   {s}
                 </button>
@@ -663,12 +681,14 @@ export default function TavernChat() {
                 : '输入你的行动或台词…（Enter 发送，Shift+Enter 换行）'}
               minRows={2}
               disabled={streaming}
-              className="flex-1 text-sm border rounded-lg px-3 py-2 bg-background/60 focus:outline-none focus:ring-1 focus:ring-pink-500/50 disabled:opacity-50"
+              className="flex-1 text-sm border rounded-2xl px-4 py-2.5 bg-background/60 disabled:opacity-50"
             />
             <button
               onClick={() => setShowParams(v => !v)}
-              title="回复长度与生成参数"
-              className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 border transition-colors ${
+              title="模型、回复长度与生成参数"
+              aria-label="模型、回复长度与生成参数"
+              aria-pressed={showParams}
+              className={`flex items-center justify-center w-9 h-9 rounded-full shrink-0 border transition-colors ${
                 showParams ? 'bg-primary/15 text-primary border-primary/40' : 'hover:bg-muted'
               }`}
             >
@@ -678,7 +698,8 @@ export default function TavernChat() {
               onClick={suggest}
               disabled={streaming || suggesting || bubbles.length === 0}
               title="帮我想想：根据角色刚说的话给几条参考回复"
-              className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 border
+              aria-label="帮我想想"
+              className="flex items-center justify-center w-9 h-9 rounded-full shrink-0 border
                 hover:bg-muted disabled:opacity-40"
             >
               {suggesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lightbulb className="w-4 h-4" />}
@@ -687,7 +708,8 @@ export default function TavernChat() {
               <button
                 onClick={stop}
                 title="停止生成（已输出的部分会保留）"
-                className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0
+                aria-label="停止生成"
+                className="flex items-center justify-center w-9 h-9 rounded-full shrink-0
                   bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/40 hover:bg-rose-500/25"
               >
                 <Square className="w-3.5 h-3.5" fill="currentColor" />
@@ -696,7 +718,9 @@ export default function TavernChat() {
               <button
                 onClick={handleSend}
                 disabled={!input.trim()}
-                className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0
+                title="发送（Enter）"
+                aria-label="发送"
+                className="flex items-center justify-center w-9 h-9 rounded-full shrink-0
                   bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
               >
                 <Send className="w-4 h-4" />
@@ -752,16 +776,16 @@ function SidePanel({
   return (
     <div className="fixed inset-0 z-50 flex" onClick={onClose}>
       <div
-        className="w-full max-w-sm h-full bg-card border-r border-pink-500/20 shadow-xl overflow-y-auto"
+        className="w-full max-w-sm h-full bg-card border-r border-primary/20 shadow-2xl overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-card border-b px-5 py-3.5 flex items-center gap-2">
           <p className="font-semibold text-sm flex-1">{title}</p>
-          <button onClick={onClose} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-1 rounded-full hover:bg-muted" title="关闭" aria-label="关闭"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-5">{children}</div>
       </div>
-      <div className="flex-1 bg-black/50 backdrop-blur-sm" />
+      <div aria-hidden className="flex-1 bg-black/50 backdrop-blur-sm" />
     </div>
   )
 }
@@ -865,7 +889,7 @@ function SessionList({
         <div
           key={s.id}
           className={`border rounded-lg px-3 py-2 flex items-center gap-2 ${
-            s.id === currentId ? 'border-pink-500/50 bg-pink-500/[0.06]' : 'hover:border-pink-500/30'
+            s.id === currentId ? 'border-primary/50 bg-primary/[0.06]' : 'hover:border-primary/30'
           }`}
         >
           <button
@@ -882,8 +906,9 @@ function SessionList({
           </button>
           <button
             onClick={() => remove(s.id)}
-            className="p-1.5 rounded hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30 shrink-0"
+            className="p-1.5 rounded-full hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400 shrink-0"
             title="删除"
+            aria-label="删除故事线"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -892,7 +917,7 @@ function SessionList({
       <button
         onClick={create}
         className="w-full flex items-center justify-center gap-1 px-3 py-2 text-xs border border-dashed
-          border-pink-500/30 rounded-lg text-muted-foreground hover:bg-pink-500/5"
+          border-primary/30 rounded-lg text-muted-foreground hover:bg-primary/5"
       >
         <Plus className="w-3.5 h-3.5" /> 新故事线
       </button>

@@ -45,6 +45,8 @@ interface Props {
   locked: boolean
   /** exact = 模组里有定义、效果是引擎算的。没定义的也能点，只是交给 GM 现写 */
   onUseItem: (name: string, exact: boolean, quantity?: number) => void
+  /** 丢弃：keep 是丢完后还剩几件，0 = 整件丢掉 */
+  onDiscardItem: (name: string, keep: number) => void
   /** 施展一招。exact 的含义同 onUseItem */
   onUseSkill: (name: string, exact: boolean) => void
   /** 玩家自己改一条待办。status 给空串 = 划掉 */
@@ -90,7 +92,7 @@ interface Props {
 export default function StatusSidebar({
   sess, module, npcs, items, skills,
   tab, onTab, locked,
-  onUseItem, onUseSkill, onSetTask, openNpc, onOpenNpc,
+  onUseItem, onDiscardItem, onUseSkill, onSetTask, openNpc, onOpenNpc,
   onApplyDiscoveries, onDismissDiscovery, applyingDiscoveries = false,
   onConfirmItemClaim, onDismissItemClaim,
   notes, appearance, activity, onDeleteNote, onDeleteAppearance, onDeleteActivity,
@@ -219,6 +221,7 @@ export default function StatusSidebar({
               items={items}
               locked={locked}
               onUseItem={onUseItem}
+              onDiscardItem={onDiscardItem}
               onConfirmClaim={onConfirmItemClaim}
               onDismissClaim={onDismissItemClaim}
             />

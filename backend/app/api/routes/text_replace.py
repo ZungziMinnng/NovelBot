@@ -19,6 +19,7 @@ from app.models.memory import Memory, Outline
 from app.models.text_replace_backup import TextReplaceBackup
 from app.api.deps import CurrentUser, get_owned_novel
 from app.api.routes.corrections import _sync_summary_vector
+from app.services import word_stats
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -235,6 +236,7 @@ async def _apply_once(novel_id: int, req: ApplyReplaceRequest, db: AsyncSession)
 
     payload: list[dict] = []
     total = 0
+    word_delta = 0
     summary_chapter_ids: list[int] = []
 
     for target, obj in await _collect_targets(db, novel_id, picked):
@@ -251,6 +253,7 @@ async def _apply_once(novel_id: int, req: ApplyReplaceRequest, db: AsyncSession)
         new_text = target.text.replace(find, replace)
         setattr(obj, target.field, new_text)
         if target.table == "chapters" and target.field == "content":
+            word_delta += len(new_text) - (obj.word_count or 0)
             obj.word_count = len(new_text)
         if target.table == "chapters" and target.field == "summary":
             await _mirror_summary_to_memory(db, target.row_id, new_text)
@@ -270,6 +273,7 @@ async def _apply_once(novel_id: int, req: ApplyReplaceRequest, db: AsyncSession)
     )
     db.add(backup)
     await _prune_backups(db, novel_id)
+    await word_stats.record(db, novel_id, word_delta)
     await db.commit()
     await db.refresh(backup)
 
@@ -340,6 +344,7 @@ async def _undo_once(novel_id: int, backup_id: int, db: AsyncSession) -> dict:
 
     restored = 0
     missing = 0
+    word_delta = 0
     summary_chapter_ids: list[int] = []
     for item in backup.payload or []:
         model = _UNDO_MODELS.get(item.get("table"))
@@ -353,6 +358,7 @@ async def _undo_once(novel_id: int, backup_id: int, db: AsyncSession) -> dict:
         before = item["before"]
         setattr(obj, item["field"], before)
         if item["table"] == "chapters" and item["field"] == "content":
+            word_delta += len(before) - (obj.word_count or 0)
             obj.word_count = len(before)
         if item["table"] == "chapters" and item["field"] == "summary":
             await _mirror_summary_to_memory(db, item["row_id"], before)
@@ -360,6 +366,7 @@ async def _undo_once(novel_id: int, backup_id: int, db: AsyncSession) -> dict:
         restored += 1
 
     backup.undone_at = datetime.utcnow()
+    await word_stats.record(db, novel_id, word_delta)
     await db.commit()
 
     return {

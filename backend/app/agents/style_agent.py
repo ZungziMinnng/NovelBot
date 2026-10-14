@@ -8,20 +8,28 @@
 
 每段的「玩家输入」也在导入时反推好随段落落库（scenes[].input）：游戏叙事示例
 要的是「玩家说了什么 → 正文怎么接」，取用时直接拼，不再调模型。
+
+整场景直接切连续原文；粗筛后过本地重排；另有试写对比。
 """
 import asyncio
 
 from app.prompts.loader import render
-from app.services import llm_client, llm_json
+from app.services import llm_client, llm_json, reranker
 from app.services.style_extract import (
     DIALOGUE,
+    GENERIC_TITLES,
     PRESET_CATEGORIES,
     PRESET_KEYWORDS,
+    RERANK_QUERIES,
+    WHOLE_SCENE,
     apply_replacements,
+    compare_stats,
+    compute_stats,
     dialogue_score,
     find_in,
     keyword_score,
     pick_candidates,
+    whole_scenes,
 )
 
 _INSTRUCTION_TOKENS = 2000
@@ -34,6 +42,19 @@ _EXCERPT_MIN = 20
 # 反推玩家输入：一批十段，一段一句话；批小点，一批崩了牵连的段落少
 _PROMPT_BATCH = 10
 _PROMPT_TOKENS = 3000
+# 词表粗筛先放宽到三倍，再让重排模型按类别描述精读挑 12 块——「一剑穿心」和「剑鞘挂在墙上」词表分不开
+_PREFILTER = 36
+_CANDIDATES = 12
+# 试写：一次一段，字数够算统计就行
+_TRIAL_LENGTH = 600
+_TRIAL_TOKENS = 4000
+_TRIAL_SAMPLES = 2
+
+# 文风卡的栏目，顺序即展示顺序；模板里的 JSON 键要和这里一致
+STYLE_CARD_FIELDS = (
+    "叙述视角", "句子节奏", "分段习惯", "对话写法", "描写配比",
+    "用词质感", "情绪表达", "场景转换与收尾", "这本书不做的事",
+)
 
 
 def _messages(rendered: str) -> list[dict]:
@@ -116,6 +137,18 @@ async def _category_keywords(custom: list[str], model: str, api_format: str) -> 
     return out
 
 
+async def _shortlist(category: str, pool: list[tuple[int, str]], score) -> list[str]:
+    cands = pick_candidates(pool, score, limit=_PREFILTER)
+    if len(cands) <= 1:
+        return cands
+    # 重排模型没装/没 GPU 时原样返回，等于退回纯词表
+    query = RERANK_QUERIES.get(category, category)
+    ranked, _ = await asyncio.to_thread(
+        reranker.rerank_hits, query, [{"text": t} for t in cands], len(cands)
+    )
+    return [h["text"] for h in ranked][:_CANDIDATES]
+
+
 async def _locate(category: str, candidates: list[str], model: str, api_format: str) -> list[dict]:
     if not candidates:
         return []
@@ -155,28 +188,28 @@ async def analyze(
     categories: list[str],
     stats: dict,
     model_ref: str = "",
+    chapters: list[str] | None = None,
 ) -> dict:
-    """sample：随机抽样块，只用来写文风说明、认人名；pool：全书的块，按类别从里面摘录。"""
+    """sample：随机抽样块，只用来写文风说明、认人名；pool：全书的块，按类别从里面摘录；
+    chapters：整章原文，只有「整场景」用。"""
     # model_ref 为空 = 用户的默认快速模型；非空时归属校验在 resolve_model_ref 里做
     model, api_format = llm_client.get_agent_client("memory", model_ref)
 
     custom = [c for c in categories if c not in PRESET_CATEGORIES]
     custom_kw = await _category_keywords(custom, model, api_format)
 
-    candidates: list[list[str]] = []
-    for category in categories:
+    async def group(category: str) -> list[dict]:
+        if category == WHOLE_SCENE:
+            return [{"category": WHOLE_SCENE, "text": t, "summary": ""} for t in whole_scenes(chapters or [])]
         if category == DIALOGUE:
             score = dialogue_score
         else:
             words = PRESET_KEYWORDS.get(category) or custom_kw.get(category, [])
             score = lambda text, words=words: keyword_score(text, words)
-        candidates.append(pick_candidates(pool, score))
+        return await _locate(category, await _shortlist(category, pool, score), model, api_format)
 
     # 每类一次调用，并发；按类别顺序拼回来，摘录编号才稳定
-    groups = await asyncio.gather(*(
-        _locate(category, cands, model, api_format)
-        for category, cands in zip(categories, candidates)
-    ))
+    groups = await asyncio.gather(*(group(c) for c in categories))
     excerpts = [e for group in groups for e in group]
     if not excerpts:
         raise ValueError("书里没找到所选的内容，换几个类别试试")
@@ -204,19 +237,28 @@ async def analyze(
 
     characters: list[dict] = []
     raw_characters = parsed.get("characters")
-    for raw in raw_characters if isinstance(raw_characters, list) else []:
-        if not isinstance(raw, dict):
-            continue
+    raws = [r for r in (raw_characters if isinstance(raw_characters, list) else []) if isinstance(r, dict)]
+
+    def _aliases(raw: dict) -> list[str]:
+        aliases = raw.get("aliases")
+        return [str(a).strip() for a in (aliases if isinstance(aliases, list) else [])]
+
+    claims: dict[str, int] = {}
+    for raw in raws:
+        for alias in set(_aliases(raw)):
+            claims[alias] = claims.get(alias, 0) + 1
+
+    for raw in raws:
         name = str(raw.get("name") or "").strip()
-        if not name:
+        # 称谓不是名字：「妻子」当人名换掉，正文就成了「林晓是个贤惠的林晓」
+        if not name or name in GENERIC_TITLES:
             continue
         neutral = str(raw.get("neutral") or "").strip()
         if neutral:
             mapping[name] = neutral
-            aliases = raw.get("aliases")
-            for alias in aliases if isinstance(aliases, list) else []:
-                alias = str(alias).strip()
-                if alias:
+            for alias in _aliases(raw):
+                # 单字、称谓不换；两个人都报的别名（「师兄」「老大」）也不换，换给谁都错一半
+                if len(alias) >= 2 and alias not in GENERIC_TITLES and alias != name and claims.get(alias, 0) == 1:
                     mapping[alias] = neutral
         characters.append({"name": neutral or name, "role": str(raw.get("role") or "").strip()})
 
@@ -253,8 +295,22 @@ async def analyze(
     protagonist = next((c["name"] for c in characters if c["role"] == "主角"), "")
     await _fill_inputs(scenes, protagonist, mapping, model, api_format)
 
+    # 高频词组是在原文上算的，前几名常是人名地名（「裴仙子」「镇岳宫」），既漏专名又不是文风。
+    # 原地改：路由把同一个 stats 存进库
+    phrases = stats.get("top_phrases")
+    if isinstance(phrases, list):
+        names = [k for k in mapping if len(k) >= 2]
+        stats["top_phrases"] = [p for p in phrases if not any(k in p or p in k for k in names)]
+
+    # 文风卡分栏输出，存成「【栏】内容」一行一栏，下游照旧当一段文字用；老模板/模型没给卡就退回 style_desc
+    card = parsed.get("style_card")
+    lines = []
+    if isinstance(card, dict):
+        lines = [f"【{k}】{str(card[k]).strip()}" for k in STYLE_CARD_FIELDS if str(card.get(k) or "").strip()]
+    style_desc = "\n".join(lines) or str(parsed.get("style_desc") or "")
+
     return {
-        "style_desc": apply_replacements(str(parsed.get("style_desc") or ""), mapping),
+        "style_desc": apply_replacements(style_desc, mapping),
         "characters": characters,
         "scenes": scenes,
     }
@@ -280,10 +336,6 @@ async def _novel_example(style_desc: str, text: str, model: str, api_format: str
     if not instruction:
         return None
     return {"user": _novel_user(len(text), instruction), "assistant": text}
-
-
-async def _ready(value):
-    return value
 
 
 async def _dialogue_pairs(
@@ -349,14 +401,11 @@ async def adapt(
         raise ValueError("没有可用的段落")
 
     if mode == "novel":
-        # 导入时已反推出输入的段直接拼；只有旧数据才现问模型——都有输入时不碰模型配置
-        model = api_format = ""
-        if any(not item["input"] for item in picked):
-            model, api_format = llm_client.get_agent_client("memory", model_ref)
+        # 导入时反推的是游戏的「玩家输入」（只写主角动作），和写手收到的「剧情节拍」不同构，
+        # 拿来当写作方向模型学不到映射；小说一律现反推节拍
+        model, api_format = llm_client.get_agent_client("memory", model_ref)
         examples = await _gather_or_fail([
-            _ready({"user": _novel_user(len(item["text"]), item["input"]), "assistant": item["text"]})
-            if item["input"]
-            else _novel_example(profile.style_desc or "", item["text"], model, api_format)
+            _novel_example(profile.style_desc or "", item["text"], model, api_format)
             for item in picked
         ])
         return {"examples": _rename(examples, name_map)}
@@ -387,3 +436,43 @@ async def adapt(
         return {"examples": _rename(examples, name_map)}
 
     raise ValueError(f"未知模式：{mode}")
+
+
+async def trial(profile, scene_indexes: list[int], model_ref: str = "") -> dict:
+    """按文风说明+几段原文试写一段新内容，再用代码比统计——差在哪由数字说，不让模型自评。"""
+    scenes = list(profile.scenes or [])
+    texts = [
+        str(scenes[i].get("text") or "") for i in dict.fromkeys(scene_indexes)
+        if 0 <= i < len(scenes) and str(scenes[i].get("text") or "").strip()
+    ]
+    if not texts:
+        # 没选就挑最长的：几十字的摘句看不出节奏，整场景最合适
+        texts = sorted(
+            (str(s.get("text") or "") for s in scenes if str(s.get("text") or "").strip()),
+            key=len, reverse=True,
+        )
+    samples = texts[:_TRIAL_SAMPLES]
+    style_desc = (profile.style_desc or "").strip()
+    if not style_desc and not samples:
+        raise ValueError("这个文风没有说明也没有段落，没法试写")
+
+    model, api_format = llm_client.get_agent_client("memory", model_ref)
+    rendered = render(
+        "style_trial.jinja2", style_desc=style_desc, samples=samples, length=_TRIAL_LENGTH,
+        person=str((profile.stats or {}).get("person") or ""),
+    )
+    text = (await llm_client.dispatch_chat_complete(
+        [{"role": "user", "content": rendered}], model, api_format,
+        temperature=0.8, max_tokens=_TRIAL_TOKENS,
+    ) or "").strip()
+    if not text:
+        raise ValueError("试写没有返回内容，请重试或换模型")
+
+    source_stats = dict(profile.stats or {})
+    trial_stats = compute_stats([text])
+    return {
+        "text": text,
+        "source_stats": source_stats,
+        "trial_stats": trial_stats,
+        "gaps": compare_stats(source_stats, trial_stats),
+    }

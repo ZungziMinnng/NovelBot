@@ -250,6 +250,7 @@ async def _run_migrations() -> None:
         # 时段（分幕）：模组给默认表，每局各存一份自己的。老库拿到 '[]'/''
         # 就是「不用时段」，行为与加这些列之前完全一致
         "ALTER TABLE rpg_modules ADD COLUMN time_slots JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_modules ADD COLUMN reply_length_tiers JSON DEFAULT '[]'",
         "ALTER TABLE rpg_sessions ADD COLUMN time_slots JSON DEFAULT '[]'",
         "ALTER TABLE rpg_sessions ADD COLUMN slot VARCHAR(20) DEFAULT ''",
         "ALTER TABLE rpg_sessions ADD COLUMN day INTEGER DEFAULT 1",
@@ -265,6 +266,8 @@ async def _run_migrations() -> None:
         # 可选的地点层级：空是大地图，非空表示父地点内部的小地图节点
         "ALTER TABLE rpg_locations ADD COLUMN parent_id INTEGER DEFAULT NULL",
         "CREATE INDEX IF NOT EXISTS idx_rpg_locations_parent ON rpg_locations(module_id, parent_id)",
+        # 区域/集合标记。老库拿到 0 = 都是普通地点，行为和加这一列之前一样
+        "ALTER TABLE rpg_locations ADD COLUMN is_region BOOLEAN DEFAULT 0",
         "ALTER TABLE rpg_sessions ADD COLUMN visited JSON DEFAULT '[]'",
         # GM 边玩边记的 NPC 近况。老库拿到 '{}'，角色卡上那一块不显示
         "ALTER TABLE rpg_sessions ADD COLUMN npc_notes JSON DEFAULT '{}'",
@@ -326,6 +329,9 @@ async def _run_migrations() -> None:
         # 幕后往事和 NPC 之间的关系标签。老库拿到 '[]' = 谁和谁都没碰过面
         "ALTER TABLE rpg_sessions ADD COLUMN npc_offscreen JSON DEFAULT '[]'",
         "ALTER TABLE rpg_sessions ADD COLUMN npc_bonds JSON DEFAULT '[]'",
+        # 知情账。老库拿到 '[]' = 没登记过任何秘密，提示词和加这一列之前逐字一致
+        "ALTER TABLE rpg_sessions ADD COLUMN secrets JSON DEFAULT '[]'",
+        "ALTER TABLE rpg_sessions ADD COLUMN secret_proposals JSON DEFAULT '[]'",
         # 剧情挪动的人物位置：{"3": "校长办公室"}。老库拿到 '{}' = 谁的位置
         # 都没被剧情改过，一律按作息表 / 常驻地点算，和加这一列之前逐字一致
         "ALTER TABLE rpg_sessions ADD COLUMN npc_places JSON DEFAULT '{}'",
@@ -359,6 +365,8 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_messages ADD COLUMN settlement JSON DEFAULT NULL",
         "ALTER TABLE rpg_messages ADD COLUMN turn_request JSON DEFAULT NULL",
         "ALTER TABLE rpg_messages ADD COLUMN before_save_id INTEGER DEFAULT NULL",
+        # 消息发生在第几天。老消息拿到 NULL = 不知道，上下文里不打日期，逐字一致
+        "ALTER TABLE rpg_messages ADD COLUMN day INTEGER DEFAULT NULL",
         "ALTER TABLE rpg_sessions ADD COLUMN operation_token VARCHAR(40) DEFAULT ''",
         "ALTER TABLE rpg_sessions ADD COLUMN operation_until DATETIME DEFAULT NULL",
         # 老消息按线回填在场名单：从角色线来的就是那一个人。用字符串拼而不是
@@ -466,6 +474,16 @@ async def _run_migrations() -> None:
         "ALTER TABLE rpg_modules ADD COLUMN narration_examples JSON DEFAULT '[]'",
         # 文风库（表由 create_all 建，这里只补索引）
         "CREATE INDEX IF NOT EXISTS idx_style_profiles_user ON style_profiles(user_id)",
+        # 作者进度标记（草稿/待修/定稿），与 status 无关；章节历史版本/便签/日更统计三张表由 create_all 建
+        "ALTER TABLE chapters ADD COLUMN author_mark VARCHAR(10) DEFAULT ''",
+        # 主页备忘录（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_memos_user_scope ON memos(user_id, scope)",
+        # 熔炉成品（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_forge_characters_user ON forge_characters(user_id)",
+        # 设定库（表由 create_all 建，这里只补索引）
+        "CREATE INDEX IF NOT EXISTS idx_lore_entries_user_kind ON lore_entries(user_id, kind)",
+        # OpenAI 兼容中转的 Gemini 原生入口：填了就让该供应商下的 gemini 模型走原生格式
+        "ALTER TABLE api_providers ADD COLUMN gemini_base_url VARCHAR(500) DEFAULT ''",
     ]
     async with engine.begin() as conn:
         for sql in migrations:
@@ -706,13 +724,24 @@ _BUILTIN_RULES = [
     ("writer_guardrails", "去AI味 / 一致性底线", "guardrail", "writer_guardrails.jinja2"),
 ]
 
+# 模板改版前各版本正文的 sha256（strip 后）。库里内置规则与其中某版逐字节相同 = 用户没改过，
+# 启动时跟到新版；改过一个字就不动。改模板时把旧版哈希追加进来。
+_BUILTIN_RULE_OLD_HASHES = {
+    "writer_guardrails": {
+        "6c1351275bbe9ae1448e037f27bb69630384044d1805db0d6dca55a091f5a883",  # 2026-10-03 去重前
+        "e318eee13e829e98c56e81de4ee3132cddbd5b3eefd77c22b49fd8c0a1bcdb58",  # 2026-10-03 加叙述层去AI味前
+    },
+}
+
 
 async def seed_builtin_rules(user_ids: list[int] | None = None) -> None:
     """为用户补齐内置规则。
 
-    幂等：按 (user_id, builtin_key) 存在即跳过，永不 UPDATE——用户对内置规则的
-    编辑必须活过重启。种子失败不抛，由 resolve_rules_block 的模板兜底覆盖缺口。
+    幂等：按 (user_id, builtin_key) 存在即跳过——用户对内置规则的编辑必须活过重启。
+    唯一的 UPDATE：正文与 _BUILTIN_RULE_OLD_HASHES 里某个旧版逐字节相同（没人改过），
+    跟到当前模板。种子失败不抛，由 resolve_rules_block 的模板兜底覆盖缺口。
     """
+    import hashlib
     from sqlalchemy import select
     from app.models.prompt_rule import PromptRule
     from app.models.user import User
@@ -736,6 +765,14 @@ async def seed_builtin_rules(user_ids: list[int] | None = None) -> None:
                 if not content:
                     logger.warning("内置规则模板 %s 渲染为空，跳过补种", template)
                     continue
+                old_hashes = _BUILTIN_RULE_OLD_HASHES.get(key, set())
+                if old_hashes:
+                    for rule in (await session.execute(
+                        select(PromptRule).where(PromptRule.builtin_key == key)
+                    )).scalars():
+                        if hashlib.sha256((rule.content or "").strip().encode()).hexdigest() in old_hashes:
+                            rule.content = content
+                            added += 1
                 for uid in user_ids:
                     if (uid, key) in existing:
                         continue
@@ -752,7 +789,7 @@ async def seed_builtin_rules(user_ids: list[int] | None = None) -> None:
 
 
 async def init_db():
-    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word, rpg, style_profile  # noqa: F401
+    from app.models import novel, chapter, character, memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume, worldview_change, world_rule, story_thread, llm_usage, glossary_entry, user, text_replace_backup, tavern, sensitive_word, rpg, style_profile, chapter_version, author_note, word_day, memo, forge, lore  # noqa: F401
     async with engine.begin() as conn:
         existing = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).has_table("world_rules")

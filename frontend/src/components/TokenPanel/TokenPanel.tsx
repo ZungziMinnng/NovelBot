@@ -25,7 +25,7 @@ const CONTEXT_SECTIONS: Array<{ key: string; label: string; source: 'rag' | 'ful
   { key: 'relationship_milestones', label: '关系里程碑', source: 'field' },
   { key: 'recall_evidence', label: '回忆取证', source: 'rag' },
   { key: 'notes_context', label: '补充设定', source: 'mixed' },
-  { key: 'recent_text', label: '上一章原文', source: 'full' },
+  { key: 'recent_text', label: '近章原文', source: 'full' },
   { key: 'characters', label: '角色状态', source: 'name' },
   { key: 'items', label: '道具', source: 'name' },
   { key: 'systems', label: '系统', source: 'name' },

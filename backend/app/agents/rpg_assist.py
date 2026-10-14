@@ -6,12 +6,20 @@
 安全底线同酒馆：creator_note 是「AI 看不到的介绍」，它既不作为输入进 prompt，
 也不给生成入口——那一栏本来就是写给人看的。
 """
+import asyncio
+import logging
+
 from app.services import llm_client
 from app.services.rpg_prompts import render
+
+logger = logging.getLogger(__name__)
 
 # 单条参考的长度上限。放到 5000 是为了让写了几千字的世界观能整段进去——
 # 只截前 600 字会让生成的内容和后半段设定对不上
 CONTEXT_CHARS = 5000
+
+# 额外要求最多贴这么多字。整段灌进去会把栏位本身的写法冲掉
+INSTRUCTION_CHARS = 500
 
 # 可辅助的栏位 → (界面上的名字, 这一栏该写什么, 字数上限)。
 # **这是唯一的栏位注册点**：路由拿它当白名单，前端的联合类型照着它写
@@ -79,13 +87,26 @@ FIELD_SPECS: dict[str, tuple[str, str, int]] = {
 }
 
 
+# 批量优化角色：RpgNpc 的列名 → FIELD_SPECS 的键。写法和字数上限跟单栏「AI 优化」共用
+REFINE_FIELDS: dict[str, str] = {
+    "persona": "npc_persona",
+    "appearance": "npc_appearance",
+    "description": "npc_description",
+}
+
+# 十个人两栏就是二十发，全并发容易撞供应商限流
+_REFINE_CONCURRENCY = 4
+
+
 async def assist_field(
-    field: str, content: str, context: dict[str, str], model_ref: str
+    field: str, content: str, context: dict[str, str], model_ref: str,
+    instruction: str = "",
 ) -> str:
     """生成（content 为空）或优化（content 非空）单栏内容，只返回该栏正文。
 
     context 是 {展示名: 文本}，由前端按当前表单拼；这里只负责截断和清洗，
     不去反查库——作者刚敲进去还没保存的内容，库里查不到。
+    instruction 是作者这次的额外要求，空串 = 没写。
     """
     label, guidance, max_chars = FIELD_SPECS[field]
     context_blocks = [
@@ -102,6 +123,10 @@ async def assist_field(
         context_blocks=context_blocks,
         is_generate=not content.strip(),
     )
+    # 追加在渲染结果后面而不是写进模板：模板作者可以自己覆写，写进去会被旧模板吃掉
+    extra = (instruction or "").strip()[:INSTRUCTION_CHARS]
+    if extra:
+        prompt += f"\n作者这次的额外要求（与上面冲突时以这条为准，但仍守住硬性要求）：\n{extra}"
     # 用叙事模型而不是那个便宜的 fast_model_ref：这是写世界观和人设的创作活，
     # 便宜模型写出来的东西作者要整段重写，省下的那点钱买不到任何东西
     model, api_format = llm_client.get_agent_client("writer", model_ref)
@@ -115,3 +140,50 @@ async def assist_field(
         max_tokens=4500,
     )
     return (result or "").strip()
+
+
+def npc_context(module, npc) -> dict[str, str]:
+    """键名跟前端 npcContext 一致：单栏优化和批量优化喂进去的是同一份料，
+    同一个人换个入口写出来才不会是两个脾气。"""
+    return {
+        "模组名": module.name or "",
+        "题材": module.genre or "",
+        "世界观": module.worldview or "",
+        "角色名": npc.name or "",
+        "年龄": npc.age or "",
+        "这个人是谁": npc.description or "",
+        "性格": npc.persona or "",
+        "外貌": npc.appearance or "",
+    }
+
+
+async def refine_npcs(module, npcs, fields: list[str], instruction: str = "") -> list[dict]:
+    """批量重写几个角色的几栏，一人一栏一次调用，只回结果不落库。
+
+    顺序固定为「角色顺序 × 栏位顺序」。一条失败不拖垮整批：钱已经花了，
+    别的条目照样给作者看。
+    """
+    # 先探一次模型配置：配错在这里抛 ValueError 变成一个 400，
+    # 而不是 N 条各报一遍「模型没配好」
+    llm_client.get_agent_client("writer", module.model_ref)
+    sem = asyncio.Semaphore(_REFINE_CONCURRENCY)
+
+    async def one(npc, field: str) -> dict:
+        original = getattr(npc, field) or ""
+        item = {"npc_id": npc.id, "name": npc.name, "field": field,
+                "original": original, "text": "", "error": ""}
+        try:
+            async with sem:
+                item["text"] = await assist_field(
+                    REFINE_FIELDS[field], original, npc_context(module, npc),
+                    module.model_ref, instruction=instruction,
+                )
+        except Exception as e:
+            logger.warning("批量优化角色失败 npc=%s field=%s: %s", npc.id, field, e)
+            item["error"] = "这一条没写成：" + str(e)[:200]
+            return item
+        if not item["text"]:
+            item["error"] = "模型没返回内容（常见于内容过滤），可单独重试或换模型"
+        return item
+
+    return list(await asyncio.gather(*[one(npc, f) for npc in npcs for f in fields]))

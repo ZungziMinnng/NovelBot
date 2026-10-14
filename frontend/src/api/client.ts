@@ -137,11 +137,41 @@ export interface Chapter {
   summary: string
   instruction?: string
   status: string
+  /** 作者自己的进度标记，和 status（确认 → 进记忆）无关 */
+  author_mark?: AuthorMark
   word_count: number
   model_used: string
   created_at: string
   updated_at: string
 }
+
+export type AuthorMark = '' | 'draft' | 'revise' | 'final'
+
+export interface ChapterVersionMeta {
+  id: number
+  reason: 'regenerate' | 'rewrite' | 'restore' | 'edit' | string
+  word_count: number
+  created_at: string
+}
+
+export interface WordStats {
+  today: number
+  total: number
+  days: Array<{ day: string; net: number }>
+}
+
+export interface AuthorNote {
+  id: number
+  novel_id: number
+  /** 写到第几章时提醒；null = 不挂章的灵感便签 */
+  chapter_number: number | null
+  content: string
+  done: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type PassageMode = 'rewrite' | 'expand' | 'condense'
 
 export interface CharacterSecret {
   fact: string
@@ -294,6 +324,7 @@ export interface ApiProvider {
   api_key_masked: string
   api_format: string
   use_proxy: boolean
+  gemini_base_url: string
   created_at: string
 }
 
@@ -549,6 +580,7 @@ export interface DashboardStats {
   total_words: number
   total_entities: number
   novel_words: Record<string, number>
+  novel_chapters: Record<string, number>
 }
 
 export interface NovelOverview {
@@ -692,7 +724,7 @@ export const chaptersApi = {
     api.post('/chapters/batch-volume', { chapter_ids: chapterIds, volume }).then(r => r.data),
   discover: (chapterId: number) =>
     api.post<{
-      characters: Array<{ name: string; role: string; description: string }>
+      characters: Array<{ name: string; role: string; description: string; source_chapter?: number }>
       entities: Array<{ name: string; type: string; description: string }>
       locations: Array<{ name: string; type: string; description: string; parent_name: string }>
       techniques: Array<{ name: string; type: string; description: string }>
@@ -706,6 +738,59 @@ export const chaptersApi = {
       done: number[]
       failed: Array<{ number: number; error: string }>
     }>(`/chapters/novel/${novelId}/backfill-summaries`, { mode }, { timeout: 1800000 }).then(r => r.data),
+  /** chapterIds：最后一章已确认之后那一段未确认章的新顺序（必须是那一段的全部） */
+  reorder: (novelId: number, chapterIds: number[]) =>
+    api.post<{ ok: boolean; moved: number }>('/chapters/reorder', { novel_id: novelId, chapter_ids: chapterIds }).then(r => r.data),
+  insertBefore: (novelId: number, beforeChapterId: number) =>
+    api.post<Chapter>('/chapters/insert', { novel_id: novelId, before_chapter_id: beforeChapterId }).then(r => r.data),
+  versions: (chapterId: number) =>
+    api.get<ChapterVersionMeta[]>(`/chapters/${chapterId}/versions`).then(r => r.data),
+  version: (chapterId: number, versionId: number) =>
+    api.get<ChapterVersionMeta & { content: string }>(`/chapters/${chapterId}/versions/${versionId}`).then(r => r.data),
+  restoreVersion: (chapterId: number, versionId: number) =>
+    api.post<Chapter>(`/chapters/${chapterId}/versions/${versionId}/restore`).then(r => r.data),
+  wordStats: (novelId: number, days = 30) =>
+    api.get<WordStats>(`/chapters/novel/${novelId}/word-stats`, { params: { days } }).then(r => r.data),
+}
+
+/** 选段改写/扩写/缩写：只返回替换文字，不落库 */
+export const passageApi = {
+  rewrite: (data: {
+    novel_id: number
+    mode: PassageMode
+    selected: string
+    before: string
+    after: string
+    instruction?: string
+  }) => api.post<{ text: string }>('/generation/passage', data, { timeout: 180000 }).then(r => r.data),
+}
+
+/** 作者便签：只给作者看，不进提示词 */
+export const authorNotesApi = {
+  list: (novelId: number) => api.get<AuthorNote[]>(`/author-notes/novel/${novelId}`).then(r => r.data),
+  create: (data: { novel_id: number; content: string; chapter_number?: number | null }) =>
+    api.post<AuthorNote>('/author-notes/', data).then(r => r.data),
+  update: (id: number, data: Partial<Pick<AuthorNote, 'content' | 'done' | 'chapter_number'>>) =>
+    api.patch<AuthorNote>(`/author-notes/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/author-notes/${id}`).then(r => r.data),
+}
+
+/** 主页备忘录：novel = 小说主页那块，game = 游戏主页那块，两边互不显示 */
+export type MemoScope = 'novel' | 'game'
+
+export interface Memo {
+  id: number
+  scope: MemoScope
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+export const memosApi = {
+  list: (scope: MemoScope) => api.get<Memo[]>('/memos/', { params: { scope } }).then(r => r.data),
+  create: (scope: MemoScope, content: string) => api.post<Memo>('/memos/', { scope, content }).then(r => r.data),
+  update: (id: number, content: string) => api.patch<Memo>(`/memos/${id}`, { content }).then(r => r.data),
+  delete: (id: number) => api.delete(`/memos/${id}`).then(r => r.data),
 }
 
 // ── Submission APIs ────────────────────────────────────────────────────────
@@ -772,7 +857,8 @@ export const submissionApi = {
 
 export const charactersApi = {
   list: (novelId: number) => api.get<Character[]>(`/characters/novel/${novelId}`).then(r => r.data),
-  create: (data: Partial<Character>) => api.post<Character>('/characters/', data).then(r => r.data),
+  // source_chapter：从该章正文发现的角色，后端按正文生成角色卡并补算该章状态
+  create: (data: Partial<Character> & { source_chapter?: number }) => api.post<Character>('/characters/', data).then(r => r.data),
   update: (id: number, data: Partial<Character>) => api.patch<Character>(`/characters/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/characters/${id}`).then(r => r.data),
   uploadAvatar: (characterId: number, file: File) => {
@@ -889,9 +975,9 @@ export const settingsApi = {
 
 export const providersApi = {
   list: () => api.get<ApiProvider[]>('/providers/').then(r => r.data),
-  create: (data: { name: string; base_url: string; api_key: string; api_format: string; use_proxy?: boolean }) =>
+  create: (data: { name: string; base_url: string; api_key: string; api_format: string; use_proxy?: boolean; gemini_base_url?: string }) =>
     api.post<ApiProvider>('/providers/', data).then(r => r.data),
-  update: (id: number, data: { name?: string; base_url?: string; api_key?: string; api_format?: string; use_proxy?: boolean }) =>
+  update: (id: number, data: { name?: string; base_url?: string; api_key?: string; api_format?: string; use_proxy?: boolean; gemini_base_url?: string }) =>
     api.patch<ApiProvider>(`/providers/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/providers/${id}`).then(r => r.data),
 }
@@ -1187,6 +1273,19 @@ export type RpgAssistField =
   | 'location_description' | 'item_description' | 'skill_description'
   | 'task_description'
 
+/** 批量 AI 优化角色能改的栏，就是 RpgNpc 的列名。白名单在后端 rpg_assist.REFINE_FIELDS */
+export type RpgNpcRefineField = 'persona' | 'appearance' | 'description'
+
+export interface RpgNpcRefineItem {
+  npc_id: number
+  name: string
+  field: RpgNpcRefineField
+  original: string
+  /** error 非空时为空串 */
+  text: string
+  error: string
+}
+
 /** 模组（剧本）：一份可反复开局的世界设定，对应酒馆的角色卡 */
 export interface RpgModule {
   id: number
@@ -1248,6 +1347,8 @@ export interface RpgModule {
   temperature: number
   max_tokens: number
   reply_length: number
+  /** 简短/适中/详细三档的字数；空或缺项用默认 150/300/600 */
+  reply_length_tiers?: number[]
   model_ref: string
   fast_model_ref: string
   settlement_model_ref: string
@@ -1549,6 +1650,8 @@ export interface RpgLocation {
   name: string
   description: string
   parent_id: number | null
+  /** 区域/集合（江苏省）：只是范围，不是能站的具体地点 */
+  is_region: boolean
   connections: string[]
   enter_requires: RpgCondition
   sort_order: number
@@ -1752,6 +1855,35 @@ export interface RpgNpcBond {
   exposed: boolean
 }
 
+/** 知情账里的一条秘密。owner=0 是玩家的；known_by 是除 owner 以外还知道的 NPC */
+export interface RpgSecret {
+  id: string
+  content: string
+  owner: number
+  known_by: number[]
+  names: Record<string, string>
+  player_knows: boolean
+  day: number
+  /** 隐约察觉、没有证据的人 */
+  suspects?: number[]
+  /** 被骗的人 → 她深信的假版本，{"3": "她以为是…"} */
+  misled?: Record<string, string>
+}
+
+/** 结算提的知情账改动，等玩家点头。kind=new 新登记 / learn 某人得知 / retire 已公开 */
+export interface RpgSecretProposal {
+  id: string
+  kind: 'new' | 'learn' | 'retire'
+  content: string
+  quote: string
+  message_id: number
+  owner_name?: string
+  known_names?: string[]
+  npc_name?: string
+  stance?: 'knows' | 'suspects' | 'misled'
+  belief?: string
+}
+
 export interface RpgSession {
   id: number
   module_id: number
@@ -1803,6 +1935,9 @@ export interface RpgSession {
    *  侧栏默认只画 exposed 的，上帝视角才画全部 */
   npc_offscreen: RpgOffscreenEntry[]
   npc_bonds: RpgNpcBond[]
+  /** 知情账：谁知道什么。写正文的模型据此让不知情的人装作不知道 */
+  secrets: RpgSecret[]
+  secret_proposals: RpgSecretProposal[]
   /** 每个人这一局的经历，{"3": [...]}，按发生顺序往后追加。和 npc_notes 分开存：
    *  那边同名键会被盖掉（她现在怎么样），这边只增不改（她经历过什么） */
   npc_history: Record<string, RpgNpcHistoryEntry[]>
@@ -2067,11 +2202,15 @@ export const rpgApi = {
       data: {
         stage: string; messages: ChatMessage[]; known?: RpgWizardKnown
         model?: string; temperature?: number
+        /** 给了就从这部小说的初始设定里抽，messages 传 [] */
+        novel_id?: number
       },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/extract`, data, {
-        timeout: 180000,
+        timeout: 600000,
       }).then(r => r.data),
+    /** 整套模组一次出完、不流式，带思考的模型常常要四五分钟。
+     *  前端先放弃的话后端照样跑完，结果被丢掉、钱照花，所以给到 10 分钟 */
     wizardGenerate: (
       moduleId: number,
       data: {
@@ -2080,7 +2219,7 @@ export const rpgApi = {
       },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/wizard/generate`, data, {
-        timeout: 180000,
+        timeout: 600000,
       }).then(r => r.data),
     /** 在某一摊（地点/角色/道具/动作）点「AI 生成」。白名单由后端查库，不用前端传。
      *  返回结构同 wizardExtract，只会含 kind 对应那一摊的列表 */
@@ -2090,7 +2229,7 @@ export const rpgApi = {
       data: { instruction?: string; count?: number; nsfw?: boolean; model?: string; temperature?: number },
     ) =>
       api.post<RpgWizardExtract>(`/rpg/modules/${moduleId}/generate/${kind}`, data, {
-        timeout: 180000,
+        timeout: 600000,
       }).then(r => r.data),
     /** 给一项数值划整张档表。**spec 传表单里那一条的实时值**，不让后端按名字
      *  回查：作者常常是刚加一项、名字和上下限还没存，库里查不到那一项 */
@@ -2118,6 +2257,15 @@ export const rpgApi = {
       api.post<RpgNpc>(`/rpg/modules/${moduleId}/npcs/`, data).then(r => r.data),
     update: (id: number, data: RpgNpcInput) =>
       api.patch<RpgNpc>(`/rpg/npcs/${id}`, data).then(r => r.data),
+    /** 批量 AI 优化几个人的几栏，只回预览不落库。
+     *  一人一栏一发、并发 4，十几个人要几分钟；前端先放弃的话后端照样跑完、钱照花 */
+    refine: (
+      moduleId: number,
+      data: { npc_ids: number[]; fields: RpgNpcRefineField[]; instruction?: string },
+    ) =>
+      api.post<{ items: RpgNpcRefineItem[] }>(
+        `/rpg/modules/${moduleId}/npcs/refine`, data, { timeout: 600000 },
+      ).then(r => r.data),
     delete: (id: number) => api.delete(`/rpg/npcs/${id}`).then(r => r.data),
     uploadAvatar: (id: number, file: File) => {
       const form = new FormData()
@@ -2221,6 +2369,11 @@ export const rpgApi = {
       api.post<{ session: RpgSession; facts: string[] }>(
         `/rpg/sessions/${id}/advance`, undefined, { timeout: 180000 },
       ).then(r => r.data),
+    /** 时间跳转：N 天后的某个时段，只往后。纯引擎，不写过渡叙事 */
+    jump: (id: number, days: number, slot: string) =>
+      api.post<{ session: RpgSession; facts: string[] }>(
+        `/rpg/sessions/${id}/jump`, { days, slot }, { timeout: 180000 },
+      ).then(r => r.data),
     /** 瞬移：从地点总览点一个地方就直接过去。同样零 LLM 调用 */
     move: (id: number, target: string) =>
       api.post<{ session: RpgSession; message: string }>(
@@ -2254,10 +2407,25 @@ export const rpgApi = {
      *  改完之后模型看到的就只有你写的这一版 */
     editSummary: (id: number, slot: string, text: string) =>
       api.patch<RpgSession>(`/rpg/sessions/${id}/summary`, { slot, text }).then(r => r.data),
+    /** 知情账：登记 / 改 / 划掉一件秘密。owner=0 是玩家的 */
+    addSecret: (id: number, data: {
+      content: string; owner: number; known_by: number[]; player_knows: boolean
+    }) => api.post<RpgSession>(`/rpg/sessions/${id}/secrets`, data).then(r => r.data),
+    patchSecret: (id: number, secretId: string, data: {
+      content?: string; known_by?: number[]; player_knows?: boolean
+    }) => api.patch<RpgSession>(`/rpg/sessions/${id}/secrets/${secretId}`, data).then(r => r.data),
+    resolveSecrets: (id: number, accepts: { id: string; accept: boolean }[]) =>
+      api.post<RpgSession>(`/rpg/sessions/${id}/secrets/resolve`, { accepts }).then(r => r.data),
+    deleteSecret: (id: number, secretId: string) =>
+      api.delete<RpgSession>(`/rpg/sessions/${id}/secrets/${secretId}`).then(r => r.data),
     /** 把勾中的新发现补全成完整档案并建进模组。这是**第二次**模型调用——
      *  提取是结算那一次顺带的，不花钱；补属性、连地图才在这里花。
      *  超时同向导的 3 分钟：它是一次完整的设定生成 */
-    applyDiscoveries: (id: number, data: { ids: string[]; model?: string; temperature?: number }) =>
+    applyDiscoveries: (id: number, data: {
+      ids: string[]; model?: string; temperature?: number
+      /** 玩家在剧情里框选的地点名。后端回那段原文核对、取前后文当依据 */
+      manual_place?: { name: string; message_id: number }
+    }) =>
       api.post<RpgDiscoveryApply>(`/rpg/sessions/${id}/discoveries/apply`, data, {
         timeout: 180000,
       }).then(r => r.data),
@@ -2608,7 +2776,7 @@ export interface OriginalDraftData {
 }
 
 export interface NewCharactersData {
-  candidates: Array<{ name: string; role: string; description: string }>
+  candidates: Array<{ name: string; role: string; description: string; source_chapter?: number }>
 }
 
 export interface NewEntitiesData {
@@ -2985,6 +3153,8 @@ export interface RpgStatePatch {
   npc_activity_log: Record<string, RpgNpcHistoryEntry[]>
   npc_offscreen: RpgOffscreenEntry[]
   npc_bonds: RpgNpcBond[]
+  secrets: RpgSecret[]
+  secret_proposals: RpgSecretProposal[]
   npc_history: Record<string, RpgNpcHistoryEntry[]>
   npc_milestones: RpgMilestone[]
   npc_places: Record<string, string>
@@ -3035,6 +3205,8 @@ export type RpgSSEMessage =
   | { event: 'item_claims'; data: RpgItemClaim[] }
   /** 模型觉得这几桩事办完了。弹窗问玩家，点头才算 */
   | { event: 'task_proposals'; data: RpgTaskProposal[] }
+  /** 知情账的改动提议。不打断，侧栏秘密区亮出待确认 */
+  | { event: 'secret_proposals'; data: RpgSecretProposal[] }
   /** 模型觉得这一幕收尾了，可以推时段。**只点亮按钮，不推时间**——
    *  时钟仍然只有玩家能拨。data 是给玩家看的那句理由 */
   | { event: 'slot_hint'; data: string }

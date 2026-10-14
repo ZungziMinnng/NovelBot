@@ -129,3 +129,17 @@ class Novel(Base):
     story_threads: Mapped[list["StoryThread"]] = relationship(  # noqa: F821
         "StoryThread", back_populates="novel", cascade="all, delete-orphan"
     )
+    chapter_versions: Mapped[list["ChapterVersion"]] = relationship(  # noqa: F821
+        "ChapterVersion", back_populates="novel", cascade="all, delete-orphan"
+    )
+    author_notes: Mapped[list["AuthorNote"]] = relationship(  # noqa: F821
+        "AuthorNote", back_populates="novel", cascade="all, delete-orphan"
+    )
+    word_days: Mapped[list["WordDay"]] = relationship(  # noqa: F821
+        "WordDay", back_populates="novel", cascade="all, delete-orphan"
+    )
+
+
+# 这三张表只挂在 Novel 上、别处不引用。随 Novel 一起导入，
+# 免得只导了 novel 的地方（几十个测试文件）配置映射时找不到类名
+from app.models import chapter_version, author_note, word_day  # noqa: E402,F401

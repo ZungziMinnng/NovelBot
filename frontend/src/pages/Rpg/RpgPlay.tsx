@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
-  AlertTriangle, ArrowLeft, BookMarked, Clock, Cpu, Dices, Footprints, Gauge, History, Lightbulb, Loader2,
+  AlertTriangle, ArrowLeft, BookMarked, ChevronDown, ChevronRight, Clock, Cpu, Dices, FastForward, Footprints, Gauge, History, Layers, Lightbulb, Loader2,
   MapPin, MessageSquare, PanelLeftOpen, Pencil, RotateCcw, Send, SkipForward, Square, User, Users,
   Wrench, X,
 } from 'lucide-react'
@@ -32,6 +32,7 @@ import {
   kindMeta, normalizeSuggestions, splitSuggestions, suggestionLabel,
 } from './suggestion'
 import DiceRoll from './DiceRoll'
+import { replyTiers, TIER_LABELS } from './replyLength'
 import RpgAvatar from './RpgAvatar'
 import LocationOverview from './LocationOverview'
 import PlacePage from './PlacePage'
@@ -44,6 +45,7 @@ import MemoryLog from './MemoryLog'
 import TweakPanel from './TweakPanel'
 import SaveTab from './sidebar/SaveTab'
 import TaskResolutionsModal from './TaskResolutionsModal'
+import TimeJumpModal from './TimeJumpModal'
 import RpgTurnStatus from './RpgTurnStatus'
 import SettlementReport from './SettlementReport'
 import { WaitBar } from './rpgUi'
@@ -139,6 +141,8 @@ const DROPPED_LABEL: Record<string, string> = {
   sample: '叙事样例', roster: '角色总表',
   worldbook: '世界书', catalog: '道具与技能',
 }
+
+const LINE_WINDOW = 80
 
 /** 这条戏当时谁在跟前——也就是它会进谁的记忆。
  *  null 是迁移过来的老消息，当时的名单没记下来，那就什么都别说 */
@@ -237,6 +241,7 @@ export default function RpgPlay() {
   const [saveOpen, setSaveOpen] = useState(false)
   // 修改器同理挂在页头：手改数值是「这一局之外」的事，和侧栏那五格不是一类
   const [tweakOpen, setTweakOpen] = useState(false)
+  const [jumpOpen, setJumpOpen] = useState(false)
   // 记忆历史也挂在页头：它横跨所有格子（你自己那格 + 每个角色各一格），
   // 而侧栏那几格是「当前这一个人」的视角，放不进去
   const [memoryOpen, setMemoryOpen] = useState(false)
@@ -253,6 +258,8 @@ export default function RpgPlay() {
   const [lastOutcome, setLastOutcome] = useState<GameOutcome | null>(null)
   // 输入框上方那个「移动」下拉开着没有
   const [moveOpen, setMoveOpen] = useState(false)
+  // 没进过的区域，玩家在移动里点开看的那几个（只露出区域里排第一的地点）
+  const [peekRegions, setPeekRegions] = useState<Set<number>>(new Set())
   const moveBox = useRef<HTMLDivElement>(null)
   const pendingActionRef = useRef('自由行动')
   // 右边那一列（本次行动花了多少 token）开着没有
@@ -399,6 +406,7 @@ export default function RpgPlay() {
     setTurnMode('group')
     setPrivateWith(null)
     setLastOutcome(null)
+    setLinePages(1)
     landedRef.current = false
   }, [sessionId])
 
@@ -511,21 +519,63 @@ export default function RpgPlay() {
     if (!sess) return []
     const seen = new Set(visibleLocations(locations, sess))
     const known = knownNpcs(npcs, sess, module)
-    return locations
-      .filter(loc => seen.has(loc.id) && norm(loc.name) !== norm(sess.location || ''))
-      .map(loc => {
-        const [ok, why] = checkCondition(loc.enter_requires, sess, npcs)
-        return {
-          loc,
-          why: ok ? '' : why,
-          people: known.filter(
-            n => norm(npcPlace(
-              n, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
-            )) === norm(loc.name),
-          ).length,
+    // 按层级排：区域当小标题（不能点），它里面的地点缩进跟在后面
+    const ids = new Set(locations.map(l => l.id))
+    const kids = new Map<number | null, typeof locations>()
+    for (const loc of locations) {
+      const key = loc.parent_id && ids.has(loc.parent_id) ? loc.parent_id : null
+      kids.set(key, [...(kids.get(key) ?? []), loc])
+    }
+    const went = new Set((sess.visited || []).map(norm))
+    // 到过的地点连同它的各级上级都算「进过」：上级一旦进过，下面的子地点才列出来。
+    // 当前位置不在地点表里（模型现编的地名）时不做这层隐藏，免得列表被清空
+    const byId = new Map(locations.map(l => [l.id, l]))
+    const here = locations.find(l => norm(l.name) === norm(sess.location || ''))
+    const entered = new Set<number>()
+    if (here) {
+      const names = new Set([norm(here.name), ...went])
+      for (const loc of locations) {
+        if (!names.has(norm(loc.name))) continue
+        for (let p: typeof loc | undefined = loc, n = 0; p && n < 20; p = byId.get(p.parent_id ?? -1), n++) {
+          entered.add(p.id)
         }
-      })
-  }, [locations, npcs, sess, module])
+      }
+    }
+    const out: {
+      loc: typeof locations[number]; why: string; people: number; depth: number; fresh: boolean
+      peek: 'open' | 'closed' | null
+    }[] = []
+    const walk = (parent: number | null, depth: number) => {
+      const siblings = kids.get(parent) ?? []
+      for (const loc of siblings) {
+        // 没进过的上级：普通地点的子地点不列；区域点开后只露出排第一的那个
+        if (here && parent !== null && !entered.has(parent)) {
+          const up = byId.get(parent)
+          if (!(up?.is_region && peekRegions.has(parent) && siblings[0] === loc)) continue
+        }
+        if (seen.has(loc.id) && (loc.is_region || norm(loc.name) !== norm(sess.location || ''))) {
+          const [ok, why] = checkCondition(loc.enter_requires, sess, npcs)
+          out.push({
+            loc,
+            why: ok ? '' : why,
+            depth,
+            fresh: !loc.is_region && !went.has(norm(loc.name)),
+            peek: here && loc.is_region && !entered.has(loc.id) && (kids.get(loc.id)?.length ?? 0) > 0
+              ? (peekRegions.has(loc.id) ? 'open' : 'closed')
+              : null,
+            people: known.filter(
+              n => norm(npcPlace(
+                n, sess.slot, sess.npc_places, sess.npc_followers, sess.location,
+              )) === norm(loc.name),
+            ).length,
+          })
+        }
+        walk(loc.id, depth + 1)
+      }
+    }
+    walk(null, 0)
+    return out
+  }, [locations, npcs, sess, module, peekRegions])
 
   /**
    * 真正发出去的那个模式。turnMode 存的是玩家的**意愿**，这里按屋里此刻的人
@@ -614,6 +664,12 @@ export default function RpgPlay() {
       : bubbles.filter(b => b.present === null || b.present.includes(focusNpcId))),
     [bubbles, focusNpcId],
   )
+
+  // 时间线只画最近这么多条：几百回合全画的话，输入框每敲一个字整页都要重渲染一遍，
+  // 打字就卡。更早的点按钮一页页往上翻
+  // ponytail: 简单截尾，真要一直往回翻很远再换虚拟列表
+  const [linePages, setLinePages] = useState(1)
+  const lineStart = Math.max(0, lineBubbles.length - LINE_WINDOW * linePages)
 
   /** 在飞的那一轮是不是就落在你眼前。只有一条时间线了，所以它永远在这里；
    *  还没落库的气泡 present 记的是 null（谁在场要等后端快照），于是它在哪个
@@ -788,6 +844,13 @@ export default function RpgPlay() {
               : previous
           ))
           setTaskAsk(prev => [...prev, ...msg.data])
+        } else if (msg.event === 'secret_proposals') {
+          // 不打断：知情账的改动不急着当场定，侧栏「角色」页的秘密区会亮出待确认
+          qc.setQueryData(['rpg-session', sessionId], (previous?: RpgSession) => (
+            previous
+              ? { ...previous, secret_proposals: [...(previous.secret_proposals || []), ...msg.data] }
+              : previous
+          ))
         } else if (msg.event === 'slot_hint') {
           // 不打断。留在这儿把下面那颗「结束这个时段」点亮，推不推是玩家的事
           setSlotHint(msg.data)
@@ -975,6 +1038,9 @@ export default function RpgPlay() {
     abortTurn()
     qc.invalidateQueries({ queryKey: ['rpg-messages', sessionId] })
   }
+
+  // 剧情里框选出来、等玩家确认建成地点的名字（hook 必须在下面的提前 return 之前）
+  const [pickedPlace, setPickedPlace] = useState<{ name: string; message_id: number } | null>(null)
 
   if (!sess) {
     return (
@@ -1179,6 +1245,29 @@ export default function RpgPlay() {
     }
   }
 
+  /** 时间跳转：N 天后的某个时段。纯引擎；失败也要去问一次真实状态（同 advance） */
+  const jump = async (days: number, slot: string) => {
+    if (locked || engineBusy) return
+    setEngineBusy(true)
+    setEngineWait(slowAdvance ? '正在跳转时间…' : '')
+    try {
+      const { session: next, facts } = await rpgApi.sessions.jump(sessionId, days, slot)
+      qc.setQueryData(['rpg-session', sessionId], next)
+      setSlotHint(null)
+      setJumpOpen(false)
+      playSfx('turn')
+      setLastOutcome({ title: '时间跳转', facts, changes: stateChanges(sess, next) })
+      if (facts.length) toast(facts.join('，'), { icon: '🕘' })
+      refreshSaves()
+    } catch {
+      toast.error('没能跳转时间')
+      qc.invalidateQueries({ queryKey: ['rpg-session', sessionId] })
+    } finally {
+      setEngineBusy(false)
+      setEngineWait('')
+    }
+  }
+
   /** 划掉 GM 记错的一条近况。不拍存档：这是在改模型的笔误，不是剧情事件 */
   const dropNote = async (npcId: number, key: string) => {
     try {
@@ -1285,11 +1374,11 @@ export default function RpgPlay() {
     }
   }
 
-  const applyDiscoveries = async (ids: string[]) => {
-    if (!ids.length) return
+  const applyDiscoveries = async (ids: string[], manualPlace?: { name: string; message_id: number }) => {
+    if (!ids.length && !manualPlace) return
     setApplyingFound(true)
     try {
-      const result = await rpgApi.sessions.applyDiscoveries(sessionId, { ids })
+      const result = await rpgApi.sessions.applyDiscoveries(sessionId, { ids, manual_place: manualPlace })
       qc.setQueryData(['rpg-session', sessionId], (prev?: RpgSession) => (
         prev ? { ...prev, discoveries: result.remaining } : prev
       ))
@@ -1317,11 +1406,23 @@ export default function RpgPlay() {
       // 被白名单或重名拦下的必须说出来，静默丢弃等于骗作者
       result.dropped.forEach(line => toast(line))
       if (!made && !result.dropped.length) toast('没有建出任何东西')
-    } catch {
-      toast.error('补全失败，这些发现还留着，可以再试一次')
+    } catch (e: any) {
+      // 框选地点被拒（不在正文里 / 重名）时后端给的是能看懂的原因，直接显示
+      toast.error(manualPlace
+        ? (e?.response?.data?.detail || '建地点失败，可以再试一次')
+        : '补全失败，这些发现还留着，可以再试一次')
     } finally {
       setApplyingFound(false)
+      if (manualPlace) setPickedPlace(null)
     }
+  }
+
+  // 剧情里框选的一段字：结算没认出来的地点，玩家自己指出来建档
+  const pickFromSelection = (messageId: number) => {
+    const text = (window.getSelection()?.toString() || '').trim()
+    // 太短多半是误点，太长或跨段就不是一个地名了
+    setPickedPlace(text.length >= 2 && text.length <= 30 && !/\n/.test(text)
+      ? { name: text, message_id: messageId } : null)
   }
 
   const dismissDiscovery = async (id: string) => {
@@ -1342,6 +1443,16 @@ export default function RpgPlay() {
       qc.invalidateQueries({ queryKey: ['rpg-items', moduleId] })
     } catch {
       toast.error('入库失败，这一条还留着，可以再试一次')
+    }
+  }
+
+  /** 丢弃：走修改器，传的是丢完后的目标件数。对 GM 静默，不进剧情 */
+  const discardItem = async (name: string, keep: number) => {
+    try {
+      const { session } = await rpgApi.sessions.tweak(sessionId, { inventory: [{ name, qty: keep }] })
+      qc.setQueryData(['rpg-session', sessionId], session)
+    } catch {
+      toast.error('丢弃失败')
     }
   }
 
@@ -1412,6 +1523,7 @@ export default function RpgPlay() {
       onTab={setTab}
       locked={locked}
       onUseItem={useItem}
+      onDiscardItem={discardItem}
       onUseSkill={useSkill}
       onSetTask={setTaskState}
       openNpc={openNpc}
@@ -1448,14 +1560,17 @@ export default function RpgPlay() {
           // 带上来路：模组页左上角那个箭头本来只会回游戏列表，改完还得在列表里
           // 把这一局找出来再点进去。有了 from 它就直接指回这儿
           onClick={() => navigate(`/game/module/${sess.module_id}?from=${sess.id}`)}
-          className="p-2 rounded-md hover:bg-muted"
+          className="p-2 rounded-full hover:bg-muted"
           title="返回模组"
+          aria-label="返回模组"
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
-        <Dices className="w-5 h-5 text-primary shrink-0" />
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+          <Dices className="w-4 h-4" />
+        </span>
         <div className="min-w-0">
-          <p className="font-bold text-sm truncate">{sess.char_name || '无名者'}</p>
+          <p className="font-display font-bold text-base truncate">{sess.char_name || '无名者'}</p>
           <p className="text-xs text-muted-foreground truncate">
             {module?.name || ''}
             {module ? ` · ${styleLabel(module.play_style)}` : ''}
@@ -1489,9 +1604,10 @@ export default function RpgPlay() {
           <div className="relative">
             <button
               onClick={() => setMemoryOpen(open => !open)}
+              aria-expanded={memoryOpen}
               title="每一格压出来的长期记忆，按角色分。只能看"
-              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
-                ${memoryOpen ? 'bg-muted' : ''}`}
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-foreground/10 transition-colors
+                ${memoryOpen ? 'bg-foreground/[0.08] text-foreground' : 'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground'}`}
             >
               <BookMarked className="w-3.5 h-3.5" />记忆
             </button>
@@ -1512,9 +1628,10 @@ export default function RpgPlay() {
           <div className="relative">
             <button
               onClick={() => setSaveOpen(open => !open)}
+              aria-expanded={saveOpen}
               title="存档 / 读档"
-              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
-                ${saveOpen ? 'bg-muted' : ''}`}
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-foreground/10 transition-colors
+                ${saveOpen ? 'bg-foreground/[0.08] text-foreground' : 'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground'}`}
             >
               <History className="w-3.5 h-3.5" />存档
             </button>
@@ -1542,9 +1659,10 @@ export default function RpgPlay() {
           <div className="relative">
             <button
               onClick={() => setTweakOpen(open => !open)}
+              aria-expanded={tweakOpen}
               title="手动改数值、关系、背包和处境。GM 不会知道你动过手"
-              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
-                ${tweakOpen ? 'bg-muted' : ''}`}
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-foreground/10 transition-colors
+                ${tweakOpen ? 'bg-foreground/[0.08] text-foreground' : 'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground'}`}
             >
               <Wrench className="w-3.5 h-3.5" />修改器
             </button>
@@ -1572,9 +1690,10 @@ export default function RpgPlay() {
           {/* 用量那一列的开关。只在宽屏出现：那一列自己是 xl 才渲染的 */}
           <button
             onClick={toggleCost}
+            aria-pressed={costOpen}
             title="本次行动花了多少 token"
-            className={`hidden xl:flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border hover:bg-muted
-              ${costOpen ? 'bg-muted' : ''}`}
+            className={`hidden xl:flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-foreground/10 transition-colors
+              ${costOpen ? 'bg-foreground/[0.08] text-foreground' : 'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground'}`}
           >
             <Gauge className="w-3.5 h-3.5" />用量
           </button>
@@ -1583,8 +1702,9 @@ export default function RpgPlay() {
           <ThemePicker />
           <button
             onClick={() => setMenuOpen(true)}
-            className="xl:hidden p-2 rounded-md hover:bg-muted"
+            className="xl:hidden p-2 rounded-full hover:bg-muted"
             title="角色 / 道具 / 新发现"
+            aria-label="打开侧栏：角色 / 道具 / 新发现"
           >
             <PanelLeftOpen className="w-4 h-4" />
           </button>
@@ -1746,7 +1866,7 @@ export default function RpgPlay() {
                     && ` · 提到 ${mentionedOnly(meta).join('、')}`}
                   {/* 平时不显示。一出现就说明设定写爆了总闸，该去缩那一块 */}
                   {meta.dropped && meta.dropped.length > 0 && (
-                    <span className="text-amber-500">
+                    <span className="text-amber-700 dark:text-amber-300">
                       {' · '}已丢 {meta.dropped.map(k => DROPPED_LABEL[k] || k).join('、')}
                     </span>
                   )}
@@ -1801,6 +1921,7 @@ export default function RpgPlay() {
                   locations={locations}
                   npcs={npcs}
                   parentId={mapParentId}
+                  onOpen={setMapParentId}
                   locked={locked}
                   onGo={go}
                   onPick={() => setView('place')}
@@ -1846,7 +1967,16 @@ export default function RpgPlay() {
                         : '还是空的。写下你要做的事，或者回地点总览看看有谁在。'}
                     </p>
                   )}
-                  {lineBubbles.map((b, i) => {
+                  {lineStart > 0 && (
+                    <button
+                      onClick={() => setLinePages(p => p + 1)}
+                      className="block mx-auto text-xs px-3 py-1 rounded-md border text-muted-foreground hover:bg-muted"
+                    >
+                      显示更早的 {Math.min(LINE_WINDOW, lineStart)} 条（还有 {lineStart} 条）
+                    </button>
+                  )}
+                  {lineBubbles.slice(lineStart).map((b, j) => {
+                    const i = lineStart + j
                     const last = i === lineBubbles.length - 1
                     const mine = editing !== null && editing.id === b.id
                     // 还在流的那两条不给动：id 还没回来，也没人知道后端最后
@@ -1972,6 +2102,7 @@ export default function RpgPlay() {
                           className="novel-content relative rounded-2xl border border-primary/15 bg-card/80 backdrop-blur-sm
                             px-5 py-4 text-base whitespace-pre-wrap"
                           style={readingStyle}
+                          onMouseUp={() => { if (b.id !== null && !streaming) pickFromSelection(b.id) }}
                         >
                           {waiting && streamingHere && last
                             ? <ThinkingDots /> : b.content}
@@ -2003,6 +2134,32 @@ export default function RpgPlay() {
                           )}
                         </div>
                       )}
+                      {/* 就地出一条，不做浮层：浮层要么 portal 出去丢了 --rpg-* 颜色，
+                          要么被气泡的 backdrop-blur 当成定位容器 */}
+                      {pickedPlace && pickedPlace.message_id === b.id && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <MapPin className="w-3.5 h-3.5 text-primary shrink-0" />
+                          <span className="text-muted-foreground truncate">
+                            把「<span className="text-foreground">{pickedPlace.name}</span>」建成地点？AI 会照这段剧情补描述和连接
+                          </span>
+                          <button
+                            onClick={() => applyDiscoveries([], pickedPlace)}
+                            disabled={applyingFound || streaming}
+                            className="ml-auto flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary text-primary-foreground
+                              hover:opacity-90 disabled:opacity-40 shrink-0"
+                          >
+                            {applyingFound && <Loader2 className="w-3 h-3 animate-spin" />}
+                            建地点
+                          </button>
+                          <button
+                            onClick={() => setPickedPlace(null)}
+                            className="p-1 rounded-lg text-muted-foreground hover:bg-muted shrink-0"
+                            aria-label="取消"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
                       {b.role === 'assistant' && b.id !== null && b.settlement && (
                         <SettlementReport
                           report={b.settlement}
@@ -2029,7 +2186,16 @@ export default function RpgPlay() {
                     主动推进这一局的动作，摆在页头反而像个设置项。只此一处，
                     页头和 GameHud 上那两个重复的已经撤了 */}
                 {hasClock && (
-                  <div className="flex justify-end">
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => setJumpOpen(true)}
+                      disabled={locked || engineBusy}
+                      title="直接跳到 N 天后的某个时段。不生成剧情，只往后跳，跳之前自动存档"
+                      className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border
+                        hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <FastForward className="w-3.5 h-3.5" />时间跳转
+                    </button>
                     <button
                       onClick={advance}
                       disabled={locked || engineBusy}
@@ -2141,7 +2307,7 @@ export default function RpgPlay() {
                     {/* 自由文本那一行：保持原来的淡样式，点一下等于替他打出这句话 */}
                     {plain.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[11px] text-muted-foreground shrink-0">或者说一句</span>
+                        <span className="text-xs text-muted-foreground shrink-0">或者说一句</span>
                         {plain.map((tip, i) => (
                           <button
                             key={i}
@@ -2160,7 +2326,7 @@ export default function RpgPlay() {
 
                 {actions.length > 0 && (
                   <div className="rounded-xl border border-primary/20 bg-primary/[0.04] p-2.5 space-y-2">
-                    <div className="flex items-center gap-2 text-[11px] font-medium text-primary">
+                    <div className="flex items-center gap-2 text-xs font-medium text-primary">
                       <Dices className="w-3.5 h-3.5" />快捷行动
                       <span className="font-normal text-muted-foreground">不影响自由输入</span>
                     </div>
@@ -2177,7 +2343,7 @@ export default function RpgPlay() {
                             hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {action.name}
-                          <span className="ml-1 text-[10px] opacity-75">{actionTimeHint(action, sess, module)}</span>
+                          <span className="ml-1 text-[11px] opacity-75">{actionTimeHint(action, sess, module)}</span>
                         </button>
                       )
                     })}
@@ -2191,7 +2357,7 @@ export default function RpgPlay() {
                         value={target}
                         onChange={e => setTarget(e.target.value)}
                         title="动作作用在谁身上（好感加给他）。只决定数值加给谁，不会把你切到别的地方去"
-                        className="text-xs border rounded-lg px-2 py-1 bg-background/60 focus:outline-none"
+                        className="text-xs border rounded-lg px-2 py-1 bg-background/60"
                       >
                         <option value="">对谁…</option>
                         {hereNpcs.map(n => <option key={n.id} value={n.name}>{n.name}</option>)}
@@ -2203,7 +2369,7 @@ export default function RpgPlay() {
 
                 {/* 带剧情的移动。和地图上那个【移动到这里】是两条路：那边是
                     瞬移（零模型调用、不产生剧情），这边会生成一段过场并结算 */}
-                {moveTargets.length > 0 && (
+                {moveTargets.some(t => !t.loc.is_region) && (
                   <div ref={moveBox} className="relative">
                     <button
                       onClick={() => setMoveOpen(v => !v)}
@@ -2223,19 +2389,51 @@ export default function RpgPlay() {
                         <p className="px-2 py-1 text-[11px] text-muted-foreground">
                           走过去，会生成一段过场
                         </p>
-                        {moveTargets.map(({ loc, why, people }) => (
+                        {moveTargets.map(({ loc, why, people, depth, fresh, peek }) => loc.is_region ? (
+                          peek ? (
+                            <button
+                              key={loc.id}
+                              onClick={() => setPeekRegions(prev => {
+                                const next = new Set(prev)
+                                if (!next.delete(loc.id)) next.add(loc.id)
+                                return next
+                              })}
+                              style={{ paddingLeft: 8 + depth * 12 }}
+                              className="flex w-full items-center gap-1 rounded-lg pr-2 pt-1.5 pb-0.5 text-[11px]
+                                font-medium text-muted-foreground text-left hover:bg-muted"
+                              title={peek === 'open' ? '收起' : '点开，看看这片区域的入口'}
+                            >
+                              <Layers className="w-3 h-3 shrink-0" />
+                              <span className="flex-1 truncate">{loc.name}</span>
+                              {peek === 'open'
+                                ? <ChevronDown className="w-3 h-3 shrink-0" />
+                                : <ChevronRight className="w-3 h-3 shrink-0" />}
+                            </button>
+                          ) : (
+                            <p
+                              key={loc.id}
+                              style={{ paddingLeft: 8 + depth * 12 }}
+                              className="flex items-center gap-1 pr-2 pt-1.5 pb-0.5 text-[11px] font-medium text-muted-foreground"
+                              title="区域，不能直接去，选下面它里面的地点"
+                            >
+                              <Layers className="w-3 h-3 shrink-0" />{loc.name}
+                            </p>
+                          )
+                        ) : (
                           <button
                             key={loc.id}
                             onClick={() => moveByTurn(loc.name)}
                             disabled={!!why}
                             title={why || `前往${loc.name}`}
-                            className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs
-                              text-left hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                            style={{ paddingLeft: 8 + depth * 12 }}
+                            className={`flex w-full items-center gap-1.5 rounded-lg pr-2 py-1.5 text-xs
+                              text-left hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed
+                              ${fresh && !why ? 'text-muted-foreground/60' : ''}`}
                           >
                             <MapPin className="w-3 h-3 shrink-0" />
                             <span className="flex-1 truncate">{loc.name}</span>
                             <span className="shrink-0 text-[11px] text-muted-foreground">
-                              {why || (people > 0 ? `${people} 人` : '')}
+                              {why || (fresh ? '未到过' : people > 0 ? `${people} 人` : '')}
                             </span>
                           </button>
                         ))}
@@ -2280,7 +2478,7 @@ export default function RpgPlay() {
                       onChange={e => setPrivateWith(Number(e.target.value) || null)}
                       disabled={dead}
                       title="跟谁单独说。只能挑此刻就在你跟前的人"
-                      className="border rounded-lg px-2 py-1 bg-background/60 focus:outline-none disabled:opacity-50"
+                      className="border rounded-lg px-2 py-1 bg-background/60 disabled:opacity-50"
                     >
                       {hereNpcs.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}
                     </select>
@@ -2317,7 +2515,7 @@ export default function RpgPlay() {
                       onChange={e => setAttr(e.target.value)}
                       disabled={locked}
                       title="自己指定用哪项数值判定。选了就跳过 AI 裁决那一步，更快也更省"
-                      className="text-xs border rounded-lg px-2 h-9 bg-background/60 focus:outline-none disabled:opacity-50"
+                      className="text-xs border rounded-lg px-2 h-9 bg-background/60 disabled:opacity-50"
                     >
                       <option value="">让 GM 决定</option>
                       {checkable.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
@@ -2329,7 +2527,7 @@ export default function RpgPlay() {
                       onChange={e => setOpponent(e.target.value)}
                       disabled={locked}
                       title="这一轮在跟谁较劲。选了就按双方的数值对着算，不选则由 GM 判断"
-                      className="text-xs border rounded-lg px-2 h-9 bg-background/60 focus:outline-none disabled:opacity-50"
+                      className="text-xs border rounded-lg px-2 h-9 bg-background/60 disabled:opacity-50"
                     >
                       <option value="">不指定对手</option>
                       {rivals.map(n => <option key={n.id} value={n.name}>{n.name}</option>)}
@@ -2388,6 +2586,7 @@ export default function RpgPlay() {
             actionCount={actions.length}
             hasClock={hasClock}
             layout="column"
+            locations={locations}
           />
 
           {/* 你正盯着的那个人。只在对话里挂：地点总览和地点页那两个视角里
@@ -2434,6 +2633,18 @@ export default function RpgPlay() {
             {menu}
           </div>
         </div>
+      )}
+
+      {/* 必须放在页面根部：输入栏容器带 backdrop-blur，会让里面的 fixed 相对它定位 */}
+      {jumpOpen && (
+        <TimeJumpModal
+          slots={(sess.time_slots?.length ? sess.time_slots : module?.time_slots) || []}
+          day={sess.day || 1}
+          slot={sess.slot || ''}
+          saving={engineBusy}
+          onConfirm={jump}
+          onClose={() => setJumpOpen(false)}
+        />
       )}
 
       {taskAsk.length > 0 && (
@@ -2667,19 +2878,17 @@ function PlayParams({ module, disabled }: { module: RpgModule; disabled: boolean
   )
 }
 
-const REPLY_LENGTH_PRESETS = [
-  { label: '不限', value: 0 },
-  { label: '简短', value: 150 },
-  { label: '适中', value: 300 },
-  { label: '详细', value: 600 },
-]
-
 /** 输入框旁边的旁白长度。和 PlayParams 一样改的是模组本身，下一次发送就生效；
- *  精确字数去模组编辑页填，这里只给几档，填过的非整档值照样显示成当前项 */
+ *  三档的字数在模组编辑页的生成参数里改，填过的非整档值照样显示成当前项 */
 function ReplyLengthPicker({ module, disabled }: { module: RpgModule; disabled: boolean }) {
   const qc = useQueryClient()
   const current = module.reply_length
-  const custom = !REPLY_LENGTH_PRESETS.some(p => p.value === current)
+  const tiers = replyTiers(module.reply_length_tiers)
+  const presets = [
+    { label: '不限', value: 0 },
+    ...TIER_LABELS.map((label, i) => ({ label, value: tiers[i] })),
+  ]
+  const custom = !presets.some(p => p.value === current)
 
   const change = async (value: number) => {
     try {
@@ -2700,11 +2909,11 @@ function ReplyLengthPicker({ module, disabled }: { module: RpgModule; disabled: 
         value={current}
         onChange={e => change(Number(e.target.value))}
         disabled={disabled}
-        className="border rounded-lg px-2 py-1 bg-background/60 text-foreground focus:outline-none disabled:opacity-50"
+        className="border rounded-lg px-2 py-1 bg-background/60 text-foreground disabled:opacity-50"
       >
         {custom && <option value={current}>{current} 字</option>}
-        {REPLY_LENGTH_PRESETS.map(p => (
-          <option key={p.value} value={p.value}>
+        {presets.map(p => (
+          <option key={p.label} value={p.value}>
             {p.value ? `${p.label} · ${p.value} 字` : p.label}
           </option>
         ))}

@@ -36,6 +36,12 @@ class StyleAgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.get_client = patch_client.start()
         self.addCleanup(patch_client.stop)
+        # 重排模型要 GPU，测试里原样返回 = 纯词表粗筛
+        patch_rerank = patch(
+            "app.services.reranker.rerank_hits", side_effect=lambda q, h, k: (h, False)
+        )
+        self.rerank = patch_rerank.start()
+        self.addCleanup(patch_rerank.stop)
 
     def _profile(self, **kwargs):
         base = {"style_desc": "", "characters": [], "scenes": []}
@@ -109,8 +115,10 @@ class StyleAgentTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        out = await style_agent.analyze([], [(0, first), (1, second)], ["打斗"], {"person": "第三人称"})
+        stats = {"person": "第三人称", "top_phrases": ["萧炎道", "云岚宗", "冷笑一声"]}
+        out = await style_agent.analyze([], [(0, first), (1, second)], ["打斗"], stats)
 
+        self.assertEqual(stats["top_phrases"], ["冷笑一声"])  # 专名不进高频词组
         self.assertEqual(out["style_desc"], "林轩自称林轩。")
         self.assertEqual(out["characters"], [
             {"name": "林轩", "role": "主角"},
@@ -210,20 +218,100 @@ class StyleAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"约{len(text)}字", example["user"])
         self.assertEqual(example["assistant"], text)
 
-    async def test_adapt_novel_with_stored_input_skips_model(self):
+    async def test_adapt_novel_ignores_stored_player_input(self):
+        # 存的是游戏的玩家输入，不是剧情节拍；小说一律现反推
         text = "他走进酒馆。"
         profile = self._profile(scenes=[
             {"scene_type": "日常", "text": text, "speakers": [], "input": "林轩走进酒馆"},
         ])
+        self.call.return_value = ({"instruction": "林轩进门，被掌柜拦下，从不耐烦到让步。"}, 0, 0)
 
         out = await style_agent.adapt(profile, "novel", [0])
 
         example = out["examples"][0]
-        self.assertEqual(self.call.await_count, 0)
-        self.get_client.assert_not_called()  # 没配默认模型也能取
-        self.assertIn("=== 写作方向", example["user"])
-        self.assertTrue(example["user"].endswith("林轩走进酒馆"))
+        self.assertEqual(self.call.await_count, 1)
+        self.assertTrue(example["user"].endswith("从不耐烦到让步。"))
         self.assertEqual(example["assistant"], text)
+
+    async def test_analyze_skips_generic_and_shared_aliases(self):
+        text = "萧炎看着妻子，又看了看师兄薰儿，云岚宗的人都在。萧炎没说话，妻子也没说话。"
+        self.call.side_effect = self._reply(
+            locate={"items": [{"index": 0, "excerpt": text, "summary": ""}]},
+            analysis={"characters": [
+                {"name": "萧炎", "aliases": ["炎", "老大"], "role": "主角", "neutral": "林轩"},
+                {"name": "薰儿", "aliases": ["妻子", "老大"], "role": "配角", "neutral": "苏婉"},
+                {"name": "师兄", "aliases": [], "role": "配角", "neutral": "王五"},
+            ]},
+        )
+
+        out = await style_agent.analyze([], [(0, text)], ["环境描写"], {})
+
+        scene = out["scenes"][0]["text"]
+        self.assertIn("看着妻子", scene)  # 称谓别名不换
+        self.assertIn("师兄苏婉", scene)  # 称谓当名字的角色整个丢掉
+        self.assertNotIn("王五", scene)
+        self.assertEqual([c["name"] for c in out["characters"]], ["林轩", "苏婉"])
+
+    async def test_analyze_joins_style_card(self):
+        excerpt = {"category": "打斗", "text": "萧炎挥剑斩向对面。", "summary": ""}
+        self.call.side_effect = self._reply(analysis={
+            "style_card": {"句子节奏": "短句多", "叙述视角": "贴着萧炎", "用词质感": " "},
+            "style_desc": "旧字段",
+            "characters": [{"name": "萧炎", "aliases": [], "role": "主角", "neutral": "林轩"}],
+        })
+        with patch("app.agents.style_agent._locate", new=AsyncMock(return_value=[excerpt])):
+            out = await style_agent.analyze([], [(0, "块。")], ["打斗"], {})
+        # 按固定栏目顺序、空栏不要、专名照换
+        self.assertEqual(out["style_desc"], "【叙述视角】贴着林轩\n【句子节奏】短句多")
+
+    async def test_whole_scene_skips_model_locate(self):
+        chapter = "\n".join(f"第{i}段，他走过长街，雨下个不停，灯一盏盏亮起来。" for i in range(60))
+        self.call.side_effect = self._reply(analysis={})
+
+        out = await style_agent.analyze([], [], ["整场景"], {}, "", [chapter])
+
+        self.assertFalse(any("逐字复制" in p for p in self.prompts))
+        self.assertEqual(out["scenes"][0]["scene_type"], "整场景")
+        self.assertGreaterEqual(len(out["scenes"][0]["text"]), 800)
+
+    async def test_rerank_reorders_shortlist(self):
+        a = "他挥剑。剑鞘挂在墙上，屋里没人。"
+        b = "他一剑刺穿对方的肩膀，对方挥刀反砍。"
+        self.rerank.side_effect = lambda q, h, k: (list(reversed(h)), True)
+        self.call.side_effect = self._reply(locate={"items": []})
+        with self.assertRaises(ValueError):
+            await style_agent.analyze([], [(0, a), (1, b)], ["打斗"], {})
+        query = self.rerank.call_args.args[0]
+        self.assertIn("交手", query)  # 用类别描述，不是类别名
+        locate = next(p for p in self.prompts if "逐字复制" in p)
+        # 词表分 b 高排前面，重排倒过来后 a 在前
+        self.assertLess(locate.index(a), locate.index(b))
+
+    async def test_trial_returns_text_and_gaps(self):
+        profile = self._profile(
+            style_desc="短句。",
+            stats={"avg_sentence_len": 8, "person": "第三人称"},
+            scenes=[
+                {"scene_type": "日常", "text": "他走了。", "speakers": []},
+                {"scene_type": "整场景", "text": "他推开门，屋里没人，桌上的茶还是热的。", "speakers": []},
+            ],
+        )
+        long_text = "他慢慢地走过那条又长又窄而且总是下着雨的老街，一直走到了尽头才停下来。" * 3
+        with patch(
+            "app.services.llm_client.dispatch_chat_complete", new=AsyncMock(return_value=long_text)
+        ) as dispatch:
+            out = await style_agent.trial(profile, [], "9")
+
+        prompt = dispatch.await_args.args[0][0]["content"]
+        self.assertLess(prompt.index("他推开门"), prompt.index("他走了。"))  # 没选段落时长的在前
+        self.assertIn("用第三人称", prompt)
+        self.get_client.assert_called_with("memory", "9")
+        self.assertEqual(out["text"], long_text)
+        self.assertEqual([g["key"] for g in out["gaps"]], ["avg_sentence_len"])
+
+    async def test_trial_empty_profile_raises(self):
+        with self.assertRaisesRegex(ValueError, "没法试写"):
+            await style_agent.trial(self._profile(), [])
 
     async def test_adapt_tavern_filters_and_renames(self):
         profile = self._profile(scenes=[

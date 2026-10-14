@@ -14,7 +14,7 @@ from app.database import init_db, seed_admin, seed_builtin_rules, AsyncSessionLo
 from app.api.auth_middleware import AuthMiddleware
 from app.api.routes import novels, chapters, characters, generation, app_settings, chat
 from app.api.routes import model_library, admin, writer_presets, prompt_rules, world_entities, locations, api_providers, novel_notes, factions, techniques, volumes, outlines, prompts, corrections, worldview_changes, glossary, world_rules, story_threads, text_replace, tavern
-from app.api.routes import auth, submission, rpg, style_profiles
+from app.api.routes import auth, submission, rpg, style_profiles, author_notes, memos, forge, lore
 
 
 async def _auto_migrate_providers(session, admin_id: int):
@@ -112,6 +112,10 @@ app.include_router(tavern.router,          prefix="/api/tavern",         tags=["
 app.include_router(submission.router,      prefix="/api/submission",     tags=["submission"])
 app.include_router(rpg.router,             prefix="/api/rpg",            tags=["rpg"])
 app.include_router(style_profiles.router,  prefix="/api/style-profiles", tags=["style-profiles"])
+app.include_router(author_notes.router,    prefix="/api/author-notes",   tags=["author-notes"])
+app.include_router(memos.router,           prefix="/api/memos",          tags=["memos"])
+app.include_router(forge.router,           prefix="/api/forge",          tags=["forge"])
+app.include_router(lore.router,            prefix="/api/lore",           tags=["lore"])
 
 
 _avatars_dir = Path("data/avatars")

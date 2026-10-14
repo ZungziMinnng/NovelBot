@@ -29,7 +29,7 @@ PROMPTS = {
     "rpg_settle.jinja2": {
         "label": "回合结算",
         "description": "从刚写出的剧情里读出状态变化，并顺带给出三条建议行动。请保持 JSON 输出格式和字段名，后端按字段名解析。数值名不在模组定义里的会被丢弃。",
-        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "outcome_failed": "这一轮是不是判定失败（失败/大失败）。为真时多一句「失败必须留下代价」——后端也会按这一条校验，空结算会被打回重做", "stats": "玩家当前数值表", "location": "当前位置", "place_note": "这个地方已经记下的那一句近况，提示模型别重复写", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）、relations（这个人当前的关系数字）、appearance（这一局已经被改写掉的外貌）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "step_caps": "作者定了每轮变化上限的数值，{名字: 上限}，没定过的不在里面", "stat_meanings": "作者写的「这一项影响什么」，{名字: 说明}。模型据此判断该往哪边动——不给的话它只会顺着名字字面单向加", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算","tasks": "手上还没办完的事，每项含 name、goal（怎样才算办完）；模型只能在这份清单里提议收线", "has_clock": "这个模组有没有时段。只有有时段时才问模型「这一幕收尾了吗」（scene_wrapped）"},
+        "variables": {"narration": "刚写出来的剧情", "outcome_label": "本回合判定结果，没开判定时为空", "outcome_failed": "这一轮是不是判定失败（失败/大失败）。为真时多一句「失败必须留下代价」——后端也会按这一条校验，空结算会被打回重做", "stats": "玩家当前数值表", "location": "当前位置", "place_note": "这个地方已经记下的那一句近况，提示模型别重复写", "inventory": "背包，每项含 name、qty", "flags": "当前处境开关", "npcs": "在场角色，每项含 id、name、notes（这一局已经记下的近况）、relations（这个人当前的关系数字）、appearance（这一局已经被改写掉的外貌）", "note_keys": "这一局所有角色用过的近况键名，提示模型别造同义词", "relation_names": "模组定义的关系数值名", "step_caps": "作者定了每轮变化上限的数值，{名字: 上限}，没定过的不在里面", "stat_meanings": "作者写的「这一项影响什么」，{名字: 说明}。模型据此判断该往哪边动——不给的话它只会顺着名字字面单向加", "engine_note": "本轮已由引擎精确结算的部分，提示模型不要重复计算","tasks": "手上还没办完的事，每项含 name、goal（怎样才算办完）；模型只能在这份清单里提议收线", "has_clock": "这个模组有没有时段。只有有时段时才问模型「这一幕收尾了吗」（scene_wrapped）", "secret_rows": "现有秘密账，每项含 n（编号）、content、owner、state（谁知情/起疑/被骗）；模型据此回报谁新知道了什么（secret_updates），没登记过秘密时为空"},
     },
     "rpg_suggest.jinja2": {
         "label": "帮我想想",
@@ -84,7 +84,7 @@ PROMPTS = {
     "rpg_generate.jinja2": {
         "label": "一键生成（模组编辑）",
         "description": "在地点/角色/道具/动作那一摊点「AI 生成」时用的。按作者一句话的要求批量生成，引用的数值名、地点名要和模组里已有的对得上，对不上的会被后端丢掉。请保持 JSON 输出格式和字段名。",
-        "variables": {"kind": "生成哪一摊（location/npc/item/action）", "instruction": "作者的要求，如「生成霍格沃兹的五个地点」", "count": "目标数量", "nsfw": "是否开成人模式", "play_style": "玩法类别（sim/rpg/slg）", "stat_names": "模组已有的玩家数值名，供道具/动作 effects 校验", "relation_names": "模组已有的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "模组已有的地点名，供角色 location 校验", "existing_names": "这一摊里模组已有的名字，提示模型别重复生成"},
+        "variables": {"kind": "生成哪一摊（location/npc/item/action）", "instruction": "作者的要求，如「生成霍格沃兹的五个地点」", "count": "目标数量", "nsfw": "是否开成人模式", "play_style": "玩法类别（sim/rpg/slg）", "stat_names": "模组已有的玩家数值名，供道具/动作 effects 校验", "relation_names": "模组已有的关系数值名，供角色 initial_state 和动作 relation_effects 校验", "location_names": "模组已有的地点名，供角色 location 校验", "existing_names": "这一摊里模组已有的名字，提示模型别重复生成", "existing_npcs": "生成角色时：已有角色的「名字｜常驻：地点｜身份」行列表，让和某人有关的新角色跟着落在同一地点"},
     },
 }
 
@@ -126,6 +126,7 @@ def validate(name: str, content: str) -> None:
         max_chars=400, is_generate=True,
         context_blocks=[{"label": "世界观", "content": "示例"}],
         day=3, slot="晚", has_clock=True,
+        secret_rows=[{"n": 1, "content": "我掌心有通缉烙印", "owner": "玩家", "state": "知情：韩曼宁"}],
         range_text="0 到 100", label_max=6, note_max=150,
         existing="0 起 陌生；60 起 亲近",
         stat_names=["精力", "资金"], location_names=["酒馆", "后巷"],
@@ -150,6 +151,7 @@ def validate(name: str, content: str) -> None:
         outcome_label="", outcome_failed=False, engine_note="", tasks=[],
         is_generate=False, context_blocks=[],
         slot="", has_clock=False,
+        secret_rows=[],
         stat_names=[], location_names=[],
         existing_names=[], picked=[],
         char_name="", unknown=[],

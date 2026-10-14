@@ -42,6 +42,38 @@ const BTN = 'px-2 py-0.5 text-xs rounded border hover:bg-muted'
 /** 人物位置下拉里「主角」那一项的值。NPC 的值是 id 字符串，撞不上 */
 const PLAYER = '__player__'
 
+/** 地点下拉的选项：没有区域的地点平铺在前，区域里的地点归到以区域名为标题的分组下 */
+function PlaceOptions({ locations }: { locations: RpgLocation[] }) {
+  const byId = new Map(locations.map(l => [l.id, l]))
+  const label = (loc: RpgLocation) => {
+    const chain: string[] = []
+    for (let p = byId.get(loc.parent_id ?? -1), n = 0; p && n < 20; p = byId.get(p.parent_id ?? -1), n++) {
+      if (p.is_region) chain.unshift(p.name)
+    }
+    return chain.join(' / ')
+  }
+  const loose: string[] = []
+  const groups = new Map<string, string[]>()
+  const seen = new Set<string>()
+  for (const loc of locations) {
+    if (loc.is_region || !loc.name || seen.has(loc.name)) continue
+    seen.add(loc.name)
+    const g = label(loc)
+    if (!g) loose.push(loc.name)
+    else groups.set(g, [...(groups.get(g) || []), loc.name])
+  }
+  return (
+    <>
+      {loose.map(name => <option key={name} value={name}>{name}</option>)}
+      {Array.from(groups).map(([g, names]) => (
+        <optgroup key={g} label={g}>
+          {names.map(name => <option key={name} value={name}>{name}</option>)}
+        </optgroup>
+      ))}
+    </>
+  )
+}
+
 /** 修改器。宽度由外面那个浮层给，这里只管内部布局 */
 export default function TweakPanel({
   sessionId, sess, module, npcs, locations, locked, onApplied,
@@ -103,7 +135,12 @@ export default function TweakPanel({
     : npcPlace(selectedNpc, sess.slot, sess.npc_places, sess.npc_followers, sess.location)
   const hasPlaceEdit = Object.prototype.hasOwnProperty.call(placeInputs, selectedId)
   const selectedPlace = hasPlaceEdit ? placeInputs[selectedId] ?? '' : currentPlace
-  const placeNames = Array.from(new Set(locations.map(place => place.name).filter(Boolean)))
+  // 区域只是个范围，人和玩家都只能落在具体地点上，所以下拉里只放地点，区域当分组标题
+  const placeNames = Array.from(new Set(
+    locations.filter(place => !place.is_region).map(place => place.name).filter(Boolean),
+  ))
+  const placeOptions = <PlaceOptions locations={locations} />
+  const registered = (name: string) => placeNames.includes(name)
   const playerMoved = !!playerPlace && playerPlace !== sess.location
   const pendingPlaces = Object.keys(placeInputs).length + (playerMoved ? 1 : 0)
 
@@ -309,10 +346,10 @@ export default function TweakPanel({
                 onChange={event => setPlayerPlace(event.target.value)}
                 className={`${FREE_INPUT} w-full`}
               >
-                {!placeNames.includes(sess.location) && (
+                {!registered(sess.location) && (
                   <option value={sess.location || ''} disabled>{sess.location || '未安排'}（未登记地点）</option>
                 )}
-                {placeNames.map(name => <option key={name} value={name}>{name}</option>)}
+                {placeOptions}
               </select>
               <p className="text-[11px] text-muted-foreground">
                 直接瞬移，不花时段、不看进入条件；跟着你的人一起过去。
@@ -330,15 +367,15 @@ export default function TweakPanel({
           >
             <option value="">恢复作息 / 常驻地点（解除跟随）</option>
             <option value={AWAY}>已离开（不在任何地方，等剧情带回来）</option>
-            {selectedPlace && selectedPlace !== AWAY && !placeNames.includes(selectedPlace) && (
+            {selectedPlace && selectedPlace !== AWAY && !registered(selectedPlace) && (
               <option value={selectedPlace} disabled>{selectedPlace}（未登记地点）</option>
             )}
-            {placeNames.map(name => <option key={name} value={name}>{name}</option>)}
+            {placeOptions}
           </select>
           <div className="flex gap-2">
             <button
               className={BTN}
-              disabled={!placeNames.includes(sess.location)}
+              disabled={!registered(sess.location)}
               onClick={() => setPlaceInputs(previous => ({ ...previous, [selectedId]: sess.location }))}
             >移到我这里</button>
             <button

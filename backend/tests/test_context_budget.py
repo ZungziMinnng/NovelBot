@@ -9,15 +9,15 @@ from app.services.relevance_selector import diversify_historical_hits
 
 
 class ContextBudgetTests(unittest.TestCase):
-    def test_short_chapter_uses_minimum_input_budget(self):
+    def test_input_budget_follows_window_not_output(self):
+        # 65536 窗口：扣掉输出 5250、思考 1313、安全 6554 后全给输入
         budget = build_context_budget(target_words=3500, context_window=65536)
-        self.assertEqual(budget.input_budget, 18000)
         self.assertEqual(budget.output_reserve, 5250)
+        self.assertEqual(budget.input_budget, 65536 - 5250 - 1313 - 6554)
 
-    def test_long_chapter_scales_to_thirty_thousand_tokens(self):
-        budget = build_context_budget(target_words=8000, context_window=65536)
-        self.assertEqual(budget.input_budget, 30000)
-        self.assertEqual(budget.output_reserve, 12000)
+    def test_large_window_is_capped(self):
+        budget = build_context_budget(target_words=5000, context_window=1_000_000)
+        self.assertEqual(budget.input_budget, 64000)
 
     def test_small_model_window_is_a_hard_limit(self):
         budget = build_context_budget(target_words=8000, context_window=32768)

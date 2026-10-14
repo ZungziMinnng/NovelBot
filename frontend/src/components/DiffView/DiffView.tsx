@@ -5,13 +5,15 @@ interface DiffViewProps {
   originalText: string
   revisedText: string
   onClose: () => void
+  leftLabel?: string
+  rightLabel?: string
 }
 
 /**
  * 段落级对比视图：左栏显示初稿，右栏显示修改稿。
  * 不在两版本中都存在的段落分别用红/绿色块标注。
  */
-export default function DiffView({ originalText, revisedText, onClose }: DiffViewProps) {
+export default function DiffView({ originalText, revisedText, onClose, leftLabel = '修订前版本', rightLabel = '修订后版本' }: DiffViewProps) {
   const { originalLines, revisedLines } = useMemo(() => {
     // 按段落分割（空行作为分隔符）
     const splitLines = (text: string) =>
@@ -44,11 +46,11 @@ export default function DiffView({ originalText, revisedText, onClose }: DiffVie
         <div className="flex items-center gap-4 text-xs font-medium">
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-sm bg-red-500/40 border border-red-500/60 inline-block" />
-            修订前版本
+            {leftLabel}
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-sm bg-green-500/40 border border-green-500/60 inline-block" />
-            修订后版本
+            {rightLabel}
           </span>
         </div>
         <button

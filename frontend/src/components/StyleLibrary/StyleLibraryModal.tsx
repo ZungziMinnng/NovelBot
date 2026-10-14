@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { Trash2, Upload, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
+import { novelsApi, type Novel } from '@/api/client'
 import {
   DEFAULT_CATEGORIES,
   PRESET_CATEGORIES,
@@ -11,6 +12,7 @@ import {
   type StyleProfilePreview,
   type StyleScene,
   type StyleStats,
+  type StyleTrialResult,
 } from '@/api/styleProfiles'
 import StyleModelSelect, { useStyleModel } from './StyleModelSelect'
 
@@ -127,6 +129,12 @@ export default function StyleLibraryModal({ onClose }: Props) {
   const [saving, setSaving] = useState(false)
   // 选完文件先停在「选类别」这一步
   const [pendingFile, setPendingFile] = useState<File | null>(null)
+  // 或者从自己写的书里提
+  const [pendingNovel, setPendingNovel] = useState<Novel | null>(null)
+  const [novels, setNovels] = useState<Novel[]>([])
+  const [trialResult, setTrialResult] = useState<StyleTrialResult | null>(null)
+  const [trialing, setTrialing] = useState(false)
+  const pending = pendingFile !== null || pendingNovel !== null
   // 勾选在弹窗里一直留着：连着导几本不用重勾
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES)
   const [categoryInput, setCategoryInput] = useState('')
@@ -148,6 +156,13 @@ export default function StyleLibraryModal({ onClose }: Props) {
       .finally(() => {
         if (alive) setListLoading(false)
       })
+    // 书单只给「从我的小说导入」用，拿不到就不显示那一项
+    novelsApi
+      .list()
+      .then(list => {
+        if (alive) setNovels(list)
+      })
+      .catch(() => {})
     return () => {
       alive = false
     }
@@ -165,6 +180,7 @@ export default function StyleLibraryModal({ onClose }: Props) {
     setStats(data.stats || {})
     setCharacters(data.characters || [])
     setScenes(toEditScenes(data.scenes || []))
+    setTrialResult(null)
   }
 
   function openProfile(p: StyleProfile) {
@@ -174,6 +190,7 @@ export default function StyleLibraryModal({ onClose }: Props) {
     setDirty(false)
     setImportedCategories([])
     setPendingFile(null)
+    setPendingNovel(null)
   }
 
   function openDraft(preview: StyleProfilePreview) {
@@ -193,6 +210,7 @@ export default function StyleLibraryModal({ onClose }: Props) {
     setScenes([])
     setDirty(false)
     setImportedCategories([])
+    setTrialResult(null)
   }
 
   async function confirmDiscard(): Promise<boolean> {
@@ -226,7 +244,35 @@ export default function StyleLibraryModal({ onClose }: Props) {
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     e.target.value = '' // 清掉才能再选同一个文件
-    if (file) setPendingFile(file)
+    if (file) {
+      setPendingFile(file)
+      setPendingNovel(null)
+    }
+  }
+
+  async function handlePickNovel(id: string) {
+    const novel = novels.find(n => String(n.id) === id)
+    if (!novel || importing) return
+    if (!(await confirmDiscard())) return
+    setPendingNovel(novel)
+    setPendingFile(null)
+  }
+
+  function cancelPending() {
+    setPendingFile(null)
+    setPendingNovel(null)
+  }
+
+  async function handleTrial() {
+    if (selectedId === null || trialing) return
+    setTrialing(true)
+    try {
+      setTrialResult(await styleProfilesApi.trial(selectedId, [], model))
+    } catch (err) {
+      toast.error(errText(err, '试写失败'))
+    } finally {
+      setTrialing(false)
+    }
   }
 
   function toggleCategory(name: string) {
@@ -240,12 +286,14 @@ export default function StyleLibraryModal({ onClose }: Props) {
   }
 
   async function handleStartImport() {
-    if (!pendingFile || importing || categories.length === 0) return
+    if (!pending || importing || categories.length === 0) return
     const used = [...categories] // 跑的时候还能改勾选，先记下这次用的
     setImporting(true)
     try {
-      const preview = await styleProfilesApi.importTxt(pendingFile, used, model)
-      setPendingFile(null)
+      const preview = pendingNovel
+        ? await styleProfilesApi.importNovel(pendingNovel.id, used, model)
+        : await styleProfilesApi.importTxt(pendingFile!, used, model)
+      cancelPending()
       openDraft(preview)
       setImportedCategories(used)
     } catch (err) {
@@ -328,7 +376,18 @@ export default function StyleLibraryModal({ onClose }: Props) {
   if (stats.dialogue_ratio != null) statParts.push(`对话占比 ${Math.round(stats.dialogue_ratio * 100)}%`)
   if (stats.avg_para_len != null) statParts.push(`平均段长 ${stats.avg_para_len} 字`)
   if (stats.person) statParts.push(stats.person)
+  if (stats.short_sentence_ratio != null) statParts.push(`短句 ${Math.round(stats.short_sentence_ratio * 100)}%`)
+  if (stats.single_sentence_para_ratio != null)
+    statParts.push(`单句成段 ${Math.round(stats.single_sentence_para_ratio * 100)}%`)
+  if (stats.exclaim_per_k != null) statParts.push(`感叹号 ${stats.exclaim_per_k}/千字`)
+  if (stats.question_per_k != null) statParts.push(`问号 ${stats.question_per_k}/千字`)
+  const tags = stats.dialogue_tags
+  if (tags?.tag != null)
+    statParts.push(
+      `台词：带说/道 ${Math.round(tags.tag * 100)}% · 动作带出 ${Math.round((tags.beat ?? 0) * 100)}% · 光秃 ${Math.round((tags.bare ?? 0) * 100)}%`,
+    )
   const statsLine = statParts.join(' · ')
+  const phrasesLine = stats.top_phrases?.length ? `高频词组：${stats.top_phrases.join('、')}` : ''
 
   // 某类没凑够就明说，免得以为是漏了
   const shortfallText = importedCategories
@@ -363,6 +422,22 @@ export default function StyleLibraryModal({ onClose }: Props) {
                 <Upload className="w-4 h-4" />
                 导入 txt
               </button>
+              {novels.length > 0 && (
+                <select
+                  value=""
+                  onChange={e => void handlePickNovel(e.target.value)}
+                  disabled={importing}
+                  aria-label="从我的小说导入"
+                  className="mt-2 w-full px-2 py-1.5 text-sm border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                >
+                  <option value="">从我的小说导入…</option>
+                  {novels.map(n => (
+                    <option key={n.id} value={n.id}>
+                      {n.title}
+                    </option>
+                  ))}
+                </select>
+              )}
               {importing && (
                 <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
                   正在全书查找并摘取，可能要几分钟…
@@ -405,11 +480,13 @@ export default function StyleLibraryModal({ onClose }: Props) {
 
           <main className="flex-1 flex flex-col min-h-0">
             <div className="flex-1 overflow-y-auto p-5">
-              {pendingFile ? (
+              {pending ? (
                 <div className="max-w-xl space-y-5">
                   <div>
                     <h4 className="text-sm font-medium mb-1">选择要提取的内容</h4>
-                    <p className="text-xs text-muted-foreground break-all">{pendingFile.name}</p>
+                    <p className="text-xs text-muted-foreground break-all">
+                      {pendingNovel ? `我的小说：${pendingNovel.title}` : pendingFile?.name}
+                    </p>
                   </div>
 
                   <div className="flex flex-wrap gap-2">
@@ -475,13 +552,14 @@ export default function StyleLibraryModal({ onClose }: Props) {
                   </div>
 
                   <p className="text-xs text-muted-foreground leading-relaxed">
-                    每类约 {EXCERPTS_PER_CATEGORY} 段，只截相关的那几句原文。类别越多越慢。
+                    每类约 {EXCERPTS_PER_CATEGORY} 段，只截相关的那几句原文；「整场景」例外，直接截 800~1500
+                    字的连续原文，看一场戏怎么推进。类别越多越慢。
                   </p>
 
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setPendingFile(null)}
+                      onClick={cancelPending}
                       disabled={importing}
                       className="px-4 py-2 rounded-lg border text-sm hover:bg-muted transition-colors disabled:opacity-50"
                     >
@@ -535,20 +613,58 @@ export default function StyleLibraryModal({ onClose }: Props) {
                   </div>
 
                   {statsLine && <div className="text-sm text-muted-foreground">{statsLine}</div>}
+                  {phrasesLine && <div className="text-xs text-muted-foreground">{phrasesLine}</div>}
 
                   <div>
                     <label className="block text-sm font-medium mb-1">文风说明</label>
+                    {styleDesc.includes('【') && (
+                      <p className="mb-1 text-xs text-muted-foreground">一行一栏，【】里是栏目名，改内容就行。</p>
+                    )}
                     <textarea
                       value={styleDesc}
                       onChange={e => {
                         setStyleDesc(e.target.value)
                         setDirty(true)
                       }}
-                      rows={5}
+                      rows={styleDesc.includes('【') ? 12 : 5}
                       placeholder="这本书的文风特点…"
                       className="w-full px-3 py-2 text-sm border rounded-lg bg-background resize-y focus:outline-none focus:ring-2 focus:ring-primary/50"
                     />
                   </div>
+
+                  {trialResult && (
+                    <div className="rounded-lg border p-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">试写结果</span>
+                        <button
+                          type="button"
+                          onClick={() => setTrialResult(null)}
+                          title="收起"
+                          className="ml-auto p-0.5 rounded hover:bg-muted transition-colors"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {trialResult.gaps.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">统计上和原文差不多。读一下看语感对不对。</p>
+                      ) : (
+                        <ul className="text-xs text-amber-600 space-y-0.5">
+                          {trialResult.gaps.map(g => (
+                            <li key={g.key}>
+                              {g.label}：原文 {g.source}，试写 {g.trial}
+                              {g.diff != null && `（${g.diff > 0 ? '+' : ''}${Math.round(g.diff * 100)}%）`}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {trialResult.gaps.length > 0 && (
+                        <p className="text-xs text-muted-foreground">差得多的那几项，可以在文风说明对应的栏里写得更明确。</p>
+                      )}
+                      <div className="text-sm whitespace-pre-wrap leading-relaxed max-h-80 overflow-y-auto">
+                        {trialResult.text}
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <div className="text-sm font-medium mb-2">原书角色</div>
@@ -597,7 +713,7 @@ export default function StyleLibraryModal({ onClose }: Props) {
               )}
             </div>
 
-            {editing && !pendingFile && (
+            {editing && !pending && (
               <div className="flex items-center gap-2 px-5 py-3 border-t shrink-0">
                 {isDraft ? (
                   <>
@@ -625,6 +741,15 @@ export default function StyleLibraryModal({ onClose }: Props) {
                       className="px-4 py-2 rounded-lg border hover:bg-muted transition-colors"
                     >
                       删除
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleTrial()}
+                      disabled={trialing || dirty}
+                      title={dirty ? '先保存修改，试写按库里存的版本来' : '照这个文风写一段新内容，和原文比统计'}
+                      className="px-4 py-2 rounded-lg border hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {trialing ? '试写中…' : '试写一段'}
                     </button>
                     <button
                       type="button"

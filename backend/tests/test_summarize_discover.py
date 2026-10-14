@@ -82,7 +82,7 @@ class SummarizeAndDiscoverTests(unittest.TestCase):
                 async def fake_call_json(messages, model, api_format, **kw):
                     return {
                         "day_offset": 0, "period": "", "importance": 4,
-                        "summary": "张三得到青锋剑。",
+                        "summary": "张三得到青锋剑。", "title": "第1章：《青锋出鞘》",
                         "characters": [{"name": "李四", "role": "配角", "description": "路人"}],
                         "entities": [], "locations": [], "techniques": [], "factions": [],
                     }, 100, 50
@@ -96,6 +96,7 @@ class SummarizeAndDiscoverTests(unittest.TestCase):
                     )
                 self.assertIn("张三得到青锋剑", summary)
                 self.assertIn("张三得到青锋剑", ch.summary)
+                self.assertEqual(ch.title, "青锋出鞘")  # 前缀和书名号被清掉
                 self.assertEqual(discovered["characters"][0]["name"], "李四")
                 self.assertEqual((in_tok, out_tok), (100, 50))
                 mem = (await session.execute(
@@ -117,7 +118,7 @@ class SummarizeAndDiscoverTests(unittest.TestCase):
                     raise JsonCallError("坏输出", input_tokens=10, output_tokens=5)
 
                 async def fake_dispatch(messages, model=None, api_format=None, **kw):
-                    return '{"day_offset": 0, "period": "", "summary": "纯摘要路径。", "importance": 3}', 20, 8
+                    return '{"day_offset": 0, "period": "", "summary": "纯摘要路径。", "importance": 3, "title": "新标题"}', 20, 8
 
                 v1, v2 = self._vector_patches()
                 with v1, v2, \
@@ -129,6 +130,7 @@ class SummarizeAndDiscoverTests(unittest.TestCase):
                     )
                 self.assertIsNone(discovered)
                 self.assertIn("纯摘要路径", summary)
+                self.assertEqual(ch.title, "新标题")  # 降级路径同样取标题
                 self.assertEqual((in_tok, out_tok), (30, 13))  # 失败调用 + 降级调用累加
             finally:
                 await session.close()
@@ -180,3 +182,19 @@ class SummarizeAndDiscoverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApplyAutoTitleTest(unittest.TestCase):
+    def test_only_fills_empty_or_placeholder(self):
+        ch = Chapter(number=3, title="")
+        summarizer._apply_auto_title(ch, "第三章 夜袭")
+        self.assertEqual(ch.title, "夜袭")
+        ch.title = "第3章"
+        summarizer._apply_auto_title(ch, "「夜袭」")
+        self.assertEqual(ch.title, "夜袭")
+        ch.title = "作者改过的"
+        summarizer._apply_auto_title(ch, "AI 标题")
+        self.assertEqual(ch.title, "作者改过的")
+        ch.title = ""
+        summarizer._apply_auto_title(ch, None)
+        self.assertEqual(ch.title, "")

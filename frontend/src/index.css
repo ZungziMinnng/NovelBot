@@ -4,7 +4,8 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
+    /* 页面底色压一点点灰，卡片保持纯白——原来两个都是纯白，卡片只剩一条边框 */
+    --background: 220 20% 97.5%;
     --foreground: 222.2 84% 4.9%;
     --card: 0 0% 100%;
     --card-foreground: 222.2 84% 4.9%;
@@ -22,12 +23,25 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
     --radius: 0.5rem;
+
+    /* 阴影两个旋钮，tailwind.config.js 的 boxShadow 全靠它们。主题块都不写这两个，
+       所以浅色主题吃这里、深色主题吃 .dark——18 套不用逐个配 */
+    --shadow-color: 220 40% 20%;
+    --shadow-strength: 0.12;
+    --surface-highlight: transparent;
+
+    /* 动效节奏：快（反馈）/ 中（展开）/ 慢（进场） */
+    --dur-fast: 160ms;
+    --dur-med: 320ms;
+    --dur-slow: 720ms;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .dark {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    /* 卡片比底色亮一档；原来两者同色 */
+    --card: 222 47% 7.5%;
     --card-foreground: 210 40% 98%;
     --primary: 217.2 91.2% 59.8%;
     --primary-foreground: 222.2 47.4% 11.2%;
@@ -42,6 +56,11 @@
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 224.3 76.3% 48%;
+
+    /* 深色底上投影本来就看不太出，靠纯黑加浓度补回来 */
+    --shadow-color: 0 0% 0%;
+    --shadow-strength: 0.45;
+    --surface-highlight: hsl(var(--foreground) / 0.05);
   }
 
   [data-theme="eye-care"] {
@@ -450,6 +469,78 @@
     @apply border-border;
   }
 
+  /* 输入控件的共用手感。全包在 :where() 里，特异性为 0：页面上写了 border-pink-500/20、
+     focus:ring-* 之类的类名照样生效，这里只给没写的补上。
+     只认带 border 类的框：正文编辑区那种无边框、铺满的 textarea 不能在打字时套一圈光 */
+  :where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color']), textarea, select):where([class~='border']) {
+    transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease, background-color var(--dur-fast) ease;
+  }
+  :where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color']), textarea, select):where([class~='border']):where(:hover:not(:disabled, :focus)) {
+    border-color: hsl(var(--foreground) / 0.2);
+  }
+  :where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color']), textarea, select):where([class~='border']):where(:focus) {
+    outline: none;
+    border-color: hsl(var(--ring) / 0.7);
+    box-shadow: 0 0 0 3px hsl(var(--ring) / 0.16);
+  }
+  :where(input, textarea)::placeholder {
+    color: hsl(var(--muted-foreground) / 0.7);
+  }
+  :where(input[type='checkbox'], input[type='radio'], input[type='range']) {
+    accent-color: hsl(var(--primary));
+  }
+
+  /* 主按钮：全站 180 多处 `bg-primary text-primary-foreground` 的按钮，不逐个改 JSX，
+     在这里统一补一层顶光 + 主色投影 + 按下反馈。特异性为 0，写了 shadow-* 的照旧 */
+  :where(button[class~='bg-primary'], a[class~='bg-primary']) {
+    background-image: linear-gradient(180deg, hsl(0 0% 100% / 0.14), hsl(0 0% 100% / 0));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.16),
+      0 1px 2px hsl(var(--primary) / 0.22),
+      0 6px 16px -8px hsl(var(--primary) / 0.55);
+    transition: transform var(--dur-fast) ease, box-shadow var(--dur-fast) ease, opacity var(--dur-fast) ease, background-color var(--dur-fast) ease;
+  }
+  :where(button[class~='bg-primary'], a[class~='bg-primary']):where(:hover:not(:disabled)) {
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.18),
+      0 2px 4px hsl(var(--primary) / 0.22),
+      0 10px 24px -10px hsl(var(--primary) / 0.7);
+  }
+  :where(button[class~='bg-primary'], a[class~='bg-primary']):where(:active:not(:disabled)) {
+    transform: translateY(1px) scale(0.985);
+  }
+
+  /* 卡片：rounded-xl/2xl + border + bg-card(/xx) 的块统一带一层浅投影，深色主题再加
+     一道顶边高光。原来卡片只靠 1px 边框和背景区分 */
+  :where([class~='border'][class*='rounded-xl'][class*='bg-card'], [class~='border'][class*='rounded-2xl'][class*='bg-card']) {
+    box-shadow:
+      inset 0 1px 0 var(--surface-highlight),
+      0 1px 2px hsl(var(--shadow-color) / calc(var(--shadow-strength) * 0.4)),
+      0 8px 24px -14px hsl(var(--shadow-color) / calc(var(--shadow-strength) * 0.9));
+  }
+
+  /* 页面顶栏。二十来个页面各写各的 <header>（有的带模糊有的不带），这里统一成
+     吸顶的毛玻璃条，不用逐个改 JSX。只认 min-h-screen 根节点下的直接子 header；
+     编辑器那种 h-screen 自己管滚动的布局不在此列；首页（data-bare）自己排版 */
+  .min-h-screen > header:not([data-bare]) {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background-color: hsl(var(--background) / 0.72);
+    -webkit-backdrop-filter: saturate(1.5) blur(14px);
+    backdrop-filter: saturate(1.5) blur(14px);
+    border-bottom-color: hsl(var(--foreground) / 0.08);
+  }
+  .min-h-screen > header:not([data-bare]) :where(h1) {
+    letter-spacing: -0.015em;
+  }
+  .min-h-screen > header:not([data-bare]) :where(button, a) {
+    transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-fast) ease;
+  }
+  .min-h-screen > header:not([data-bare]) :where(button, a):where(:active:not(:disabled)) {
+    transform: scale(0.94);
+  }
+
   /* 全局字号基准：默认 16px 偏小，整体放大约 6%（rem 单位随之缩放） */
   html {
     font-size: 17px;
@@ -458,6 +549,33 @@
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 标题收紧字距、折行均分，大字号下才不松散 */
+  h1, h2, h3 {
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.28);
+    color: inherit;
+  }
+
+  /* 键盘焦点。只对键盘生效（鼠标点不出这圈），之前全站没有任何焦点样式 */
+  /* 不写 border-radius：outline 会自己贴着元素原有的圆角走 */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  /* 输入框的焦点由下面那圈边框 + 光晕表示，不再叠一层 outline */
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: none;
   }
 
   /* 输入框的拖拽手柄被挪到了上边缘（见 lib/textareaTopResize.ts），浏览器原来画在
@@ -487,11 +605,143 @@
   }
 }
 
+/* 模组编辑页的输入框默认撑满一行。放在 components 层而不是写成 w-full：
+   utilities 层排在它后面，同一个框再写 w-20 / flex-1 才压得过它。
+   从前 INPUT 里直接带 w-full，而 Tailwind 里 w-full 排在 w-20 后面，
+   一行里的窄框全被撑成整行宽，其余的 flex-1 框被挤成一条缝 */
+@layer components {
+  .input-fill {
+    width: 100%;
+  }
+}
+
 /* 小说内容区域字体 */
 .novel-content {
   font-family: 'Georgia', 'SimSun', serif;
   line-height: 2;
   letter-spacing: 0.05em;
+}
+
+/* ---------- 列表页 / 设置页共用 ---------- */
+
+/* 页面顶部一团主色光 + 淡稿纸格。和首页同一套语汇，浓度减半；跟 --primary 走，
+   所以酒馆页是粉、游戏页是紫。挂在 relative 的根节点里，main 要 relative z-10 盖在上面 */
+.page-glow {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 520px;
+  pointer-events: none;
+  overflow: hidden;
+}
+.page-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 70% at 50% -15%, hsl(var(--primary) / 0.14), transparent 70%);
+}
+.page-glow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(hsl(var(--foreground) / 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--foreground) / 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: center top;
+  -webkit-mask-image: radial-gradient(ellipse 55% 75% at 50% 0%, #000 20%, transparent 70%);
+  mask-image: radial-gradient(ellipse 55% 75% at 50% 0%, #000 20%, transparent 70%);
+}
+
+/* 顶栏最左那个返回键统一成圆的 */
+.min-h-screen > header:not([data-bare]) > button:first-child {
+  border-radius: 9999px;
+}
+
+/* 设置页：每个 <section> 是一张卡。不逐个改 JSX，靠 main 上的 settings-stack 一条规则 */
+.settings-stack > section {
+  border: 1px solid hsl(var(--foreground) / 0.08);
+  background-color: hsl(var(--card));
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow:
+    inset 0 1px 0 var(--surface-highlight),
+    0 1px 2px hsl(var(--shadow-color) / calc(var(--shadow-strength) * 0.4)),
+    0 8px 24px -14px hsl(var(--shadow-color) / calc(var(--shadow-strength) * 0.9));
+}
+@media (min-width: 1024px) {
+  .settings-stack > section {
+    padding: 1.75rem 2rem;
+  }
+}
+.settings-stack > section :where(h2) {
+  font-size: 1.0625rem;
+  letter-spacing: -0.01em;
+}
+
+/* ---------- 首页 ---------- */
+
+/* 稿纸方格：用 --foreground 画线，18 套主题都自动对上明暗；往外围淡出 */
+.manuscript-grid {
+  background-image:
+    linear-gradient(hsl(var(--foreground) / 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--foreground) / 0.045) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: center top;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 30%, transparent 75%);
+}
+
+/* 颗粒。纯 SVG 噪点，不走网络 */
+.grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes aurora-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, 6%, 0) scale(1.08); }
+}
+.aurora {
+  animation: aurora-drift 18s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* 进场：上浮 + 去模糊。--i 是序号，逐个错开 */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(16px); filter: blur(6px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+/* backwards 而不是 both：结束后不再钉住 transform:none，否则 hover:-translate-y 抬不起来 */
+.reveal {
+  animation: rise var(--dur-slow) var(--ease-out) backwards;
+  animation-delay: calc(var(--i, 0) * 80ms + 120ms);
+}
+
+/* 标题逐字落墨 */
+@keyframes ink {
+  from { opacity: 0; transform: translateY(0.35em); filter: blur(8px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+.ink-char {
+  display: inline-block;
+  animation: ink 900ms var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+.caret {
+  display: inline-block;
+  width: 0.08em;
+  height: 0.9em;
+  margin-left: 0.08em;
+  vertical-align: -0.06em;
+  background: hsl(var(--primary));
+  animation: blink 1.1s steps(1) infinite;
 }
 
 /* 流式文本光标动画 */
@@ -547,4 +797,20 @@
 ::-webkit-scrollbar-thumb {
   background: hsl(var(--border));
   border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* 关了动画偏好：全站动效压到一瞬，保留状态变化本身 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

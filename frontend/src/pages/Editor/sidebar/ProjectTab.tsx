@@ -2,9 +2,9 @@ import { useState, useRef, useCallback, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check, ChevronDown, ChevronRight, Layers, Pencil, Trash2,
-  Plus, X, Loader2,
+  Plus, X, Loader2, GripVertical,
 } from 'lucide-react'
-import { chaptersApi, volumesApi, type Chapter, type Novel, type Volume } from '@/api/client'
+import { chaptersApi, volumesApi, type AuthorMark, type Chapter, type Novel, type Volume } from '@/api/client'
 import AutoTextarea from '@/components/AutoTextarea'
 import toast from 'react-hot-toast'
 
@@ -64,6 +64,94 @@ export default function ProjectTab({
 
   const totalWords = useMemo(() => chapters.reduce((sum, c) => sum + (c.word_count || 0), 0), [chapters])
   const totalTokens = useMemo(() => Math.round(totalWords * 1.5), [totalWords])
+
+  // 日更：全书今天净增多少字。key 带上总字数，章节一变就重新取
+  const { data: wordStats } = useQuery({
+    queryKey: ['word-stats', novelId, totalWords],
+    queryFn: () => chaptersApi.wordStats(novelId, 7),
+    placeholderData: prev => prev,
+  })
+
+  // 能拖动/插入的只有最后一章已确认之后的章节
+  const lastConfirmed = useMemo(
+    () => chapters.reduce((m, c) => (c.status === 'confirmed' ? Math.max(m, c.number) : m), 0),
+    [chapters],
+  )
+  const movable = useMemo(
+    () => chapters.filter(c => c.number > lastConfirmed).sort((a, b) => a.number - b.number),
+    [chapters, lastConfirmed],
+  )
+  const [dragId, setDragId] = useState<number | null>(null)
+  const [overId, setOverId] = useState<number | null>(null)
+  const [ordering, setOrdering] = useState(false)
+
+  const refreshAfterRenumber = () => {
+    qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+    qc.invalidateQueries({ queryKey: ['outlines', novelId] })
+    qc.invalidateQueries({ queryKey: ['outline-health', novelId] })
+    qc.invalidateQueries({ queryKey: ['story-threads', novelId] })
+    qc.invalidateQueries({ queryKey: ['author-notes', novelId] })
+  }
+
+  const handleDrop = async (targetId: number) => {
+    const fromId = dragId
+    setDragId(null)
+    setOverId(null)
+    if (fromId == null || fromId === targetId || ordering) return
+    const ids = movable.map(c => c.id)
+    const from = ids.indexOf(fromId)
+    const to = ids.indexOf(targetId)
+    if (from < 0 || to < 0) return
+    ids.splice(from, 1)
+    ids.splice(to, 0, fromId)
+    // 当前打开的章节如果被挪了，跟着它走到新章号
+    const numbers = movable.map(c => c.number)
+    const active = movable.find(c => c.number === selectedChapterNum)
+    setOrdering(true)
+    try {
+      await chaptersApi.reorder(novelId, ids)
+      refreshAfterRenumber()
+      if (active) onSelectChapter(numbers[ids.indexOf(active.id)])
+      toast.success('章节顺序已调整')
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || '调整失败')
+    } finally { setOrdering(false) }
+  }
+
+  const handleInsertBefore = async (c: Chapter) => {
+    if (ordering) return
+    setOrdering(true)
+    try {
+      const created = await chaptersApi.insertBefore(novelId, c.id)
+      refreshAfterRenumber()
+      onSelectChapter(created.number)
+      toast.success(`已在第${c.number}章前插入新章`)
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || '插入失败')
+    } finally { setOrdering(false) }
+  }
+
+  // 作者自己的标记，点一下换下一档；和生成状态无关
+  const MARK_ORDER: AuthorMark[] = ['', 'draft', 'revise', 'final']
+  const MARK_LABEL: Record<AuthorMark, string> = { '': '', draft: '草稿', revise: '待修', final: '定稿' }
+  const MARK_STYLE: Record<AuthorMark, string> = {
+    '': '',
+    draft: 'bg-muted text-muted-foreground',
+    revise: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+    final: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+  }
+  const cycleMark = async (c: Chapter) => {
+    const cur = (c.author_mark || '') as AuthorMark
+    const next = MARK_ORDER[(MARK_ORDER.indexOf(cur) + 1) % MARK_ORDER.length]
+    qc.setQueryData<Chapter[]>(['chapters', novelId], old =>
+      old?.map(ch => (ch.id === c.id ? { ...ch, author_mark: next } : ch)))
+    try {
+      await chaptersApi.update(c.id, { author_mark: next })
+    } catch {
+      toast.error('标记保存失败')
+      qc.invalidateQueries({ queryKey: ['chapters', novelId] })
+    }
+  }
 
   const volumeNumSet = new Set(volumes.map(v => v.number))
   const volumeMap = new Map(volumes.map(v => [v.number, v]))
@@ -200,8 +288,27 @@ export default function ProjectTab({
   const renderChapter = (c: Chapter) => {
     const isActive = c.number === selectedChapterNum
     const isGen = isGenerating && generatingNovelId === c.novel_id && generatingChapterNum === c.number
+    const canMove = !selectMode && !isGenerating && c.number > lastConfirmed
+    const mark = (c.author_mark || '') as AuthorMark
     return (
-      <div key={c.id} className="flex items-center gap-1">
+      <div
+        key={c.id}
+        className={`group/ch flex items-center gap-1 rounded-md ${overId === c.id && dragId !== c.id ? 'ring-1 ring-primary/60' : ''} ${dragId === c.id ? 'opacity-50' : ''}`}
+        onDragOver={canMove && dragId != null ? (e) => { e.preventDefault(); setOverId(c.id) } : undefined}
+        onDragLeave={canMove ? () => setOverId(prev => (prev === c.id ? null : prev)) : undefined}
+        onDrop={canMove ? (e) => { e.preventDefault(); handleDrop(c.id) } : undefined}
+      >
+        {canMove && movable.length > 1 && (
+          <span
+            draggable
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; setDragId(c.id) }}
+            onDragEnd={() => { setDragId(null); setOverId(null) }}
+            className="shrink-0 cursor-grab text-muted-foreground/40 hover:text-muted-foreground"
+            title="拖动调整顺序（只能在未确认章节之间挪）"
+          >
+            <GripVertical className="w-3 h-3" />
+          </span>
+        )}
         {selectMode && (
           <input
             type="checkbox"
@@ -236,11 +343,16 @@ export default function ProjectTab({
         >
           <div className="flex items-center justify-between">
             <span className="truncate">第{c.number}章</span>
-            {isGen
-              ? <span className="w-2 h-2 rounded-full bg-primary animate-pulse shrink-0" />
-              : c.status === 'confirmed'
-                ? <Check className="w-3 h-3 shrink-0 opacity-70" />
-                : null}
+            <span className="flex items-center gap-1 shrink-0">
+              {mark && (
+                <span className={`px-1 rounded text-[0.625rem] leading-4 ${MARK_STYLE[mark]}`}>{MARK_LABEL[mark]}</span>
+              )}
+              {isGen
+                ? <span className="w-2 h-2 rounded-full bg-primary animate-pulse shrink-0" />
+                : c.status === 'confirmed'
+                  ? <Check className="w-3 h-3 shrink-0 opacity-70" />
+                  : null}
+            </span>
           </div>
           {c.title && c.title !== `第${c.number}章` && (
             <p className={`text-xs truncate mt-0.5 ${isActive && !selectMode ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
@@ -248,6 +360,27 @@ export default function ProjectTab({
             </p>
           )}
         </button>
+        {!selectMode && (
+          <div className="hidden group-hover/ch:flex flex-col items-center shrink-0">
+            <button
+              onClick={() => cycleMark(c)}
+              className="px-0.5 text-[0.625rem] leading-4 text-muted-foreground hover:text-foreground"
+              title="作者标记：草稿 → 待修 → 定稿 → 无（只给自己看）"
+            >
+              标
+            </button>
+            {canMove && (
+              <button
+                onClick={() => handleInsertBefore(c)}
+                disabled={ordering}
+                className="p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-40"
+                title="在这一章前面插入新章"
+              >
+                <Plus className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -265,6 +398,16 @@ export default function ProjectTab({
             {totalWords > 0 && (
               <p className="text-[0.6875rem] text-muted-foreground/70 mt-0.5">
                 {totalWords.toLocaleString()} 字 · ~{totalTokens.toLocaleString()} tokens
+              </p>
+            )}
+            {wordStats && (
+              <p
+                className="text-[0.6875rem] text-muted-foreground/70 mt-0.5"
+                title={wordStats.days.map(d => `${d.day}  ${d.net >= 0 ? '+' : ''}${d.net}`).join('\n') || '还没有记录'}
+              >
+                今日 <span className={wordStats.today > 0 ? 'text-primary' : wordStats.today < 0 ? 'text-destructive' : ''}>
+                  {wordStats.today >= 0 ? '+' : ''}{wordStats.today.toLocaleString()}
+                </span> 字
               </p>
             )}
           </div>

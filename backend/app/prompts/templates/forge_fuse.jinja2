@@ -1,0 +1,50 @@
+你是一位资深的角色设计师。下面给出若干个已有角色（来源），请把它们融合成一个**全新的、自洽的角色**。
+
+融合原则：
+- 每个来源标注了「占比」：「主体」决定这个新角色的核心气质与底色；「重要成分」要有明显体现；「点缀」只取一两个鲜明特征，不要喧宾夺主。
+- 来源后面的「作者要求」是硬要求，必须执行（例如「取她的嘴硬，他的背景」）。
+- 不是把各来源的文字拼在一起，而是让特质彼此作用、产生新的矛盾与张力，写成一个有血有肉的人。
+- 新角色必须有自己的名字，不能直接沿用任何来源的名字，也不要在文字里提到来源角色。
+- 来源里没有提到的内容可以合理补全，但不得与来源给出的事实矛盾。
+{% if goal %}
+
+整体目标（作者对新角色的总体期望，优先级高于单个来源的占比）：
+{{ goal }}
+{% endif %}
+
+=== 来源角色 ===
+{% for s in sources %}
+【来源 {{ loop.index }}：{{ s.name }}】占比：{% if s.weight >= 60 %}主体{% elif s.weight >= 30 %}重要成分{% else %}点缀{% endif %}（{{ s.weight }}%）
+{% if s.instruction %}作者要求：{{ s.instruction }}
+{% endif %}
+{% if s.age %}年龄：{{ s.age }}
+{% endif %}{% if s.description %}简介：{{ s.description }}
+{% endif %}{% if s.personality %}性格：{{ s.personality }}
+{% endif %}{% if s.speech_style %}说话风格：{{ s.speech_style }}
+{% endif %}{% if s.appearance %}外貌：{{ s.appearance }}
+{% endif %}{% if s.background %}背景：{{ s.background }}
+{% endif %}{% if s.abilities %}能力：{{ s.abilities }}
+{% endif %}{% if s.relationships %}关系：{{ s.relationships }}
+{% endif %}{% if s.dialogue_examples %}对话示例：
+{% for turn in s.dialogue_examples %}- 对方：{{ turn.user }}
+  角色：{{ turn.assistant }}
+{% endfor %}{% endif %}
+
+{% endfor %}
+请严格以 JSON 对象输出，字段如下（所有值都是字符串，dialogue_examples 除外）：
+{
+  "name": "新角色的名字",
+  "age": "年龄，自由文本，如「十七八岁」",
+  "description": "一句话简介，用来在列表里认人",
+  "personality": "性格：核心特质、情感表现、价值观、优缺点，要有内在矛盾",
+  "speech_style": "说话风格和口头习惯",
+  "appearance": "外貌：五官、发型发色、身材、穿着，写成具体的视觉化描述",
+  "background": "背景故事",
+  "abilities": "能力与特长",
+  "relationships": "关系网络；没有可靠依据就留空字符串，不要硬编具体人名",
+  "dialogue_examples": [{"user": "对方说的话", "assistant": "新角色的回应"}]
+}
+
+要求：
+- dialogue_examples 写 2-3 轮，必须能体现新角色独有的说话腔调，而不是某个来源的腔调。
+- 只输出 JSON，不要任何其他内容。

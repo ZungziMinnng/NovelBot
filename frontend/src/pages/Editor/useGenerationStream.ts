@@ -12,7 +12,7 @@ import { useDevLogStore } from '@/store/devLogStore'
 import { useQueryClient } from '@tanstack/react-query'
 
 export interface GenerationStreamState {
-  newCharCandidates: Array<{ name: string; role: string; description: string }>
+  newCharCandidates: Array<{ name: string; role: string; description: string; source_chapter?: number }>
   newEntityCandidates: Array<{ name: string; type: string; description: string }>
   newLocationCandidates: Array<{ name: string; type: string; description: string; parent_name: string }>
   newTechCandidates: Array<{ name: string; type: string; description: string }>
@@ -44,7 +44,7 @@ export interface GenerationStreamActions {
   handleAddNewTechs: () => Promise<void>
   toggleFactionSelection: (i: number) => void
   handleAddNewFactions: () => Promise<void>
-  setNewCharCandidates: (v: Array<{ name: string; role: string; description: string }>) => void
+  setNewCharCandidates: (v: Array<{ name: string; role: string; description: string; source_chapter?: number }>) => void
   setNewEntityCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
   setNewLocationCandidates: (v: Array<{ name: string; type: string; description: string; parent_name: string }>) => void
   setNewTechCandidates: (v: Array<{ name: string; type: string; description: string }>) => void
@@ -64,7 +64,7 @@ export function useGenerationStream(
 ) {
   const qc = useQueryClient()
   // ── Discovery state ──────────────────────────────────────────────────────
-  const [newCharCandidates, setNewCharCandidates] = useState<Array<{ name: string; role: string; description: string }>>([])
+  const [newCharCandidates, setNewCharCandidates] = useState<Array<{ name: string; role: string; description: string; source_chapter?: number }>>([])
   const [newEntityCandidates, setNewEntityCandidates] = useState<Array<{ name: string; type: string; description: string }>>([])
   const [selectedCharIndices, setSelectedCharIndices] = useState<Set<number>>(new Set())
   const [newLocationCandidates, setNewLocationCandidates] = useState<Array<{ name: string; type: string; description: string; parent_name: string }>>([])

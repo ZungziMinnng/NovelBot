@@ -250,10 +250,10 @@ export default function WizardApplyModal({ draft, onCancel, onApply, onMoveStat,
               <Row key={i} on={picked.has(`npc:${i}`)} onToggle={() => toggle(`npc:${i}`)}
                 title={n.name}
                 sub={[n.location, ...Object.entries(n.initial_state || {}).map(([k, v]) => `${k} ${v}`)].filter(Boolean).join(' · ') || undefined}>
-                {n.persona && <p className="text-sm mt-1 whitespace-pre-wrap line-clamp-2">{n.persona}</p>}
-                {n.profile_sections && Object.entries(n.profile_sections).filter(([, text]) => text).map(([key, text]) => (
-                  <p key={key} className="text-xs mt-1 text-muted-foreground line-clamp-2"><span className="font-medium">{key}</span>：{text}</p>
-                ))}
+                <NpcDetail sections={[
+                  ['性格', n.persona], ['外貌', n.appearance], ['身份', n.description],
+                  ...Object.entries(n.profile_sections || {}),
+                ]} />
                 {/* 作息和说话样例都是无声写进卡里的东西，不列出来作者不知道多了这些 */}
                 {n.slot_locations && Object.keys(n.slot_locations).length > 0 && (
                   <p className="text-xs mt-1 text-muted-foreground"><span className="font-medium">作息</span>：
@@ -367,6 +367,33 @@ function Row({ on, onToggle, title, sub, children }: {
       </div>
       {children}
     </label>
+  )
+}
+
+/**
+ * 角色卡的几栏长文。默认每栏两行，点「展开」看全文——外貌、性格动辄几百字，
+ * 不给看全就只能勾了再去编辑页翻。按钮在 label 里，要拦掉默认行为，不然会顺手切勾选。
+ */
+function NpcDetail({ sections }: { sections: Array<[string, string | undefined]> }) {
+  const [open, setOpen] = useState(false)
+  const filled = sections.filter(([, text]) => text?.trim())
+  if (!filled.length) return null
+  return (
+    <div className="mt-1 space-y-1">
+      {filled.map(([key, text]) => (
+        <p key={key} className={`text-xs text-muted-foreground whitespace-pre-wrap ${open ? '' : 'line-clamp-2'}`}>
+          <span className="font-medium text-foreground/80">{key}</span>：{text}
+        </p>
+      ))}
+      <button
+        type="button"
+        onClick={e => { e.preventDefault(); e.stopPropagation(); setOpen(o => !o) }}
+        aria-expanded={open}
+        className="text-xs text-primary hover:underline"
+      >
+        {open ? '收起' : '展开全文'}
+      </button>
+    </div>
   )
 }
 

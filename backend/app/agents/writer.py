@@ -82,6 +82,28 @@ def _build_example_turns(examples) -> list[dict]:
     return turns
 
 
+def _splice_example_turns(messages: list[dict], examples) -> int:
+    """示例轮插到 system 之后，原地改 messages，返回插了几条。
+
+    后面补一句界碑：文风库取来的示例换成了本书角色名，不划清的话模型会把示例剧情当成已发生的事。
+    下一条是 user 就并进开头，否则单独插一条 user，保持 user/assistant 交替。
+    """
+    turns = _build_example_turns(examples)
+    if not turns:
+        return 0
+    messages[1:1] = turns
+    after = 1 + len(turns)
+    end = render("writer_example_end.jinja2").strip()
+    if after < len(messages) and messages[after]["role"] == "user":
+        messages[after] = {**messages[after], "content": f"{end}\n\n{messages[after]['content']}"}
+    else:
+        messages.insert(after, {"role": "user", "content": end})
+    return len(turns)
+
+
+RECENT_TEXT_HEADER = "=== 近章原文（按章节顺序，最后一章即上一章）==="
+
+
 def _apply_deepseek_system_merge(messages: list[dict], real_model: str) -> list[dict]:
     """DeepSeek：system prompt 降级到 user message。
     DeepSeek V4 默认开启 thinking 会忽略 system message；
@@ -184,7 +206,7 @@ async def stream_chapter(
         if chars_block:
             user_parts.append(chars_block)
         if recent_text:
-            user_parts.append(f"=== 上章结尾 ===\n{recent_text}")
+            user_parts.append(f"{RECENT_TEXT_HEADER}\n{recent_text}")
         user_parts.append(task_instruction)
         if instruction:
             user_parts.append(f"=== 写作方向（严格遵守，与其他要求冲突时以本节为准）===\n{instruction}")
@@ -198,7 +220,7 @@ async def stream_chapter(
         if chars_block:
             ref_parts.append(chars_block)
         if recent_text:
-            ref_parts.append(f"=== 上章结尾 ===\n{recent_text}")
+            ref_parts.append(f"{RECENT_TEXT_HEADER}\n{recent_text}")
         messages.append({"role": "user", "content": "\n\n".join(ref_parts) or "请根据角色设定和写作任务创作小说章节。"})
         # assistant 确认收到参考资料
         messages.append({"role": "assistant", "content": "已了解上述背景资料、角色设定和近期剧情，准备按要求创作。"})
@@ -232,11 +254,14 @@ async def stream_chapter(
             messages.append({"role": "user", "content": "\n\n".join(revision_parts)})
 
     # ── few-shot 示例轮：插到 system 之后、参考资料之前 ──
-    example_turns = _build_example_turns(writer_examples)
-    if example_turns:
-        messages[1:1] = example_turns
+    example_count = _splice_example_turns(messages, writer_examples)
 
     messages = _apply_deepseek_system_merge(messages, real_model)
+
+    # Claude 只缓存显式标记的前缀。system（自定义提示词+规则块）跨章不变，标在这里；
+    # 参考资料从世界观检索那块起每章都变，标了每章多付 25% 写入费却几乎吃不到命中。
+    if messages[0]["role"] == "system":
+        messages[0] = {**messages[0], llm_client.CACHE_BREAKPOINT: True}
 
     # ── DeepSeek：根据目标字数动态限制 max_tokens ──
     # DeepSeek 不遵守提示词中的字数要求，会填满整个 token 预算。
@@ -269,7 +294,7 @@ async def stream_chapter(
         "instruction_chars": len(instruction or ""),
         "task_chars": len(task_instruction or ""),
         "issues_feedback_chars": len(issues_feedback or ""),
-        "example_turns": len(example_turns),
+        "example_turns": example_count,
         "message_roles": [m.get("role", "") for m in messages],
         "message_chars": [len(m.get("content", "")) for m in messages],
         "section_previews": {
@@ -505,9 +530,7 @@ async def stream_chapter_rewrite(
         messages.append({"role": "user", "content": "\n\n".join(rewrite_parts)})
 
     # ── few-shot 示例轮：插到 system 之后、参考资料之前 ──
-    example_turns = _build_example_turns(writer_examples)
-    if example_turns:
-        messages[1:1] = example_turns
+    example_count = _splice_example_turns(messages, writer_examples)
 
     messages = _apply_deepseek_system_merge(messages, real_model)
 
@@ -532,7 +555,7 @@ async def stream_chapter_rewrite(
         "characters_chars": len(chars_block or ""),
         "original_text_chars": len(original_text or ""),
         "annotations_chars": len(annotations_text or ""),
-        "example_turns": len(example_turns),
+        "example_turns": example_count,
         "message_roles": [m.get("role", "") for m in messages],
         "message_chars": [len(m.get("content", "")) for m in messages],
         "section_previews": {

@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 
 class ChapterCreate(BaseModel):
@@ -17,6 +17,7 @@ class ChapterUpdate(BaseModel):
     summary: Optional[str] = None
     status: Optional[str] = None
     volume: Optional[int] = None
+    author_mark: Optional[Literal["", "draft", "revise", "final"]] = None
 
 
 class ChapterOut(BaseModel):
@@ -29,6 +30,7 @@ class ChapterOut(BaseModel):
     summary: str
     instruction: Optional[str] = None
     status: str
+    author_mark: str = ""
     word_count: int
     model_used: str = ""
     created_at: datetime

@@ -1,5 +1,6 @@
 import { Activity, CalendarClock, Flag, MapPin, Zap } from 'lucide-react'
-import type { RpgModule, RpgSession } from '@/api/client'
+import type { RpgLocation, RpgModule, RpgSession } from '@/api/client'
+import MiniMap from './MiniMap'
 import { bandOf } from './StatBar'
 import { styleLabel } from './stylePresets'
 import { PANEL } from './rpgUi'
@@ -18,6 +19,8 @@ interface Props {
   hasClock: boolean
   /** band = 页头下面横贯一条（窄屏用）；column = 右侧那一列。同一份内容两副排法 */
   layout?: 'band' | 'column'
+  /** 传了才在 column 排法里画小地图 */
+  locations?: RpgLocation[]
 }
 
 // 格子多到这个数以上就不画了，改回数字：这一排挤在页头的 chip 行里，
@@ -44,7 +47,7 @@ function SlotCells({ used, budget }: { used: number; budget: number }) {
 }
 
 export default function GameHud({
-  session, module, outcome, actionCount, hasClock, layout = 'band',
+  session, module, outcome, actionCount, hasClock, layout = 'band', locations,
 }: Props) {
   const visibleStats = (module?.stat_defs || [])
     .filter(def => def.name && def.display !== '隐藏')
@@ -128,6 +131,7 @@ export default function GameHud({
       // aside 管，自己只管排内容，不然三块各滚各的
       <div className="rpg-side p-3 space-y-3">
         <div className="flex flex-col items-start gap-2 text-xs">{chips}</div>
+        {locations && <MiniMap sess={session} locations={locations} />}
         <div className="space-y-2.5">{stats}</div>
         {report}
       </div>

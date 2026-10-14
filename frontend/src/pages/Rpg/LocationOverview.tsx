@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { MapPin } from 'lucide-react'
+import { Layers, MapPin } from 'lucide-react'
 import type { RpgLocation, RpgNpc, RpgSession } from '@/api/client'
 import { checkCondition, knownNpcs, norm, npcPlace, visibleLocations } from './condition'
 import { edgePairs, layout } from './mapLayout'
+import MapCompass from './MapCompass'
 
 interface Props {
   sess: RpgSession
@@ -17,6 +18,8 @@ interface Props {
   onPick: () => void
   /** 当前查看的地图层级；null 是大地图 */
   parentId?: number | null
+  /** 翻进某个区域的内部地图。不传就不能进（区域的按钮会置灰） */
+  onOpen?: (id: number) => void
 }
 
 /**
@@ -37,7 +40,7 @@ interface Props {
  * 判定权始终在后端，这里放行了后端照样会拦。
  */
 export default function LocationOverview({
-  sess, locations, npcs, locked, busy, onGo, onPick, parentId = null,
+  sess, locations, npcs, locked, busy, onGo, onPick, parentId = null, onOpen,
 }: Props) {
   // 选中态是组件私有的：外面两个调用点（RpgPlay 的总览、PlacePage 的内部地图）
   // 只关心「玩家最后决定去哪」，不关心他在地图上点过谁
@@ -85,8 +88,11 @@ export default function LocationOverview({
     return (
       <div className="rounded-2xl border border-border/60 bg-card/40 px-4 py-3 space-y-2">
         <div className="flex items-center gap-2 text-sm font-medium">
-          <MapPin className="w-4 h-4 shrink-0 text-primary" />
+          {pick.is_region
+            ? <Layers className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
+            : <MapPin className="w-4 h-4 shrink-0 text-primary" />}
           {pick.name}
+          {pick.is_region && <span className="text-xs font-normal text-muted-foreground">· 区域</span>}
           {mine && <span className="text-xs font-normal text-muted-foreground">· 你在这里</span>}
           {hasChildren && <span className="text-xs font-normal text-muted-foreground">· 有内部地图</span>}
         </div>
@@ -98,6 +104,18 @@ export default function LocationOverview({
         </p>
         {!!why && <p className="text-xs text-amber-600 dark:text-amber-400">{why}</p>}
         <div className="flex justify-end">
+          {pick.is_region ? (
+            // 区域只是范围，人不能站在它头上：只给「看里面」，没有「移动到这里」
+            <button
+              onClick={() => onOpen?.(pick.id)}
+              disabled={!hasChildren || !onOpen}
+              title="区域本身不能直接去，进里面挑一个具体地点"
+              className="rounded-lg border border-primary/60 bg-primary/10 px-3 py-1.5 text-xs
+                font-medium hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {hasChildren && onOpen ? '看看里面 →' : '区域，不能直接去'}
+            </button>
+          ) : (
           <button
             // 当前地点那个是导航（翻自己的地点页），不受 locked/busy 管——
             // 一局结束之后历史还得能翻
@@ -109,6 +127,7 @@ export default function LocationOverview({
           >
             {mine ? '看看这里有谁 →' : why ? '进不去' : '移动到这里 →'}
           </button>
+          )}
         </div>
       </div>
     )
@@ -118,6 +137,7 @@ export default function LocationOverview({
     <div className="space-y-3">
       <div className="relative w-full aspect-[3/2] overflow-hidden rounded-2xl border
         border-border/60 bg-card/40">
+        <MapCompass />
         <svg
           className="absolute inset-0 w-full h-full text-muted-foreground"
           viewBox="0 0 100 100"
@@ -174,14 +194,19 @@ export default function LocationOverview({
               className={`absolute -translate-x-1/2 -translate-y-1/2 flex items-center gap-1
                 px-2 py-1 rounded-lg border text-xs whitespace-nowrap transition-colors
                 ${picked === loc.id ? 'ring-2 ring-primary ring-offset-1 ring-offset-background' : ''}
+                ${loc.is_region ? 'border-dashed border-2 px-3 py-1.5' : ''}
                 ${mine
                   ? 'bg-primary text-primary-foreground border-primary shadow-sm font-medium'
+                  : loc.is_region
+                    ? 'bg-sky-500/5 border-sky-500/50 hover:border-primary/50'
                   : why
                     // 进不去的：不灰成看不见，条件写在下面的详情面板里
                     ? 'bg-card/60 border-dashed border-border/60 text-muted-foreground'
                     : 'bg-card/95 border-border/70 hover:border-primary/50'}`}
             >
-              <MapPin className="w-3 h-3 shrink-0" />
+              {loc.is_region
+                ? <Layers className="w-3.5 h-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+                : <MapPin className="w-3 h-3 shrink-0" />}
               {loc.name}
               {mine && <span className="font-normal">· 你在这里</span>}
               {hasChildren && <span className="font-normal">· 有内部地图</span>}

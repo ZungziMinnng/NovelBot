@@ -6,12 +6,12 @@ import { rpgApi, type RpgItem, type RpgStatDef } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import { SaveBadge } from '@/components/SaveBadge/SaveBadge'
 import { useFormAutosave } from '@/lib/useFormAutosave'
-import { ACCENT, AddRow, Assist, DeleteButton, INPUT, Section } from './rpgUi'
+import { ACCENT, AddRow, Assist, DeleteButton, INPUT, ITEM_CATEGORIES, Section } from './rpgUi'
 import EffectEditor from './EffectEditor'
 import BatchGenerate from './BatchGenerate'
 import { effectChips } from './effectChips'
 
-const CATEGORIES = ['消耗品', '装备', '关键道具'] as const
+const CATEGORIES = ITEM_CATEGORIES
 
 interface ItemForm {
   name: string

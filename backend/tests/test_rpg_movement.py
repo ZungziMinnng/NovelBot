@@ -317,6 +317,16 @@ class NewPlaceCandidateTests(unittest.TestCase):
                 self.assertEqual(self._at(content), "")
                 self.assertTrue(rpg_turn.movement_target(content, self.places))
 
+    def test_enclosing_registered_place_is_the_fallback(self):
+        places = [RpgLocation(name=n) for n in ("庶务堂", "杂役弟子宿舍")]
+        places.append(RpgLocation(name="观水州", is_region=True))
+        at = lambda c: rpg_turn.movement_enclosing(c, places, self.npcs)
+        self.assertEqual(at("去庶务堂西侧灵砂库领淬剑冷砂"), "庶务堂")
+        # 名字不以登记地点开头 / 开头是区域 / 本身就是登记地点：都不出手
+        for content in ("去太玄大殿密室", "去观水州码头", "去庶务堂", "别去庶务堂西侧灵砂库"):
+            with self.subTest(content=content):
+                self.assertEqual(at(content), "")
+
     def test_the_action_tail_is_not_part_of_the_name(self):
         self.assertEqual(self._at("去后山竹林看看"), "后山竹林")
         self.assertEqual(self._at("去城南码头喝酒"), "城南码头")

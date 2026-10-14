@@ -82,6 +82,14 @@ def _character_reference_text(character: Character) -> str:
     )
 
 
+def _milestone_parties(content: str) -> set[str]:
+    """从里程碑 content（"[表白] 甲↔乙 | 第37章 | 经过"）里取出当事人名字。"""
+    head = (content or "").split("|", 1)[0]
+    if "]" in head:
+        head = head.split("]", 1)[1]
+    return {n.strip() for n in head.split("↔") if n.strip()}
+
+
 def _add_entities_referenced_by_characters(
     characters: list[Character],
     items: list[WorldEntity],
@@ -215,14 +223,8 @@ async def build_generation_context(
         min_summaries=min(3, max_summaries),
     )
 
-    prev_result = await session.execute(
-        select(Chapter).where(
-            Chapter.novel_id == novel.id,
-            Chapter.number == chapter_number - 1,
-            Chapter.volume == volume,
-        )
-    )
-    prev_chapter = prev_result.scalar_one_or_none()
+    recent_chapters = await _load_recent_chapters(session, novel.id, chapter_number, RECENT_CHAPTERS)
+    prev_chapter = recent_chapters[-1] if recent_chapters else None
     prev_content = ""
     if prev_chapter:
         prev_content = summarizer.strip_plot_suggestions(prev_chapter.content or "")
@@ -273,8 +275,8 @@ async def build_generation_context(
     else:
         meta.append({"key": "core_setting", "label": "世界观设定", "detail": "空", "source": "mixed", "items": [], "content": ""})
 
-    # 名称匹配文本 = 指令 + 上一章原文 + 近期摘要 + 大纲
-    name_match_text = "\n".join(filter(None, [world_query, prev_content, rolling_text, outline_content]))
+    # 名称匹配文本 = 指令 + 上一章原文 + 大纲（不含近期摘要：提到才注入，几章前出场过的人不算提到）
+    name_match_text = "\n".join(filter(None, [world_query, prev_content, outline_content]))
 
     # 2b. 实体加载（名称匹配优先 → RAG 兜底 → 全量回退）
     all_characters = (await session.execute(
@@ -710,25 +712,30 @@ async def build_generation_context(
     fulltext_query = "\n".join(filter(None, [scene_hint.strip(), ctx["chapter_outline"].strip()]))
     if _on("rag_fulltext") and hit_chapter_order and fulltext_query:
         ctx["rag_fulltext"] = await _build_rag_fulltext(
-            session, novel.id, hit_chapter_order[:3], fulltext_query,
+            session, novel.id, hit_chapter_order[:5], fulltext_query,
             token_budget=budget.allocations["rag_fulltext"],
         )
         if ctx["rag_fulltext"]:
             ft_count = ctx["rag_fulltext"].count("章原文】")
             meta.append({"key": "rag_fulltext", "label": "历史原文取段", "detail": f"{ft_count}段原文", "source": "rag", "items": [], "content": _preview(ctx["rag_fulltext"])})
 
-    # 6. 即时上下文：上一章全文（复用上面已加载的 prev_chapter）
+    # 6. 即时上下文：最近几章全文（复用上面已加载的 recent_chapters）
     # 全文强制完整注入，不受 token 预算约束——衔接质量优先于成本
-    if prev_chapter:
-        ctx["recent_text"] = prev_content.strip() or (prev_chapter.summary or "").strip()
-    else:
-        ctx["recent_text"] = ""
+    recent_parts: list[str] = []
+    recent_numbers: set[int] = set()
+    if _on("recent_text"):
+        for ch in recent_chapters:
+            text = summarizer.strip_plot_suggestions(ch.content or "").strip() or (ch.summary or "").strip()
+            if text:
+                recent_parts.append(f"--- 第{ch.number}章 ---\n{text}")
+                recent_numbers.add(ch.number)
+    ctx["recent_text"] = "\n\n".join(recent_parts)
     if not _on("recent_text"):
-        meta.append({"key": "recent_text", "label": "上一章原文", "detail": "已跳过", "source": "full", "items": [], "content": ""})
+        meta.append({"key": "recent_text", "label": "近章原文", "detail": "已跳过", "source": "full", "items": [], "content": ""})
     elif ctx["recent_text"]:
-        meta.append({"key": "recent_text", "label": "上一章原文", "detail": "", "source": "full", "items": [], "content": _preview(ctx["recent_text"])})
+        meta.append({"key": "recent_text", "label": "近章原文", "detail": f"{len(recent_parts)}章", "source": "full", "items": [], "content": _preview(ctx["recent_text"])})
     else:
-        meta.append({"key": "recent_text", "label": "上一章原文", "detail": "空", "source": "full", "items": [], "content": ""})
+        meta.append({"key": "recent_text", "label": "近章原文", "detail": "空", "source": "full", "items": [], "content": ""})
 
     # 7. 全书概要（长程记忆，覆盖百章级别）
     ctx["book_summary"] = truncate_to_token_budget(
@@ -749,7 +756,6 @@ async def build_generation_context(
         full_text_result = await session.execute(
             select(Chapter).where(
                 Chapter.novel_id == novel.id,
-                Chapter.volume == volume,
                 Chapter.number >= start_ch,
                 Chapter.number < chapter_number,
             ).order_by(Chapter.number.asc())
@@ -757,6 +763,8 @@ async def build_generation_context(
         full_text_chapters = full_text_result.scalars().all()
         full_texts = []
         for ch in full_text_chapters:
+            if ch.number in recent_numbers:  # 已在近章原文里，不重复注入
+                continue
             content = summarizer.strip_plot_suggestions(ch.content or "")
             if content.strip():
                 full_texts.append(f"--- 第{ch.number}章 ---\n{content}")
@@ -846,12 +854,15 @@ async def build_generation_context(
                 Memory.in_context.is_(True),
             ).order_by(Memory.chapter_number, Memory.id)
         )).scalars().all()
+        # 只注入当事人至少有一个在本章角色里的；回忆取证的定位池仍用全量 milestone_rows
+        present_names = {c.name for c in characters if c.name}
+        relevant = [m for m in milestone_rows if present_names & _milestone_parties(m.content)]
         ms_budget = budget.allocations["relationship_milestones"]
-        selected = milestone_rows
-        if sum(estimate_tokens(m.content) for m in milestone_rows) > ms_budget:
+        selected = relevant
+        if sum(estimate_tokens(m.content) for m in relevant) > ms_budget:
             # 超预算按重要度优先保留，输出仍按章节顺序
             picked, used = [], 0
-            for m in sorted(milestone_rows, key=lambda m: (-(m.importance or 3), m.chapter_number or 0)):
+            for m in sorted(relevant, key=lambda m: (-(m.importance or 3), m.chapter_number or 0)):
                 t = estimate_tokens(m.content)
                 if picked and used + t > ms_budget:
                     continue
@@ -862,8 +873,8 @@ async def build_generation_context(
         if selected:
             ms_detail = (
                 f"{len(selected)}条"
-                if len(selected) == len(milestone_rows)
-                else f"{len(selected)}/{len(milestone_rows)}条（预算筛选）"
+                if len(selected) == len(relevant)
+                else f"{len(selected)}/{len(relevant)}条（预算筛选）"
             )
             meta.append({"key": "relationship_milestones", "label": "关系里程碑", "detail": ms_detail, "source": "field", "items": [], "content": _preview("；".join(ctx["relationship_milestones"]))})
 
@@ -1004,6 +1015,22 @@ def _rank_paragraphs(query: str, paragraphs: list[str], top_k: int) -> list[str]
     return _gram_overlap_rank(query, paragraphs, top_k)
 
 
+RECENT_CHAPTERS = 3  # 近章原文注入的章数
+
+
+async def _load_recent_chapters(
+    session: AsyncSession, novel_id: int, chapter_number: int, n: int,
+) -> list[Chapter]:
+    """取本章之前最近 n 章（按章号升序）。章节号全书连续，不按卷过滤——否则每卷第一章接不上上一卷结尾。"""
+    rows = (await session.execute(
+        select(Chapter)
+        .where(Chapter.novel_id == novel_id, Chapter.number < chapter_number)
+        .order_by(Chapter.number.desc())
+        .limit(n)
+    )).scalars().all()
+    return list(reversed(rows))
+
+
 async def _build_rag_fulltext(
     session: AsyncSession,
     novel_id: int,
@@ -1027,7 +1054,8 @@ async def _build_rag_fulltext(
         paragraphs = _split_paragraphs(summarizer.strip_plot_suggestions(chapter.content))
         if not paragraphs:
             continue
-        fragments = [p[:400] for p in _rank_paragraphs(query, paragraphs, top_k=2)]
+        # 段落已由 _split_paragraphs 限制在 600 字内，整段注入不再截断
+        fragments = _rank_paragraphs(query, paragraphs, top_k=3)
         if not fragments:
             continue
         block = "\n".join(f"【第{number}章原文】{frag}" for frag in fragments)
@@ -1217,8 +1245,7 @@ def format_context_for_writer(
                        if isinstance(e, dict) and e.get("content")][-_HISTORY_INJECT_LIMIT:]
             if history:
                 chars_text += (
-                    "  经历（近期，天数为故事内绝对日，供你把握事件间隔与时间跨度；"
-                    "正文严禁出现\"第X日/第X章\"字样）：\n"
+                    "  经历（近期，天数为故事内绝对日，供你把握事件间隔与时间跨度）：\n"
                 )
                 for e in history:
                     day_part = f"·第{e['day']}日" if e.get("day") else ""
@@ -1408,9 +1435,7 @@ def format_context_for_writer(
         parts.append(
             "=== 参考资料使用规则 ===\n"
             "事实优先级：已确认世界观变更/核心规则 > 当前角色与实体状态 > 活跃伏笔与秘密 > 上章正文 > 有来源的历史证据 > 摘要与大纲。\n"
-            "大纲和写作方向表示本章计划，不代表事件已经发生。资料未说明时，不得自行补写姓名、来历、关系、能力、物品来源或角色知情情况；同级资料冲突时回避断言。\n"
-            "以下摘要中的绝对日期计数（如【第X日】、第X日、当日、次日等）只用于内部时间线排序，不属于正文文风。\n"
-            "生成正文时不得把这些时间标注显式写进叙事段落；除非用户指令明确要求日期标注，否则用自然的时间过渡承接剧情。"
+            "大纲和写作方向表示本章计划，不代表事件已经发生。资料未说明时，不得自行补写姓名、来历、关系、能力、物品来源或角色知情情况；同级资料冲突时回避断言。"
         )
     if _on("core_setting") and ctx.get("core_rules"):
         if for_chat:
@@ -1538,8 +1563,7 @@ def format_context_for_writer(
             parts.append(
                 f"=== 当前故事时间 ===\n"
                 f"上一章结束时为故事内第 {story_day} 日。以下参考资料中的“第X日”是故事内绝对天数，"
-                f"供你推算事件间隔与时间跨度（如“潜伏了多久”“过了几年”），"
-                f"严禁在正文中出现“第X日/第X章”字样，需用自然的时间过渡描写代替。"
+                f"供你推算事件间隔与时间跨度（如“潜伏了多久”“过了几年”）。"
             )
     if _on("book_summary") and ctx.get("book_summary"):
         parts.append(f"=== 全书概要 ===\n{ctx['book_summary'].strip()}")
@@ -1596,7 +1620,7 @@ def format_context_for_writer(
         f"风格：{ctx.get('writing_style', '')}，"
         f"目标字数 {target_words} 字（不得低于 {int(target_words * 0.9)} 字，不得超过 {int(target_words * 1.15)} 字）。"
         f"{continuity_hint}\n"
-        f"正文中不要显式写出参考摘要里的第X日、当日、次日等时间线标注；需要表达时间推进时，用自然叙事过渡。\n"
+        f"参考资料里的“第X日”“第X章”是内部标注，正文不要写出；表达时间推进用“三日后”“入秋时”“又过了半月”这类自然过渡。\n"
         f"直接输出正文内容，不要输出章节标题或任何前缀。"
     )
     if hidden_facts:

@@ -9,9 +9,9 @@ from sqlalchemy import select
 from app.database import get_db, AsyncSessionLocal
 from app.models.chapter import Chapter
 from app.models.novel import Novel
-from app.schemas.generation import GenerateChapterRequest, ReviewRequest, RewriteChapterRequest
+from app.schemas.generation import GenerateChapterRequest, PassageRewriteRequest, ReviewRequest, RewriteChapterRequest
 from app.agents.orchestrator import run_chapter_generation, run_chapter_rewrite
-from app.services import context_builder, llm_client
+from app.services import context_builder, llm_client, passage_rewrite
 from app.api.deps import CurrentUser, get_owned_novel
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,28 @@ async def rewrite_chapter(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/passage")
+async def rewrite_passage(
+    req: PassageRewriteRequest,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """选段改写/扩写/缩写。只返回替换文字，不落库；作者接受后由编辑器替换并正常保存。"""
+    if not req.selected.strip():
+        raise HTTPException(status_code=400, detail="没有选中文字")
+    novel = await get_owned_novel(db, req.novel_id, user)
+    try:
+        text = await passage_rewrite.run(
+            novel, req.mode, req.before, req.selected, req.after, req.instruction, req.model,
+        )
+    except Exception as e:
+        logger.warning("选段改写失败 novel=%s", req.novel_id, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"改写失败：{e}") from e
+    if not text:
+        raise HTTPException(status_code=502, detail="模型没有返回内容")
+    return {"text": text}
 
 
 @router.post("/review")

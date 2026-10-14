@@ -75,10 +75,10 @@ class SkillTurnTests(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
         await self.engine.dispose()
 
-    async def _turn(self, content, **kwargs):
+    async def _turn(self, content, finish="usage", **kwargs):
         async def stream(messages, **options):
             yield "你依言而动。"
-            yield ("usage", 1, 1)
+            yield (finish, 1, 1)
 
         with (
             patch.object(rpg_turn, "AsyncSessionLocal", self.sessions),
@@ -104,6 +104,14 @@ class SkillTurnTests(unittest.IsolatedAsyncioTestCase):
         return next(
             int(s["cooldown_left"]) for s in self.sess.skills if s["name"] == name
         )
+
+    async def test_hitting_the_output_cap_warns_the_player(self):
+        # 正文被单次上限掐断时要说出来，不然玩家只看到半句话
+        events = await self._turn("看看四周", finish="length")
+        warnings = [data for event, data in events if event == "warning"]
+        self.assertTrue(any("单次上限" in w for w in warnings))
+        self.assertFalse(any("单次上限" in w for event, w in
+                             (await self._turn("再看看")) if event == "warning"))
 
     async def test_using_a_skill_applies_effects_and_starts_the_cooldown(self):
         await self._turn("施展听风辨位", skill_name="听风辨位")

@@ -33,8 +33,19 @@ STAGES = ["world", "loop", "stats", "places", "slots", "cast", "things", "quests
 # 症状是「说好八个角色只出来三个」「最后一段写到一半没了」，全程静默。
 # quests 也单列一档：一条任务（名字+简介+判定句+分类+effects）比一个角色便宜
 # 得多，但比世界观那种单栏文本贵；loop 只产一栏，走默认就够
-_STAGE_MAX_TOKENS = {"cast": 10000, "quests": 4000}
+# cast 原先 10000，只装得下三四个写全的角色——作者聊定十个，抽出来只剩四个。
+# 抽取前不知道对话里定了几个人，按人数算不了，直接对齐一句话生成的 40000
+_STAGE_MAX_TOKENS = {"cast": 40000, "quests": 4000}
 _STAGE_MAX_TOKENS_DEFAULT = 6000
+
+# 输出被额度掐断时塞进 dropped 第一条。repair_json 补齐后结果看着是完整的，
+# 不报出来作者只会以为模型偷懒少写了
+_TRUNCATED_NOTE = "模型输出写到额度上限被截断了，排在后面的内容（多半是角色）可能缺了一部分；可以分几次生成，或换输出上限更高的模型"
+
+
+def _note_truncation(meta: dict, dropped: list) -> None:
+    if meta.get("truncated"):
+        dropped.insert(0, _TRUNCATED_NOTE)
 
 _STAT_OWNERSHIP_RULES = """
 === 数值归属与输出字段约定 ===
@@ -47,6 +58,16 @@ _STAT_OWNERSHIP_RULES = """
 - 输出数值 JSON 时同时给出 stat_defs 和 relation_stat_defs 两个数组，未设置的组输出 []。每项额外标注 scope：玩家数值填 "player"，关系数值填 "relation"；scope 必须与所在数组一致，effect 必须说明持有者和用途。
 - 关系数值名称用通用维度名，人物名放进 NPC 卡片，不能把“甲的好感”“乙的好感”做成两种关系维度。
 - 道具、技能、任务的 effects 和动作的 effects 引用玩家数值；NPC initial_state 和动作 relation_effects 引用关系数值，不能互换。
+"""
+
+_NPC_PROFILE_RULES = """
+
+=== 角色详细档案（必填）===
+每个角色对象里除上面已有的字段外，还必须带：
+"profile_sections": {"背景故事": "出身、怎么长大、哪几件事改了他的路、现在什么身份", "能力特长": "会什么，以及明确的弱点和限制", "关系网络": "和玩家、和其他角色之间的关系、矛盾、依赖、秘密"}
+- 三栏都要写满，各写各的事，不许互相重复，也不许一句话敷衍；键名必须是这三个中文名，不要改写、不要用英文。
+- 「关系网络」玩家这一头必须写到；同一批里的角色之间有关系的也写上。
+- 另外可选 "dialogue_examples": [{"user": "玩家说的一句", "assistant": "他会怎么回"}]，1~2 组，要能听出他的说话腔调。
 """
 
 _ACTION_GROUP_RULES = """
@@ -115,6 +136,7 @@ async def generate_full(
     prompt += _STAT_OWNERSHIP_RULES
     prompt += _ACTION_GROUP_RULES
     model, api_format = llm_client.get_fast_client(model_ref)
+    meta: dict = {}
     parsed, _, _ = await llm_json.call_json(
         [
             {"role": "system", "content": prompt},
@@ -122,6 +144,7 @@ async def generate_full(
         ],
         model,
         api_format,
+        meta=meta,
         # 这一发要出整个模组（设定+数值+地点+时段+角色+道具+动作），原先的
         # 6500/9000 连几个写全了的角色都装不下，多出来的部分被静默吞掉。
         # 现在还要多装技能、任务、每个角色的作息和说话样例，额度再往上抬一档：
@@ -137,7 +160,7 @@ async def generate_full(
     slots = _clean_slots(parsed, dropped)
     relation_names = [s["name"] for s in stats["relation_stat_defs"]]
     stat_names = [s["name"] for s in stats["stat_defs"]]
-    location_names = [p["name"] for p in places["locations"]]
+    location_names = leaf_names(places["locations"])
     # 一句话生成是一发出全部，白名单没别处可取，只能从这一份回答自己里按依赖
     # 顺序洗：数值 → 地点 → 时段 → 角色 → 道具技能任务。少传一个参数不是少校验
     # 一层，是那一摊整个丢掉——症状是模型明明写了角色作息、动作的 at_location，
@@ -145,6 +168,7 @@ async def generate_full(
     cast = _clean_cast(parsed, dropped, relation_names, location_names, slots["time_slots"])
     things = _clean_things(parsed, dropped, stat_names, relation_names, location_names)
     result = {**world, **stats, **places, **slots, **cast, **things}
+    _note_truncation(meta, dropped)
     result["dropped"] = dropped
     return result
 
@@ -205,14 +229,29 @@ def _clean_relation_name(value) -> str:
     return name
 
 
+# 自由聊天：不走分步流程，作者想问什么聊什么。放代码里（同 _NPC_PROFILE_RULES 的理由），
+# 并且明说盖过上面「一步步问他」「提醒他点下一步」那些话
+_FREE_CHAT_RULES = """
+
+=== 当前模式：自由聊天（盖过上面所有「一步步问他」「提醒点下一步」的要求）===
+这不是分步构思，作者此刻只是想和你随便聊他这个模组。
+- 他问什么答什么：问现有设定就照下面附的表单内容原文回答；想让你挑毛病就老实指出矛盾、空缺、可以加强的地方；想要点子就给具体的名字和做法。
+- 不要主动带他走流程，不要问「接下来聊哪一步」，也不要每次结尾都提醒「点下一步」。
+- 他想改某处设定，就当面把改后的版本写出来给他看；他会自己去表单里改。
+- 仍然只围绕模组表单有的那些字段聊（世界观、规则、数值、地点、角色、道具、技能、任务、动作、时段）。他明确问到别的，直接答，别硬往表单上扯。
+- 可以用「1. 2. 3.」分点，不用 markdown 符号。
+"""
+
+
 async def chat_stream_args(
     messages: list[dict], model_ref: str, nsfw: bool, stage: str,
-    confirmed: str, play_style: str, world_scope: str = "region",
+    confirmed: str, play_style: str, world_scope: str = "region", snapshot: str = "",
 ):
     """组装构思对话的 (messages, model, api_format)。SSE 由路由层包。
 
     用叙事模型而不是便宜模型：这是陪作者攒世界观的创作活，同 rpg_assist 的理由。
     """
+    free = stage == "free"
     stage = stage if stage in STAGES else ""
     system_prompt = render(
         "rpg_wizard.jinja2",
@@ -226,20 +265,49 @@ async def chat_stream_args(
         system_prompt += _STAT_OWNERSHIP_RULES
     if stage == "things":
         system_prompt += _ACTION_GROUP_RULES
+    if free:
+        system_prompt += _FREE_CHAT_RULES
+    # 放代码里而不是模板：作者存过自己的 rpg_wizard 覆写时，模板里加的变量进不来，
+    # 而覆写版里多半还留着旧的那句「你看不到他表单里填了什么」
+    if snapshot.strip():
+        system_prompt += (
+            "\n\n=== 他的模组表单里目前已经填好的内容 ===\n"
+            "【这一段优先于上面「你看不到他表单里已经填了什么」那句话】你现在看得到。\n"
+            "- 聊的时候要和这些对得上：用里面已有的名字、地点、数值，别另起炉灶重复设计，"
+            "也别冒出和它们矛盾的设定。\n"
+            "- 他问到已有的内容就照这里的原文答；这里没写的才算还没填。\n"
+            "- 和上面「前面几步已经定下来的」重叠时，以这一段为准（它是表单里的最新内容）。\n"
+            "- 他想改已有的东西，就帮他改；不要把已经写好的内容当成没有，重新问一遍。\n\n"
+            + snapshot.strip()
+        )
     full = [{"role": "system", "content": system_prompt}]
     full += [{"role": m["role"], "content": m["content"]} for m in messages]
     model, api_format = llm_client.get_agent_client("writer", model_ref)
     return full, model, api_format
 
 
+# 素材是小说设定而不是对话时追加在抽取模板后面。放代码里而不是改模板：作者自定义过
+# 抽取模板也照样生效（同 _STAT_OWNERSHIP_RULES）。它要盖过模板末尾「没聊到就留空」
+# 那几条——小说里本来就没有数值表、地点连接、道具效果，照模板办这几步会全空
+_NOVEL_SOURCE_RULES = """
+
+【素材说明——以下优先于上面「对话记录」「聊定」「没聊到就留空」的措辞】
+下面给你的不是对话，而是一部小说的初始设定。要把它改造成一个游戏模组，游戏是原著的平行线：
+- 只用设定里写明的初始状态。不收原著的剧情进展、事件结局，不要写某个人「已经死了」「已经背叛了」。
+- 世界观、角色、地点、势力：忠于设定，设定里没写的别编，留空。角色的 persona/appearance/profile_sections 直接从角色卡和描述改写，别丢信息。
+- 数值、时段、道具/技能/动作、任务：小说里没有现成的，请根据设定设计，贴合这个世界的规矩和角色，名字要具体、不要套用泛用词。
+- 地点：优先用设定里出现的地点；connections 可以按设定里的空间关系合理推断。设定里写了「属于」的地点是子地图，用 parent_name 指向它的上级；大陆、区域、城市这一级放大地图（parent_name 留空），建筑、房间、洞府这类放进所属地点内部。不要把整本书的地点全摊平到大地图上。像「某州」「某国」这类集合性地点，只当父地点；设定里它下属的城镇、门派、建筑要作为它的子地点写出来，起始地点和角色常驻地都放在这些具体子地点里，不要放在集合本身。
+- 关系数值起点：角色卡里写明了初始关系就照写，没写就按默认，不要为了凑数编造恩怨。"""
+
+
 async def extract_stage(
     stage: str, transcript: str, known: dict, model_ref: str,
-    temperature: float | None = None,
+    temperature: float | None = None, from_novel: bool = False,
 ) -> dict:
     """抽当前这一步的字段并清洗。known 带前面已定的名字白名单。
 
     返回 {字段..., "dropped": [被丢掉的东西的说明]}。抽取用便宜模型 + JSON 重试，
-    同小说侧；清洗全在本地做，不再调模型。
+    同小说侧；清洗全在本地做，不再调模型。from_novel 时 transcript 是小说设定文本。
     """
     if stage not in STAGES:
         return {"dropped": []}
@@ -267,16 +335,20 @@ async def extract_stage(
                 + "\n此前确认的关系数值：" + ("、".join(relation_names) or "无")
                 + "\n保留未被作者修改的归属；对话中有明确纠正时，以最后一次纠正为准。"
             )
+    if from_novel:
+        system_prompt += _NOVEL_SOURCE_RULES
     model, api_format = llm_client.get_fast_client(model_ref)
+    meta: dict = {}
     parsed, _, _ = await llm_json.call_json(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"=== 对话记录 ===\n{transcript}"},
+            {"role": "user", "content": f"=== {'小说设定' if from_novel else '对话记录'} ===\n{transcript}"},
         ],
         model,
         api_format,
         max_tokens=_STAGE_MAX_TOKENS.get(stage, _STAGE_MAX_TOKENS_DEFAULT),
         temperatures=_ladder(temperature),
+        meta=meta,
     )
 
     cleaners = {
@@ -295,6 +367,7 @@ async def extract_stage(
     }
     dropped: list[str] = []
     result = cleaners[stage](parsed, dropped)
+    _note_truncation(meta, dropped)
     result["dropped"] = dropped
     return result
 
@@ -311,6 +384,35 @@ def _batch_max_tokens(kind: str, count: int) -> int:
     确认模型支持，否则请求直接被拒。"""
     per = 5000 if kind == "npc" else 1200
     return min(16000, max(_STAGE_MAX_TOKENS_DEFAULT, per * max(1, count)))
+
+
+_APART_HINTS = ("分开", "分居", "异地", "远在", "外地", "不在同", "流落", "离家", "失踪", "不同的地方", "不同地方", "别处", "别的地方")
+
+
+def _pin_related_location(
+    result: dict, instruction: str, existing_npcs: list, location_names: list[str], dropped: list,
+) -> None:
+    """要求里只点了一个已有角色、没点任何地点时，新角色的地点以那个角色的常驻地点为准。
+
+    提示词里已经这么要求了，但模型有时仍把人放到别处（要求「A 的妹妹」，A 在甲地，
+    她出现在乙地）。能确定的情况才改：点到的已有角色常驻地点是唯一的、要求里没提
+    任何地点名、也没写「分开/异地」这类意思。拿不准的一律不动。"""
+    rows = result.get("npcs") or []
+    if not rows:
+        return
+    text = str(instruction or "")
+    if any(h in text for h in _APART_HINTS) or any(p and p in text for p in location_names):
+        return
+    mentioned = [n for n in existing_npcs if str(n.get("name") or "").strip() and str(n["name"]).strip() in text]
+    if len(mentioned) != 1:
+        return
+    place = str(mentioned[0].get("location") or "").strip()
+    if place not in location_names:
+        return
+    for row in rows:
+        if row.get("location") != place:
+            row["location"] = place
+            dropped.append(f"角色「{row.get('name')}」的常驻地点按相关角色「{mentioned[0]['name']}」改为「{place}」")
 
 
 async def generate_batch(
@@ -331,11 +433,21 @@ async def generate_batch(
     location_names = [str(n) for n in (known.get("location_names") or [])]
     existing_names = [str(n) for n in (known.get("existing_names") or [])]
 
+    existing_npcs = []
+    for row in known.get("existing_npcs") or []:
+        place = str(row.get("location") or "").strip()
+        desc = str(row.get("description") or "").strip().replace("\n", " ")[:40]
+        existing_npcs.append(
+            f"{row.get('name')}｜常驻：{place if place in location_names else '（没定或不是具体地点）'}"
+            + (f"｜{desc}" if desc else "")
+        )
+
     system_prompt = render(
         "rpg_generate.jinja2",
         kind=kind,
         instruction=instruction,
         count=count,
+        existing_npcs=existing_npcs,
         nsfw=nsfw,
         play_style=play_style or "rpg",
         stat_names="、".join(stat_names),
@@ -345,7 +457,20 @@ async def generate_batch(
     )
     if kind == "action":
         system_prompt += _ACTION_GROUP_RULES
+    # 作者在「提示词」里存过自己的 rpg_generate 覆写时，模板里新加的字段进不来
+    # （覆写整份替换默认模板）。详细档案是角色卡的一部分，不能靠模板版本碰运气
+    if kind == "npc" and "profile_sections" not in system_prompt:
+        system_prompt += _NPC_PROFILE_RULES
+    if kind == "npc" and existing_npcs and "已有角色的常驻地点" not in system_prompt:
+        system_prompt += (
+            "\n\n=== 已有角色的常驻地点（名字｜常驻｜身份）===\n"
+            + "\n".join(f"· {line}" for line in existing_npcs)
+            + "\n要求里如果说新角色和某个已有角色有关（亲人、同伴、上司、对手、同住……），"
+            "location 默认填那个已有角色的「常驻」地点；除非要求里明确写了别的地点，"
+            "或这种关系本身意味着分开。\n"
+        )
     model, api_format = llm_client.get_fast_client(model_ref)
+    meta: dict = {}
     parsed, _, _ = await llm_json.call_json(
         [
             {"role": "system", "content": system_prompt},
@@ -355,6 +480,7 @@ async def generate_batch(
         api_format,
         max_tokens=_batch_max_tokens(kind, count),
         temperatures=_ladder(temperature),
+        meta=meta,
     )
 
     dropped: list[str] = []
@@ -365,6 +491,7 @@ async def generate_batch(
         result.pop("default_location", None)
     elif kind == "npc":
         result = _clean_cast(parsed, dropped, relation_names, location_names)
+        _pin_related_location(result, instruction, known.get("existing_npcs") or [], location_names, dropped)
     elif kind == "item":
         things = _clean_things(parsed, dropped, stat_names, relation_names)
         result = {"items": things["items"]}
@@ -394,6 +521,7 @@ async def generate_batch(
     for name in dup:
         dropped.append(f"「{name}」模组里已经有了，跳过")
 
+    _note_truncation(meta, dropped)
     result["dropped"] = dropped
     return result
 
@@ -580,6 +708,14 @@ def _clean_places(parsed: dict, dropped: list, known_names=()) -> dict:
         if parent and (parent not in valid or parent == loc["name"]):
             dropped.append(f"地点「{loc['name']}」的父地点「{parent}」不存在，已设为顶层")
             loc["parent_name"] = ""
+    # 只有两层（大地图 / 子地图）：父地点自己还有父级的话，这条挂到最上层去
+    parent_of = {loc["name"]: loc["parent_name"] for loc in locations}
+    for loc in locations:
+        parent = loc["parent_name"]
+        if parent and parent_of.get(parent):
+            dropped.append(f"地点「{loc['name']}」的父地点「{parent}」本身已是子地点，地图只有两层，已改挂到「{parent_of[parent]}」下")
+            loc["parent_name"] = parent_of[parent]
+    for loc in locations:
         kept, cut = [], []
         for target in loc["connections"]:
             t = _text(target)
@@ -592,7 +728,21 @@ def _clean_places(parsed: dict, dropped: list, known_names=()) -> dict:
     if default_location and default_location not in valid:
         dropped.append(f"起始地点「{default_location}」不在生成的地点里，已留空")
         default_location = ""
+    # 有子地点的是「集合」（某州、某城），玩家只能站在具体的子地点里
+    first_child = {}
+    for loc in locations:
+        if loc["parent_name"]:
+            first_child.setdefault(loc["parent_name"], loc["name"])
+    if default_location in first_child:
+        dropped.append(f"起始地点「{default_location}」是一片区域，已改为其中的「{first_child[default_location]}」")
+        default_location = first_child[default_location]
     return {"locations": locations, "default_location": default_location}
+
+
+def leaf_names(locations: list[dict]) -> list[str]:
+    """能落脚的地点名：没有子地点的那些。有子地点的是集合，角色和起点不该落在它头上。"""
+    parents = {loc.get("parent_name") for loc in locations if loc.get("parent_name")}
+    return [loc["name"] for loc in locations if loc["name"] not in parents]
 
 
 def _clean_cast(parsed: dict, dropped: list, relation_names, location_names, slot_names=()) -> dict:

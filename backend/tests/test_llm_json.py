@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 
-from app.services.llm_json import JsonCallError, call_json, repair_json
+from app.services.llm_json import JsonCallError, call_json, looks_truncated, repair_json
 
 
 class RepairJsonTests(unittest.TestCase):
@@ -60,6 +60,25 @@ class RepairJsonTests(unittest.TestCase):
         self.assertEqual(parsed[1]["chapter"], 2)
 
 
+class LooksTruncatedTests(unittest.TestCase):
+    def test_complete_object_is_not_truncated(self):
+        self.assertFalse(looks_truncated('前言 {"a": [1, {"b": 2}]} 完毕'))
+
+    def test_unclosed_object_is_truncated(self):
+        self.assertTrue(looks_truncated('{"npcs": [{"name": "甲"}, {"name": "乙'))
+
+    def test_brackets_inside_strings_are_ignored(self):
+        self.assertFalse(looks_truncated('{"a": "右括号 } 和 ] 还有 \\" 引号"}'))
+        self.assertTrue(looks_truncated('{"a": "左括号 { 没关"'))
+
+    def test_array_expectation(self):
+        self.assertFalse(looks_truncated('[{"a": 1}]', expect="array"))
+        self.assertTrue(looks_truncated('[{"a": 1}, {"a"', expect="array"))
+
+    def test_no_json_is_not_truncated(self):
+        self.assertFalse(looks_truncated("抱歉，无法完成"))
+
+
 class CallJsonTests(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
@@ -73,6 +92,23 @@ class CallJsonTests(unittest.TestCase):
         )
         self.assertEqual(parsed, {"ok": True})
         self.assertEqual((in_tok, out_tok), (10, 5))
+
+    def test_meta_reports_truncation(self):
+        async def cut(**kwargs):
+            return '{"npcs": [{"name": "甲"}, {"name": "乙', 10, 5
+
+        async def whole(**kwargs):
+            return '{"ok": true}', 10, 5
+
+        meta: dict = {}
+        parsed, _, _ = self._run(call_json([], "m", "openai", dispatch=cut, meta=meta))
+        self.assertTrue(meta["truncated"])
+        # 补齐会退回到最后一个完整的 }，写到一半的「乙」整条没了——正是要报出来的原因
+        self.assertEqual(parsed["npcs"], [{"name": "甲"}])
+
+        meta = {}
+        self._run(call_json([], "m", "openai", dispatch=whole, meta=meta))
+        self.assertFalse(meta["truncated"])
 
     def test_retries_on_bad_json_then_succeeds(self):
         calls = []

@@ -3,18 +3,17 @@ from math import ceil
 
 
 DEFAULT_CONTEXT_WINDOW = 65536
-MIN_INPUT_BUDGET = 18000
-MAX_INPUT_BUDGET = 36000
+MAX_INPUT_BUDGET = 64000
 SAFETY_RATIO = 0.10
 
-# recent_text（上一章原文）强制完整注入，不参与预算分配
+# recent_text（近章原文）强制完整注入，不参与预算分配
 SECTION_RATIOS = {
     "instructions": 0.12,
     "hard_facts": 0.18,
     "current_state": 0.15,
     "rolling_summary": 0.08,
     "rag_context": 0.11,
-    "rag_fulltext": 0.05,
+    "rag_fulltext": 0.12,
     "overview": 0.05,
     "relationship_milestones": 0.04,
     "recall_evidence": 0.06,
@@ -78,9 +77,10 @@ def build_context_budget(
     thinking_reserve = ceil(output_reserve * 0.25) if thinking_enabled else 0
     safety_reserve = ceil(window * SAFETY_RATIO)
 
-    candidate = max(MIN_INPUT_BUDGET, min(MAX_INPUT_BUDGET, ceil(estimated_output * 2.5)))
+    # 输入预算跟模型窗口走（不再按输出字数推算）：扣掉输出/思考/安全余量后全给参考资料，
+    # 封顶 MAX_INPUT_BUDGET 控成本
     available = max(8000, window - output_reserve - thinking_reserve - safety_reserve)
-    input_budget = min(candidate, available)
+    input_budget = min(MAX_INPUT_BUDGET, available)
     allocations = {
         key: max(1, int(input_budget * ratio))
         for key, ratio in SECTION_RATIOS.items()

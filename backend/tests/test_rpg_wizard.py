@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from app.agents import rpg_wizard
 from app.api.routes import rpg as rpg_routes
+from app.prompts.loader import render
 from app.schemas.rpg import RpgWizardExtractIn
 from app.services import rpg_prompts
 from app.services.auth import current_user_var
@@ -571,6 +572,47 @@ class ExtractCleaningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["tasks"][1]["category"], "支线")
         self.assertTrue(any("武力" in d for d in out["dropped"]))
 
+    async def test_places_keep_two_levels_and_flatten_deeper_nesting(self):
+        out = await self._extract("places", {"locations": [
+            {"name": "雨城", "parent_name": ""},
+            {"name": "旅馆", "parent_name": "雨城"},
+            {"name": "客房", "parent_name": "旅馆"},
+        ]})
+        parents = {l["name"]: l["parent_name"] for l in out["locations"]}
+        self.assertEqual(parents, {"雨城": "", "旅馆": "雨城", "客房": "雨城"})
+        self.assertTrue(any("两层" in d for d in out["dropped"]))
+
+    async def test_extract_template_asks_for_parent_name(self):
+        self.assertIn("parent_name", rpg_prompts.default_content("rpg_wizard_extract.jinja2"))
+
+    async def test_start_location_on_a_container_moves_to_its_first_child(self):
+        out = await self._extract("places", {
+            "default_location": "青州",
+            "locations": [
+                {"name": "青州", "parent_name": ""},
+                {"name": "临江城", "parent_name": "青州"},
+                {"name": "落霞山", "parent_name": ""},
+            ],
+        })
+        self.assertEqual(out["default_location"], "临江城")
+        self.assertTrue(any("青州" in d and "临江城" in d for d in out["dropped"]))
+
+    def test_leaf_names_excludes_containers(self):
+        locs = [
+            {"name": "青州", "parent_name": ""},
+            {"name": "临江城", "parent_name": "青州"},
+            {"name": "落霞山", "parent_name": ""},
+        ]
+        self.assertEqual(rpg_wizard.leaf_names(locs), ["临江城", "落霞山"])
+
+    async def test_npc_placed_on_a_container_is_dropped_by_leaf_whitelist(self):
+        out = await self._extract(
+            "cast", {"npcs": [{"name": "老陈", "location": "青州"}, {"name": "小李", "location": "临江城"}]},
+            known={"location_names": ["临江城"]},
+        )
+        locs = {n["name"]: n["location"] for n in out["npcs"]}
+        self.assertEqual(locs, {"老陈": "", "小李": "临江城"})
+
     async def test_the_things_stage_still_extracts_tasks(self):
         """那段清洗抽成了 _clean_tasks 给 quests 用，_clean_things 改成调它。
 
@@ -619,6 +661,60 @@ class ExtractRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status_code, 500)
         self.assertIn("后台日志", caught.exception.detail)
         self.assertTrue(any("broken" in message for message in logs.output))
+
+
+class NovelImportTests(unittest.IsolatedAsyncioTestCase):
+    """「从小说导入」：素材换成小说设定，其余（白名单、清洗）照走向导那条路。"""
+
+    async def _request(self, novel_source=("## 角色\n- 老陈", []), parsed=None):
+        call = AsyncMock(return_value=(parsed or {}, 0, 0))
+        with (
+            patch.object(rpg_routes, "_get_owned_module", AsyncMock(return_value=SimpleNamespace(model_ref="7"))),
+            patch.object(rpg_routes, "get_owned_novel", AsyncMock(return_value=SimpleNamespace(id=5))),
+            patch.object(rpg_routes, "build_novel_source", AsyncMock(return_value=novel_source)),
+            patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")),
+            patch.object(rpg_wizard.llm_json, "call_json", call),
+        ):
+            out = await rpg_routes.wizard_extract(
+                1, RpgWizardExtractIn(stage="cast", novel_id=5), user=None, db=None,
+            )
+        return out, call
+
+    async def test_novel_source_replaces_transcript_and_adds_rules(self):
+        _, call = await self._request()
+        messages = call.call_args.args[0]
+        self.assertIn(rpg_wizard._NOVEL_SOURCE_RULES, messages[0]["content"])
+        self.assertIn("小说设定", messages[1]["content"])
+        self.assertIn("老陈", messages[1]["content"])
+
+    async def test_import_still_filters_references_by_whitelist(self):
+        parsed = {"npcs": [{"name": "老陈", "location": "不存在的地方"}]}
+        out, _ = await self._request(parsed=parsed)
+        self.assertEqual(out.npcs[0]["location"], "")
+
+    async def test_truncation_notes_reach_dropped(self):
+        out, _ = await self._request(novel_source=("## 角色\n- 老陈", ["只取了前 30 个"]))
+        self.assertIn("只取了前 30 个", out.dropped)
+
+    async def test_empty_novel_is_a_readable_400(self):
+        with self.assertRaises(HTTPException) as caught:
+            await self._request(novel_source=("", []))
+        self.assertEqual(caught.exception.status_code, 400)
+
+    async def test_chat_path_is_unchanged_without_novel_id(self):
+        _, call = await self._request()
+        with (
+            patch.object(rpg_routes, "_get_owned_module", AsyncMock(return_value=SimpleNamespace(model_ref="7"))),
+            patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")),
+            patch.object(rpg_wizard.llm_json, "call_json", call),
+        ):
+            await rpg_routes.wizard_extract(
+                1, RpgWizardExtractIn(stage="cast", messages=[{"role": "user", "content": "确认"}]),
+                user=None, db=None,
+            )
+        last = call.call_args.args[0]
+        self.assertNotIn(rpg_wizard._NOVEL_SOURCE_RULES, last[0]["content"])
+        self.assertIn("对话记录", last[1]["content"])
 
 
 class FullGenerationTests(unittest.IsolatedAsyncioTestCase):
@@ -833,6 +929,27 @@ class GenerateBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["npcs"][0]["location"], "")
         self.assertTrue(any("恐惧" in d for d in out["dropped"]))
 
+    async def test_npc_batch_keeps_profile_and_examples(self):
+        """单摊生成角色也要带上档案三栏和说话样例，提示词里得明确要。"""
+        prompt = render(
+            "rpg_generate.jinja2", kind="npc", instruction="", count=3, nsfw=False,
+            play_style="rpg", stat_names="", relation_names="", location_names="", existing_names="",
+        )
+        for word in ("profile_sections", "背景故事", "能力特长", "关系网络", "dialogue_examples"):
+            with self.subTest(word=word):
+                self.assertIn(word, prompt)
+        out = await self._gen(
+            "npc",
+            {"npcs": [{
+                "name": "老周",
+                "profile_sections": {"背景故事": "码头长大", "能力特长": "会撬锁，怕水"},
+                "dialogue_examples": [{"user": "你好", "assistant": "有事说事。"}],
+            }]},
+        )
+        npc = out["npcs"][0]
+        self.assertEqual(npc["profile_sections"], {"背景故事": "码头长大", "能力特长": "会撬锁，怕水"})
+        self.assertEqual(npc["dialogue_examples"], [{"user": "你好", "assistant": "有事说事。"}])
+
     async def test_action_only_returns_actions(self):
         """道具那一摊生成动作不该混进 items 键。"""
         out = await self._gen(
@@ -954,6 +1071,42 @@ class GenerateTiersTests(unittest.IsolatedAsyncioTestCase):
                  "tiers": [{"at": 60, "label": "亲近", "note": ""}]},
                 "", 3, "7",
             )
+
+
+class TruncationNoteTests(unittest.IsolatedAsyncioTestCase):
+    """输出被额度掐断时 repair_json 会补齐，结果看着完整——症状是「说好十个
+    角色只出来四个」。三个入口都得把截断报进 dropped，作者才知道不是模型偷懒。"""
+
+    async def _run(self, entry, truncated):
+        async def fake_call_json(*_args, meta=None, **_kwargs):
+            if meta is not None:
+                meta["truncated"] = truncated
+            return {"npcs": [{"name": "甲"}]}, 0, 0
+
+        with patch.object(rpg_wizard.llm_json, "call_json", fake_call_json), \
+             patch.object(rpg_wizard.llm_client, "get_fast_client", return_value=("m", "openai")):
+            if entry == "extract":
+                return await rpg_wizard.extract_stage("cast", "十个角色", {}, "7")
+            if entry == "full":
+                return await rpg_wizard.generate_full("十个角色", False, "rpg", "7")
+            return await rpg_wizard.generate_batch("npc", "十个角色", 10, {}, False, "7")
+
+    async def test_truncation_is_reported_on_every_entry(self):
+        for entry in ("extract", "full", "batch"):
+            with self.subTest(entry=entry):
+                result = await self._run(entry, True)
+                self.assertEqual(result["dropped"][0], rpg_wizard._TRUNCATED_NOTE)
+                self.assertEqual(result["npcs"][0]["name"], "甲")
+
+    async def test_complete_output_has_no_note(self):
+        for entry in ("extract", "full", "batch"):
+            with self.subTest(entry=entry):
+                result = await self._run(entry, False)
+                self.assertNotIn(rpg_wizard._TRUNCATED_NOTE, result["dropped"])
+
+    def test_cast_extraction_budget_fits_ten_characters(self):
+        # 一个写全的角色五六千 token，十个人至少要这么多
+        self.assertGreaterEqual(rpg_wizard._STAGE_MAX_TOKENS["cast"], 40000)
 
 
 if __name__ == "__main__":

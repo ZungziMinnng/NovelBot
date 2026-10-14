@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Bot, Loader2, ChevronRight, SkipForward } from 'lucide-react'
 import toast from 'react-hot-toast'
 import {
-  streamRpgWizard, modelLibraryApi,
+  streamRpgWizard, modelLibraryApi, novelsApi,
   type ChatSSEMessage, type RpgWizardExtract, type RpgWizardKnown, type RpgPlayStyle, type RpgWorldScope,
 } from '@/api/client'
 import { rpgApi } from '@/api/client'
@@ -22,6 +22,8 @@ interface Props {
 }
 
 const EMPTY_DRAFT: RpgWizardExtract = { dropped: [] }
+/** stage 的取值：-1 = 还没选方式，-2 = 自由聊天（不走分步流程），>=0 = 第几步 */
+const FREE_CHAT = -2
 
 interface PersistedWizardState {
   messages?: ChatSurfaceMessage[]
@@ -79,6 +81,9 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     queryFn: modelLibraryApi.list,
   })
   const chatModels = modelLibrary.filter(m => m.model_type !== 'embedding')
+  const { data: novels = [] } = useQuery({ queryKey: ['novels'], queryFn: novelsApi.list })
+  const [novelId, setNovelId] = useState<number | null>(null)
+  const [importProgress, setImportProgress] = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
   const fullRequestRef = useRef(0)
@@ -96,7 +101,10 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   const knownFromDraft = useCallback((d: RpgWizardExtract): RpgWizardKnown => ({
     stat_names: (d.stat_defs || []).map(s => s.name),
     relation_names: (d.relation_stat_defs || []).map(s => s.name),
-    location_names: (d.locations || []).map(l => l.name),
+    // 有子地点的是集合（某州），角色和动作只能落在最底层的具体地点上
+    location_names: (d.locations || [])
+      .filter(l => !(d.locations || []).some(c => c.parent_name === l.name))
+      .map(l => l.name),
     slot_names: d.time_slots || [],
   }), [])
 
@@ -121,7 +129,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     setMessages([...history, { role: 'assistant', content: '' }])
     setIsStreaming(true)
     setWaiting(true)
-    const stageId = stageIndex >= 0 ? wizardStages[stageIndex].id : ''
+    const stageId = stageIndex >= 0 ? wizardStages[stageIndex].id : stageIndex === FREE_CHAT ? 'free' : ''
 
     abortRef.current = streamRpgWizard(
       moduleId,
@@ -129,7 +137,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         messages: history.map(m => ({ role: m.role, content: m.content })),
         model,
         stage: stageId,
-        confirmed: stageId ? confirmed : '',
+        confirmed: stageIndex >= 0 ? confirmed : '',
         play_style: playStyle,
         world_scope: worldScope,
       },
@@ -193,6 +201,10 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
 
   const send = useCallback((text: string, base?: ChatSurfaceMessage[]) => {
     if (!text || isStreaming || generatingFull) return
+    if (stage === FREE_CHAT) {
+      run([...(base ?? messages), { role: 'user', content: text }], FREE_CHAT, '')
+      return
+    }
     if (stage < 0) {
       if (oneShotMode) {
         void generateFull(text)
@@ -286,6 +298,44 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     }
   }, [isStreaming, extracting, stage, draft, settledStages, wizardStages, extractCurrent])
 
+  /** 把小说的初始设定按向导的步骤顺序逐步抽一遍，前一步的名字当后一步的白名单 */
+  const importFromNovel = useCallback(async () => {
+    if (!novelId || importProgress || isStreaming || extracting || generatingFull || applying) return
+    if (preview || settledStages.length > 0) {
+      const ok = await confirmDialog({ title: '导入会覆盖当前草案', detail: '已经填进模组的内容不受影响。', confirmText: '继续导入', danger: true })
+      if (!ok) return
+    }
+    let merged: RpgWizardExtract = EMPTY_DRAFT
+    try {
+      for (let i = 0; i < wizardStages.length; i++) {
+        const target = wizardStages[i]
+        setImportProgress(`${i + 1}/${wizardStages.length} · ${target.label}`)
+        try {
+          const result = await rpgApi.modules.wizardExtract(moduleId, {
+            stage: target.id, messages: [], known: knownFromDraft(merged),
+            model, temperature: extractTemp, novel_id: novelId,
+          })
+          merged = mergeWizardStage(merged, result, target.id)
+        } catch (err) {
+          throw new Error(`「${target.label}」抽取失败：${wizardErrorMessage(err)}`)
+        }
+      }
+      const title = novels.find(n => n.id === novelId)?.title || ''
+      setMessages([{
+        role: 'assistant',
+        content: fullDraftIntro(merged, `我把《${title}》的初始设定改造成了一套模组草案（平行线，不带原著剧情进度）。`),
+      }])
+      setDraft(merged)
+      setSettledStages(wizardStages.map(s => s.id))
+      setPreview(merged)
+    } catch (err) {
+      toast.error(`${wizardErrorMessage(err)}。已完成的步骤没有保留，请重试`)
+    } finally {
+      setImportProgress('')
+    }
+  }, [novelId, importProgress, isStreaming, extracting, generatingFull, applying, preview, settledStages,
+    wizardStages, moduleId, knownFromDraft, model, extractTemp, novels])
+
   const handleEditAt = useCallback(async (index: number, text: string) => {
     if (messages[index]?.role === 'assistant') {
       setMessages(prev => prev.map((m, i) => (i === index ? { ...m, content: text } : m)))
@@ -359,7 +409,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
     void generateFull(`请基于上次想法重新随机生成一套不同方案：${fullInstruction}`, fullInstruction)
   }, [fullInstruction, generatingFull, generateFull])
 
-  const busy = isStreaming || extracting || generatingFull || applying
+  const busy = isStreaming || extracting || generatingFull || applying || !!importProgress
   const current = stage >= 0 ? wizardStages[stage] : null
 
   return (
@@ -376,9 +426,11 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
         onClear={handleClear}
         placeholder={current
           ? '回答上面的问题，或者说“我不知道，你帮我定”… (Enter 发送)'
-          : oneShotMode
-            ? '例如：一个发生在雨夜港口的失忆侦探故事'
-            : '请选择一种构思方式后再输入...'}
+          : stage === FREE_CHAT
+            ? '随便聊：问现有设定、让我挑毛病、要点子都行… (Enter 发送)'
+            : oneShotMode
+              ? '例如：一个发生在雨夜港口的失忆侦探故事'
+              : '请选择一种构思方式后再输入...'}
         headerExtra={
           <>
             <select
@@ -402,7 +454,7 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
             />
           </>
         }
-        belowHeader={(current || messages.length > 0) && (
+        belowHeader={(current || stage === FREE_CHAT || messages.length > 0) && (
           <div className="px-4 py-2.5 border-b bg-muted/30 shrink-0 space-y-2">
             <label className="flex items-center gap-2 text-xs">
               <span className="shrink-0">切换步骤</span>
@@ -413,12 +465,18 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
                 className="min-w-0 flex-1 rounded border bg-background px-2 py-1 disabled:opacity-40"
               >
                 <option value={-1} disabled>选择要修改的步骤</option>
+                <option value={FREE_CHAT}>自由聊天（按现有模组内容随便聊）</option>
                 {wizardStages.map((step, index) => (
                   <option key={step.id} value={index}>{index + 1}. {step.label}</option>
                 ))}
               </select>
               <span className="text-muted-foreground">保留对话和草案</span>
             </label>
+            {stage === FREE_CHAT && (
+              <p className="text-xs text-muted-foreground">
+                自由聊天：向导能看到你模组里已经填好的全部内容，问什么答什么，不会催你走流程。聊出的结论要自己改进表单；想让它收进表单请切回某一步。
+              </p>
+            )}
             {current && <>
             <div className="flex items-center gap-1">
               {wizardStages.map((s, i) => (
@@ -525,6 +583,40 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
                 >
                   一句话生成整套
                 </button>
+                <button
+                  onClick={() => { setOneShotMode(false); setStage(FREE_CHAT) }}
+                  title="不走流程，围绕你模组里已经填好的内容随便聊"
+                  className="sm:col-span-2 text-sm rounded-lg px-3 py-2.5 border hover:bg-muted transition-colors"
+                >
+                  直接聊天（按现有模组内容）
+                </button>
+              </div>
+            )}
+            {!oneShotMode && novels.length > 0 && (
+              <div className="mt-4 rounded-lg border bg-muted/20 p-3">
+                <p className="text-xs font-medium mb-1">从小说导入</p>
+                <p className="text-xs text-muted-foreground mb-2">
+                  取小说的初始设定（世界观、规则、地点、势力、角色卡），按平行线改造成模组；不带原著的剧情进度。数值、道具、动作等小说里没有的由 AI 设计，会依次跑 {wizardStages.length} 步，耗时较长。
+                </p>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={novelId ?? ''}
+                    onChange={e => setNovelId(e.target.value ? Number(e.target.value) : null)}
+                    disabled={!!importProgress}
+                    className="min-w-0 flex-1 text-xs border rounded px-2 py-1.5 bg-background"
+                  >
+                    <option value="">选择一部小说</option>
+                    {novels.map(n => <option key={n.id} value={n.id}>{n.title}</option>)}
+                  </select>
+                  <button
+                    onClick={importFromNovel}
+                    disabled={!novelId || !!importProgress || busy}
+                    className="flex items-center gap-1 shrink-0 text-xs rounded px-2.5 py-1.5 bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40"
+                  >
+                    {importProgress && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    {importProgress || '导入并抽取'}
+                  </button>
+                </div>
               </div>
             )}
             {!oneShotMode && (
@@ -553,8 +645,8 @@ export default function WizardPanel({ moduleId, playStyle, onApply }: Props) {
   )
 }
 
-function fullDraftIntro(draft: RpgWizardExtract): string {
-  const lines = ['我根据你的想法生成了一套模组草案。']
+function fullDraftIntro(draft: RpgWizardExtract, lead = '我根据你的想法生成了一套模组草案。'): string {
+  const lines = [lead]
   if (draft.genre) lines.push(`题材：${draft.genre}`)
   if (draft.worldview) lines.push(`世界观：${draft.worldview}`)
   const groups = [

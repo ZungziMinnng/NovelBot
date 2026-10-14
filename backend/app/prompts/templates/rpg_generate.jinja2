@@ -26,24 +26,32 @@
   "npcs": [
     {
       "name": "角色名",
-      "persona": "脾气、在意什么、怕什么、对玩家什么态度",
-      "appearance": "第一次见看得见的：长相、身形、穿着、随身带什么",
-      "description": "身份、来历、会什么、和别人什么关系。这些是事实不是性格",
+      "persona": "脾气、在意什么、怕什么、对玩家什么态度、怎么说话。要写成一个有内在矛盾的人",
+      "appearance": "第一次见看得见的：五官、发型发色、身形、穿着、随身带什么。用具体的颜色形状材质写",
+      "description": "一句话身份与来历。这些是事实不是性格",
+      "profile_sections": {"背景故事": "出身、怎么长大、哪几件事改了他的路、现在什么身份", "能力特长": "会什么，以及明确的弱点和限制", "关系网络": "和玩家、和其他角色之间的关系、矛盾、依赖、秘密"},
       "location": "平时待在哪个地点",
-      "initial_state": {"关系数值名": 起始值数字}
+      "initial_state": {"关系数值名": 起始值数字},
+      "dialogue_examples": [{"user": "玩家说的一句", "assistant": "他会怎么回"}]
     }
   ]
 }
 
+- 每个角色的 persona / appearance / description 和 profile_sections 三栏都要填满，三栏各写各的事，不许互相重复、也不许一句话敷衍。
+- 「能力特长」除了写他会什么，必须写明弱点和限制——只写强项的角色在数值系统里无从下手。「关系网络」玩家这一头必须写到；同一批里的角色之间有关系的也写上。
+- dialogue_examples 写 1~2 组，每组都要有 user 和 assistant，assistant 要能听出这个人的说话腔调。
 {% if existing_names %}- 已经有的角色：{{ existing_names }}，别重复生成。{% endif %}
 {% if relation_names %}- initial_state 的键只能从这几个里选：{{ relation_names }}。写了别的名字，那一条删掉。{% else %}- 模组还没定关系数值，initial_state 一律留空对象 {}。{% endif %}
+{% if existing_npcs %}- 模组里已有角色的常驻地点（名字｜常驻｜身份）：
+{% for line in existing_npcs %}  · {{ line }}
+{% endfor %}- 要求里如果说这个新角色和某个已有角色有关（亲人、同伴、上司、对手、同住……），location 默认就填那个已有角色的「常驻」地点，让两人待在一起；除非要求里明确写了别的地点，或这种关系本身意味着分开（比如远在外地）。「关系网络」里也要具体写到和那个已有角色的关系。{% endif %}
 {% if location_names %}- location 只能填这几个地点之一：{{ location_names }}。对不上就留空串。{% else %}- 模组还没定地点，location 一律留空串。{% endif %}
 {% elif kind == 'item' %}
 生成「道具」：
 
 {
   "items": [
-    {"name": "道具名", "description": "是什么、什么手感、有什么用", "category": "消耗品/装备/关键道具 三选一", "consumable": 用完就没了true/false, "start_with": 开局就带着true/false, "effects": {"数值名": 增减数字}}
+    {"name": "道具名", "description": "是什么、什么手感、有什么用", "category": "消耗品/武器/装备/关键道具/资料 五选一（资料 = 书、功法、图纸、笔记、手册这类记载知识的东西，古今题材通用）", "consumable": 用完就没了true/false, "start_with": 开局就带着true/false, "effects": {"数值名": 增减数字}}
   ]
 }
 
@@ -67,7 +75,7 @@
 
 {
   "tasks": [
-    {"name": "任务名", "description": "这桩事的来龙去脉、谁托付的", "objective": "做到什么才算办完，一句话", "category": "主线/支线/日常 三选一", "auto_start": 开局就接下true/false, "effects": {"数值名": 办完之后的增减数字}}
+    {"name": "任务名", "description": "这桩事的来龙去脉、谁托付的", "objective": "做到什么才算办完，一句话", "category": "主线/支线/日常 三选一；日常=每天都要重复做、隔天自动重开的事，只办一次的差事写支线", "auto_start": 开局就接下true/false, "effects": {"数值名": 办完之后的增减数字}}
   ]
 }
 

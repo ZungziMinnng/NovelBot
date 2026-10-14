@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Plus, Trash2, Sparkles } from 'lucide-react'
 import type { ExampleTurn } from '@/api/client'
 import AutoTextarea from '@/components/AutoTextarea'
@@ -7,6 +8,8 @@ interface Props {
   onChange: (v: ExampleTurn[]) => void
   /** dialogue = 酒馆角色卡的对话示例，措辞按"玩家说 / 角色回"来；narration = 游戏的叙事示例 */
   variant?: 'novel' | 'dialogue' | 'narration'
+  /** 标题栏右侧额外按钮，比如「从文风库取用」 */
+  actions?: ReactNode
 }
 
 const COPY = {
@@ -54,7 +57,7 @@ const COPY = {
   },
 } as const
 
-export default function ExampleTurnsEditor({ value, onChange, variant = 'novel' }: Props) {
+export default function ExampleTurnsEditor({ value, onChange, variant = 'novel', actions }: Props) {
   const copy = COPY[variant]
   const update = (i: number, patch: Partial<ExampleTurn>) => {
     onChange(value.map((ex, idx) => (idx === i ? { ...ex, ...patch } : ex)))
@@ -68,6 +71,7 @@ export default function ExampleTurnsEditor({ value, onChange, variant = 'novel' 
       <div className="flex items-center justify-between mb-2">
         <label className="text-sm font-medium">{copy.title}</label>
         <div className="flex items-center gap-3">
+          {actions}
           <button
             type="button"
             onClick={addTemplate}

@@ -90,7 +90,16 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
   const here = locations.find(l => norm(l.name) === norm(at))
   if (!at || !here) return new Set(locations.map(l => l.id))
 
+  const byId = new Map(locations.map(loc => [loc.id, loc]))
   const lit = new Set([norm(here.name), ...(sess.visited || []).map(norm)])
+  // 站在、去过某处，也就等于到过它所在的区域：区域之间的连线（观水州—衔禅州）
+  // 要从这些区域身上散开，否则区域永远照不亮
+  for (const loc of locations) {
+    if (!lit.has(norm(loc.name))) continue
+    for (let p = byId.get(loc.parent_id ?? -1), n = 0; p && n < 20; p = byId.get(p.parent_id ?? -1), n++) {
+      lit.add(norm(p.name))
+    }
+  }
   const wired = wiredIds(locations)
   const out = new Set<number>()
   for (const loc of locations) {
@@ -100,12 +109,28 @@ export function visibleLocations(locations: RpgLocation[], sess: RpgSession): Se
     if (near) out.add(loc.id)
   }
 
-  const byId = new Map(locations.map(loc => [loc.id, loc]))
   let parentId = here.parent_id
   while (parentId != null) {
     if (out.has(parentId)) break
     out.add(parentId)
     parentId = byId.get(parentId)?.parent_id ?? null
+  }
+
+  // 区域只是一个范围，没有「入口」可连：区域看得见了，里面的地点就都该能去。
+  // 不这样的话，区域内部的点只连着彼此，迷雾无论如何散不进去，玩家就进不去那片区域
+  const children = new Map<number, RpgLocation[]>()
+  for (const loc of locations) {
+    if (loc.parent_id != null) children.set(loc.parent_id, [...(children.get(loc.parent_id) ?? []), loc])
+  }
+  const open = (id: number) => {
+    for (const kid of children.get(id) ?? []) {
+      if (out.has(kid.id) && !kid.is_region) continue
+      out.add(kid.id)
+      open(kid.id)
+    }
+  }
+  for (const loc of locations) {
+    if (loc.is_region && out.has(loc.id)) open(loc.id)
   }
   return out
 }

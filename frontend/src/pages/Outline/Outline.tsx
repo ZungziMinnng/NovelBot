@@ -263,7 +263,7 @@ export default function Outline() {
                   ['近期剧情摘要（滚动窗口）', preview.context.rolling_summary],
                   ['相关历史场景（RAG 检索）', preview.context.rag_context],
                   ['补充设定（NovelNote）', preview.context.notes_context],
-                  ['上一章原文', preview.context.recent_text],
+                  ['近章原文', preview.context.recent_text],
                 ] as [string, string][]).map(([label, content]) =>
                   content ? (
                     <CollapsibleSection key={label} label={label} defaultOpen={false}>

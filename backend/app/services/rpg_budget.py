@@ -38,6 +38,8 @@ SECTION_BASE = {
     # 那是有意的上界：这一块每轮都发，真要长篇解释数值该写进世界观
     "meaning": 1600,
     "scene": 400,
+    # 全图隶属关系，只有地点名。50 个地点约 300 token，留一倍余量
+    "map": 600,
     "catalog": 700,
     # 单人份，由 _npc_history_lines 从尾部裁
     "npc_history": 220,

@@ -177,6 +177,8 @@ class RpgModule(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
     # 期望叙事字数（软约束）。RPG 单轮该比酒馆长，所以给默认值而不是 0
     reply_length: Mapped[int] = mapped_column(Integer, default=300)
+    # 游玩页「旁白」下拉里 简短/适中/详细 三档的字数；空 = 用前端默认的 150/300/600
+    reply_length_tiers: Mapped[list] = mapped_column(JSON, default=list)
 
     model_ref: Mapped[str] = mapped_column(String(100), default="")
     fast_model_ref: Mapped[str] = mapped_column(String(100), default="")
@@ -646,6 +648,10 @@ class RpgLocation(Base):
         Integer, ForeignKey("rpg_locations.id"), nullable=True, index=True,
     )
 
+    # 区域/集合（江苏省、某州）：只是范围，不是能站的具体地点。作者勾的，
+    # 跟「有没有子地点」无关——还没往里加子地点时也该被认成区域
+    is_region: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # 从这里能直接去哪儿，存名字不存 id：RpgNpc.location 本来就是字符串、
     # onstage_npcs() 本来就按名字比对，用 id 会凭空多一套映射
     connections: Mapped[list] = mapped_column(JSON, default=list)
@@ -947,6 +953,24 @@ class RpgSession(Base):
     # 够模型拿去定两人说话的口气。新的盖掉旧的——关系只有一个现值
     npc_bonds: Mapped[list] = mapped_column(JSON, default=list)
 
+    # 知情账：一条一件秘密（玩家的、NPC 的、两个人之间的），谁知道记在名单里：
+    # [{"id": "a1b2...", "content": "...", "owner": 0, "known_by": [3, 7],
+    #   "names": {"3": "韩曼宁"}, "player_knows": true, "day": 4}]
+    #
+    # owner：0 = 玩家的秘密，否则是 NPC id。known_by 是**除了 owner 以外**还知道的 NPC。
+    # player_knows：玩家自己知道（owner=0 时恒真）；NPC 的秘密被玩家查明时翻成真，
+    # 这是 npc_offscreen / npc_bonds 里那个 exposed 一直缺的 setter。
+    # 名字在写入时快照，理由同 npc_offscreen。
+    #
+    # 这一列只管**提示词里谁该装作不知道**，不是硬隔离。目前由玩家在侧栏手动登记
+    # （结算自动维护是后一步）。进 SNAPSHOT_FIELDS（读档要回滚），不进 STATE_FIELDS
+    secrets: Mapped[list] = mapped_column(JSON, default=list)
+    # 结算对知情账提的改动，等玩家点头才写进 secrets（同 task_proposals）：
+    # [{"id","kind":"new|learn|retire","quote","message_id", ...}]，形状见
+    # rpg_settlement.filter_secret_updates。不进 SNAPSHOT：它只是待办，回滚时
+    # 对应那条剧情没了，提议也该跟着没（resolve 时找不到目标会自己丢掉）
+    secret_proposals: Mapped[list] = mapped_column(JSON, default=list)
+
     # 地点近况：{"地窖": "门被你踹坏了，合不上"}，键是**地名**，值是一句话。
     #
     # 这不是第四个记忆格。记忆按格子分（玩家一格、每个 NPC 各一格，见 summary /
@@ -1126,6 +1150,10 @@ class RpgMessage(Base):
     #   []    = 确定只有玩家一个人 → 不进任何 NPC 的视图
     # 把 None 写成 [] 会让老存档里所有群戏对 NPC 集体失忆
     present: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+
+    # 这条消息发生在第几天，写入时快照。没有它，窗口里第 3 天的对话到了第 8 天
+    # 会被读成「刚才 / 昨天」。None = 不知道（加这一列之前的老消息），不打标记
+    day: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     # 本回合判定，只挂在 user 行上。null = 这轮没判定。
     # 挂 user 行而不是 assistant 行，是为了中断语义：assistant 行要等叙事跑完

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bot, Globe, ArrowLeftToLine, Loader2, Wand2, MessageSquare, ChevronRight, SkipForward, Target, Flame } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -8,6 +8,7 @@ import {
 } from '@/api/client'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useBrainstormStore, formatConfirmed } from '@/store/brainstormStore'
+import { useChatStreamStore, useChatStream } from '@/store/chatStreamStore'
 import type { BrainstormPurpose } from './wizardStages'
 import ChatSurface from '@/components/ChatSurface/ChatSurface'
 import type { ChatSurfaceMessage } from '@/components/ChatSurface/types'
@@ -21,6 +22,8 @@ interface Props {
   /** 把用户勾选的字段写进表单 */
   onApply: (picked: Partial<BrainstormExtract>) => void
 }
+
+const STREAM_KEY = 'brainstorm'
 
 const STARTERS: Record<BrainstormPurpose, string[]> = {
   market: [
@@ -50,8 +53,8 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
   const stages = STAGES_BY_PURPOSE[purpose]
   const lastStage = stages.length - 1
 
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [waiting, setWaiting] = useState(false)
+  // 流式状态放全局 store：切到别的页面请求照跑，回来还能接着看、接着停
+  const { isStreaming, waiting } = useChatStream(STREAM_KEY)
   const [model, setModel] = useState('')
   const [webSearch, setWebSearch] = useState(false)
   const [extracting, setExtracting] = useState(false)
@@ -63,19 +66,14 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
   })
   const chatModels = modelLibrary.filter(m => m.model_type !== 'embedding')
 
-  const abortRef = useRef<AbortController | null>(null)
-
-  useEffect(() => () => { abortRef.current?.abort() }, [])
-
   // stageIndex 显式传入：推进阶段时 store 的 stage 还没同步到这里的闭包
   const run = useCallback((history: ChatSurfaceMessage[], stageIndex: number) => {
     setMessages([...history, { role: 'assistant', content: '' }])
-    setIsStreaming(true)
-    setWaiting(true)
 
     const stageId = mode === 'wizard' && stageIndex >= 0 ? stages[stageIndex].id : ''
+    const streams = useChatStreamStore.getState()
 
-    abortRef.current = streamBrainstorm(
+    const controller = streamBrainstorm(
       {
         messages: history.map(m => ({ role: m.role, content: m.content })),
         model,
@@ -88,18 +86,19 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {
-          setWaiting(false)
+          streams.gotToken(STREAM_KEY)
           setMessages(prev => patchLast(prev, c => c + msg.data))
         } else if (msg.event === 'warning') {
-          setWaiting(false)
+          streams.gotToken(STREAM_KEY)
           setMessages(prev => patchLast(prev, c => `⚠ ${msg.data}\n\n${c}`))
         } else if (msg.event === 'error') {
-          setWaiting(false)
+          streams.gotToken(STREAM_KEY)
           setMessages(prev => patchLast(prev, () => `[错误] ${msg.data}`))
         }
       },
-      () => { setIsStreaming(false); setWaiting(false) },
+      () => streams.end(STREAM_KEY, controller),
     )
+    streams.start(STREAM_KEY, controller)
   }, [mode, model, nsfwMode, webSearch, purpose, stages, confirmed, temperature, setMessages])
 
   // base 显式传入：从中间某句重发时，闭包里的 messages 还是截断前的旧值
@@ -123,11 +122,7 @@ export default function BrainstormPanel({ getFormSnapshot, onApply }: Props) {
     ], index)
   }, [messages, stages, run, setStage])
 
-  const stop = useCallback(() => {
-    abortRef.current?.abort()
-    setIsStreaming(false)
-    setWaiting(false)
-  }, [])
+  const stop = useCallback(() => useChatStreamStore.getState().abort(STREAM_KEY), [])
 
   const handleEditAt = useCallback(async (index: number, text: string) => {
     if (messages[index]?.role === 'assistant') {

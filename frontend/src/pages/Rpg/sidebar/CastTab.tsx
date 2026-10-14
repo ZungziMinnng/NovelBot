@@ -4,6 +4,7 @@ import { following, knownNpcs, npcPlace, onstage } from '../condition'
 import RpgAvatar from '../RpgAvatar'
 import StatBar from '../StatBar'
 import { PANEL } from '../rpgUi'
+import SecretPanel from './SecretPanel'
 
 export default function CastTab({
   sess, module, npcs, relDefs, onOpenNpc, onOpenSelf,
@@ -119,6 +120,8 @@ export default function CastTab({
           </button>
         )
       })}
+
+      <SecretPanel sess={sess} npcs={known} />
     </>
   )
 }

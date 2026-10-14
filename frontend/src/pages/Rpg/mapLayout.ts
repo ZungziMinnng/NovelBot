@@ -25,6 +25,45 @@ export function layout(locations: RpgLocation[]): Map<number, { x: number; y: nu
   }))
 }
 
+export interface PlaceGroup {
+  /** 所属路径，如「江苏省 / 南京」。顶层的散点是空串 */
+  label: string
+  /** 这一组里能落脚的地点名（区域本身不在里面） */
+  names: { name: string; text: string }[]
+}
+
+/**
+ * 给下拉框 / 勾选列表用的分组：每个有子地点的节点（或区域）一组，组名是它的层级路径，
+ * 组里是它的直接子地点。区域只当组名；有子地点但没标区域的，自己排在自己那组第一个。
+ * 顺序按地点表的先后，深度优先。
+ */
+export function placeGroups(locations: RpgLocation[]): PlaceGroup[] {
+  const kids = new Map<number | null, RpgLocation[]>()
+  const ids = new Set(locations.map(l => l.id))
+  for (const loc of locations) {
+    // 父地点不在表里（脏数据）就当顶层，免得整条分支凭空消失
+    const key = loc.parent_id && ids.has(loc.parent_id) ? loc.parent_id : null
+    kids.set(key, [...(kids.get(key) || []), loc])
+  }
+  const out: PlaceGroup[] = []
+  const seen = new Set<number>()
+  const walk = (parent: RpgLocation | null, path: string[]) => {
+    const group: PlaceGroup = { label: path.join(' / '), names: [] }
+    const containers: RpgLocation[] = []
+    if (parent && !parent.is_region) group.names.push({ name: parent.name, text: `${parent.name}（本身）` })
+    for (const loc of kids.get(parent ? parent.id : null) || []) {
+      if (seen.has(loc.id)) continue
+      seen.add(loc.id)
+      if (loc.is_region || kids.has(loc.id)) containers.push(loc)
+      else group.names.push({ name: loc.name, text: loc.name })
+    }
+    if (group.names.length) out.push(group)
+    for (const c of containers) walk(c, [...path, c.name])
+  }
+  walk(null, [])
+  return out
+}
+
 /**
  * 要画的路，一条一对。
  *

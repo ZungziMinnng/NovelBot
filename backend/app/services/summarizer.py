@@ -355,7 +355,7 @@ async def summarize_chapter(
         temperature=0.3,
         max_tokens=2000,
     )
-    body, importance, day_offset, period = _parse_summary_payload(raw_summary)
+    body, importance, day_offset, period, title = _parse_summary_payload(raw_summary)
     body = _strip_leading_time_tag(_clean_summary(body))
 
     # 检测输出截断：正文未以正常标点结尾，说明被中途截断（token 耗尽或安全过滤）
@@ -389,14 +389,14 @@ async def summarize_chapter(
         )
         in_tok += retry_in
         out_tok += retry_out
-        r_body, r_imp, r_offset, r_period = _parse_summary_payload(retry_raw)
+        r_body, r_imp, r_offset, r_period, r_title = _parse_summary_payload(retry_raw)
         r_body = _strip_leading_time_tag(_clean_summary(r_body))
         if r_body.strip() and len(r_body.strip()) > len(body.strip()):
             logger.info(
                 "章节 %s 脱敏重试成功 (len=%d → %d)",
                 chapter.number, len(body.strip()), len(r_body.strip()),
             )
-            body, importance, day_offset, period = r_body, r_imp, r_offset, r_period
+            body, importance, day_offset, period, title = r_body, r_imp, r_offset, r_period, r_title or title
         else:
             logger.warning(
                 "章节 %s 脱敏重试未改善 (original=%d, retry=%d)",
@@ -410,6 +410,7 @@ async def summarize_chapter(
     summary = await _persist_summary(
         session, chapter, novel, body, importance, day_offset, period, prev_day, clean_content,
     )
+    _apply_auto_title(chapter, title)
     return summary, in_tok, out_tok
 
 
@@ -851,6 +852,7 @@ async def summarize_and_discover(
     summary = await _persist_summary(
         session, chapter, novel, body, importance, day_offset, period, prev_day, clean_content,
     )
+    _apply_auto_title(chapter, data.get("title"))
     await _save_milestones(session, novel, chapter, data.get("milestones"))
     discovered = {k: data.get(k) if isinstance(data.get(k), list) else [] for k in _DISCOVER_KEYS}
     discovered["threads"] = _extract_thread_candidates(
@@ -877,20 +879,34 @@ def _coerce_summary_fields(data: dict) -> tuple[int, int, str]:
     return imp, max(0, offset), period
 
 
-def _parse_summary_payload(raw: str) -> tuple[str, int, int, str]:
-    """解析章节摘要 LLM 的 JSON 输出 {summary, importance, day_offset, period}。
-    返回 (summary, importance, day_offset, period)。失败时回退为
-    「整段文本 + 中性分3 + 偏移0 + 空时段」，保证核心摘要路径不因 JSON 解析失败而中断。"""
+def _parse_summary_payload(raw: str) -> tuple[str, int, int, str, str]:
+    """解析章节摘要 LLM 的 JSON 输出 {summary, importance, day_offset, period, title}。
+    返回 (summary, importance, day_offset, period, title)。失败时回退为
+    「整段文本 + 中性分3 + 偏移0 + 空时段 + 空标题」，保证核心摘要路径不因 JSON 解析失败而中断。"""
     try:
         data = json.loads(repair_json(raw))
         if isinstance(data, dict) and "summary" in data:
             summary = str(data.get("summary") or "").strip()
             imp, offset, period = _coerce_summary_fields(data)
             if summary:
-                return summary, imp, offset, period
+                return summary, imp, offset, period, str(data.get("title") or "")
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
-    return raw.strip(), 3, 0, ""
+    return raw.strip(), 3, 0, "", ""
+
+
+_TITLE_PREFIX = re.compile(r"^第[0-9零一二三四五六七八九十百千]+章\s*[:：]?\s*")
+
+
+def _apply_auto_title(chapter: Chapter, raw_title) -> None:
+    """摘要顺带生成的标题只填空位：章节还没标题或仍是「第N章」占位时才写，
+    作者手动改过的标题不会被重新确认覆盖（想重新生成就先清空标题）。"""
+    current = (chapter.title or "").strip()
+    if current and current != f"第{chapter.number}章":
+        return
+    title = _TITLE_PREFIX.sub("", str(raw_title or "").strip()).strip("《》「」『』\"'“” ")
+    if title:
+        chapter.title = title[:30]
 
 
 def _fuzzy_match_character(name: str, char_map: dict[str, "Character"]) -> str | None:
@@ -933,8 +949,10 @@ async def update_character_states(
     chapter: Chapter,
     novel: Novel,
     instruction: str = "",
+    only_ids: set[int] | None = None,
 ) -> tuple[bool, str, int, int, list[str], list[int]]:
     """根据章节内容更新角色状态卡。
+    only_ids 限定只更新这些角色（新建角色补算来源章时用，避免其他角色被同一章重复累积）。
     返回 (success, warning_message, input_tokens, output_tokens, unmatched_names, updated_ids)。
     """
     result = await session.execute(
@@ -950,6 +968,8 @@ async def update_character_states(
 
     # 只发本章点名（含称谓）的角色状态；一个都没命中就跳过调用
     characters = _filter_mentioned(all_characters, chapter_content, _char_titles)
+    if only_ids is not None:
+        characters = [c for c in characters if c.id in only_ids]
     if not characters:
         return True, "", 0, 0, [], []
 

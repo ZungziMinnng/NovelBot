@@ -172,6 +172,8 @@ def _state_payload(sess: RpgSession) -> dict:
         # 上帝视角那颗开关要的就是没筛过的那份
         "npc_offscreen": sess.npc_offscreen or [],
         "npc_bonds": sess.npc_bonds or [],
+        "secrets": sess.secrets or [],
+        "secret_proposals": sess.secret_proposals or [],
         # 这一轮记下的经历和关系转折：角色档案的「经历」那一页要当场长出来，
         # 不带的话玩家点进去看到的还是上一轮的样子
         "npc_history": sess.npc_history or {},
@@ -268,6 +270,9 @@ def _move(sess: RpgSession, target: RpgLocation, npcs: list[RpgNpc]) -> list[str
     作者忘了连一条边，而玩家看到的却是一句莫名其妙的拒绝。
     """
     from_name = (sess.location or "").strip()
+    # 区域只是范围（江苏省、观水州），人站不到它头上，得说清去里面哪儿
+    if getattr(target, "is_region", False):
+        return [f"{target.name}是一片区域，不是具体的地方，要说清楚去里面的哪一处"]
     ok, why = check_condition(target.enter_requires, sess, npcs)
     if not ok:
         return [f"你想进{target.name}，但{why}，被挡在外面"]
@@ -647,7 +652,9 @@ def movement_target(content: str, locations: list[RpgLocation]) -> str:
     # 问句是在打听，不是在动身
     if re.search(r"[?？]|吗$", text):
         return ""
-    names = {norm_name(location.name): location.name for location in locations if location.name}
+    # 区域不是目的地：「去观水州」认不出具体去哪，整句交回 AI，别替玩家站到范围头上
+    names = {norm_name(location.name): location.name for location in locations
+             if location.name and not getattr(location, "is_region", False)}
     # 移动按钮替玩家写进正文的那句文案（见 _ENGINE_MOVE）。整句必须**恰好**是
     # 一个登记地点名才认，尾段简称也算（登记「灵药园柴房」，玩家打「你前往柴房」）
     engine = _ENGINE_MOVE.match(text)
@@ -791,6 +798,30 @@ def movement_candidate(content: str, locations: list[RpgLocation], npcs: list[Rp
             hits.add(name)
     # 同 movement_target：一句话指了两个地方就别替玩家挑
     return hits.pop() if len(hits) == 1 else ""
+
+
+def movement_enclosing(content: str, locations: list[RpgLocation], npcs: list[RpgNpc]) -> str:
+    """没登记的去处退而求其次：它的名字以某个已登记地点开头，就落在那个地点上。
+
+    「去庶务堂西侧灵砂库领冷砂」→ 庶务堂。只在自动建地点没接手时才用（关着开关、
+    或到了上限），候选名完全由 movement_candidate 把关，这里只做「找最长的登记前缀」。
+    区域不算；前缀同名有两个就不猜。
+    """
+    candidate = norm_name(movement_candidate(content, locations, npcs))
+    if not candidate:
+        return ""
+    best: list[str] = []
+    best_len = 0
+    for location in locations:
+        key = norm_name(location.name)
+        if not key or getattr(location, "is_region", False):
+            continue
+        if len(key) < len(candidate) and candidate.startswith(key):
+            if len(key) > best_len:
+                best, best_len = [location.name], len(key)
+            elif len(key) == best_len and location.name not in best:
+                best.append(location.name)
+    return best[0] if len(best) == 1 else ""
 
 
 # ── 自由输入里的「带谁走 / 派谁去 / 打发谁」 ────────────────────────────────
@@ -1536,7 +1567,13 @@ def _apply_company(
     facts: list[str] = []
     for npc_id in company.follow:
         npc = by_id.get(npc_id)
-        if npc is not None and apply_npc_followers(sess, npc_id, True):
+        if npc is None:
+            continue
+        # 剧情先前把她挪到这儿的那条覆盖（npc_places）在取值链里排在跟随前面，
+        # 不清的话名单上有她、人却钉在原地：叫到走廊的人「带她回校长室」后
+        # 还站在走廊。玩家亲口带上她，那条覆盖就作废了
+        apply_npc_place(sess, npc_id, "")
+        if apply_npc_followers(sess, npc_id, True):
             facts.append(f"{npc.name}跟上了你")
     for npc_id in company.unfollow:
         npc = by_id.get(npc_id)
@@ -1726,14 +1763,14 @@ async def _store_reply(
     重算会拿到结算挪过人之后的状态，那是「这一轮结束后谁在」。
     """
     async with AsyncSessionLocal() as store:
+        sess = await store.get(RpgSession, session_id)
         row = RpgMessage(
             session_id=session_id, role="assistant", content=reply,
             input_tokens=in_tok, output_tokens=out_tok,
-            location=place, present=present,
+            location=place, present=present, day=sess.day or 1,
             settlement=settlement,
         )
         store.add(row)
-        sess = await store.get(RpgSession, session_id)
         # 显式改一个字段才会触发 onupdate，存档列表靠 updated_at 排序
         sess.updated_at = datetime.utcnow()
         await store.commit()
@@ -1946,8 +1983,10 @@ async def _maybe_summarize(session_id: int) -> bool:
             overflow = overflow[: len(fresh) * 2]
             if not overflow:
                 continue
+            # 每条带上第几天：不带的话压出来的梗概没有时间，日后读来全像昨天的事
             transcript = "\n".join(
-                f"{who if m.role == 'user' else 'GM'}：{m.content}" for m in overflow
+                (f"[第{m.day}天] " if m.day is not None else "")
+                + f"{who if m.role == 'user' else 'GM'}：{m.content}" for m in overflow
             )
             jobs.append({
                 "slot": slot,
@@ -3081,6 +3120,7 @@ async def run_turn(
     # SCENE_PREAMBLE 三处）。那套管线存档在 rpg-knowledge-pipeline 分支
     buf: list[str] = []
     in_tok = out_tok = 0
+    finish = None
     try:
         async for chunk in llm_client.dispatch_chat_stream_with_usage(
             messages=messages,
@@ -3090,7 +3130,7 @@ async def run_turn(
             max_tokens=fresh_module.max_tokens,
         ):
             if isinstance(chunk, tuple):
-                _, in_tok, out_tok = chunk
+                finish, in_tok, out_tok = chunk
             elif isinstance(chunk, dict):
                 if "warning" in chunk:
                     yield "warning", chunk["warning"]
@@ -3113,6 +3153,17 @@ async def run_turn(
     reply = "".join(buf).strip()
     if not reply:
         raise ValueError("模型没有返回剧情，请重试这一轮")
+    if finish == "length":
+        # 写到单次上限被掐断：正文停在半句话上。从前这个信号直接丢掉，
+        # 玩家只看到「又截断了」，不知道是模组设置里那个数太小
+        logger.warning(
+            "RPG 局 %s 叙事被输出上限截断: model=%s, out_tok=%d, max_tokens=%s",
+            session_id, model, out_tok, fresh_module.max_tokens,
+        )
+        yield "warning", (
+            f"这一轮写到单次上限（{fresh_module.max_tokens} tokens）被截断了，"
+            "可以在模组设置里把「单次上限」调大"
+        )
     message_id = await _store_reply(
         session_id, reply, in_tok, out_tok, present, place, settlement_seed
     )
@@ -3154,6 +3205,8 @@ async def run_turn(
                 yield "discoveries", result["discoveries"]
             if result.get("task_proposals"):
                 yield "task_proposals", result["task_proposals"]
+            if result.get("secret_proposals"):
+                yield "secret_proposals", result["secret_proposals"]
             # 待确认的新道具。同 discoveries 单独一条：它不在 state 里（不是游戏
             # 状态），不发的话玩家要等整页重新拉一次才看到「新获取」那一块
             if result.get("item_claims"):

@@ -338,6 +338,9 @@ async def run_memory_pipeline(
                 location_candidates.append({"name": name, "type": "", "description": "（状态更新中发现，未录入地点库）", "parent_name": ""})
 
         if candidates:
+            # 带上来源章：前端添加时回传，后端据此按正文生成角色卡、补算状态
+            for c in candidates:
+                c["source_chapter"] = chapter_number
             yield _sse_json("new_characters", {"candidates": candidates})
         if entity_candidates:
             yield _sse_json("new_entities", {"candidates": entity_candidates})

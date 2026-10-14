@@ -1,9 +1,10 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Settings, RotateCcw, Globe, Bot } from 'lucide-react'
 import { streamChat, modelLibraryApi, findModelEntry, type ChatSSEMessage } from '@/api/client'
 import type { Novel } from '@/api/client'
 import { useChatStore, getChatSettings, getChatMessages, type ChatMessage } from '@/store/chatStore'
+import { useChatStreamStore, useChatStream } from '@/store/chatStreamStore'
 import AutoTextarea from '@/components/AutoTextarea'
 import ChatSurface from '@/components/ChatSurface/ChatSurface'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
@@ -15,8 +16,9 @@ interface Props {
 }
 
 export default function ChatPanel({ novelId, novel, chapterNumber }: Props) {
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [waiting, setWaiting] = useState(false)
+  // 流式状态放全局 store：切到别的页面请求照跑，回来还能接着看、接着停
+  const streamKey = `chat:${novelId}`
+  const { isStreaming, waiting } = useChatStream(streamKey)
   const [showSettings, setShowSettings] = useState(false)
 
   const chatSettings = useChatStore((s) => getChatSettings(s, novelId))
@@ -37,11 +39,7 @@ export default function ChatPanel({ novelId, novel, chapterNumber }: Props) {
   // chatSettings.model 可能是 ModelEntry.id（新）或旧 model_id；解析到条目后用 id 作 select value
   const chatEntry = findModelEntry(modelLibrary, chatSettings.model)
   const selectedChatModel = chatEntry && chatEntry.model_type !== 'embedding' ? String(chatEntry.id) : ''
-  const abortRef = useRef<AbortController | null>(null)
-
-  useEffect(() => {
-    return () => { abortRef.current?.abort() }
-  }, [])
+  const stop = useCallback(() => useChatStreamStore.getState().abort(streamKey), [streamKey])
 
   // base 显式传入：从中间某句重发时，闭包里的 messages 还是截断前的旧值
   const send = useCallback((text: string, base?: ChatMessage[]) => {
@@ -50,10 +48,9 @@ export default function ChatPanel({ novelId, novel, chapterNumber }: Props) {
 
     appendMessage(novelId, { role: 'user', content: text })
     appendMessage(novelId, { role: 'assistant', content: '' })
-    setIsStreaming(true)
-    setWaiting(true)
+    const streams = useChatStreamStore.getState()
 
-    abortRef.current = streamChat(
+    const controller = streamChat(
       {
         novel_id: novelId,
         messages: history.map(m => ({ role: m.role, content: m.content })),
@@ -67,19 +64,20 @@ export default function ChatPanel({ novelId, novel, chapterNumber }: Props) {
       },
       (msg: ChatSSEMessage) => {
         if (msg.event === 'token') {
-          setWaiting(false)
+          streams.gotToken(streamKey)
           updateLastAssistant(novelId, (prev) => prev + msg.data)
         } else if (msg.event === 'warning') {
-          setWaiting(false)
+          streams.gotToken(streamKey)
           updateLastAssistant(novelId, (prev) => `⚠ ${msg.data}\n\n${prev}`)
         } else if (msg.event === 'error') {
-          setWaiting(false)
+          streams.gotToken(streamKey)
           updateLastAssistant(novelId, () => `[错误] ${msg.data}`)
         }
       },
-      () => { setIsStreaming(false); setWaiting(false) },
+      () => streams.end(streamKey, controller),
     )
-  }, [isStreaming, messages, novelId, chapterNumber, chatSettings, selectedChatModel, appendMessage, updateLastAssistant])
+    streams.start(streamKey, controller)
+  }, [isStreaming, messages, novelId, streamKey, chapterNumber, chatSettings, selectedChatModel, appendMessage, updateLastAssistant])
 
   const handleEditAt = useCallback(async (index: number, text: string) => {
     if (messages[index]?.role === 'assistant') {
@@ -108,8 +106,9 @@ export default function ChatPanel({ novelId, novel, chapterNumber }: Props) {
       isStreaming={isStreaming}
       waiting={waiting}
       onSend={send}
+      onStop={stop}
       onEditAt={handleEditAt}
-      onClear={() => { abortRef.current?.abort(); clearMessages(novelId) }}
+      onClear={() => { stop(); clearMessages(novelId) }}
       emptyState={
         <div className="text-center text-sm text-muted-foreground/60 mt-8">
           <Bot className="w-8 h-8 mx-auto mb-2 opacity-30" />

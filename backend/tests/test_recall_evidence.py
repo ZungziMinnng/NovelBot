@@ -14,6 +14,8 @@ from app.services.context_builder import (
     _build_rag_fulltext,
     _build_recall_evidence,
     _has_recall_intent,
+    _load_recent_chapters,
+    _milestone_parties,
     _split_paragraphs,
 )
 
@@ -26,6 +28,20 @@ class RecallIntentTests(unittest.TestCase):
     def test_no_trigger(self):
         self.assertFalse(_has_recall_intent("主角大战反派，攻入皇城"))
         self.assertFalse(_has_recall_intent(""))
+
+
+class MilestonePartiesTests(unittest.TestCase):
+    def test_parses_parties(self):
+        self.assertEqual(
+            _milestone_parties("[表白] 林砚↔苏晚 | 第37章 | 天台雨夜表白"),
+            {"林砚", "苏晚"},
+        )
+
+    def test_three_parties_and_no_type(self):
+        self.assertEqual(_milestone_parties("甲↔乙↔丙 | 第1章 | 结拜"), {"甲", "乙", "丙"})
+
+    def test_empty(self):
+        self.assertEqual(_milestone_parties(""), set())
 
 
 class SplitParagraphTests(unittest.TestCase):
@@ -218,6 +234,36 @@ class BuildRagFulltextTests(unittest.TestCase):
                 await engine.dispose()
 
         self._run(scenario())
+
+
+class LoadRecentChaptersTests(unittest.TestCase):
+    """近章原文：按全书连续章号取最近 N 章，不按卷过滤。"""
+
+    def test_crosses_volume_boundary(self):
+        async def scenario():
+            engine = create_async_engine("sqlite+aiosqlite://")
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session = async_sessionmaker(engine, expire_on_commit=False)()
+            try:
+                novel = Novel(title="测试")
+                session.add(novel)
+                await session.flush()
+                session.add_all([
+                    Chapter(novel_id=novel.id, number=n, volume=1 if n <= 25 else 2, content=f"第{n}章")
+                    for n in (23, 24, 25, 26)
+                ])
+                await session.flush()
+                # 写第 26 章（第 2 卷第一章）：上一卷末尾两章必须能取到
+                rows = await _load_recent_chapters(session, novel.id, 26, 3)
+                self.assertEqual([c.number for c in rows], [23, 24, 25])
+                rows = await _load_recent_chapters(session, novel.id, 1, 3)
+                self.assertEqual(rows, [])
+            finally:
+                await session.close()
+                await engine.dispose()
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

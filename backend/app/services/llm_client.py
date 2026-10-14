@@ -179,6 +179,7 @@ async def refresh_provider_cache(session) -> None:
             "base_url": p.base_url,
             "api_format": p.api_format,
             "use_proxy": p.use_proxy,
+            "gemini_base_url": p.gemini_base_url or "",
             "user_id": p.user_id,
         }
     logger.info("LLM 供应商缓存已刷新，客户端缓存已清空: providers=%d", len(_providers_cache))
@@ -189,6 +190,20 @@ def get_model_api_format(model_id: str) -> str:
     return _model_formats.get(model_id, "openai")
 
 
+def _native_gemini_url(model_id: str, provider_id: int | None) -> str:
+    """OpenAI 兼容供应商上的 Gemini 模型若该供应商填了原生入口，返回那个地址，否则空串。
+
+    走原生格式才带得上 safetySettings；OpenAI 兼容那条路 Gemini 按默认严格档过滤，
+    finish_reason=content_filter 空回。只认名字带 gemini 的模型：同一家中转上的
+    DeepSeek/Claude 不能跟着切。"""
+    provider = _providers_cache.get(provider_id) if provider_id else None
+    if not provider or provider["api_format"] != "openai":
+        return ""
+    if "gemini" not in (model_id or "").lower():
+        return ""
+    return provider.get("gemini_base_url") or ""
+
+
 def resolve_model_ref(ref: str) -> tuple[str, str, int | None]:
     """把存储的模型引用解析为 (real_model_id, api_format, provider_id|None)。
 
@@ -196,17 +211,24 @@ def resolve_model_ref(ref: str) -> tuple[str, str, int | None]:
     字符串走"最早注册优先"回退（向后兼容旧数据 / 旧 .env，路由行为不变）。
 
     非 admin 用户只接受本人的 ModelEntry.id：字符串引用会命中"最早注册的同名
-    模型"（可能是别人的供应商），必须拒绝，防止烧他人 API Key。"""
+    模型"（可能是别人的供应商），必须拒绝，防止烧他人 API Key。
+
+    供应商填了 Gemini 原生入口时，其下 gemini 模型的 api_format 在这里就报成
+    "gemini"——writer 等调用方按它拼消息结构，必须和实际发送格式一致。"""
     user = _current_non_admin()
     if user is not None:
         entry = _entry_index.get(int(ref)) if ref and ref.isdigit() else None
         if entry is None or entry.get("user_id") != user.id:
             raise ValueError("模型引用无效或不属于当前用户")
-        return entry["model_id"], entry["api_format"], entry["provider_id"]
-    if ref and ref.isdigit() and int(ref) in _entry_index:
+        model_id, fmt, provider_id = entry["model_id"], entry["api_format"], entry["provider_id"]
+    elif ref and ref.isdigit() and int(ref) in _entry_index:
         e = _entry_index[int(ref)]
-        return e["model_id"], e["api_format"], e["provider_id"]
-    return ref, _model_formats.get(ref, "openai"), _model_provider_map.get(ref)
+        model_id, fmt, provider_id = e["model_id"], e["api_format"], e["provider_id"]
+    else:
+        model_id, fmt, provider_id = ref, _model_formats.get(ref, "openai"), _model_provider_map.get(ref)
+    if _native_gemini_url(model_id, provider_id):
+        fmt = "gemini"
+    return model_id, fmt, provider_id
 
 
 def _resolve_model(agent_type: str, novel_override: str = "") -> str:
@@ -291,13 +313,44 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list]:
     return system_instruction, contents
 
 
-def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list]:
-    """提取 system prompt，其余保持 {role, content} 格式"""
+# 调用方在消息上打这个键，表示「缓存到这条为止」。只有 Claude 要显式 cache_control；
+# Gemini/DeepSeek/豆包是自动前缀缓存，发出前把键剥掉即可。
+CACHE_BREAKPOINT = "cache_breakpoint"
+
+
+def _is_claude_model(model_id: str) -> bool:
+    return "claude" in model_id.lower()
+
+
+def _cache_block(text: str) -> list[dict]:
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+def _apply_cache_breakpoints(messages: list[dict], model: str) -> list[dict]:
+    """openai 格式：Claude 把打了标记的消息改成带 cache_control 的内容块，其余模型只剥键。
+    不改动入参（writer 还拿它给 DevPanel 展示）。"""
+    if not any(CACHE_BREAKPOINT in m for m in messages):
+        return messages
+    claude = _is_claude_model(model)
+    out = []
+    for m in messages:
+        if CACHE_BREAKPOINT in m:
+            m = {k: v for k, v in m.items() if k != CACHE_BREAKPOINT}
+            if claude and isinstance(m.get("content"), str) and m["content"]:
+                m["content"] = _cache_block(m["content"])
+        out.append(m)
+    return out
+
+
+def _to_anthropic_messages(messages: list[dict]) -> tuple[str | list, list]:
+    """提取 system prompt，其余保持 {role, content} 格式；带缓存标记的转成 cache_control 内容块"""
     system_prompt = ""
     filtered = []
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        if msg.get(CACHE_BREAKPOINT) and content:
+            content = _cache_block(content)
         if role == "system":
             system_prompt = content
         else:
@@ -320,6 +373,9 @@ def _resolve_dispatch(model_ref: str, api_format: str):
     if provider:
         pfmt = provider["api_format"]
         up = provider.get("use_proxy", True)
+        native_url = _native_gemini_url(real_model, provider_id)
+        if native_url:
+            return real_model, "gemini", _get_gemini_client_for(provider["api_key"], native_url, up)
         if pfmt == "gemini":
             return real_model, "gemini", _get_gemini_client_for(provider["api_key"], provider["base_url"], up)
         elif pfmt == "anthropic":
@@ -474,6 +530,10 @@ def _apply_deepseek_fast_thinking(kwargs: dict) -> None:
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
 
+# 被上游以 400 拒绝 MINIMAL 的模型（部分 3.x flash / 渠道不支持），运行期记住后直接给 LOW
+_GEMINI_NO_MINIMAL: set[str] = set()
+
+
 # 参考 Cherry Studio THINKING_TOKEN_MAP (config/models/reasoning.ts:775-779)
 _GEMINI_2X_THINKING_LIMITS: dict[str, tuple[int, int]] = {
     "flash_lite": (512, 24576),
@@ -501,7 +561,8 @@ def _resolve_gemini_thinking(model_id: str, thinking_level: str = "medium"):
 
     if thinking_level == "off":
         if _is_gemini_3x(model_id):
-            lowest = genai_types.ThinkingLevel.MINIMAL if _is_gemini_flash(model_id) else genai_types.ThinkingLevel.LOW
+            use_minimal = _is_gemini_flash(model_id) and model_id not in _GEMINI_NO_MINIMAL
+            lowest = genai_types.ThinkingLevel.MINIMAL if use_minimal else genai_types.ThinkingLevel.LOW
             return genai_types.ThinkingConfig(thinking_level=lowest)
         min_budget, _ = _get_2x_thinking_limits(model_id)
         return genai_types.ThinkingConfig(thinking_budget=min_budget)
@@ -655,6 +716,8 @@ _TRANSIENT_NET_ERRORS = (
     httpx.PoolTimeout, httpx.RemoteProtocolError,
 )
 _GEMINI_NET_RETRIES = 3
+# 中转挂住不返回时 SDK 没有兜底，调用会永远等下去，连带占着游戏局的操作锁。只管非流式
+_GEMINI_CALL_TIMEOUT = 180
 
 
 async def _gemini_call(
@@ -669,6 +732,7 @@ async def _gemini_call(
     """使用 genai SDK 发送非流式 Gemini 请求，返回 SDK response 对象。
     非流式调用幂等，对传输层瞬时网络错误做带退避重试（代理闪断兜底）。"""
     import asyncio
+    from google.genai import errors as genai_errors
     from google.genai import types as genai_types
 
     if client is None:
@@ -685,14 +749,32 @@ async def _gemini_call(
         config_kwargs["system_instruction"] = system_instruction
     config_kwargs["safety_settings"] = _gemini_safety_settings()
 
-    last_exc: Exception | None = None
-    for attempt in range(_GEMINI_NET_RETRIES):
-        try:
-            return await client.aio.models.generate_content(
+    async def send():
+        return await asyncio.wait_for(
+            client.aio.models.generate_content(
                 model=model,
                 contents=contents,
                 config=genai_types.GenerateContentConfig(**config_kwargs),
-            )
+            ),
+            timeout=_GEMINI_CALL_TIMEOUT,
+        )
+
+    last_exc: Exception | None = None
+    for attempt in range(_GEMINI_NET_RETRIES):
+        try:
+            return await send()
+        except genai_errors.ClientError as e:
+            # 有的模型不认 MINIMAL（400 "Thinking level MINIMAL is not supported"），
+            # 降到 LOW 重发一次并记住，后续调用不再撞
+            tc = config_kwargs.get("thinking_config")
+            if (tc is not None and tc.thinking_level == genai_types.ThinkingLevel.MINIMAL
+                    and "MINIMAL" in str(e)):
+                logger.warning("Gemini 模型 %s 不支持 MINIMAL 思考档，改用 LOW 重试", model)
+                _GEMINI_NO_MINIMAL.add(model)
+                config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                    thinking_level=genai_types.ThinkingLevel.LOW)
+                return await send()
+            raise
         except _TRANSIENT_NET_ERRORS as e:
             last_exc = e
             if attempt < _GEMINI_NET_RETRIES - 1:
@@ -1213,7 +1295,7 @@ async def chat_stream_with_usage(
     """
     kwargs: dict = {
         "model": model,
-        "messages": messages,
+        "messages": _apply_cache_breakpoints(messages, model),
         "max_tokens": max_tokens,
         "stream": True,
         "stream_options": {"include_usage": True},

@@ -33,7 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import database
-from app.agents.rpg_turn import GROUP_MODE, PRIVATE_MODE, missed_dispatch, parse_company
+from app.agents.rpg_turn import GROUP_MODE, PRIVATE_MODE, _apply_company, missed_dispatch, parse_company
 from app.api.routes.rpg import SNAPSHOT_DEFAULTS, SNAPSHOT_FIELDS
 from app.database import Base
 from app.models import novel as _novel, chapter as _chapter, character as _character, memory as _memory, model_library, writer_preset, prompt_rule, world_entity, location, api_provider, novel_note, faction, technique, volume as _volume, worldview_change, world_rule, story_thread, glossary_entry, user as _user, tavern as _tavern, rpg as _rpg, sensitive_word, text_replace_backup, llm_usage  # noqa: F401
@@ -206,6 +206,29 @@ class SlotResetTests(unittest.TestCase):
         self.assertEqual(sess.day, 4)
         self.assertEqual(sess.npc_followers, [3])
         self.assertEqual(sess.npc_places, {})
+
+
+class CarryClearsOverrideTests(unittest.TestCase):
+    """被剧情叫到跟前的人（npc_places 里有她），玩家带她走时必须真的跟上。
+
+    真实存档：樱庭爱理被叫到走廊，玩家说「带樱庭爱理回到校长室……」，
+    跟随名单加上了她，可剧情那条「走廊」覆盖排在跟随前面，人还钉在走廊。
+    """
+
+    def test_carry_drops_the_story_override(self):
+        npc = _npc(location="宿舍")
+        sess = _sess(location="走廊", npc_places={"3": "走廊"})
+        company = parse_company(
+            "带赫敏回到校长办公室，倒杯热水给她", _places("走廊", "校长办公室"), [npc], sess,
+        )
+        self.assertEqual((company.move_to, company.follow), ("校长办公室", (3,)))
+        _apply_company(sess, [npc], company)
+        sess.location = "校长办公室"
+        self.assertEqual(sess.npc_places, {})
+        self.assertEqual(
+            npc_place(npc, sess.slot, sess.npc_places, sess.npc_followers, sess.location),
+            "校长办公室",
+        )
 
 
 # ── C~J. 认意图 ───────────────────────────────────────────────────────────

@@ -145,5 +145,52 @@ class CandidateTests(unittest.TestCase):
             self.assertIn(f"第{index + 1}章", text)
 
 
+class FrontMatterTests(unittest.TestCase):
+    def test_header_ads_and_junk_dropped(self):
+        text = "书名：某书\n作者: 某人\n本书由 www.xx.com 整理\n\");('他推开门。\n“……你来了。”"
+        self.assertEqual(se.strip_front_matter(text), "他推开门。\n“……你来了。”")
+
+    def test_body_far_down_untouched(self):
+        body = "\n".join(f"第{i}行正文。" for i in range(40))
+        text = f"{body}\n作者：这行在正文里"
+        self.assertEqual(se.strip_front_matter(text), text)
+
+
+class WholeSceneTests(unittest.TestCase):
+    def test_continuous_text_within_bounds(self):
+        chapters = [_chapter_body(i, paras=40) for i in range(10)] + ["太短的一章。"]
+        scenes = se.whole_scenes(chapters)
+        self.assertEqual(len(scenes), 5)
+        for s in scenes:
+            self.assertTrue(800 <= len(s.replace("\n", "")) <= 1500)
+            # 连续原文：在某一章里能原样找到
+            self.assertTrue(any(s in "\n".join(se._paragraphs(c)) for c in chapters))
+
+    def test_short_book_gives_nothing(self):
+        self.assertEqual(se.whole_scenes(["一段。"]), [])
+
+
+class NewStatsTests(unittest.TestCase):
+    def test_extra_fields(self):
+        stats = se.compute_stats(["他走了。“好！”他说。\n她站着，没动，看着窗外很久很久很久很久。\n“走吗？”"])
+        self.assertEqual(stats["exclaim_per_k"] > 0, True)
+        self.assertEqual(stats["question_per_k"] > 0, True)
+        self.assertEqual(set(stats["dialogue_tags"]), {"tag", "beat", "bare"})
+        self.assertEqual(stats["dialogue_tags"]["bare"], 0.5)  # 「走吗」那句光秃秃
+        self.assertIn("top_phrases", stats)
+
+    def test_top_phrases_repeat_only(self):
+        paras = ["青铜古灯亮起来。"] * 5 + ["偶然一句。"]
+        self.assertEqual(se.compute_stats(paras)["top_phrases"][0], "青铜古灯")
+
+    def test_compare_flags_big_gaps_only(self):
+        source = {"avg_sentence_len": 10, "dialogue_ratio": 0.3, "person": "第一人称"}
+        trial = {"avg_sentence_len": 11, "dialogue_ratio": 0.1, "person": "第三人称", "avg_para_len": 50}
+        gaps = se.compare_stats(source, trial)
+        self.assertEqual([g["key"] for g in gaps], ["dialogue_ratio", "person"])
+        # 老文风没新统计：不比
+        self.assertEqual(se.compare_stats({}, trial), [])
+
+
 if __name__ == "__main__":
     unittest.main()

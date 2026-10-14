@@ -18,6 +18,8 @@ import Tavern from '@/pages/Tavern/Tavern'
 import TavernCard from '@/pages/Tavern/TavernCard'
 import TavernChat from '@/pages/Tavern/TavernChat'
 import TavernSettings from '@/pages/Tavern/TavernSettings'
+import Forge from '@/pages/Forge/Forge'
+import Lore from '@/pages/Lore/Lore'
 import Rpg from '@/pages/Rpg/Rpg'
 import RpgModule from '@/pages/Rpg/RpgModule'
 import RpgPlay from '@/pages/Rpg/RpgPlay'
@@ -71,6 +73,8 @@ export default function App() {
           <Route path="/novel/:id/notes" element={<Notes />} />
           <Route path="/novel/:id/data" element={<Admin />} />
           <Route path="/rules" element={<Rules />} />
+          <Route path="/forge" element={<Forge />} />
+          <Route path="/lore" element={<Lore />} />
           <Route path="/tavern" element={<Tavern />} />
           <Route path="/tavern/settings" element={<TavernSettings />} />
           <Route path="/tavern/card/:id" element={<TavernCard />} />

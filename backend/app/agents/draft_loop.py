@@ -113,6 +113,8 @@ async def run_draft_loop(
                 if finish_reason == "length":
                     writer_truncated = True
             else:
+                if revision == 0 and not full_text:
+                    state["first_token_s"] = round(time.monotonic() - writer_start, 2)
                 full_text += item
                 yield _sse("token", item)
         state["writer_truncated"] = writer_truncated

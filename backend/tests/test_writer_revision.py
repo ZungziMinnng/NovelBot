@@ -99,5 +99,25 @@ class StreamChapterRevisionTests(unittest.TestCase):
         self.assertIn("第三段逻辑矛盾", messages[1]["content"])
 
 
+class ExampleBoundaryTests(unittest.TestCase):
+    def test_boundary_prepended_to_next_user(self):
+        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "参考资料"}]
+        n = writer._splice_example_turns(msgs, [{"user": "节拍", "assistant": "成文"}])
+        self.assertEqual(n, 2)
+        self.assertEqual([m["role"] for m in msgs], ["system", "user", "assistant", "user"])
+        self.assertIn("文风示范", msgs[3]["content"])
+        self.assertTrue(msgs[3]["content"].endswith("参考资料"))
+
+    def test_boundary_inserted_before_assistant(self):
+        msgs = [{"role": "system", "content": "S"}, {"role": "assistant", "content": "A"}]
+        writer._splice_example_turns(msgs, [{"user": "节拍", "assistant": "成文"}])
+        self.assertEqual([m["role"] for m in msgs], ["system", "user", "assistant", "user", "assistant"])
+
+    def test_no_examples_no_boundary(self):
+        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+        self.assertEqual(writer._splice_example_turns(msgs, [{"user": "", "assistant": "x"}]), 0)
+        self.assertEqual(len(msgs), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
