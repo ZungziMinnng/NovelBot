@@ -50,6 +50,7 @@ import RpgTurnStatus from './RpgTurnStatus'
 import SettlementReport from './SettlementReport'
 import { WaitBar } from './rpgUi'
 import { styleLabel } from './stylePresets'
+import { gameThemeAttr } from './gameThemes'
 import { GAMEPLAY_MODEL_FIELDS, EXTRA_MODEL_FIELDS, isEmbeddingField, type RpgModelField } from './modelSettings'
 import { playSfx } from './useSfx'
 import GameHud, { type GameOutcome } from './GameHud'
@@ -1551,7 +1552,7 @@ export default function RpgPlay() {
   )
 
   return (
-    <div className="mode-game h-screen flex flex-col bg-background relative">
+    <div className="mode-game h-screen flex flex-col bg-background relative" data-game-theme={gameThemeAttr(module?.ui_theme)}>
       {/* z-20 而不是 z-10：页头里的下拉（模型、主题）是绝对定位的，会垂到下面
           那块内容区上。内容区也是 z-10 而且在 DOM 里更靠后，同层后来者居上，
           下拉就被右边的角色栏盖住了。页头必须比内容高一层 */}

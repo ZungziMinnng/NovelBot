@@ -13,7 +13,7 @@ import {
   rpgApi, modelLibraryApi, modelSelectValue, groupModelsByProvider,
   type RpgModule as Module, type RpgWorldEntry, type RpgNpc,
   type RpgInvItem, type RpgBand, type RpgCondition, type RpgSession, type RpgStatDef,
-  type RpgPlayStyle, type RpgImageConfig, type RpgLocation,
+  type RpgPlayStyle, type RpgUiTheme, type RpgImageConfig, type RpgLocation,
 } from '@/api/client'
 import { confirmDialog } from '@/components/ConfirmDialog/ConfirmDialog'
 import ExampleTurnsEditor from '@/components/ExampleTurnsEditor'
@@ -50,6 +50,7 @@ import {
 import {
   PLAY_STYLES, STYLE_BLOCKS, STYLE_EXAMPLES, blockTitle, styleLabel, type BlockName,
 } from './stylePresets'
+import { GAME_THEMES, gameThemeAttr } from './gameThemes'
 
 const BANDS: Array<{ key: RpgBand; label: string }> = [
   { key: 'trivial', label: '轻易' },
@@ -375,8 +376,6 @@ export default function RpgModule() {
     worldbook: (
       <WorldBookSection
         moduleId={moduleId}
-        scanDepth={form.scan_depth}
-        onScanDepthChange={v => set('scan_depth', v)}
         statDefs={form.stat_defs || []}
         relationDefs={form.relation_stat_defs || []}
         npcs={npcs}
@@ -412,6 +411,7 @@ export default function RpgModule() {
     <Section title="这是个什么世界" desc="每轮都会注入，是整个模组的底色。" icon={Globe2} accent={ACCENT.map}>
       <div className="space-y-5">
         <PlayStyleField value={playStyle} onChange={v => set('play_style', v)} />
+        <GameThemeField value={form.ui_theme || ''} onChange={v => set('ui_theme', v)} />
         <GenreField form={form} set={set} />
         <Field label="世界观" multiline value={form.worldview} onChange={v => set('worldview', v)} placeholder="时代、地理、势力、超自然规则、当下的危机……" hint="写世界本身长什么样。具体的地点、人物和秘密放到世界书词条里。" assist={{ moduleId, field: 'worldview', context: assistContext }} />
         <div className="border-t border-border/60 pt-5 space-y-5">
@@ -518,7 +518,7 @@ export default function RpgModule() {
   }
 
   return (
-    <div className="mode-game min-h-screen bg-background relative">
+    <div className="mode-game min-h-screen bg-background relative" data-game-theme={gameThemeAttr(form.ui_theme)}>
       <header className="sticky top-0 z-20 border-b border-border/50 bg-background/80 backdrop-blur-md px-6 py-3.5 flex items-center gap-3">
         <button onClick={() => navigate('/game')} className="p-2 rounded-md hover:bg-muted" title="返回游戏列表">
           <ArrowLeft className="w-4 h-4" />
@@ -998,6 +998,44 @@ function CoverHeader({
 }
 
 // ── 玩法类别 ──────────────────────────────────────────────────────────────
+
+/** 游玩界面的视觉主题，纯皮肤：不进 prompt，选完这一页立刻换上预览。 */
+function GameThemeField({
+  value, onChange,
+}: {
+  value: RpgUiTheme
+  onChange: (v: RpgUiTheme) => void
+}) {
+  return (
+    <div>
+      <label className="text-sm font-medium mb-2 block">界面风格</label>
+      <div className="flex gap-1.5">
+        {GAME_THEMES.map(t => (
+          <button
+            key={t.key || 'follow'}
+            onClick={() => onChange(t.key)}
+            title={t.hint}
+            className={`flex-1 flex items-center justify-center gap-1.5 text-xs px-3 py-2 rounded-lg border transition-colors ${
+              value === t.key
+                ? 'bg-primary/15 text-primary border-primary/40'
+                : 'text-muted-foreground hover:bg-muted'
+            }`}
+          >
+            <span
+              className="w-3 h-3 rounded-full border border-black/10 shrink-0"
+              style={{ backgroundImage: `linear-gradient(135deg, ${t.swatch[0]} 50%, ${t.swatch[1]} 50%)` }}
+            />
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground mt-1.5">
+        {GAME_THEMES.find(t => t.key === value)?.hint}
+        {' '}只换游玩时的配色、字体和装饰，不影响 GM 提示词；浅色/深色仍跟你在全站的选择走。
+      </p>
+    </div>
+  )
+}
 
 /** 类别真的会改三件事：注入给模型的玩法规则、右栏的板块顺序、判定区块露不露。
  *  所以它不是个标签，改完这一页立刻就变。 */
@@ -1800,6 +1838,23 @@ function GenerationParams({
             tokens。世界观、角色、回忆这些块按比例分这个数，21500 是原来的额度。
           </p>
         </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">关键词扫描范围</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number" min={1} max={20}
+              value={form.scan_depth}
+              onChange={e => set('scan_depth', Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+              className={`${INPUT} w-20`}
+            />
+            <span className="text-xs text-muted-foreground">
+              条消息{form.scan_depth <= 1 ? '：只看玩家刚发的这句' : `：这句 + 往回 ${form.scan_depth - 1} 条`}
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-1.5">
+            决定世界书触发和「提到谁」。调大了旁白自己也会参与匹配，同一条词条容易连着触发好几轮；想让某条设定一直在，用「常驻」比调大这个稳。
+          </p>
+        </div>
       </div>
     </div>
   )
@@ -1862,9 +1917,9 @@ function entryKindOf(entry: { constant: boolean; trigger_condition?: RpgConditio
 
 /** 插入深度的人话版。作者真正用得上的只有这三档，其余留给下面那个数字框 */
 const DEPTH_CHOICES: { value: number; label: string }[] = [
-  { value: 0, label: '放在开场设定里' },
-  { value: 1, label: '贴在我这句话前面' },
-  { value: 2, label: '再往前一条' },
+  { value: 0, label: '0 · 放在开场设定里' },
+  { value: 1, label: '1 · 贴在我这句话前面' },
+  { value: 2, label: '2 · 再往前一条' },
 ]
 
 /** 常用 GM 指令：把当下输入框里那段存起来，换个模组也能取用。
@@ -2050,11 +2105,9 @@ function RulesSection({
 }
 
 function WorldBookSection({
-  moduleId, scanDepth, onScanDepthChange, statDefs, relationDefs, npcs, slotNames,
+  moduleId, statDefs, relationDefs, npcs, slotNames,
 }: {
   moduleId: number
-  scanDepth: number
-  onScanDepthChange: (v: number) => void
   statDefs: RpgStatDef[]
   relationDefs: RpgStatDef[]
   npcs: RpgNpc[]
@@ -2243,7 +2296,7 @@ function WorldBookSection({
             </label>
           )}
           <Fold title="高级">
-            <label className="text-xs font-medium mb-1 block">这段话贴在哪儿</label>
+            <label className="text-xs font-medium mb-1 block">这段话贴在哪儿（插入深度）</label>
             {DEPTH_CHOICES.some(c => c.value === form.depth) ? (
               <select
                 value={form.depth}
@@ -2373,22 +2426,6 @@ function WorldBookSection({
       icon={BookMarked}
       accent={ACCENT.map}
     >
-      <div className="mb-4 pb-4 border-b flex items-center gap-2 flex-wrap">
-        <label className="text-xs font-medium">关键词扫描范围</label>
-        <input
-          type="number" min={1} max={20}
-          value={scanDepth}
-          onChange={e => onScanDepthChange(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-          className={`${INPUT} w-16`}
-        />
-        <span className="text-xs text-muted-foreground">
-          条消息{scanDepth <= 1 ? '：只看玩家刚发的这句' : `：这句 + 往回 ${scanDepth - 1} 条`}
-        </span>
-        <p className="text-xs text-muted-foreground w-full">
-          调大了旁白自己也会参与匹配，同一条词条容易连着触发好几轮。想让某条设定一直在，用「常驻」比调大这个稳。
-        </p>
-      </div>
-
       <div className="space-y-2">
         {/* 只有两类都非空才分段。词条少的模组照旧是一条大列表，界面不变 */}
         {split && <p className="text-xs font-medium text-muted-foreground px-1">设定词条</p>}

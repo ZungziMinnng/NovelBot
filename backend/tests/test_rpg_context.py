@@ -1357,10 +1357,18 @@ class HistoryTests(_Base):
         messages, _ = await self._build("接着说", history=history)
         sent = [m["content"] for m in messages[1:]]
         # 你自己经历过的全在（含背着老兵跟老板娘说的那句——你自己做的事，
-        # 你和叙述你的 GM 都得看得见），刚说的那句在最后
+        # 你和叙述你的 GM 都得看得见），刚说的那句在最后。
+        # 老兵没见过的两句各带一条「当时老兵不在场」；老消息（present=None）不标
+        unaware = "（当时老兵不在场，对这段一无所知）\n"
         self.assertEqual(
             sent,
-            ["开场白", "一个人翻箱子", "只跟老兵说的", "只跟老板娘说的", "接着说"],
+            [
+                "开场白",
+                unaware + "一个人翻箱子",
+                "只跟老兵说的",
+                unaware + "只跟老板娘说的",
+                "接着说",
+            ],
         )
 
 
@@ -1502,6 +1510,35 @@ class NarrationExampleTests(_Base):
         self._assert_alternates(messages)
         self.assertTrue(messages[3]["content"].startswith("（以上几轮只是文风示范"))
         self.assertEqual(messages[4]["content"], "雨还在下。")
+
+
+
+class UnwitnessedNoteTests(unittest.TestCase):
+    def _here(self):
+        from app.models.rpg import RpgNpc
+        return [RpgNpc(id=1, name="赫敏"), RpgNpc(id=2, name="罗恩")]
+
+    def _msg(self, present):
+        return RpgMessage(id=1, role="user", content="x", present=present)
+
+    def test_player_alone_marks_everyone_here_as_unaware(self):
+        from app.services.rpg_context import unwitnessed_note
+        note = unwitnessed_note(self._msg([]), self._here())
+        self.assertIn("赫敏", note)
+        self.assertIn("罗恩", note)
+        self.assertIn("不在场", note)
+
+    def test_only_those_who_were_absent_are_named(self):
+        from app.services.rpg_context import unwitnessed_note
+        note = unwitnessed_note(self._msg([1]), self._here())
+        self.assertNotIn("赫敏", note)
+        self.assertIn("罗恩", note)
+
+    def test_everyone_witnessed_or_unknown_gets_no_note(self):
+        from app.services.rpg_context import unwitnessed_note
+        self.assertEqual(unwitnessed_note(self._msg([1, 2]), self._here()), "")
+        # None 是老消息，口径是对所有人可见
+        self.assertEqual(unwitnessed_note(self._msg(None), self._here()), "")
 
 
 if __name__ == "__main__":

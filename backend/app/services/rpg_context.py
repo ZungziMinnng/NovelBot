@@ -202,6 +202,7 @@ MILESTONE_PREAMBLE = (
 SCENE_PREAMBLE = (
     "在场的人只知道**自己也在场**的那些事。你在别处、或在别人不在场时做的事，"
     "他们不知道，除非有人告诉过他们——不要让他们主动提起。"
+    "历史里标了「不在场」的段落，被点名的人对那段一无所知。"
 )
 
 # 玩家在输入框上方明着选的三个模式。群聊=在场的都参与；私聊=只跟那一个人说话，
@@ -1484,6 +1485,24 @@ def message_slots(message: RpgMessage) -> list[str]:
     return slots
 
 
+def unwitnessed_note(message: RpgMessage, here: list[RpgNpc]) -> str:
+    """这条历史消息发生时，此刻在场的人里谁不在场。都在场 / 不知道 = 空串。
+
+    玩家格装全部消息，所以玩家独自做的事、和别人的私聊都会进窗口；光靠
+    SCENE_PREAMBLE 一句总则，模型要自己逐条推断「这段谁在」，推错了就是 NPC
+    张口提起她没见过的事。这里把答案逐条写在消息上。
+    `present` 为 None 是老消息（不知道），不标；`[]` 是确定只有玩家一人。
+    """
+    if message.present is None:
+        return ""
+    witnessed = {int(i) for i in message.present if str(i).lstrip("-").isdigit()}
+    names = [(n.name or "").strip() for n in here if n.id not in witnessed]
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    return f"（当时{'、'.join(names)}不在场，对这段一无所知）"
+
+
 def slot_upto(sess: RpgSession, slot: str) -> int:
     """这个格子已经压到第几条了。玩家格用老那两列，NPC 格用按 id 分格的那两列。"""
     if slot == PLAYER_SLOT:
@@ -2408,6 +2427,9 @@ async def build_rpg_messages(
     previous, previous_day = "", None
     for m, place in zip(window, window_places):
         content = m.content
+        unaware = unwitnessed_note(m, here)
+        if unaware:
+            content = f"{unaware}\n{content}"
         if multi_place and place and place != previous:
             content = f"（以下发生在「{place}」）\n{content}"
         if place:

@@ -95,6 +95,10 @@ class RpgModule(Base):
     # 取值见 services/rpg_play_style.py
     play_style: Mapped[str] = mapped_column(String(20), default="rpg")
 
+    # 游玩界面的视觉主题：xuanhuan / modern / fantasy，空串 = 跟随全站主题。
+    # 纯前端皮肤，永远不进 prompt；故意不从 genre 推（genre 是自由文本）
+    ui_theme: Mapped[str] = mapped_column(String(20), default="")
+
     # ── 数值定义 ──
     # 玩家那一套。[{name, initial, min, max, for_check, on_zero, display}]
     # max=None 表示无上限（钱、声望这种）；display=隐藏 的项玩家看不见，

@@ -1265,6 +1265,9 @@ export interface RpgCondition {
  *  这个说「这局怎么玩」。同一个魔法学院可以是模拟养成也可以是探索冒险 */
 export type RpgPlayStyle = 'sim' | 'rpg' | 'slg'
 
+/** 游玩界面的视觉主题。'' = 跟随全站主题。纯皮肤，不进 prompt */
+export type RpgUiTheme = '' | 'xuanhuan' | 'modern' | 'fantasy'
+
 /** 支持 AI 生成/优化的模组栏位，与后端 agents/rpg_assist.py 的 FIELD_SPECS 对齐。
  *  两边是手工对齐的：这里多写一个，后端会回 400 */
 export type RpgAssistField =
@@ -1296,6 +1299,7 @@ export interface RpgModule {
   genre: string
   /** 玩法类别。老模组读出来是 'rpg'；后端对未知值一律按 'rpg' 算 */
   play_style: RpgPlayStyle
+  ui_theme: RpgUiTheme
   worldview: string
   /** 开局旁白，建局时落成首条 assistant 消息 */
   opening_scene: string

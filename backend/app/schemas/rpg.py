@@ -9,6 +9,8 @@ from app.models.rpg import normalize_profile_sections
 # 玩法规则没注入）；但**读出去的是裸 str**——老库里可能留着空串，
 # 用 Literal 校验响应会让一个正常的模组直接打不开
 PlayStyle = Literal["sim", "rpg", "slg"]
+# 游玩界面主题，"" = 跟随全站。同样：写入校验，读出是裸 str
+UiTheme = Literal["", "xuanhuan", "modern", "fantasy"]
 # AI 调度挑去处的办法，见 models.RpgModule.npc_move_mode。读出去同样是裸 str
 NpcMoveMode = Literal["ai", "random"]
 # 角色那一级多一个 "" = 跟随模组
@@ -22,6 +24,7 @@ class RpgModuleCreate(BaseModel):
     creator_note: str = ""
     genre: str = ""
     play_style: PlayStyle = "rpg"
+    ui_theme: UiTheme = ""
     worldview: str = ""
     opening_scene: str = ""
     system_instruction: str = ""
@@ -84,6 +87,8 @@ class RpgModuleUpdate(BaseModel):
     creator_note: Optional[str] = None
     genre: Optional[str] = None
     play_style: Optional[PlayStyle] = None
+    # 切回跟随全站要传 ""，不能传 null——路由是 exclude_none
+    ui_theme: Optional[UiTheme] = None
     worldview: Optional[str] = None
     opening_scene: Optional[str] = None
     system_instruction: Optional[str] = None
@@ -141,6 +146,7 @@ class RpgModuleOut(BaseModel):
     genre: str
     # 裸 str 不是 PlayStyle：老库里的空串要能读出来，见上面的注释
     play_style: str
+    ui_theme: str = ""
     worldview: str
     opening_scene: str
     system_instruction: str

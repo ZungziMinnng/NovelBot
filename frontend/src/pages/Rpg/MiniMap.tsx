@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RpgLocation, RpgSession } from '@/api/client'
 import { norm, visibleLocations } from './condition'
 import { edgePairs, layout } from './mapLayout'
@@ -42,8 +42,83 @@ function paint(locations: RpgLocation[], sess: RpgSession): Painted | null {
   }
 }
 
-/** 一张画出来的地图：区域是底色块，路是弯的，去过的亮、没去过的淡 */
-function PaintedMap({ m, big }: { m: Painted; big: boolean }) {
+const MAX_ZOOM = 2.5
+const LABELS_FROM_ZOOM = 1.8
+const TAP_SLOP = 4
+
+/** 一张画出来的地图：区域是底色块，路是弯的，去过的亮、没去过的淡。
+ *  可拖动、滚轮或按钮缩放，缩放封顶 MAX_ZOOM、平移不出画布；没动过就是原样。
+ *  没拖动的轻点交给 onTap，免得拖一下就误开大图 */
+function PaintedMap({ m, big, onTap }: { m: Painted; big: boolean; onTap?: () => void }) {
+  const box = useRef<HTMLDivElement>(null)
+  const [view, setView] = useState({ s: 1, x: 0, y: 0 })
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const drag = useRef<{ sx: number; sy: number; lx: number; ly: number; moved: boolean } | null>(null)
+
+  const clamp = (s: number, x: number, y: number) => ({
+    s,
+    x: Math.min(Math.max(x, 0), W - W / s),
+    y: Math.min(Math.max(y, 0), H - H / s),
+  })
+  // svg 按 meet 等比铺进容器，容器比例不同时两侧留白：像素换算成画布单位、
+  // 以及留白偏移都得算进去，不然大图里缩放锚点会漂
+  const geom = (s: number) => {
+    const r = box.current!.getBoundingClientRect()
+    const u = Math.max(W / s / r.width, H / s / r.height)
+    return { r, u, ox: (r.width - W / s / u) / 2, oy: (r.height - H / s / u) / 2 }
+  }
+  const zoomAt = (factor: number, cx?: number, cy?: number) => {
+    const v = viewRef.current
+    const s = Math.min(MAX_ZOOM, Math.max(1, v.s * factor))
+    if (s === v.s || !box.current) return
+    const a = geom(v.s)
+    const b = geom(s)
+    const clientX = cx ?? a.r.left + a.r.width / 2
+    const clientY = cy ?? a.r.top + a.r.height / 2
+    const ux = v.x + (clientX - a.r.left - a.ox) * a.u
+    const uy = v.y + (clientY - a.r.top - a.oy) * a.u
+    setView(clamp(s, ux - (clientX - b.r.left - b.ox) * b.u, uy - (clientY - b.r.top - b.oy) * b.u))
+  }
+
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    // React 的 onWheel 是被动监听，preventDefault 不了；缩小到底时放行，侧栏照常能滚
+    const wheel = (e: WheelEvent) => {
+      const zoomIn = e.deltaY < 0
+      if (!zoomIn && viewRef.current.s <= 1) return
+      if (zoomIn && viewRef.current.s >= MAX_ZOOM) return
+      e.preventDefault()
+      zoomAt(zoomIn ? 1.15 : 1 / 1.15, e.clientX, e.clientY)
+    }
+    el.addEventListener('wheel', wheel, { passive: false })
+    return () => el.removeEventListener('wheel', wheel)
+  }, [])
+
+  const down = (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    drag.current = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, moved: false }
+  }
+  const move = (e: React.PointerEvent) => {
+    const d = drag.current
+    if (!d) return
+    if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > TAP_SLOP) d.moved = true
+    if (!d.moved) return
+    const v = viewRef.current
+    const { u } = geom(v.s)
+    setView(clamp(v.s, v.x - (e.clientX - d.lx) * u, v.y - (e.clientY - d.ly) * u))
+    d.lx = e.clientX
+    d.ly = e.clientY
+  }
+  const up = () => {
+    const d = drag.current
+    drag.current = null
+    if (d && !d.moved) onTap?.()
+  }
+
+  const showAll = big || view.s >= LABELS_FROM_ZOOM
+  const zoomBtn = 'w-6 h-6 rounded-md border border-border/60 bg-background/80 text-sm leading-none hover:bg-muted disabled:opacity-40'
   const px = (id: number) => (m.pos.get(id)!.x * W) / 100
   const py = (id: number) => (m.pos.get(id)!.y * H) / 100
   const road = ({ a, b }: { a: RpgLocation; b: RpgLocation }) => {
@@ -54,7 +129,13 @@ function PaintedMap({ m, big }: { m: Painted; big: boolean }) {
   }
   const label = 'fill-foreground stroke-background'
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-full">
+    <div
+      ref={box}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up}
+      onPointerCancel={() => { drag.current = null }}
+      className="relative w-full h-full touch-none select-none cursor-grab active:cursor-grabbing"
+    >
+    <svg viewBox={`${view.x} ${view.y} ${W / view.s} ${H / view.s}`} className="w-full h-full">
       {m.scoped.filter(l => l.is_region && m.visible.has(l.id)).map(l => (
         <circle key={l.id} cx={px(l.id)} cy={py(l.id)} r={big ? 26 : 22}
           className="fill-sky-500/10 stroke-sky-500/40" strokeDasharray="3 3" strokeWidth={1} />
@@ -85,7 +166,7 @@ function PaintedMap({ m, big }: { m: Painted; big: boolean }) {
             <circle cx={x} cy={y} r={seen ? 3.5 : 3}
               className={seen ? 'fill-primary/60 stroke-primary' : 'fill-background stroke-muted-foreground/50'}
               strokeWidth={1} />
-            {(seen || big) && (
+            {(seen || showAll) && (
               <text x={x} y={y + 11} textAnchor="middle" fontSize={8} strokeWidth={2.5}
                 paintOrder="stroke" className={`${label} ${seen ? '' : 'opacity-60'}`}>{l.name}</text>
             )}
@@ -93,6 +174,15 @@ function PaintedMap({ m, big }: { m: Painted; big: boolean }) {
         )
       })}
     </svg>
+    {/* 按钮自己吃掉 pointerdown，不然点它会被当成拖动/轻点 */}
+    <div
+      onPointerDown={e => e.stopPropagation()}
+      className="absolute right-1.5 bottom-1.5 flex gap-1"
+    >
+      <button onClick={() => zoomAt(1 / 1.3)} disabled={view.s <= 1} title="缩小" className={zoomBtn}>−</button>
+      <button onClick={() => zoomAt(1.3)} disabled={view.s >= MAX_ZOOM} title="放大" className={zoomBtn}>+</button>
+    </div>
+    </div>
   )
 }
 
@@ -139,14 +229,15 @@ export default function MiniMap({ sess, locations }: Props) {
           <span>{painted.title}</span>
           <span>点开放大</span>
         </div>
-        <button
-          onClick={() => setOpen(true)}
-          title="放大"
+        <div
+          role="button" tabIndex={0}
+          onKeyDown={e => e.key === 'Enter' && e.target === e.currentTarget && setOpen(true)}
+          title="点一下开大图；拖动平移，滚轮或右下角按钮缩放"
           className="block w-full aspect-[4/3] rounded-xl border border-border/60 bg-amber-500/[0.04] overflow-hidden
             hover:border-primary/50 transition-colors"
         >
-          <PaintedMap m={painted} big={false} />
-        </button>
+          <PaintedMap key={painted.here.id} m={painted} big={false} onTap={() => setOpen(true)} />
+        </div>
         {open && (
           <div
             onClick={() => setOpen(false)}
@@ -161,7 +252,7 @@ export default function MiniMap({ sess, locations }: Props) {
                 <button onClick={() => setOpen(false)} className="hover:text-foreground">关闭</button>
               </div>
               <div className="h-[calc(100%-1.5rem)] rounded-xl bg-amber-500/[0.04]">
-                <PaintedMap m={painted} big />
+                <PaintedMap key={painted.here.id} m={painted} big />
               </div>
             </div>
           </div>

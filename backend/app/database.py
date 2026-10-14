@@ -421,6 +421,8 @@ async def _run_migrations() -> None:
         # 主角设定由模组锁定。老库拿到 0 = 玩家在建局界面自己填名字和出身，
         # 和加这一列之前逐字一致
         "ALTER TABLE rpg_modules ADD COLUMN lock_protagonist BOOLEAN DEFAULT 0",
+        # 游玩界面主题。老库拿到 '' = 跟随全站主题，界面和加这一列之前一样
+        "ALTER TABLE rpg_modules ADD COLUMN ui_theme VARCHAR(20) DEFAULT ''",
         # 每个 flag 第一次立起来是第几天，给「某事之后 N 天」的条件用。
         # 老局拿到空字典 = 那些已经立着的 flag 没有日期，after_days 条件判不过；
         # 这正是想要的——引擎不知道它是哪天发生的，就别假装知道

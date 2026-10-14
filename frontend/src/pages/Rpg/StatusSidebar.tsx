@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Backpack, ScrollText, Sparkles, Users, Zap } from 'lucide-react'
+import { Backpack, Lock, ScrollText, Sparkles, Users, Zap } from 'lucide-react'
 import type {
   RpgItem, RpgModule, RpgNpc, RpgSession, RpgSkill, RpgStatDef,
 } from '@/api/client'
-import { following, npcAway, npcPlace, onstage } from './condition'
+import { following, knownNpcs, npcAway, npcPlace, onstage } from './condition'
 import useColumnResize from './useColumnResize'
 import CastTab from './sidebar/CastTab'
 import NpcDetail from './sidebar/NpcDetail'
@@ -12,13 +12,14 @@ import BagTab from './sidebar/BagTab'
 import SkillTab from './sidebar/SkillTab'
 import TaskTab from './sidebar/TaskTab'
 import FoundTab from './sidebar/FoundTab'
+import SecretPanel from './sidebar/SecretPanel'
 import { PLAYER_SLOT } from './sidebar/SummaryBlock'
 
 // 地图从侧栏搬走了：它现在是主界面（地点总览），而且「过去」变成了
 // 纯引擎的瞬移，和这里的其他格子不是一类东西了。
 // 存档也搬走了：它去了页头——存/读档是「这一局之外」的事，和角色、道具、
 // 新发现这些「局内在看的东西」不是一类，而且腾出来的格子要给技能和任务
-export type SidebarTab = 'cast' | 'bag' | 'skill' | 'task' | 'found'
+export type SidebarTab = 'cast' | 'bag' | 'skill' | 'task' | 'secret' | 'found'
 
 // 每格一个颜色，和 index.css 里 .mode-game 的 --rpg-* 一一对应。
 // 固定不跟主题走：换个主题就找不到道具在哪了，那这个设计就白做了
@@ -27,6 +28,7 @@ const TABS: { key: SidebarTab; label: string; icon: typeof Users; accent: string
   { key: 'bag', label: '道具', icon: Backpack, accent: 'var(--rpg-bag)' },
   { key: 'skill', label: '技能', icon: Zap, accent: 'var(--rpg-skill)' },
   { key: 'task', label: '任务', icon: ScrollText, accent: 'var(--rpg-task)' },
+  { key: 'secret', label: '秘密', icon: Lock, accent: 'var(--rpg-secret)' },
   { key: 'found', label: '新发现', icon: Sparkles, accent: 'var(--rpg-found)' },
 ]
 
@@ -113,8 +115,12 @@ export default function StatusSidebar({
   // 待认领的新道具也数进道具这一格：它就挂在这一格最上面，不数的话玩家不知道
   // 有件东西等着他认——而没认下来的东西是不在背包里的
   const claims = (sess.item_claims || []).length
+  // 秘密这格的角标数的是**等你点头的提议**，不是账上有几条：账是你自己登记的，
+  // 提议是不打断的，不挂角标就没人知道结算提了东西
+  const secretAsk = (sess.secret_proposals || []).length
   const badge = (key: SidebarTab) =>
-    key === 'found' ? found.length : key === 'task' ? todo : key === 'bag' ? claims : 0
+    key === 'found' ? found.length : key === 'task' ? todo : key === 'bag' ? claims
+      : key === 'secret' ? secretAsk : 0
   const statDefs = shown(module?.stat_defs)
   const relDefs = shown(module?.relation_stat_defs)
 
@@ -233,6 +239,10 @@ export default function StatusSidebar({
 
           {tab === 'task' && (
             <TaskTab sess={sess} locked={locked} onSetTask={onSetTask} />
+          )}
+
+          {tab === 'secret' && (
+            <SecretPanel sess={sess} npcs={knownNpcs(npcs, sess, module)} />
           )}
 
           {tab === 'found' && (
